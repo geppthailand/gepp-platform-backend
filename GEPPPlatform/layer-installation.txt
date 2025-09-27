@@ -1,0 +1,19 @@
+# step 1
+
+python3.13 -m pip install \
+--platform manylinux2014_x86_64 \
+--target=python \
+--implementation cp \
+--python-version 3.13 \
+--only-binary=:all: --upgrade \
+google-cloud-firestore google-genai protobuf langfuse openai pika
+
+# step 2
+
+python3.13 -m pip install \
+--platform manylinux2014_x86_64 \
+--target=python \
+--implementation cp \
+--python-version 3.13 \
+--only-binary=:all: --upgrade --no-deps \
+firebase-admin pymilvus python-dotenv ujson CacheControl msgpack
