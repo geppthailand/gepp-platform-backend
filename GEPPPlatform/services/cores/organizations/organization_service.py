@@ -316,12 +316,26 @@ class OrganizationService:
             is_numeric_id = self._is_numeric_id(node_id)
 
             if is_numeric_id:
-                # This is an existing location with numeric database ID - update members if users provided
-                if users:
-                    existing_location = self.db.query(UserLocation).filter(UserLocation.id == node_id).first()
-                    if existing_location:
+                # This is an existing location with numeric database ID - update if any changes provided
+                existing_location = self.db.query(UserLocation).filter(UserLocation.id == node_id).first()
+                if existing_location:
+                    updated = False
+
+                    # Update members if users provided (including empty array for removal)
+                    if users is not None:
                         existing_location.members = users
+                        updated = True
                         print(f"  Updated existing location {node_id} with members: {users}")
+
+                    # Update display_name and name_en if provided
+                    if display_name:
+                        existing_location.display_name = display_name
+                        existing_location.name_en = display_name  # Also update name_en
+                        updated = True
+                        print(f"  Updated existing location {node_id} with display_name and name_en: {display_name}")
+
+                    if updated:
+                        self.db.flush()
                 continue
 
             # Only process string-based IDs (new locations)
