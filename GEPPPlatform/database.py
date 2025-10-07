@@ -17,6 +17,7 @@ from GEPPPlatform.models.subscriptions.organizations import Organization, Organi
 from GEPPPlatform.models.subscriptions.subscription_models import SubscriptionPlan, Subscription, OrganizationPermission, OrganizationRole
 from GEPPPlatform.models.cores.locations import LocationCountry, LocationProvince, LocationDistrict, LocationSubdistrict
 from GEPPPlatform.models.cores.references import Currency, Material, Nationality, PhoneNumberCountryCode
+from GEPPPlatform.models.iot.iot_scale import IoTScale
 
 class DatabaseManager:
     _instance = None

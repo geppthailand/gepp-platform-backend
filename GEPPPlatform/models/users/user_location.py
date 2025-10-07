@@ -144,6 +144,19 @@ class UserLocation(Base, BaseModel):
         back_populates="subusers"
     )
     
+    # IoT Scale relationships (added for IoT integration)
+    owned_iot_scales = relationship(
+        "IoTScale", 
+        foreign_keys="IoTScale.owner_user_location_id",
+        back_populates="owner"
+    )
+    
+    iot_scales_at_location = relationship(
+        "IoTScale", 
+        foreign_keys="IoTScale.location_point_id",
+        back_populates="location"
+    )
+    
     # Methods for organizational tree management
     def add_subuser(self, subuser):
         """Add a subuser to this user's organization"""

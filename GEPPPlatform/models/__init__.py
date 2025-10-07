@@ -38,6 +38,9 @@ from .chats import *
 # Import all logs models
 from .logs import *
 
+# Import IoT models
+from .iot import *
+
 # Import audit rules model
 from .audit_rules import AuditRule, RuleType
 
@@ -117,6 +120,9 @@ __all__ = [
     'KmAnalytics', 'KmSearch', 'KmSearchResult', 'KmUserAccess',
     'KmAuditLog', 'KmConfiguration', 'KmIndexing',
 
+    # IoT models
+    'IoTScale',
+    
     # Audit Rules models
     'AuditRule', 'RuleType'
 ]

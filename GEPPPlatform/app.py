@@ -218,9 +218,19 @@ def main(event, context):
                             "data": debug_result
                         }
 
+                    elif "/api/iot" in path:
+                        # Handle all IoT routes (IoT Scale management and operations)
+                        from .services.iot.iot_main_handlers import handle_iot_routes
+
+                        iot_result = handle_iot_routes(event, data=body, **commonParams)
+                        results = {
+                            "success": True,
+                            "data": iot_result
+                        }
+
                     else:
                         # Handle other future modules here
-                        available_routes = ["/api/auth/*", "/api/users/*", "/api/organizations/*", "/api/materials/*", "/api/transactions/*", "/api/transaction_audit/*", "/api/audit/*", "/api/debug/*", "/health"]
+                        available_routes = ["/api/auth/*", "/api/users/*", "/api/organizations/*", "/api/materials/*", "/api/transactions/*", "/api/transaction_audit/*", "/api/audit/*", "/api/debug/*", "/api/iot/*", "/health"]
                         return {
                             "statusCode": 404,
                             "headers": headers,
