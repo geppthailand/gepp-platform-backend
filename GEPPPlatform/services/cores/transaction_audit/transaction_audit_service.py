@@ -581,14 +581,12 @@ Respond only with valid JSON format as specified above."""
             # Process each rule audit and apply actions
             processed_audits = []
             reject_messages = []
-            approve_messages = []
             warn_messages = []
 
             # Get audit rules for action lookup
             audit_rules_map = self._get_audit_rules_map(audit_rules)
 
-            final_status = 'pending'  # Default to approved unless rejected
-            has_rejections = False
+            has_reject_action = False
 
             for audit in audits:
                 rule_id = audit.get('rule_id')
@@ -619,15 +617,10 @@ Respond only with valid JSON format as specified above."""
                                 'message': action_message
                             })
 
-                            # Apply priority logic: reject > approve > warn
+                            # New logic: Check for reject or warn actions
                             if action_type == 'reject':
-                                final_status = 'rejected'
-                                has_rejections = True
+                                has_reject_action = True
                                 reject_messages.append(f"[{rule_id}] {action_message}")
-                            elif action_type == 'approve' and not has_rejections:
-                                # Only set to approved if no rejections found
-                                final_status = 'approved'
-                                approve_messages.append(f"[{rule_id}] {action_message}")
                             elif action_type == 'warn':
                                 warn_messages.append(f"[{rule_id}] {action_message}")
 
@@ -638,21 +631,16 @@ Respond only with valid JSON format as specified above."""
             total_rules = len(processed_audits)
             compliance_score = max(0, 100 - (triggered_count * 20)) if total_rules > 0 else 100
 
-            # Final verification: if any reject messages exist, force status to rejected
-            if reject_messages:
+            # NEW LOGIC: If no reject actions → approved, else → rejected
+            # Warn messages just go to notes
+            if has_reject_action:
                 final_status = 'rejected'
-
-            # Create summary based on final status
-            if final_status == 'rejected':
                 summary = f"Transaction rejected. Issues: {len(reject_messages)}"
                 all_messages = reject_messages + warn_messages
             else:
-                if final_status == 'pending': 
-                    summary = f"Transaction warning. {triggered_count} rules triggered."
-                    all_messages = warn_messages
-                else:
-                    summary = f"Transaction approved. {triggered_count} rules triggered."
-                    all_messages = approve_messages + warn_messages
+                final_status = 'approved'
+                summary = f"Transaction approved. {len(warn_messages)} warnings noted."
+                all_messages = warn_messages
 
             # Structure the final audit result
             audit_result = {
@@ -661,7 +649,6 @@ Respond only with valid JSON format as specified above."""
                 'compliance_score': compliance_score,
                 'rule_results': processed_audits,
                 'reject_messages': reject_messages,
-                'approve_messages': approve_messages,
                 'warn_messages': warn_messages,
                 'all_messages': all_messages,
                 'summary': summary,
@@ -740,11 +727,10 @@ Respond only with valid JSON format as specified above."""
         """Create a default audit result for error cases"""
         return {
             'transaction_id': transaction_id,
-            'audit_status': 'requires_review',
+            'audit_status': 'pending',
             'compliance_score': 0,
             'rule_results': [],
             'reject_messages': [],
-            'approve_messages': [],
             'warn_messages': ['Manual review required - AI audit failed'],
             'all_messages': ['Manual review required - AI audit failed'],
             'summary': 'AI audit failed - manual review required',
