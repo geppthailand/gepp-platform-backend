@@ -78,7 +78,7 @@ def handle_audit_rules_routes(event: Dict[str, Any], data: Dict[str, Any], **par
 
     elif '/api/audit/rules' == path and method == 'POST':
         # Create new rule
-        return handle_create_rule(audit_service, data, current_user_id)
+        return handle_create_rule(audit_service, data, current_user_id, current_user_organization_id)
 
     else:
         raise NotFoundException(f'Route not found: {path} [{method}]')
@@ -167,12 +167,17 @@ def handle_get_rule_by_id(audit_service: AuditRulesService, rule_id: int) -> Dic
 def handle_create_rule(
     audit_service: AuditRulesService,
     data: Dict[str, Any],
-    current_user_id: Optional[int] = None
+    current_user_id: Optional[int] = None,
+    current_user_organization_id: Optional[int] = None
 ) -> Dict[str, Any]:
     """
     Handle creating new audit rule
     """
     try:
+        # Set organization_id from current user if not provided in data
+        if not data.get('organization_id') and current_user_organization_id:
+            data['organization_id'] = current_user_organization_id
+
         result = audit_service.create_rule(data, current_user_id)
         return {
             'success': True,

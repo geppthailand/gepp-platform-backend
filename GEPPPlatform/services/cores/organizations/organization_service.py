@@ -105,6 +105,7 @@ class OrganizationService:
             'id': org.id,
             'name': org.name,
             'description': org.description,
+            'allow_ai_audit': org.allow_ai_audit if hasattr(org, 'allow_ai_audit') else False,
             'info': {
                 'company_name': org.organization_info.company_name,
                 'account_type': org.organization_info.account_type,
@@ -294,6 +295,38 @@ class OrganizationService:
         This preserves the old version and creates a new active one.
         """
         return self.create_organization_setup(organization_id, setup_data)
+
+    def update_ai_audit_permission(self, organization_id: int, allow_ai_audit: bool) -> Dict[str, Any]:
+        """
+        Update organization's AI audit permission.
+
+        Args:
+            organization_id: ID of the organization to update
+            allow_ai_audit: Boolean flag to enable/disable AI audit
+
+        Returns:
+            Dict containing updated organization data
+
+        Raises:
+            ValueError: If organization not found
+        """
+        organization = self.db.query(Organization).filter(
+            Organization.id == organization_id
+        ).first()
+
+        if not organization:
+            raise ValueError(f'Organization with ID {organization_id} not found')
+
+        # Update the allow_ai_audit field
+        organization.allow_ai_audit = allow_ai_audit
+        self.db.commit()
+        self.db.refresh(organization)
+
+        return {
+            'organization_id': organization.id,
+            'allow_ai_audit': organization.allow_ai_audit,
+            'updated_at': organization.updated_date.isoformat() if organization.updated_date else None
+        }
 
     def _process_locations(self, organization_id: int, locations: List[Dict[str, Any]]) -> Dict[str, str]:
         """

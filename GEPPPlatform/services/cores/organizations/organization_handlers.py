@@ -94,6 +94,11 @@ def organization_routes(event: Dict[str, Any], context: Any, **params) -> Dict[s
         body = json.loads(event.get('body', '{}'))
         return handle_update_organization_setup(org_service, user_id, body, headers)
 
+    # AI Audit Permission endpoint
+    elif method == 'PUT' and '/api/organizations/ai-audit-permission' in path:
+        body = json.loads(event.get('body', '{}'))
+        return handle_update_ai_audit_permission(org_service, user_id, user_organization_id, body, headers)
+
     else:
         raise NotFoundException('Organization endpoint not found')
 
@@ -405,3 +410,49 @@ def handle_update_organization_setup(org_service: OrganizationService, user_id: 
         raise BadRequestException(str(e))
     except Exception as e:
         raise APIException(f'Error updating organization setup: {str(e)}')
+
+
+def handle_update_ai_audit_permission(
+    org_service: OrganizationService,
+    user_id: int,
+    organization_id: int,
+    body: Dict[str, Any],
+    headers: Dict[str, str]
+) -> Dict[str, Any]:
+    """Update organization's AI audit permission"""
+    try:
+        # Validate input
+        allow_ai_audit = body.get('allow_ai_audit')
+        if allow_ai_audit is None:
+            raise ValidationException('allow_ai_audit field is required')
+
+        if not isinstance(allow_ai_audit, bool):
+            raise ValidationException('allow_ai_audit must be a boolean value')
+
+        # Verify user belongs to the organization
+        user_org = org_service.get_user_organization(user_id)
+        if not user_org or user_org.id != organization_id:
+            raise UnauthorizedException('User does not have permission to update this organization')
+
+        # Update the permission
+        result = org_service.update_ai_audit_permission(organization_id, allow_ai_audit)
+
+        return {
+            'statusCode': 200,
+            'headers': headers,
+            'body': json.dumps({
+                'success': True,
+                'data': {
+                    'organization_id': organization_id,
+                    'allow_ai_audit': allow_ai_audit
+                },
+                'message': f'AI audit permission {"enabled" if allow_ai_audit else "disabled"} successfully'
+            })
+        }
+
+    except ValidationException as e:
+        raise BadRequestException(str(e))
+    except UnauthorizedException:
+        raise
+    except Exception as e:
+        raise APIException(f'Error updating AI audit permission: {str(e)}')

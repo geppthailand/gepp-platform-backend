@@ -51,7 +51,7 @@ class AuditRulesService:
                 thresholds=rule_data.get('thresholds'),
                 metrics=rule_data.get('metrics'),
                 actions=rule_data.get('actions', []),
-                is_global=rule_data.get('is_global', True),
+                is_global=rule_data.get('is_global', False),  # Default to False for organization-specific rules
                 organization_id=rule_data.get('organization_id'),
                 is_active=rule_data.get('is_active', True)
             )
@@ -132,8 +132,8 @@ class AuditRulesService:
                     query = query.filter(AuditRule.is_global == filters['is_global'])
 
                 # Filter by organization
-                # if filters.get('organization_id'):
-                #     query = query.filter(AuditRule.organization_id == filters['organization_id'])
+                if filters.get('organization_id'):
+                    query = query.filter(AuditRule.organization_id == filters['organization_id'])
 
                 # Text search in rule name, rule_id, or condition
                 if filters.get('search'):

@@ -77,12 +77,12 @@ class TransactionAuditService:
                     'audit_results': []
                 }
 
-            # Get global audit rules
-            audit_rules = self._get_audit_rules(db)
+            # Get organization-specific audit rules
+            audit_rules = self._get_audit_rules(db, organization_id)
             if not audit_rules:
                 return {
                     'success': False,
-                    'error': 'No audit rules found. Please configure audit rules first.',
+                    'error': 'No audit rules found for this organization. Please configure audit rules first.',
                     'total_transactions': len(pending_transactions)
                 }
             # print("---====-=-=", audit_rules)
@@ -90,6 +90,7 @@ class TransactionAuditService:
             # Prepare transaction data with records and images
             transaction_audit_data = self._prepare_transaction_data(db, pending_transactions)
 
+            print(";;;=====")
             # Process transactions with AI in multiple threads
             audit_results = self._process_transactions_with_ai(
                 transaction_audit_data,
@@ -134,7 +135,7 @@ class TransactionAuditService:
             # First, let's debug what transactions exist
             debug_query = db.query(Transaction)
             if organization_id:
-                debug_query = debug_query.filter(Transaction.organization_id == organization_id)
+                debug_query = debug_query.filter(Transaction.organization_id == organization_id).filter(Transaction.is_active == True)
 
             all_transactions = debug_query.all()
             logger.info(f"DEBUG: Total transactions for org {organization_id}: {len(all_transactions)}")
@@ -160,14 +161,20 @@ class TransactionAuditService:
             logger.error(f"Error fetching pending transactions: {str(e)}")
             raise
 
-    def _get_audit_rules(self, db: Session) -> List[Dict[str, Any]]:
-        """Get global audit rules for AI processing"""
+    def _get_audit_rules(self, db: Session, organization_id: Optional[int] = None) -> List[Dict[str, Any]]:
+        """Get organization-specific audit rules for AI processing"""
         try:
-            audit_rules = db.query(AuditRule).filter(
-                AuditRule.is_global == True,
-                AuditRule.organization_id.is_(None),
+            # Get rules for the specific organization only (not global rules)
+            query = db.query(AuditRule).filter(
+                AuditRule.is_global == False,
                 AuditRule.is_active == True
-            ).all()
+            )
+
+            # Filter by organization_id if provided
+            if organization_id:
+                query = query.filter(AuditRule.organization_id == organization_id)
+
+            audit_rules = query.all()
 
             rules_data = []
             for rule in audit_rules:
@@ -336,7 +343,8 @@ class TransactionAuditService:
             else:
                 logger.info(f"Processing transaction {transaction_data['transaction_id']} with text-only analysis")
                 response = self._call_chatgpt_api(prompt)
-
+            
+            print(response)
             # Parse AI response
             audit_result = self._parse_ai_response(response, transaction_data['transaction_id'], audit_rules)
 
@@ -424,7 +432,11 @@ YOU MUST respond with a valid JSON object in this EXACT format:
             "rule_id": "<rule_id from rule>",
             "id": <database_id_of_rule>,
             "trigger": true or false,
-            "message": "<brief specific message about this rule evaluation>"
+            "message": "<the specific message that explains why the rule was triggered (not general, specific with the situation)>",
+            "reasons": [
+                "<reason1>",
+                ...
+            ]
         }}
     ]
 }}
@@ -489,6 +501,7 @@ Record #{i+1} (ID: {record.get('record_id')}):
 """
             image_analysis_instructions += record_info
 
+            # print("&&&&&&&", image_analysis_instructions)
         enhanced_prompt = base_prompt + image_analysis_instructions
         return enhanced_prompt
 
@@ -591,6 +604,7 @@ Respond only with valid JSON format as specified above."""
             for audit in audits:
                 rule_id = audit.get('rule_id')
                 rule_db_id = audit.get('id')
+                reasons = audit.get('reasons')
                 triggered = audit.get('trigger', False)
                 message = audit.get('message', '')
 
@@ -602,6 +616,7 @@ Respond only with valid JSON format as specified above."""
                     'rule_db_id': rule_db_id,
                     'triggered': triggered,
                     'message': message,
+                    'reasons': reasons,
                     'actions_applied': []
                 }
 
