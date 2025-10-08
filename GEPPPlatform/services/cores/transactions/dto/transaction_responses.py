@@ -147,10 +147,15 @@ class TransactionResponse(BaseDTO):
     created_by_id: int
     updated_by_id: Optional[int]
     approved_by_id: Optional[int]
-    is_active: bool
-    created_date: str  # ISO format
-    updated_date: str  # ISO format
-    deleted_date: Optional[str]  # ISO format
+
+    # AI Audit fields
+    ai_audit_status: Optional[str] = None
+    ai_audit_note: Optional[str] = None
+
+    is_active: bool = True
+    created_date: str = None  # ISO format
+    updated_date: str = None  # ISO format
+    deleted_date: Optional[str] = None  # ISO format
 
     # Optional: Include transaction record details if requested
     records: Optional[List[TransactionRecordResponse]] = None
@@ -182,6 +187,8 @@ class TransactionResponse(BaseDTO):
             'created_by_id': self.created_by_id,
             'updated_by_id': self.updated_by_id,
             'approved_by_id': self.approved_by_id,
+            'ai_audit_status': self.ai_audit_status,
+            'ai_audit_note': self.ai_audit_note,
             'is_active': self.is_active,
             'created_date': self.created_date,
             'updated_date': self.updated_date,
@@ -231,6 +238,8 @@ class TransactionResponse(BaseDTO):
             created_by_id=data['created_by_id'],
             updated_by_id=data.get('updated_by_id'),
             approved_by_id=data.get('approved_by_id'),
+            ai_audit_status=data.get('ai_audit_status'),
+            ai_audit_note=data.get('ai_audit_note'),
             is_active=data.get('is_active', True),
             created_date=data.get('created_date'),
             updated_date=data.get('updated_date'),

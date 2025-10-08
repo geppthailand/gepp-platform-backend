@@ -712,6 +712,8 @@ class TransactionService:
             'created_by_id': transaction.created_by_id,
             'updated_by_id': transaction.updated_by_id,
             'approved_by_id': transaction.approved_by_id,
+            'ai_audit_status': transaction.ai_audit_status.value if hasattr(transaction, 'ai_audit_status') and transaction.ai_audit_status else None,
+            'ai_audit_note': transaction.ai_audit_note if hasattr(transaction, 'ai_audit_note') else None,
             'is_active': transaction.is_active,
             'created_date': transaction.created_date.isoformat() if transaction.created_date else None,
             'updated_date': transaction.updated_date.isoformat() if transaction.updated_date else None,

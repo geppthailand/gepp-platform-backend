@@ -20,10 +20,11 @@ except ImportError:
     OpenAI = None
 
 
-from ....models.transactions.transactions import Transaction, TransactionStatus
+from ....models.transactions.transactions import Transaction, TransactionStatus, AIAuditStatus
 from ....models.transactions.transaction_records import TransactionRecord
 from ....models.audit_rules import AuditRule
 from ....models.cores.references import MainMaterial
+from ....models.subscriptions.organizations import Organization
 from ..transactions.presigned_url_service import TransactionPresignedUrlService
 
 logger = logging.getLogger(__name__)
@@ -99,8 +100,16 @@ class TransactionAuditService:
 
             print("---====-=-=", audit_results)
 
+            # Check organization's AI audit permission
+            allow_ai_audit = False
+            if organization_id:
+                org = db.query(Organization).filter(Organization.id == organization_id).first()
+                if org and hasattr(org, 'allow_ai_audit'):
+                    allow_ai_audit = org.allow_ai_audit
+
             # Update transaction statuses based on audit results
-            updated_count = self._update_transaction_statuses(db, audit_results)
+            # Pass allow_ai_audit flag to control whether to update actual status
+            updated_count = self._update_transaction_statuses(db, audit_results, allow_ai_audit)
 
             logger.info(f"AI audit completed. Processed {len(audit_results)} transactions, updated {updated_count}")
 
@@ -284,7 +293,6 @@ class TransactionAuditService:
                             'transaction_id': transaction_data['transaction_id'],
                             'audit_status': 'failed',
                             'error': str(e),
-                            'compliance_score': 0,
                             'violations': [],
                             'recommendations': ['Manual review required due to AI audit failure']
                         })
@@ -641,10 +649,9 @@ Respond only with valid JSON format as specified above."""
 
                 processed_audits.append(processed_audit)
 
-            # Calculate compliance score based on triggered rules
+            # Count triggered rules for tracking
             triggered_count = sum(1 for audit in processed_audits if audit['triggered'])
             total_rules = len(processed_audits)
-            compliance_score = max(0, 100 - (triggered_count * 20)) if total_rules > 0 else 100
 
             # NEW LOGIC: If no reject actions → approved, else → rejected
             # Warn messages just go to notes
@@ -661,7 +668,6 @@ Respond only with valid JSON format as specified above."""
             audit_result = {
                 'transaction_id': transaction_id,
                 'audit_status': final_status,
-                'compliance_score': compliance_score,
                 'rule_results': processed_audits,
                 'reject_messages': reject_messages,
                 'warn_messages': warn_messages,
@@ -681,8 +687,15 @@ Respond only with valid JSON format as specified above."""
             logger.error(f"Unexpected error processing AI response for transaction {transaction_id}: {str(e)}")
             return self._create_default_audit_result(transaction_id, error=f'Processing error: {str(e)}')
 
-    def _update_transaction_statuses(self, db: Session, audit_results: List[Dict[str, Any]]) -> int:
-        """Update transaction statuses based on audit results"""
+    def _update_transaction_statuses(self, db: Session, audit_results: List[Dict[str, Any]], allow_ai_audit: bool = False) -> int:
+        """
+        Update transaction statuses based on audit results
+
+        Args:
+            db: Database session
+            audit_results: List of audit results
+            allow_ai_audit: If True, update transaction status; if False, only update ai_audit_status
+        """
         try:
             updated_count = 0
 
@@ -692,29 +705,38 @@ Respond only with valid JSON format as specified above."""
 
                 transaction = db.query(Transaction).filter(Transaction.id == transaction_id).first()
                 if transaction:
-                    # Update status based on audit result
+                    # ALWAYS set ai_audit_status regardless of allow_ai_audit
+                    # Only two possible values: approved or rejected (no no_action for now)
                     if audit_status == 'approved':
-                        transaction.status = TransactionStatus.approved
+                        transaction.ai_audit_status = AIAuditStatus.approved
                     elif audit_status == 'rejected':
-                        transaction.status = TransactionStatus.rejected
-                    else:  # requires_review
-                        transaction.status = TransactionStatus.pending
+                        transaction.ai_audit_status = AIAuditStatus.rejected
 
-                    # Clear existing notes and replace with audit messages
-                    audit_header = f"AI Audit - Score: {result['compliance_score']}/100. {result.get('summary', '')}"
+                    # ONLY update transaction status if allow_ai_audit is True
+                    if allow_ai_audit:
+                        if audit_status == 'approved':
+                            transaction.status = TransactionStatus.approved
+                        elif audit_status == 'rejected':
+                            transaction.status = TransactionStatus.rejected
+
+                    # Create audit note with all messages
+                    audit_header = f"AI Audit - {result.get('summary', '')}"
                     all_messages = result.get('all_messages', [])
 
                     if all_messages:
                         # Create formatted audit notes with all messages
                         formatted_messages = "\n".join([f"• {msg}" for msg in all_messages])
-                        transaction.notes = f"{audit_header}\n\nAudit Details:\n{formatted_messages}"
+                        ai_audit_note = f"{audit_header}\n\nAudit Details:\n{formatted_messages}"
                     else:
-                        transaction.notes = audit_header
+                        ai_audit_note = audit_header
+
+                    # Save to ai_audit_note instead of notes
+                    transaction.ai_audit_note = ai_audit_note
 
                     updated_count += 1
 
             db.commit()
-            logger.info(f"Updated {updated_count} transaction statuses based on audit results")
+            logger.info(f"Updated {updated_count} transactions. AI audit enabled: {allow_ai_audit}")
             return updated_count
 
         except Exception as e:
@@ -743,7 +765,6 @@ Respond only with valid JSON format as specified above."""
         return {
             'transaction_id': transaction_id,
             'audit_status': 'pending',
-            'compliance_score': 0,
             'rule_results': [],
             'reject_messages': [],
             'warn_messages': ['Manual review required - AI audit failed'],

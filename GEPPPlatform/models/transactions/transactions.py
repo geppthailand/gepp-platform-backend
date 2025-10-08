@@ -37,6 +37,11 @@ class TransactionPriority(enum.Enum):
     HIGH = 'high'
     URGENT = 'urgent'
 
+class AIAuditStatus(enum.Enum):
+    approved = 'approved'
+    rejected = 'rejected'
+    no_action = 'no_action'
+
 class Transaction(Base, BaseModel):
     """
     Main transaction table - represents a batch/shipment of materials
@@ -52,6 +57,10 @@ class Transaction(Base, BaseModel):
 
     # Status
     status = Column(Enum(TransactionStatus), default=TransactionStatus.pending)
+
+    # AI Audit Status - separate from actual status
+    ai_audit_status = Column(Enum(AIAuditStatus), nullable=True)
+    ai_audit_note = Column(Text, nullable=True)
 
     # Organization and locations
     organization_id = Column(BigInteger, ForeignKey('organizations.id'), nullable=True)
