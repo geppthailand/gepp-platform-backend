@@ -25,6 +25,7 @@ from ....models.transactions.transaction_records import TransactionRecord
 from ....models.audit_rules import AuditRule
 from ....models.cores.references import MainMaterial
 from ....models.subscriptions.organizations import Organization
+from ....models.logs.transaction_audit_history import TransactionAuditHistory
 from ..transactions.presigned_url_service import TransactionPresignedUrlService
 
 logger = logging.getLogger(__name__)
@@ -112,6 +113,21 @@ class TransactionAuditService:
             updated_count = self._update_transaction_statuses(db, audit_results, allow_ai_audit)
 
             logger.info(f"AI audit completed. Processed {len(audit_results)} transactions, updated {updated_count}")
+
+            # Save audit history batch
+            try:
+                self._save_audit_history_batch(
+                    db=db,
+                    organization_id=organization_id,
+                    transaction_ids=[txn.id for txn in pending_transactions],
+                    audit_results=audit_results,
+                    total_transactions=len(pending_transactions),
+                    processed_transactions=len(audit_results),
+                    updated_transactions=updated_count
+                )
+            except Exception as hist_error:
+                logger.error(f"Failed to save audit history: {str(hist_error)}")
+                # Don't fail the entire audit if history saving fails
 
             return {
                 'success': True,
@@ -603,6 +619,7 @@ Respond only with valid JSON format as specified above."""
             processed_audits = []
             reject_messages = []
             warn_messages = []
+            all_reasons = []  # Collect all reasons from all triggered rules
 
             # Get audit rules for action lookup
             audit_rules_map = self._get_audit_rules_map(audit_rules)
@@ -612,7 +629,7 @@ Respond only with valid JSON format as specified above."""
             for audit in audits:
                 rule_id = audit.get('rule_id')
                 rule_db_id = audit.get('id')
-                reasons = audit.get('reasons')
+                reasons = audit.get('reasons', [])
                 triggered = audit.get('trigger', False)
                 message = audit.get('message', '')
 
@@ -630,6 +647,11 @@ Respond only with valid JSON format as specified above."""
 
                 # Process actions if rule is triggered
                 if triggered and rule_actions:
+                    # Add reasons from this triggered rule to all_reasons
+                    if reasons and isinstance(reasons, list):
+                        for reason in reasons:
+                            all_reasons.append(f"[{rule_id}] {reason}")
+
                     for action in rule_actions:
                         if action.get('type') == 'system_action':
                             action_type = action.get('action', '').lower()
@@ -672,6 +694,7 @@ Respond only with valid JSON format as specified above."""
                 'reject_messages': reject_messages,
                 'warn_messages': warn_messages,
                 'all_messages': all_messages,
+                'all_reasons': all_reasons,  # Include all reasons from all triggered rules
                 'summary': summary,
                 'audited_at': datetime.now(timezone.utc).isoformat(),
                 'total_rules_evaluated': total_rules,
@@ -719,16 +742,24 @@ Respond only with valid JSON format as specified above."""
                         elif audit_status == 'rejected':
                             transaction.status = TransactionStatus.rejected
 
-                    # Create audit note with all messages
+                    # Create audit note with all messages and reasons
                     audit_header = f"AI Audit - {result.get('summary', '')}"
                     all_messages = result.get('all_messages', [])
+                    all_reasons = result.get('all_reasons', [])
+
+                    audit_note_parts = [audit_header]
 
                     if all_messages:
                         # Create formatted audit notes with all messages
                         formatted_messages = "\n".join([f"• {msg}" for msg in all_messages])
-                        ai_audit_note = f"{audit_header}\n\nAudit Details:\n{formatted_messages}"
-                    else:
-                        ai_audit_note = audit_header
+                        audit_note_parts.append(f"\nAudit Details:\n{formatted_messages}")
+
+                    if all_reasons:
+                        # Add all reasons from triggered rules
+                        formatted_reasons = "\n".join([f"• {reason}" for reason in all_reasons])
+                        audit_note_parts.append(f"\nReasons:\n{formatted_reasons}")
+
+                    ai_audit_note = "\n".join(audit_note_parts)
 
                     # Save to ai_audit_note instead of notes
                     transaction.ai_audit_note = ai_audit_note
@@ -775,3 +806,51 @@ Respond only with valid JSON format as specified above."""
             'total_rules_evaluated': 0,
             'rules_triggered': 0
         }
+
+    def _save_audit_history_batch(
+        self,
+        db: Session,
+        organization_id: int,
+        transaction_ids: List[int],
+        audit_results: List[Dict[str, Any]],
+        total_transactions: int,
+        processed_transactions: int,
+        updated_transactions: int
+    ) -> None:
+        """Save audit history batch to database"""
+        try:
+            # Calculate statistics
+            approved_count = sum(1 for result in audit_results if result.get('audit_status') == 'approved')
+            rejected_count = sum(1 for result in audit_results if result.get('audit_status') == 'rejected')
+
+            # Create audit history record
+            audit_history = TransactionAuditHistory(
+                organization_id=organization_id,
+                transactions=transaction_ids,
+                audit_info={
+                    'audit_results': audit_results,
+                    'summary': {
+                        'total_transactions': total_transactions,
+                        'processed_transactions': processed_transactions,
+                        'approved_count': approved_count,
+                        'rejected_count': rejected_count
+                    }
+                },
+                total_transactions=total_transactions,
+                processed_transactions=processed_transactions,
+                approved_count=approved_count,
+                rejected_count=rejected_count,
+                status='completed',
+                started_at=datetime.now(timezone.utc),
+                completed_at=datetime.now(timezone.utc)
+            )
+
+            db.add(audit_history)
+            db.commit()
+
+            logger.info(f"Saved audit history batch {audit_history.id} for organization {organization_id}")
+
+        except Exception as e:
+            logger.error(f"Error saving audit history batch: {str(e)}")
+            db.rollback()
+            raise

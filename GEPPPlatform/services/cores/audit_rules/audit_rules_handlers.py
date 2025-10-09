@@ -48,7 +48,7 @@ def handle_audit_rules_routes(event: Dict[str, Any], data: Dict[str, Any], **par
     elif '/api/audit/rules/' in path and method == 'PUT':
         # Update rule: /api/audit/rules/{rule_id}
         rule_id = int(path.split('/rules/')[1].rstrip('/'))
-        return handle_update_rule(audit_service, rule_id, data, current_user_id)
+        return handle_update_rule(audit_service, rule_id, data, current_user_id, current_user_organization_id)
 
     elif '/api/audit/rules/' in path and method == 'DELETE':
         # Delete rule: /api/audit/rules/{rule_id}
@@ -194,12 +194,17 @@ def handle_update_rule(
     audit_service: AuditRulesService,
     rule_id: int,
     data: Dict[str, Any],
-    current_user_id: Optional[int] = None
+    current_user_id: Optional[int] = None,
+    current_user_organization_id: Optional[int] = None
 ) -> Dict[str, Any]:
     """
     Handle updating audit rule
     """
     try:
+        # Set organization_id from current user if not provided and rule is non-global
+        if data.get('is_global') == False and not data.get('organization_id') and current_user_organization_id:
+            data['organization_id'] = current_user_organization_id
+
         result = audit_service.update_rule(rule_id, data, current_user_id)
         return {
             'success': True,

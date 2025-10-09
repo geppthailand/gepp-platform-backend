@@ -6,8 +6,11 @@ from typing import Dict, Any
 import logging
 import traceback
 import os
+from sqlalchemy import and_, desc
 
 from .transaction_audit_service import TransactionAuditService
+from ....models.logs.transaction_audit_history import TransactionAuditHistory
+from ....models.transactions.transactions import Transaction, TransactionStatus
 
 logger = logging.getLogger(__name__)
 from ....exceptions import (
@@ -53,6 +56,20 @@ def handle_transaction_audit_routes(event: Dict[str, Any], data: Dict[str, Any],
                 data,
                 current_user_organization_id,
                 current_user_id
+            )
+
+        elif path == '/api/transaction_audit/audit_history' and method == 'GET':
+            return handle_get_audit_history(
+                db_session,
+                query_params,
+                current_user_organization_id
+            )
+
+        elif path == '/api/transaction_audit/reset_all' and method == 'POST':
+            return handle_reset_all_transactions(
+                db_session,
+                data,
+                current_user_organization_id
             )
 
         else:
@@ -157,3 +174,119 @@ def handle_sync_ai_audit(
                 'audited_by_user_id': current_user_id
             }
         }
+
+
+def handle_get_audit_history(
+    db_session: Any,
+    query_params: Dict[str, Any],
+    organization_id: int
+) -> Dict[str, Any]:
+    """
+    Handle GET /api/transaction_audit/audit_history - Get audit history for organization
+
+    Query parameters:
+    - page: int (default: 1)
+    - page_size: int (default: 20)
+    - status: str (optional filter by status)
+    """
+    try:
+        # Parse query parameters
+        page = int(query_params.get('page', 1))
+        page_size = int(query_params.get('page_size', 20))
+        status_filter = query_params.get('status')
+
+        logger.info(f"Fetching audit history for organization {organization_id}")
+
+        # Build query
+        query = db_session.query(TransactionAuditHistory).filter(
+            and_(
+                TransactionAuditHistory.organization_id == organization_id,
+                TransactionAuditHistory.deleted_date.is_(None)
+            )
+        )
+
+        # Apply status filter if provided
+        if status_filter:
+            query = query.filter(TransactionAuditHistory.status == status_filter)
+
+        # Order by most recent first
+        query = query.order_by(desc(TransactionAuditHistory.created_date))
+
+        # Get total count
+        total_count = query.count()
+
+        # Apply pagination
+        offset = (page - 1) * page_size
+        audit_histories = query.offset(offset).limit(page_size).all()
+
+        # Serialize results
+        history_data = [history.to_dict() for history in audit_histories]
+
+        return {
+            'success': True,
+            'data': history_data,
+            'meta': {
+                'page': page,
+                'page_size': page_size,
+                'total': total_count,
+                'total_pages': (total_count + page_size - 1) // page_size,
+                'has_more': offset + page_size < total_count
+            }
+        }
+
+    except Exception as e:
+        logger.error(f"Error fetching audit history: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise APIException(f'Failed to fetch audit history: {str(e)}')
+
+
+def handle_reset_all_transactions(
+    db_session: Any,
+    data: Dict[str, Any],
+    organization_id: int
+) -> Dict[str, Any]:
+    """
+    Handle POST /api/transaction_audit/reset_all - Reset all transactions to pending status
+
+    Resets all non-pending transactions back to pending status for the organization
+    """
+    try:
+        logger.info(f"Resetting all transactions for organization {organization_id}")
+
+        # Query transactions that are not in pending status
+        transactions_to_reset = db_session.query(Transaction).filter(
+            and_(
+                Transaction.organization_id == organization_id,
+                Transaction.status != TransactionStatus.pending,
+                Transaction.deleted_date.is_(None)
+            )
+        ).all()
+
+        updated_count = 0
+
+        # Reset each transaction
+        for transaction in transactions_to_reset:
+            transaction.status = TransactionStatus.pending
+            transaction.ai_audit_status = None
+            transaction.ai_audit_note = None
+            updated_count += 1
+
+        # Commit changes
+        db_session.commit()
+
+        logger.info(f"Reset {updated_count} transactions to pending status")
+
+        return {
+            'success': True,
+            'message': f'Successfully reset {updated_count} transactions to pending status',
+            'data': {
+                'updated_count': updated_count,
+                'organization_id': organization_id
+            }
+        }
+
+    except Exception as e:
+        db_session.rollback()
+        logger.error(f"Error resetting transactions: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise APIException(f'Failed to reset transactions: {str(e)}')
