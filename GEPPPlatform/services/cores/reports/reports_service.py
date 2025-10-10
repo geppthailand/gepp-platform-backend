@@ -4,14 +4,14 @@ Handles data retrieval and processing for various reports
 """
 
 from typing import List, Optional, Dict, Any
-from GEPPPlatform.models.cores.references import Material
+from GEPPPlatform.models.cores.references import Material, MaterialTag
 from GEPPPlatform.models.users.user_location import UserLocation
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
 from datetime import datetime
 import logging
 
-from ....models.transactions.transactions import Transaction
+from ....models.transactions.transactions import Transaction, TransactionStatus
 from ....models.transactions.transaction_records import TransactionRecord
 from ....exceptions import ValidationException, NotFoundException
 
@@ -75,6 +75,21 @@ class ReportsService:
             # Execute query
             transaction_records = query.all()
             
+            # Preload transaction statuses for included records
+            transaction_ids = {record.created_transaction_id for record in transaction_records}
+            status_map: Dict[int, TransactionStatus] = {}
+            if transaction_ids:
+                transactions_rows = self.db.query(Transaction.id, Transaction.status).filter(
+                    Transaction.id.in_(transaction_ids)
+                ).all()
+                for _id, status in transactions_rows:
+                    status_map[_id] = status
+                transactions_total = len(transactions_rows)
+                transactions_approved = sum(1 for _id, status in transactions_rows if status == TransactionStatus.approved)
+            else:
+                transactions_total = 0
+                transactions_approved = 0
+
             # If report_type is 'overview', fetch material data for each record
             materials_map = {}
             if report_type == 'overview':
@@ -89,10 +104,37 @@ class ReportsService:
                     materials = self.db.query(Material).filter(
                         Material.id.in_(material_ids)
                     ).all()
-                    
-                    # Create a mapping of material_id to material data
+                    # Resolve tag ids to names to detect plastics
+                    tag_ids: set[int] = set()
                     for material in materials:
-                        materials_map[material.id] = self._material_to_dict(material)
+                        try:
+                            for pair in material.tags or []:
+                                if isinstance(pair, (list, tuple)) and len(pair) >= 2 and pair[1] is not None:
+                                    tag_ids.add(int(pair[1]))
+                        except Exception:
+                            continue
+
+                    tag_name_map: Dict[int, str] = {}
+                    if tag_ids:
+                        tags = self.db.query(MaterialTag).filter(MaterialTag.id.in_(tag_ids)).all()
+                        for t in tags:
+                            tag_name_map[t.id] = t.name or ""
+
+                    # Create a mapping of material_id to material data with is_plastic flag
+                    for material in materials:
+                        m_dict = self._material_to_dict(material)
+                        is_plastic = False
+                        try:
+                            for pair in material.tags or []:
+                                if isinstance(pair, (list, tuple)) and len(pair) >= 2 and pair[1] is not None:
+                                    name = tag_name_map.get(int(pair[1]), "")
+                                    if 'plastic' in name.lower():
+                                        is_plastic = True
+                                        break
+                        except Exception:
+                            is_plastic = False
+                        m_dict['is_plastic'] = is_plastic
+                        materials_map[material.id] = m_dict
             
             # Convert to dict
             records_data = []
@@ -103,12 +145,27 @@ class ReportsService:
                 if report_type == 'overview' and record.material_id:
                     record_dict['material'] = materials_map.get(record.material_id)
                 
+                # Include origin_id from the created transaction for downstream aggregations
+                try:
+                    record_dict['origin_id'] = record.created_transaction.origin_id if record.created_transaction else None
+                except Exception:
+                    record_dict['origin_id'] = None
+
+                # Mark rejection status for downstream filtering
+                try:
+                    tx_status = status_map.get(record.created_transaction_id)
+                    record_dict['is_rejected'] = (tx_status == TransactionStatus.rejected)
+                except Exception:
+                    record_dict['is_rejected'] = False
+                
                 records_data.append(record_dict)
             
             return {
                 'success': True,
                 'data': records_data,
                 'total': len(records_data),
+                'transactions_total': transactions_total,
+                'transactions_approved': transactions_approved,
                 'organization_id': organization_id,
                 'message': 'Transaction records retrieved successfully'
             }
