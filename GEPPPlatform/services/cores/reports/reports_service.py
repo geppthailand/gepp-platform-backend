@@ -6,6 +6,7 @@ Handles data retrieval and processing for various reports
 from typing import List, Optional, Dict, Any
 from GEPPPlatform.models.cores.references import Material, MaterialTag
 from GEPPPlatform.models.users.user_location import UserLocation
+from GEPPPlatform.models.subscriptions.organizations import OrganizationSetup
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
 from datetime import datetime
@@ -90,9 +91,9 @@ class ReportsService:
                 transactions_total = 0
                 transactions_approved = 0
 
-            # If report_type is 'overview', fetch material data for each record
+            # If report_type is 'overview', 'diversion', or 'performance', fetch material data for each record
             materials_map = {}
-            if report_type == 'overview':
+            if report_type in ('overview', 'diversion', 'performance'):
                 # Collect unique material_ids
                 material_ids = set()
                 for record in transaction_records:
@@ -141,8 +142,8 @@ class ReportsService:
             for record in transaction_records:
                 record_dict = self._transaction_record_to_dict(record)
                 
-                # Add material data if report_type is overview
-                if report_type == 'overview' and record.material_id:
+                # Add material data if report_type is overview, diversion, or performance
+                if report_type in ('overview', 'diversion', 'performance') and record.material_id:
                     record_dict['material'] = materials_map.get(record.material_id)
                 
                 # Include origin_id from the created transaction for downstream aggregations
@@ -284,6 +285,52 @@ class ReportsService:
             raise Exception(f"Failed to retrieve materials: {str(e)}")
         except Exception as e:
             logger.error(f"Unexpected error in get_material_by_organization: {str(e)}")
+            raise
+
+    def get_organization_setup(self, organization_id: int) -> Dict[str, Any]:
+        """
+        Get active organization setup with root_nodes
+        
+        Args:
+            organization_id: The organization ID to filter by
+            
+        Returns:
+            Dict with organization setup data (only active setup with root_nodes)
+        """
+        try:
+            
+            # Query for active organization setup
+            setup = self.db.query(OrganizationSetup).filter(
+                OrganizationSetup.organization_id == organization_id,
+                OrganizationSetup.is_active == True
+            ).first()
+            
+            if not setup:
+                return {
+                    'success': True,
+                    'data': None,
+                    'organization_id': organization_id,
+                    'message': 'No active organization setup found'
+                }
+            
+            # Return only root_nodes
+            return {
+                'success': True,
+                'data': {
+                    'version': setup.version,
+                    'root_nodes': setup.root_nodes,
+                },
+                'message': 'Organization setup retrieved successfully'
+            }
+            
+        except ValidationException as e:
+            logger.error(f"Validation error in get_organization_setup: {str(e)}")
+            raise
+        except SQLAlchemyError as e:
+            logger.error(f"Database error in get_organization_setup: {str(e)}")
+            raise Exception(f"Failed to retrieve organization setup: {str(e)}")
+        except Exception as e:
+            logger.error(f"Unexpected error in get_organization_setup: {str(e)}")
             raise
 
     # ========== HELPER METHODS ==========
