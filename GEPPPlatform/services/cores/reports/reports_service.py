@@ -58,13 +58,13 @@ class ReportsService:
             
             # Apply additional filters if provided
             if filters:
-                # Filter by material
-                if filters.get('material_id'):
-                    query = query.filter(TransactionRecord.material_id == filters['material_id'])
+                # Filter by material_ids (supports multiple)
+                if filters.get('material_ids'):
+                    query = query.filter(TransactionRecord.material_id.in_(filters['material_ids']))
                 
-                # Filter by origin_id
-                if filters.get('origin_id'):
-                    query = query.filter(Transaction.origin_id == filters['origin_id'])
+                # Filter by origin_ids (supports multiple)
+                if filters.get('origin_ids'):
+                    query = query.filter(Transaction.origin_id.in_(filters['origin_ids']))
                 
                 # Filter by date range
                 if filters.get('date_from'):
@@ -91,9 +91,9 @@ class ReportsService:
                 transactions_total = 0
                 transactions_approved = 0
 
-            # If report_type is 'overview', 'diversion', or 'performance', fetch material data for each record
+            # If report_type is 'overview', 'diversion', 'performance', or 'materials', fetch material data for each record
             materials_map = {}
-            if report_type in ('overview', 'diversion', 'performance'):
+            if report_type in ('overview', 'diversion', 'performance', 'materials', 'comparison'):
                 # Collect unique material_ids
                 material_ids = set()
                 for record in transaction_records:
@@ -142,8 +142,8 @@ class ReportsService:
             for record in transaction_records:
                 record_dict = self._transaction_record_to_dict(record)
                 
-                # Add material data if report_type is overview, diversion, or performance
-                if report_type in ('overview', 'diversion', 'performance') and record.material_id:
+                # Add material data if report_type needs it
+                if report_type in ('overview', 'diversion', 'performance', 'materials', 'comparison') and record.material_id:
                     record_dict['material'] = materials_map.get(record.material_id)
                 
                 # Include origin_id from the created transaction for downstream aggregations
@@ -194,10 +194,12 @@ class ReportsService:
 
         try:
             # Base query: Join origins with user_locations
+            # Exclude hub and hub-main type locations
             query = self.db.query(UserLocation).filter(
                 UserLocation.organization_id == organization_id,
                 UserLocation.is_active == True,
-                UserLocation.is_location == True
+                UserLocation.is_location == True,
+                UserLocation.type.notin_(['hub', 'hub-main'])  # Exclude hub and hub-main types
             )
 
             # Execute query

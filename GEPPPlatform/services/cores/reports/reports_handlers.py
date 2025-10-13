@@ -23,16 +23,71 @@ def _validate_organization_id(current_user: Dict[str, Any]) -> int:
 
 
 def _build_filters_from_query_params(query_params: Dict[str, Any]) -> Dict[str, Any]:
-    """Build filters dictionary from query parameters"""
+    """
+    Build filters dictionary from query parameters
+    Supports comma-separated values for material_id and origin_id
+    Example: ?material_id=1,2,3&origin_id=10,20
+    
+    Date handling:
+    - date_from: Set to 00:00:00 of that day
+    - date_to: Set to 23:59:59.999999 of that day
+    """
     filters = {}
+    
+    # Handle material_id (comma-separated)
     if query_params.get('material_id'):
-        filters['material_id'] = int(query_params['material_id'])
+        material_ids_str = query_params['material_id']
+        if ',' in material_ids_str:
+            # Multiple IDs
+            filters['material_ids'] = [int(mid.strip()) for mid in material_ids_str.split(',') if mid.strip()]
+        else:
+            # Single ID
+            filters['material_ids'] = [int(material_ids_str)]
+    
+    # Handle origin_id (comma-separated)
     if query_params.get('origin_id'):
-        filters['origin_id'] = int(query_params['origin_id'])
+        origin_ids_str = query_params['origin_id']
+        if ',' in origin_ids_str:
+            # Multiple IDs
+            filters['origin_ids'] = [int(oid.strip()) for oid in origin_ids_str.split(',') if oid.strip()]
+        else:
+            # Single ID
+            filters['origin_ids'] = [int(origin_ids_str)]
+    
+    # Handle date filters with time adjustments
     if query_params.get('date_from'):
-        filters['date_from'] = query_params['date_from']
+        date_from_str = query_params['date_from']
+        try:
+            # Parse the date and set to start of day (00:00:00)
+            if 'T' in date_from_str or ' ' in date_from_str:
+                # Already has time component, parse as-is then reset to start of day
+                dt = datetime.fromisoformat(date_from_str.replace('Z', '+00:00'))
+            else:
+                # Date only, parse and set to start of day
+                dt = datetime.fromisoformat(date_from_str)
+            
+            # Set to start of day (00:00:00)
+            filters['date_from'] = dt.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        except Exception:
+            # Fallback to original value if parsing fails
+            filters['date_from'] = date_from_str
+    
     if query_params.get('date_to'):
-        filters['date_to'] = query_params['date_to']
+        date_to_str = query_params['date_to']
+        try:
+            # Parse the date and set to end of day (23:59:59.999999)
+            if 'T' in date_to_str or ' ' in date_to_str:
+                # Already has time component, parse as-is then reset to end of day
+                dt = datetime.fromisoformat(date_to_str.replace('Z', '+00:00'))
+            else:
+                # Date only, parse and set to end of day
+                dt = datetime.fromisoformat(date_to_str)
+            
+            # Set to end of day (23:59:59.999999)
+            filters['date_to'] = dt.replace(hour=23, minute=59, second=59, microsecond=999999).isoformat()
+        except Exception:
+            # Fallback to original value if parsing fails
+            filters['date_to'] = date_to_str
     return filters
 
 
@@ -272,6 +327,7 @@ def _handle_materials_report(
     result = reports_service.get_transaction_records_by_organization(
         organization_id=organization_id,
         filters=filters if filters else None,
+        report_type='materials'
     )
     
     # Aggregate by main material
@@ -617,7 +673,8 @@ def _handle_performance_report(
         return {
             'metrics': metrics,
             'totalWasteKg': round(total_weight, 2),
-            'recyclingRatePercent': round(recycling_rate, 2)
+            'recyclingRatePercent': round(recycling_rate, 2),
+            'recyclable_weight': round(recyclable_weight, 2)
         }
     
     # Determine the maximum depth of the hierarchy
@@ -742,12 +799,13 @@ def _handle_performance_report(
             item = {
                 'id': str(node_id),
                 'totalWasteKg': calc['totalWasteKg'],
-                'metrics': calc['metrics']
+                'metrics': calc['metrics'],
             }
             
             # Level 0 always gets recyclingRatePercent (top of hierarchy)
             if level == 0:
                 item['recyclingRatePercent'] = calc['recyclingRatePercent']
+                item['recyclable_weight'] = calc['recyclable_weight']
             
             # Get config for this level
             if level < len(level_configs):
@@ -848,8 +906,11 @@ def handle_reports_routes(event: Dict[str, Any], **common_params) -> Dict[str, A
             filters = _build_filters_from_query_params(query_params)
             return _handle_diversion_report(reports_service, organization_id, filters)
         
-        elif path == '/api/reports/origins':
+        elif path == '/api/reports/filter/origins':
             return reports_service.get_origin_by_organization(organization_id=organization_id)
+
+        elif path == '/api/reports/filter/materials':
+            return reports_service.get_material_by_organization(organization_id=organization_id)
         
         elif path == '/api/reports/comparison':
             filters = _build_filters_from_query_params(query_params)
