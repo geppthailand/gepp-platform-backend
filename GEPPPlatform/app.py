@@ -167,6 +167,16 @@ def main(event, context):
                             "data": materials_result
                         }
 
+                    elif "/api/reports" in path:
+                        # Handle all materials management routes
+                        from .services.cores.reports.reports_handlers import handle_reports_routes
+
+                        reports_result = handle_reports_routes(event, **commonParams)
+                        results = {
+                            "success": True,
+                            "data": reports_result
+                        }
+
                     elif "/api/transactions" in path:
                         # Handle all transaction management routes
                         from .services.cores.transactions.transaction_handlers import handle_transaction_routes
@@ -220,7 +230,7 @@ def main(event, context):
 
                     else:
                         # Handle other future modules here
-                        available_routes = ["/api/auth/*", "/api/users/*", "/api/organizations/*", "/api/materials/*", "/api/transactions/*", "/api/transaction_audit/*", "/api/audit/*", "/api/debug/*", "/health"]
+                        available_routes = ["/api/auth/*", "/api/users/*", "/api/organizations/*", "/api/materials/*", "/api/reports/*", "/api/transactions/*", "/api/transaction_audit/*", "/api/audit/*", "/api/debug/*", "/health"]
                         return {
                             "statusCode": 404,
                             "headers": headers,
