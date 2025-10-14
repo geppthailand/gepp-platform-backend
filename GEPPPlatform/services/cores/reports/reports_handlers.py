@@ -4,11 +4,11 @@ Handles all /api/reports/* routes
 """
 
 from typing import Dict, Any, Optional, Tuple
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from .reports_service import ReportsService
 from ....exceptions import APIException, ValidationException, NotFoundException
-from GEPPPlatform.models.cores.references import MainMaterial
+from GEPPPlatform.models.cores.references import MainMaterial, MaterialCategory
 from GEPPPlatform.models.users.user_location import UserLocation
 
 
@@ -88,6 +88,15 @@ def _build_filters_from_query_params(query_params: Dict[str, Any]) -> Dict[str, 
         except Exception:
             # Fallback to original value if parsing fails
             filters['date_to'] = date_to_str
+
+    # For Comparison path
+    if query_params.get('period'):
+        filters['period'] = query_params['period']
+    if query_params.get('leftSelection'):
+        filters['leftSelection'] = query_params['leftSelection']
+    if query_params.get('rightSelection'):
+        filters['rightSelection'] = query_params['rightSelection']
+        
     return filters
 
 
@@ -104,6 +113,67 @@ def _parse_datetime(date_str: Optional[str]) -> Optional[datetime]:
         except Exception:
             pass
     return None
+
+
+def _compute_period_range(period: Optional[str], selection: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    """Compute ISO date_from/date_to from period and selection.
+    Supports quarters (Q1-Q4), halves (H1/H2 or First/Second Half), and year (YYYY).
+    If year not present in selection, defaults to current year.
+    """
+    if not period or not selection:
+        return None, None
+
+    sel_lower = selection.strip().lower()
+    now = datetime.utcnow()
+    # Extract year if present
+    year = None
+    for token in selection.replace('-', ' ').replace('_', ' ').split():
+        if token.isdigit() and len(token) == 4:
+            try:
+                year = int(token)
+                break
+            except ValueError:
+                pass
+    if year is None:
+        year = now.year
+
+    def month_range(y: int, m_start: int, m_end: int) -> Tuple[str, str]:
+        start = datetime(y, m_start, 1, 0, 0, 0, 0)
+        # compute end as last microsecond of end month
+        if m_end == 12:
+            end_boundary = datetime(y + 1, 1, 1)
+        else:
+            end_boundary = datetime(y, m_end + 1, 1)
+        end = end_boundary - timedelta(microseconds=1)
+        return start.isoformat(), end.isoformat()
+
+    p = (period or '').strip().lower()
+    # Quarter
+    if p in ('3m'):
+        if 'q1' in sel_lower:
+            return month_range(year, 1, 3)
+        if 'q2' in sel_lower:
+            return month_range(year, 4, 6)
+        if 'q3' in sel_lower:
+            return month_range(year, 7, 9)
+        if 'q4' in sel_lower:
+            return month_range(year, 10, 12)
+        return None, None
+
+    # Half-year
+    if p in ('6m'):
+        if 'first' in sel_lower or 'h1' in sel_lower:
+            return month_range(year, 1, 6)
+        if 'second' in sel_lower or 'h2' in sel_lower:
+            return month_range(year, 7, 12)
+        return None, None
+
+    # Year
+    if p in ('12m'):
+        return month_range(year, 1, 12)
+
+    # Unknown period
+    return None, None
 
 
 def _calculate_weight(record: Dict[str, Any], material: Dict[str, Any]) -> float:
@@ -161,6 +231,22 @@ def _fetch_destination_names(db_session, destination_ids: set) -> Dict[int, str]
         return {}
 
 
+def _fetch_category_names(db_session, category_ids: set) -> Dict[int, str]:
+    """Fetch material category names from database"""
+    if not category_ids:
+        return {}
+    try:
+        rows = db_session.query(
+            MaterialCategory.id, MaterialCategory.name_en, MaterialCategory.name_th
+        ).filter(MaterialCategory.id.in_(category_ids)).all()
+        return {
+            cid: (name_en or name_th or f"Category {cid}")
+            for cid, name_en, name_th in rows
+        }
+    except Exception:
+        return {}
+
+
 def _check_transaction_completion(transaction_map: Dict[int, Dict]) -> Tuple[int, int, float]:
     """
     Check which transactions are fully completed
@@ -205,7 +291,7 @@ def _handle_overview_report(
     plastic_saved = 0.0
     recyclable_ghg_reduction = 0.0
     origin_waste_map = {}
-    material_waste_map = {}
+    category_waste_map = {}
     month_totals = {}
     
     # Aggregate metrics from transaction records
@@ -247,16 +333,16 @@ def _handle_overview_report(
             if origin_id is not None:
                 origin_waste_map[origin_id] = origin_waste_map.get(origin_id, 0.0) + weight
         
-        # Aggregate by material for waste_type_proportions
-        material_id = record.get('material_id') or material.get('id')
-        if material_id is not None:
-            if material_id not in material_waste_map:
-                material_waste_map[material_id] = {
-                    'material_id': material_id,
-                    'material_name': material.get('name_en') or material.get('name_th'),
-                    'total_waste': 0.0
-                }
-            material_waste_map[material_id]['total_waste'] += weight
+        # Aggregate by category for waste_type_proportions
+        cat_id_raw = material.get('category_id') if material else record.get('category_id')
+        try:
+            cat_id = int(cat_id_raw) if cat_id_raw is not None else None
+        except Exception:
+            cat_id = None
+        if cat_id is not None:
+            if cat_id not in category_waste_map:
+                category_waste_map[cat_id] = 0.0
+            category_waste_map[cat_id] += weight
     
     # Calculate recycle rate
     recycle_rate = (recyclable_waste / total_waste) if total_waste > 0 else 0.0
@@ -290,6 +376,18 @@ def _handle_overview_report(
         for m in sorted(month_totals.keys())
     ]
     
+    # Build waste_type_proportions by category
+    category_names_map = _fetch_category_names(reports_service.db, set(category_waste_map.keys()))
+    waste_type_proportions = []
+    for cid, total in sorted(category_waste_map.items(), key=lambda kv: kv[1], reverse=True):
+        proportion_percent = (total / total_waste * 100) if total_waste > 0 else 0.0
+        waste_type_proportions.append({
+            'category_id': cid,
+            'category_name': category_names_map.get(cid, f"Category {cid}"),
+            'total_waste': total,
+            'proportion_percent': proportion_percent,
+        })
+
     return {
         'transactions_total': result.get('transactions_total', 0),
         'transactions_approved': result.get('transactions_approved', 0),
@@ -307,11 +405,7 @@ def _handle_overview_report(
             ],
             'chart_data': chart_data
         },
-        'waste_type_proportions': sorted(
-            material_waste_map.values(), 
-            key=lambda x: x['total_waste'], 
-            reverse=True
-        ),
+        'waste_type_proportions': waste_type_proportions,
         'material_summary': []
     }
 
@@ -626,19 +720,22 @@ def _handle_performance_report(
     collect_location_ids(root_nodes)
     location_names = _fetch_destination_names(reports_service.db, location_ids)
     
-    # Fetch all main material names
-    all_main_material_ids = set()
+    # Fetch all category names
+    all_category_ids = set()
     for record in transaction_records:
         if record.get('is_rejected'):
             continue
         material = record.get('material') or {}
-        main_id = material.get('main_material_id') or record.get('main_material_id')
-        if main_id:
-            all_main_material_ids.add(main_id)
+        cat_id = material.get('category_id') or record.get('category_id')
+        if cat_id:
+            try:
+                all_category_ids.add(int(cat_id))
+            except Exception:
+                pass
     
-    main_material_names = _fetch_main_material_names(reports_service.db, all_main_material_ids)
+    category_names = _fetch_category_names(reports_service.db, all_category_ids)
     
-    # Helper to calculate metrics from records (grouped by main material)
+    # Helper to calculate metrics from records (grouped by category)
     def calculate_metrics(records):
         material_metrics = {}
         total_weight = 0.0
@@ -649,20 +746,18 @@ def _handle_performance_report(
             weight = _calculate_weight(record, material)
             total_weight += weight
             
-            # Get main material
-            main_material_id = material.get('main_material_id') or record.get('main_material_id')
-            if main_material_id:
-                material_name = main_material_names.get(main_material_id, f"Material {main_material_id}")
+            # Get category
+            category_id = material.get('category_id') or record.get('category_id')
+            try:
+                cat_id_int = int(category_id) if category_id is not None else None
+            except Exception:
+                cat_id_int = None
+            if cat_id_int is not None:
+                material_name = category_names.get(cat_id_int, f"Category {cat_id_int}")
                 material_metrics[material_name] = material_metrics.get(material_name, 0.0) + weight
             
             # Check if recyclable (category 1 or 3)
-            category_id = material.get('category_id') or record.get('category_id')
-            try:
-                cat_id = int(category_id) if category_id is not None else None
-            except Exception:
-                cat_id = None
-            
-            if cat_id in (1, 3):
+            if cat_id_int in (1, 3):
                 recyclable_weight += weight
         
         recycling_rate = (recyclable_weight / total_weight * 100) if total_weight > 0 else 0.0
@@ -841,16 +936,127 @@ def _handle_comparison_report(
 ) -> Dict[str, Any]:
     """Handle /api/reports/comparison endpoint"""
     
-    # Get transaction records
-    result = reports_service.get_transaction_records_by_organization(
-        organization_id=organization_id,
-        filters=filters if filters else None,
-        report_type='comparison'
-    )
+    period = filters.get('period')
+    left_sel = filters.get('leftSelection')
+    right_sel = filters.get('rightSelection')
     
+    # Build left and right date ranges
+    left_from, left_to = _compute_period_range(period, left_sel)
+    right_from, right_to = _compute_period_range(period, right_sel)
+    print('LEFT FILTER',   left_from, left_to, left_sel)
+    print('RIGHT FILTER', right_from, right_to, right_sel)
+
+    def fetch_side(date_from: Optional[str], date_to: Optional[str]) -> Dict[str, Any]:
+        side_filters = {k: v for k, v in filters.items() if k not in ('period', 'leftSelection', 'rightSelection', 'date_from', 'date_to')}
+        if date_from:
+            side_filters['date_from'] = date_from
+        if date_to:
+            side_filters['date_to'] = date_to
+        return reports_service.get_transaction_records_by_organization(
+            organization_id=organization_id,
+            filters=side_filters if side_filters else None,
+            report_type='comparison'
+        )
+
+    left_result = fetch_side(left_from, left_to)
+    right_result = fetch_side(right_from, right_to)
+
+    def _month_labels_in_range(start_iso: Optional[str], end_iso: Optional[str]) -> Optional[list]:
+        start_dt = _parse_datetime(start_iso)
+        end_dt = _parse_datetime(end_iso)
+        if not start_dt or not end_dt:
+            return None
+        labels = []
+        y, m = start_dt.year, start_dt.month
+        while (y < end_dt.year) or (y == end_dt.year and m <= end_dt.month):
+            labels.append(datetime(2000, m, 1).strftime('%b'))
+            m += 1
+            if m > 12:
+                m = 1
+                y += 1
+        return labels
+
+    def build_grouped(result: Dict[str, Any], start_iso: Optional[str], end_iso: Optional[str], reports_service: ReportsService) -> Dict[str, Any]:
+        material_map: Dict[str, float] = {}
+        month_map: Dict[str, float] = {}
+        total_waste = 0.0
+        category_ids: set = set()
+        # First pass: collect category IDs
+        for record in result.get('data', []):
+            # Skip rejected
+            if record.get('is_rejected'):
+                continue
+            material = record.get('material') or {}
+            cat_id = material.get('category_id') or record.get('category_id')
+            if cat_id:
+                try:
+                    category_ids.add(int(cat_id))
+                except Exception:
+                    pass
+        # Fetch category names
+        category_names: Dict[int, str] = {}
+        if category_ids:
+            try:
+                rows = reports_service.db.query(
+                    MaterialCategory.id, MaterialCategory.name_en, MaterialCategory.name_th
+                ).filter(MaterialCategory.id.in_(category_ids)).all()
+                for _id, name_en, name_th in rows:
+                    category_names[_id] = (name_en or name_th or f"Category {_id}")
+            except Exception:
+                category_names = {}
+
+        # Second pass: aggregate
+        for record in result.get('data', []):
+            if record.get('is_rejected'):
+                continue
+            material = record.get('material') or {}
+            cat_id = material.get('category_id') or record.get('category_id')
+            if not cat_id:
+                continue
+            try:
+                cat_id_int = int(cat_id)
+            except Exception:
+                continue
+            material_name = category_names.get(cat_id_int, f"Category {cat_id_int}")
+            weight = _calculate_weight(record, material)
+            dt = _parse_datetime(record.get('created_date'))
+            if not dt:
+                continue
+            month_label = datetime(2000, dt.month, 1).strftime('%b')
+            # Aggregate
+            material_map[material_name] = material_map.get(material_name, 0.0) + weight
+            month_map[month_label] = month_map.get(month_label, 0.0) + weight
+            total_waste += weight
+
+        # Ensure months are ordered chronologically in output dict (preserving insertion order by building anew)
+        ordered_month_map: Dict[str, float] = {}
+        month_labels = _month_labels_in_range(start_iso, end_iso)
+        if month_labels is None:
+            # Fallback to only present months in Jan..Dec order
+            for m in ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']:
+                if m in month_map:
+                    ordered_month_map[m] = month_map[m]
+        else:
+            for m in month_labels:
+                ordered_month_map[m] = month_map.get(m, 0.0)
+
+        # Sort materials by total_waste desc in an ordered dict-like structure
+        ordered_material_items = sorted(material_map.items(), key=lambda kv: kv[1], reverse=True)
+        ordered_material_map: Dict[str, float] = {name: val for name, val in ordered_material_items}
+
+        return {
+            'material': ordered_material_map,
+            'month': ordered_month_map,
+            'total_waste_kg': total_waste,
+        }
+
+    left_grouped = build_grouped(left_result, left_from, left_to, reports_service)
+    right_grouped = build_grouped(right_result, right_from, right_to, reports_service)
+
     return {
         'success': True,
-        'data': result,
+        'left': left_grouped,
+        'right': right_grouped,
         'message': 'Comparison report generated successfully'
     }
 
@@ -898,10 +1104,6 @@ def handle_reports_routes(event: Dict[str, Any], **common_params) -> Dict[str, A
             filters = _build_filters_from_query_params(query_params)
             return _handle_performance_report(reports_service, organization_id, filters)
         
-        elif path == '/api/reports/materials':
-            filters = _build_filters_from_query_params(query_params)
-            return _handle_materials_report(reports_service, organization_id, filters)
-        
         elif path == '/api/reports/diversion':
             filters = _build_filters_from_query_params(query_params)
             return _handle_diversion_report(reports_service, organization_id, filters)
@@ -915,13 +1117,10 @@ def handle_reports_routes(event: Dict[str, Any], **common_params) -> Dict[str, A
         elif path == '/api/reports/comparison':
             filters = _build_filters_from_query_params(query_params)
             return _handle_comparison_report(reports_service, organization_id, filters)
-        
-        else:
-            raise APIException(
-                "Report endpoint not found",
-                status_code=404,
-                error_code="REPORT_NOT_FOUND"
-            )
+
+        elif path == '/api/reports/materials':
+            filters = _build_filters_from_query_params(query_params)
+            return _handle_materials_report(reports_service, organization_id, filters)
     
     except ValidationException as e:
         raise APIException(str(e), status_code=400, error_code="VALIDATION_ERROR")
