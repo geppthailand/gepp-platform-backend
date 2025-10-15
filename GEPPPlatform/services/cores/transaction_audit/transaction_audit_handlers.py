@@ -10,7 +10,7 @@ from sqlalchemy import and_, desc
 
 from .transaction_audit_service import TransactionAuditService
 from ....models.logs.transaction_audit_history import TransactionAuditHistory
-from ....models.transactions.transactions import Transaction, TransactionStatus
+from ....models.transactions.transactions import Transaction, TransactionStatus, AIAuditStatus
 
 logger = logging.getLogger(__name__)
 from ....exceptions import (
@@ -69,6 +69,24 @@ def handle_transaction_audit_routes(event: Dict[str, Any], data: Dict[str, Any],
             return handle_reset_all_transactions(
                 db_session,
                 data,
+                current_user_organization_id
+            )
+
+        elif path == '/api/transaction_audit/add_ai_audit_queue' and method == 'POST':
+            return handle_add_ai_audit_queue(
+                db_session,
+                data,
+                current_user_organization_id,
+                current_user_id
+            )
+
+        elif path == '/api/transaction_audit/process_queue' and method == 'POST':
+            return handle_process_audit_queue(db_session)
+
+        elif path == '/api/transaction_audit/audit_report' and method == 'GET':
+            return handle_get_audit_report(
+                db_session,
+                query_params,
                 current_user_organization_id
             )
 
@@ -267,8 +285,10 @@ def handle_reset_all_transactions(
         # Reset each transaction
         for transaction in transactions_to_reset:
             transaction.status = TransactionStatus.pending
-            transaction.ai_audit_status = None
+            transaction.ai_audit_status = AIAuditStatus.null  # Use enum value, not None
             transaction.ai_audit_note = None
+            transaction.reject_triggers = []  # Clear reject triggers
+            transaction.warning_triggers = []  # Clear warning triggers
             updated_count += 1
 
         # Commit changes
@@ -290,3 +310,298 @@ def handle_reset_all_transactions(
         logger.error(f"Error resetting transactions: {str(e)}")
         logger.error(f"Traceback: {traceback.format_exc()}")
         raise APIException(f'Failed to reset transactions: {str(e)}')
+
+
+def handle_add_ai_audit_queue(
+    db_session: Any,
+    data: Dict[str, Any],
+    organization_id: int,
+    current_user_id: int = None
+) -> Dict[str, Any]:
+    """
+    Handle POST /api/transaction_audit/add_ai_audit_queue - Queue transactions for AI audit
+
+    Changes all transactions with ai_audit_status='null' to 'queued' for the organization.
+    Creates an audit history record with 'in_progress' status to be processed by cron later.
+
+    Expected payload:
+    {
+        "transaction_ids": [1, 2, 3]  # Optional: specific transactions to queue
+    }
+    """
+    try:
+        logger.info(f"Adding transactions to AI audit queue for organization {organization_id}")
+
+        # Get optional transaction IDs filter
+        transaction_ids = data.get('transaction_ids', None)
+
+        # Build base query for transactions with 'null' ai_audit_status
+        query = db_session.query(Transaction).filter(
+            and_(
+                Transaction.organization_id == organization_id,
+                Transaction.ai_audit_status == AIAuditStatus.null,
+                Transaction.deleted_date.is_(None)
+            )
+        )
+
+        # Apply transaction IDs filter if provided
+        if transaction_ids:
+            query = query.filter(Transaction.id.in_(transaction_ids))
+
+        transactions_to_queue = query.all()
+        queued_count = 0
+        queued_transaction_ids = []
+
+        # Update ai_audit_status to 'queued' for each transaction
+        for transaction in transactions_to_queue:
+            transaction.ai_audit_status = AIAuditStatus.queued
+            queued_transaction_ids.append(transaction.id)
+            queued_count += 1
+
+        # Create audit history record with 'in_progress' status
+        # This will be picked up and processed by cron job later
+        from datetime import datetime, timezone
+        audit_history = TransactionAuditHistory(
+            organization_id=organization_id,
+            triggered_by_user_id=current_user_id,
+            transactions=queued_transaction_ids,
+            audit_info={
+                'status': 'queued',
+                'message': 'Audit batch queued for processing'
+            },
+            total_transactions=queued_count,
+            processed_transactions=0,
+            approved_count=0,
+            rejected_count=0,
+            status='in_progress',
+            started_at=datetime.now(timezone.utc),
+            completed_at=None
+        )
+
+        db_session.add(audit_history)
+
+        # Commit changes
+        db_session.commit()
+
+        logger.info(f"Queued {queued_count} transactions for AI audit with audit history ID {audit_history.id}")
+
+        return {
+            'success': True,
+            'message': f'Successfully queued {queued_count} transactions for AI audit',
+            'data': {
+                'queued_count': queued_count,
+                'organization_id': organization_id,
+                'audit_history_id': audit_history.id,
+                'transaction_ids': queued_transaction_ids if transaction_ids else None
+            }
+        }
+
+    except Exception as e:
+        db_session.rollback()
+        logger.error(f"Error queueing transactions for AI audit: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise APIException(f'Failed to queue transactions for AI audit: {str(e)}')
+
+
+def handle_process_audit_queue(db_session: Any) -> Dict[str, Any]:
+    """
+    Handle POST /api/transaction_audit/process_queue - Process in_progress audit batches
+
+    This endpoint manually triggers the processing of queued audit batches.
+    Normally this would be called by a cron job, but can also be triggered manually for testing.
+
+    Returns processing results including number of batches processed.
+    """
+    try:
+        from .cron_process_audit_queue import process_audit_queue
+
+        logger.info("Manual trigger: Processing audit queue")
+
+        result = process_audit_queue(db_session)
+
+        return {
+            'success': result.get('success', False),
+            'message': result.get('message', 'Queue processing completed'),
+            'data': {
+                'processed_batches': result.get('processed_batches', 0),
+                'failed_batches': result.get('failed_batches', 0),
+                'total_batches': result.get('total_batches', 0)
+            },
+            'error': result.get('error')
+        }
+
+    except Exception as e:
+        logger.error(f"Error processing audit queue: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise APIException(f'Failed to process audit queue: {str(e)}')
+
+
+def handle_get_audit_report(
+    db_session: Any,
+    query_params: Dict[str, Any],
+    organization_id: int
+) -> Dict[str, Any]:
+    """
+    Handle GET /api/transaction_audit/audit_report - Get comprehensive audit report with filters
+
+    Query parameters:
+    - date_from: str (ISO date) - Filter transactions from this date
+    - date_to: str (ISO date) - Filter transactions to this date
+    - location: str - Filter by location name
+    - material_type: str - Filter by material type
+    - status: str - Filter by transaction status
+    - ai_audit_status: str - Filter by AI audit status (approved, rejected)
+
+    Returns comprehensive report including:
+    - Summary statistics (total, approved, rejected counts and percentages)
+    - Monthly trend data for charts
+    - Rejection reasons breakdown
+    - List of transactions with audit details
+    """
+    try:
+        import json
+        from datetime import datetime
+        from sqlalchemy import func, extract
+        from collections import Counter
+
+        logger.info(f"Generating audit report for organization {organization_id} with filters: {query_params}")
+
+        # Build base query for transactions
+        query = db_session.query(Transaction).filter(
+            and_(
+                Transaction.organization_id == organization_id,
+                Transaction.deleted_date.is_(None)
+            )
+        )
+
+        # Apply filters
+        date_from = query_params.get('date_from')
+        date_to = query_params.get('date_to')
+        location = query_params.get('location')
+        material_type = query_params.get('material_type')
+        status = query_params.get('status')
+        ai_audit_status = query_params.get('ai_audit_status')
+
+        if date_from:
+            query = query.filter(Transaction.transaction_date >= date_from)
+
+        if date_to:
+            query = query.filter(Transaction.transaction_date <= date_to)
+
+        if status:
+            query = query.filter(Transaction.status == status)
+
+        if ai_audit_status:
+            if ai_audit_status == 'approved':
+                query = query.filter(Transaction.ai_audit_status == AIAuditStatus.approved)
+            elif ai_audit_status == 'rejected':
+                query = query.filter(Transaction.ai_audit_status == AIAuditStatus.rejected)
+
+        # Get all matching transactions
+        transactions = query.all()
+
+        # Calculate summary statistics
+        total_transactions = len(transactions)
+        approved_transactions = [t for t in transactions if t.ai_audit_status == AIAuditStatus.approved]
+        rejected_transactions = [t for t in transactions if t.ai_audit_status == AIAuditStatus.rejected]
+
+        approved_count = len(approved_transactions)
+        rejected_count = len(rejected_transactions)
+
+        approved_percentage = round((approved_count / total_transactions * 100), 2) if total_transactions > 0 else 0
+        rejected_percentage = round((rejected_count / total_transactions * 100), 2) if total_transactions > 0 else 0
+
+        # Monthly trend data (for stacked bar chart)
+        # Group transactions by month
+        monthly_data = {}
+        for transaction in transactions:
+            if transaction.transaction_date:
+                month_key = transaction.transaction_date.strftime('%Y-%m')
+                if month_key not in monthly_data:
+                    monthly_data[month_key] = {'approved': 0, 'rejected': 0}
+
+                if transaction.ai_audit_status == AIAuditStatus.approved:
+                    monthly_data[month_key]['approved'] += 1
+                elif transaction.ai_audit_status == AIAuditStatus.rejected:
+                    monthly_data[month_key]['rejected'] += 1
+
+        # Sort by month and format for frontend
+        monthly_trends = []
+        for month in sorted(monthly_data.keys()):
+            monthly_trends.append({
+                'month': month,
+                'approved': monthly_data[month]['approved'],
+                'rejected': monthly_data[month]['rejected']
+            })
+
+        # Rejection reasons breakdown (for pie chart)
+        # Extract all reject_triggers and count occurrences
+        rejection_reasons = []
+        for transaction in rejected_transactions:
+            if transaction.reject_triggers and isinstance(transaction.reject_triggers, list):
+                rejection_reasons.extend(transaction.reject_triggers)
+
+        # Count frequency of each rejection reason
+        reason_counts = Counter(rejection_reasons)
+        rejection_breakdown = [
+            {'rule_id': rule_id, 'count': count}
+            for rule_id, count in reason_counts.most_common()
+        ]
+
+        # Prepare transaction list for รายละเอียดการตรวจสอบ
+        transaction_list = []
+        for transaction in transactions:
+            # Parse ai_audit_note if it's JSON
+            audit_details = None
+            if transaction.ai_audit_note:
+                try:
+                    audit_details = json.loads(transaction.ai_audit_note)
+                except:
+                    audit_details = {'note': transaction.ai_audit_note}
+
+            transaction_list.append({
+                'id': transaction.id,
+                'transaction_date': transaction.transaction_date.isoformat() if transaction.transaction_date else None,
+                'status': transaction.status.value if hasattr(transaction.status, 'value') else str(transaction.status),
+                'ai_audit_status': transaction.ai_audit_status.value if hasattr(transaction.ai_audit_status, 'value') else None,
+                'weight_kg': float(transaction.weight_kg) if transaction.weight_kg else 0,
+                'total_amount': float(transaction.total_amount) if transaction.total_amount else 0,
+                'reject_triggers': transaction.reject_triggers if transaction.reject_triggers else [],
+                'warning_triggers': transaction.warning_triggers if transaction.warning_triggers else [],
+                'audit_details': audit_details
+            })
+
+        # Compile final report
+        report = {
+            'summary': {
+                'total_transactions': total_transactions,
+                'approved_count': approved_count,
+                'rejected_count': rejected_count,
+                'approved_percentage': approved_percentage,
+                'rejected_percentage': rejected_percentage
+            },
+            'monthly_trends': monthly_trends,
+            'rejection_breakdown': rejection_breakdown,
+            'transactions': transaction_list,
+            'filters_applied': {
+                'date_from': date_from,
+                'date_to': date_to,
+                'location': location,
+                'material_type': material_type,
+                'status': status,
+                'ai_audit_status': ai_audit_status
+            }
+        }
+
+        logger.info(f"Successfully generated audit report with {total_transactions} transactions")
+
+        return {
+            'success': True,
+            'message': 'Audit report generated successfully',
+            'data': report
+        }
+
+    except Exception as e:
+        logger.error(f"Error generating audit report: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise APIException(f'Failed to generate audit report: {str(e)}')

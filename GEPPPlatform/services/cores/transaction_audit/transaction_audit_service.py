@@ -310,7 +310,12 @@ class TransactionAuditService:
                             'audit_status': 'failed',
                             'error': str(e),
                             'violations': [],
-                            'recommendations': ['Manual review required due to AI audit failure']
+                            'recommendations': ['Manual review required due to AI audit failure'],
+                            'token_usage': {
+                                'input_tokens': 0,
+                                'output_tokens': 0,
+                                'total_tokens': 0
+                            }
                         })
 
             logger.info(f"Completed AI audit for {len(audit_results)} transactions")
@@ -360,21 +365,35 @@ class TransactionAuditService:
                     logger.info(f"Generated {len(presigned_images)} presigned URLs for ChatGPT access")
                     # Enhance prompt for image analysis
                     enhanced_prompt = self._enhance_prompt_for_images(prompt, presigned_images, transaction_data)
-                    response = self._call_chatgpt_api(enhanced_prompt, presigned_images)
+                    api_response = self._call_chatgpt_api(enhanced_prompt, presigned_images)
                 else:
                     logger.warning(f"Failed to generate presigned URLs, falling back to text-only analysis")
-                    response = self._call_chatgpt_api(prompt)
+                    api_response = self._call_chatgpt_api(prompt)
             else:
                 logger.info(f"Processing transaction {transaction_data['transaction_id']} with text-only analysis")
-                response = self._call_chatgpt_api(prompt)
-            
-            print(response)
+                api_response = self._call_chatgpt_api(prompt)
+
+            # Extract content and usage from API response
+            response_content = api_response.get('content', '')
+            token_usage = api_response.get('usage', {})
+
+            print(response_content)
             # Parse AI response
-            audit_result = self._parse_ai_response(response, transaction_data['transaction_id'], audit_rules)
+            audit_result = self._parse_ai_response(response_content, transaction_data['transaction_id'], audit_rules)
 
             # Add image analysis metadata
             audit_result['images_analyzed'] = len(unique_images)
             audit_result['has_image_analysis'] = len(unique_images) > 0
+
+            # Add token usage information
+            audit_result['token_usage'] = {
+                'input_tokens': token_usage.get('input_tokens', 0),
+                'output_tokens': token_usage.get('output_tokens', 0),
+                'total_tokens': token_usage.get('total_tokens', 0)
+            }
+
+            logger.info(f"Transaction {transaction_data['transaction_id']} used {token_usage.get('total_tokens', 0)} tokens "
+                       f"(input: {token_usage.get('input_tokens', 0)}, output: {token_usage.get('output_tokens', 0)})")
 
             return audit_result
 
@@ -529,8 +548,13 @@ Record #{i+1} (ID: {record.get('record_id')}):
         enhanced_prompt = base_prompt + image_analysis_instructions
         return enhanced_prompt
 
-    def _call_chatgpt_api(self, prompt: str, images: List[str] = None) -> str:
-        """Call ChatGPT API for audit analysis with optional image processing"""
+    def _call_chatgpt_api(self, prompt: str, images: List[str] = None) -> Dict[str, Any]:
+        """
+        Call ChatGPT API for audit analysis with optional image processing
+
+        Returns:
+            Dict containing 'content' (response text) and 'usage' (token information)
+        """
         try:
             if not OPENAI_AVAILABLE:
                 raise ImportError("OpenAI package not installed. Install with: pip install openai")
@@ -583,7 +607,18 @@ Record #{i+1} (ID: {record.get('record_id')}):
                     # max_tokens=4000,
                     # temperature=0.1  # Low temperature for consistent auditing
                 )
-                return response.choices[0].message.content
+
+                # Extract token usage information
+                usage_info = {
+                    'input_tokens': response.usage.prompt_tokens if hasattr(response, 'usage') and response.usage else 0,
+                    'output_tokens': response.usage.completion_tokens if hasattr(response, 'usage') and response.usage else 0,
+                    'total_tokens': response.usage.total_tokens if hasattr(response, 'usage') and response.usage else 0
+                }
+
+                return {
+                    'content': response.choices[0].message.content,
+                    'usage': usage_info
+                }
             else:
                 # Use responses API for text-only analysis
                 full_input = f"""You are a professional waste management auditor with expertise in compliance and quality control.
@@ -598,7 +633,18 @@ Respond only with valid JSON format as specified above."""
                     reasoning={"effort": "low"},
                     text={"verbosity": "low"}
                 )
-                return result.output_text
+
+                # Extract token usage information from responses API
+                usage_info = {
+                    'input_tokens': result.usage.input_tokens if hasattr(result, 'usage') and result.usage else 0,
+                    'output_tokens': result.usage.output_tokens if hasattr(result, 'usage') and result.usage else 0,
+                    'total_tokens': (result.usage.input_tokens + result.usage.output_tokens) if hasattr(result, 'usage') and result.usage else 0
+                }
+
+                return {
+                    'content': result.output_text,
+                    'usage': usage_info
+                }
 
         except Exception as e:
             logger.error(f"ChatGPT API call failed: {str(e)}")
@@ -742,27 +788,32 @@ Respond only with valid JSON format as specified above."""
                         elif audit_status == 'rejected':
                             transaction.status = TransactionStatus.rejected
 
-                    # Create audit note with all messages and reasons
-                    audit_header = f"AI Audit - {result.get('summary', '')}"
-                    all_messages = result.get('all_messages', [])
-                    all_reasons = result.get('all_reasons', [])
+                    # Extract triggered rule IDs for reject and warning actions
+                    reject_triggers = []
+                    warning_triggers = []
 
-                    audit_note_parts = [audit_header]
+                    rule_results = result.get('rule_results', [])
+                    for rule_result in rule_results:
+                        if rule_result.get('triggered'):
+                            rule_id = rule_result.get('rule_id')
+                            actions_applied = rule_result.get('actions_applied', [])
 
-                    if all_messages:
-                        # Create formatted audit notes with all messages
-                        formatted_messages = "\n".join([f"• {msg}" for msg in all_messages])
-                        audit_note_parts.append(f"\nAudit Details:\n{formatted_messages}")
+                            # Check action types to categorize triggers
+                            has_reject = any(action.get('type') == 'reject' for action in actions_applied)
+                            has_warn = any(action.get('type') == 'warn' for action in actions_applied)
 
-                    if all_reasons:
-                        # Add all reasons from triggered rules
-                        formatted_reasons = "\n".join([f"• {reason}" for reason in all_reasons])
-                        audit_note_parts.append(f"\nReasons:\n{formatted_reasons}")
+                            if has_reject and rule_id:
+                                reject_triggers.append(rule_id)
+                            elif has_warn and rule_id:
+                                warning_triggers.append(rule_id)
 
-                    ai_audit_note = "\n".join(audit_note_parts)
+                    # Save triggers to transaction columns
+                    transaction.reject_triggers = reject_triggers
+                    transaction.warning_triggers = warning_triggers
 
-                    # Save to ai_audit_note instead of notes
-                    transaction.ai_audit_note = ai_audit_note
+                    # Save complete audit response as JSON string in ai_audit_note
+                    # This preserves all audit data for transparency and analysis
+                    transaction.ai_audit_note = json.dumps(result, ensure_ascii=False, indent=2)
 
                     updated_count += 1
 
@@ -804,7 +855,12 @@ Respond only with valid JSON format as specified above."""
             'error': error,
             'audited_at': datetime.now(timezone.utc).isoformat(),
             'total_rules_evaluated': 0,
-            'rules_triggered': 0
+            'rules_triggered': 0,
+            'token_usage': {
+                'input_tokens': 0,
+                'output_tokens': 0,
+                'total_tokens': 0
+            }
         }
 
     def _save_audit_history_batch(
@@ -823,6 +879,19 @@ Respond only with valid JSON format as specified above."""
             approved_count = sum(1 for result in audit_results if result.get('audit_status') == 'approved')
             rejected_count = sum(1 for result in audit_results if result.get('audit_status') == 'rejected')
 
+            # Calculate total token usage across all transactions
+            total_input_tokens = 0
+            total_output_tokens = 0
+            total_tokens = 0
+
+            for result in audit_results:
+                token_usage = result.get('token_usage', {})
+                total_input_tokens += token_usage.get('input_tokens', 0)
+                total_output_tokens += token_usage.get('output_tokens', 0)
+                total_tokens += token_usage.get('total_tokens', 0)
+
+            logger.info(f"Audit batch token usage - Input: {total_input_tokens}, Output: {total_output_tokens}, Total: {total_tokens}")
+
             # Create audit history record
             audit_history = TransactionAuditHistory(
                 organization_id=organization_id,
@@ -833,7 +902,12 @@ Respond only with valid JSON format as specified above."""
                         'total_transactions': total_transactions,
                         'processed_transactions': processed_transactions,
                         'approved_count': approved_count,
-                        'rejected_count': rejected_count
+                        'rejected_count': rejected_count,
+                        'token_usage': {
+                            'total_input_tokens': total_input_tokens,
+                            'total_output_tokens': total_output_tokens,
+                            'total_tokens': total_tokens
+                        }
                     }
                 },
                 total_transactions=total_transactions,
