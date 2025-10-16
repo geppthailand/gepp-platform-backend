@@ -245,7 +245,7 @@ class TransactionAuditService:
                     TransactionRecord.created_transaction_id == transaction.id
                 ).all()
 
-                # Prepare transaction data
+                # Prepare transaction data (excluding transaction-level images)
                 transaction_data = {
                     'transaction_id': transaction.id,
                     'organization_id': transaction.organization_id,
@@ -259,7 +259,7 @@ class TransactionAuditService:
                     'hazardous_level': transaction.hazardous_level,
                     'treatment_method': transaction.treatment_method,
                     'notes': transaction.notes,
-                    'images': transaction.images or [],
+                    # Remove transaction-level images - only use record-level images
                     'records': []
                 }
 
@@ -565,6 +565,7 @@ If images contradict data, flag violation with specific reason.
                         gemini_content.append(f"[Image unavailable: {str(img_error)}]")
 
             # Generate response using the new SDK
+            print(gemini_content)
             response = self.client.models.generate_content(
                 model=self.model_name,
                 contents=gemini_content,
@@ -608,6 +609,7 @@ If images contradict data, flag violation with specific reason.
             full_prompt = f"{prompt}\n\nRespond only with valid JSON format as specified above."
             system_instruction = "You are a professional waste management auditor with expertise in compliance and quality control."
 
+            # logger.info(full_prompt)
             # Generate response using the new SDK
             response = self.client.models.generate_content(
                 model=self.model_name,
@@ -626,7 +628,7 @@ If images contradict data, flag violation with specific reason.
                 'total_tokens': usage_metadata.total_token_count if usage_metadata else 0
             }
 
-            logger.info(f"Gemini API text-only response - Tokens: {usage_info['total_tokens']}")
+            # logger.info(f"Gemini API text-only response - Tokens: {usage_info['total_tokens']}")
 
             return {
                 'content': response.text,
