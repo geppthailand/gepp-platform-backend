@@ -614,7 +614,7 @@ If images contradict data, flag violation with specific reason.
                 contents=full_prompt,
                 config={
                     "system_instruction": system_instruction,
-                    "temperature": 0.,
+                    "temperature": 0.1,
                 }
             )
 

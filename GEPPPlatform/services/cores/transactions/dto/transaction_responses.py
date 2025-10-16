@@ -151,6 +151,9 @@ class TransactionResponse(BaseDTO):
     # AI Audit fields
     ai_audit_status: Optional[str] = None
     ai_audit_note: Optional[str] = None
+    reject_triggers: Optional[List[str]] = None  # Array of rule_ids that triggered rejection
+    warning_triggers: Optional[List[str]] = None  # Array of rule_ids that triggered warnings
+    reject_messages: Optional[List[str]] = None  # Human-readable reject messages (expanded from ai_audit_note)
 
     is_active: bool = True
     created_date: str = None  # ISO format
@@ -189,6 +192,9 @@ class TransactionResponse(BaseDTO):
             'approved_by_id': self.approved_by_id,
             'ai_audit_status': self.ai_audit_status,
             'ai_audit_note': self.ai_audit_note,
+            'reject_triggers': self.reject_triggers,
+            'warning_triggers': self.warning_triggers,
+            'reject_messages': self.reject_messages,
             'is_active': self.is_active,
             'created_date': self.created_date,
             'updated_date': self.updated_date,
@@ -208,10 +214,32 @@ class TransactionResponse(BaseDTO):
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'TransactionResponse':
         """Create instance from service response data"""
+        import json
+
         # Convert record data if present
         records = None
         if 'records' in data:
             records = [TransactionRecordResponse.from_dict(record) for record in data['records']]
+
+        # Extract reject_triggers and warning_triggers
+        reject_triggers = data.get('reject_triggers', [])
+        warning_triggers = data.get('warning_triggers', [])
+
+        # Expand compact ai_audit_note to get reject_messages
+        reject_messages = []
+        ai_audit_note = data.get('ai_audit_note')
+        if ai_audit_note:
+            try:
+                audit_data = json.loads(ai_audit_note) if isinstance(ai_audit_note, str) else ai_audit_note
+                # Check if it's compact format (has 's' and 'v' keys)
+                if 's' in audit_data and 'v' in audit_data:
+                    # Compact format: extract messages from violations
+                    for violation in audit_data.get('v', []):
+                        msg = violation.get('m', '')
+                        if msg:
+                            reject_messages.append(msg)
+            except (json.JSONDecodeError, TypeError, AttributeError):
+                pass  # If parsing fails, leave reject_messages empty
 
         return cls(
             id=data['id'],
@@ -240,6 +268,9 @@ class TransactionResponse(BaseDTO):
             approved_by_id=data.get('approved_by_id'),
             ai_audit_status=data.get('ai_audit_status'),
             ai_audit_note=data.get('ai_audit_note'),
+            reject_triggers=reject_triggers,
+            warning_triggers=warning_triggers,
+            reject_messages=reject_messages if reject_messages else None,
             is_active=data.get('is_active', True),
             created_date=data.get('created_date'),
             updated_date=data.get('updated_date'),

@@ -553,9 +553,19 @@ def handle_get_audit_report(
         for transaction in transactions:
             # Parse ai_audit_note if it's JSON
             audit_details = None
+            reject_messages = []
+
             if transaction.ai_audit_note:
                 try:
                     audit_details = json.loads(transaction.ai_audit_note)
+
+                    # Extract reject_messages from compact format
+                    if isinstance(audit_details, dict) and 's' in audit_details and 'v' in audit_details:
+                        # Compact format: extract messages from violations
+                        for violation in audit_details.get('v', []):
+                            msg = violation.get('m', '')
+                            if msg:
+                                reject_messages.append(msg)
                 except:
                     audit_details = {'note': transaction.ai_audit_note}
 
@@ -568,6 +578,7 @@ def handle_get_audit_report(
                 'total_amount': float(transaction.total_amount) if transaction.total_amount else 0,
                 'reject_triggers': transaction.reject_triggers if transaction.reject_triggers else [],
                 'warning_triggers': transaction.warning_triggers if transaction.warning_triggers else [],
+                'reject_messages': reject_messages if reject_messages else [],
                 'audit_details': audit_details
             })
 
