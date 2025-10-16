@@ -187,7 +187,7 @@ class TransactionAuditService:
             raise
 
     def _get_audit_rules(self, db: Session, organization_id: Optional[int] = None) -> List[Dict[str, Any]]:
-        """Get organization-specific audit rules for AI processing"""
+        """Get organization-specific audit rules for AI processing with minimal data"""
         try:
             # Get rules for the specific organization only (not global rules)
             query = db.query(AuditRule).filter(
@@ -204,6 +204,7 @@ class TransactionAuditService:
             rules_data = []
             for rule in audit_rules:
                 rules_data.append({
+                    'id': rule.id,  # Database ID for compact reference
                     'rule_id': rule.rule_id,
                     'rule_type': rule.rule_type.value,
                     'rule_name': rule.rule_name,
@@ -326,49 +327,77 @@ class TransactionAuditService:
             raise
 
     def _audit_single_transaction(self, transaction_data: Dict[str, Any], audit_rules: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Audit a single transaction using ChatGPT API with image analysis"""
+        """Audit a single transaction using ChatGPT API with structured record-image grouping"""
         try:
-            # Prepare prompt for ChatGPT
+            # Prepare base prompt for ChatGPT
+            # print(transaction_data)
             prompt = self._create_audit_prompt(transaction_data, audit_rules)
 
-            # Collect all images from transaction and records
-            all_images = []
+            # Structure: Group images with their corresponding transaction records
+            records = transaction_data.get('records', [])
+            has_images = False
 
-            # Add transaction-level images
+            # Prepare structured content for API call
+            content_parts = []
+
+            # Add main prompt
+            content_parts.append({
+                "type": "text",
+                "text": prompt
+            })
+
+            # Add transaction-level images first (if any)
             transaction_images = transaction_data.get('images', [])
             if transaction_images:
-                all_images.extend(transaction_images)
-                logger.info(f"Added {len(transaction_images)} transaction images for audit")
-
-            # Add images from all transaction records
-            records = transaction_data.get('records', [])
-            for record in records:
-                record_images = record.get('images', [])
-                if record_images:
-                    all_images.extend(record_images)
-                    logger.info(f"Added {len(record_images)} record images from record {record.get('record_id')}")
-
-            # Remove duplicates and filter valid URLs
-            unique_images = list(set([img for img in all_images if img and isinstance(img, str) and img.strip()]))
-
-            if unique_images:
-                logger.info(f"Processing transaction {transaction_data['transaction_id']} with {len(unique_images)} images for OCR/analysis")
-
-                # Generate presigned URLs for the images
-                presigned_images = self._generate_presigned_urls_for_images(
-                    unique_images,
+                presigned_txn_images = self._generate_presigned_urls_for_images(
+                    transaction_images,
                     transaction_data.get('organization_id', 1),
                     transaction_data.get('user_id', 1)
                 )
 
-                if presigned_images:
-                    logger.info(f"Generated {len(presigned_images)} presigned URLs for ChatGPT access")
-                    # Enhance prompt for image analysis
-                    enhanced_prompt = self._enhance_prompt_for_images(prompt, presigned_images, transaction_data)
-                    api_response = self._call_chatgpt_api(enhanced_prompt, presigned_images)
-                else:
-                    logger.warning(f"Failed to generate presigned URLs, falling back to text-only analysis")
-                    api_response = self._call_chatgpt_api(prompt)
+                if presigned_txn_images:
+                    content_parts.append({
+                        "type": "text",
+                        "text": "TRANSACTION-LEVEL IMAGES:"
+                    })
+                    for img_url in presigned_txn_images:
+                        content_parts.append({
+                            "type": "image_url",
+                            "image_url": {"url": img_url, "detail": "high"}
+                        })
+                    has_images = True
+
+            # Add each record with its images
+            for idx, record in enumerate(records):
+                record_images = record.get('images', [])
+                if record_images:
+                    # Generate presigned URLs for this record's images
+                    presigned_record_images = self._generate_presigned_urls_for_images(
+                        record_images,
+                        transaction_data.get('organization_id', 1),
+                        transaction_data.get('user_id', 1)
+                    )
+
+                    if presigned_record_images:
+                        # Add record context
+                        content_parts.append({
+                            "type": "text",
+                            "text": f"RECORD #{idx+1} (ID:{record.get('record_id')}) - {record.get('material_type')} - {record.get('weight_kg')}kg:"
+                        })
+
+                        # Add record's images
+                        for img_url in presigned_record_images:
+                            content_parts.append({
+                                "type": "image_url",
+                                "image_url": {"url": img_url, "detail": "high"}
+                            })
+                        has_images = True
+                        logger.info(f"Added {len(presigned_record_images)} images for record {record.get('record_id')}")
+
+            # Call API with structured content
+            if has_images:
+                logger.info(f"Processing transaction {transaction_data['transaction_id']} with {len([p for p in content_parts if p['type'] == 'image_url'])} images")
+                api_response = self._call_chatgpt_api_structured(content_parts)
             else:
                 logger.info(f"Processing transaction {transaction_data['transaction_id']} with text-only analysis")
                 api_response = self._call_chatgpt_api(prompt)
@@ -380,10 +409,6 @@ class TransactionAuditService:
             print(response_content)
             # Parse AI response
             audit_result = self._parse_ai_response(response_content, transaction_data['transaction_id'], audit_rules)
-
-            # Add image analysis metadata
-            audit_result['images_analyzed'] = len(unique_images)
-            audit_result['has_image_analysis'] = len(unique_images) > 0
 
             # Add token usage information
             audit_result['token_usage'] = {
@@ -435,118 +460,116 @@ class TransactionAuditService:
             return []
 
     def _create_audit_prompt(self, transaction_data: Dict[str, Any], audit_rules: List[Dict[str, Any]]) -> str:
-        """Create a comprehensive prompt for ChatGPT audit with rule-by-rule evaluation"""
+        """Create an optimized prompt with ID-based rule references"""
 
-        # Format audit rules for better prompt understanding
-        rules_summary = []
+        # Create compact rules reference with ID-based lookup
+        rules_compact = []
         for rule in audit_rules:
-            rule_summary = f"""
-Rule ID: {rule.get('rule_id', 'N/A')}
-DB ID: {rule.get('id', 'N/A')}
-Name: {rule.get('rule_name', 'N/A')}
-Type: {rule.get('rule_type', 'N/A')}
-Condition: {rule.get('condition', 'N/A')}
-Thresholds: {rule.get('thresholds', 'N/A')}
-Metrics: {rule.get('metrics', 'N/A')}
-Actions: {json.dumps(rule.get('actions', []), ensure_ascii=False)}
-"""
-            rules_summary.append(rule_summary)
+            rules_compact.append({
+                'id': rule.get('id'),
+                'rule_id': rule.get('rule_id'),
+                'name': rule.get('rule_name'),
+                'type': rule.get('rule_type'),
+                'condition': rule.get('condition'),
+                'thresholds': rule.get('thresholds'),
+                'metrics': rule.get('metrics')
+            })
 
         prompt = f"""
-You are an expert AI auditor for waste management transactions. Evaluate the following transaction against EACH provided audit rule individually.
+Audit waste transaction against rules. Evaluate each rule and return triggered violations only.
 
-TRANSACTION DATA:
-{json.dumps(transaction_data, indent=2, ensure_ascii=False)}
+RULES (ref by id):
+{json.dumps(rules_compact, ensure_ascii=False)}
 
-AUDIT RULES TO EVALUATE:
-{chr(10).join(rules_summary)}
+TRANSACTION:
+{json.dumps(transaction_data, ensure_ascii=False)}
 
-CRITICAL INSTRUCTIONS:
-1. Evaluate the transaction against EVERY audit rule provided
-2. For each rule, determine if it is triggered (true/false) based on the rule conditions and transaction data
-3. If a rule is triggered, provide a brief, specific message explaining why
-4. If a rule is not triggered, set trigger to false and provide a brief confirmation message
+CRITICAL: Images for each transaction_record apply ONLY to that specific record. Do NOT process images across different records unless explicitly instructed by rules.
 
-YOU MUST respond with a valid JSON object in this EXACT format:
+Respond ONLY rejected items in this JSON format:
 {{
-    "transaction_id": {transaction_data.get('transaction_id', 0)},
-    "audits": [
+    "tr_id": {transaction_data.get('transaction_id', 0)},
+    "violations": [
         {{
-            "rule_id": "<rule_id from rule>",
-            "id": <database_id_of_rule>,
-            "trigger": true or false,
-            "message": "<the specific message that explains why the rule was triggered (not general, specific with the situation)>",
-            "reasons": [
-                "<reason1>",
-                ...
-            ]
+            "id": <rule_db_id>,
+            "msg": "<short specific rejection reason (max 30 words)>"
         }}
     ]
 }}
 
-IMPORTANT REQUIREMENTS:
-- Include ALL rules in the audits array, even if not triggered
-- Keep messages brief (max 50 words)
-- Use exact rule_id and id values from the provided rules
-- Respond with ONLY valid JSON, no additional text
-- Focus on factual evaluation based on rule conditions and transaction data
+If NO violations: {{"tr_id": {transaction_data.get('transaction_id', 0)}, "violations": []}}
+Only include triggered rules. Keep messages concise.
 """
         return prompt
 
     def _enhance_prompt_for_images(self, base_prompt: str, images: List[str], transaction_data: Dict[str, Any]) -> str:
-        """Enhance the audit prompt to include image analysis instructions"""
+        """Enhance the audit prompt with compact image analysis instructions"""
 
-        image_analysis_instructions = f"""
+        image_instructions = """
 
-ADDITIONAL IMAGE ANALYSIS INSTRUCTIONS:
-You have been provided with {len(images)} presigned image URLs related to this transaction. These images may include:
-- Waste material photos showing actual materials, quantities, and conditions
-- Receipts, invoices, or transaction documents
-- Weight scale readings or measurement documentation
-- Quality certification documents
-- Processing or transport documentation
+IMAGE ANALYSIS:
+- Extract text/numbers from documents (OCR)
+- Verify weights, quantities, dates, prices match reported data
+- Check material type consistency with images
+- Identify discrepancies or missing docs
+- CRITICAL: Each record's images apply ONLY to that record
 
-When analyzing these images:
-1. **OCR Analysis**: Extract any text, numbers, weights, quantities, dates, or prices from the images
-2. **Visual Verification**: Compare visual evidence with the reported transaction data
-3. **Discrepancy Detection**: Look for inconsistencies between images and reported data
-4. **Document Verification**: Verify authenticity and completeness of any documents shown
-5. **Material Assessment**: Evaluate actual material condition, contamination level, and type consistency
-
-Pay special attention to:
-- Weight/quantity discrepancies between images and reported data
-- Material type mismatches (e.g., reported plastic but image shows metal)
-- Date inconsistencies between documents and transaction dates
-- Quality condition differences (reported "good" but image shows contaminated material)
-- Price variations between receipts/invoices and reported amounts
-- Missing required documentation or certifications
-
-For each audit rule evaluation, consider both the transaction data AND the visual evidence from images.
-If images contradict the reported data, prioritize the visual evidence and flag appropriate violations.
-
-RECORDS DATA FOR IMAGE CROSS-REFERENCE:
+If images contradict data, flag violation with specific reason.
 """
 
-        # Add detailed record information for image cross-reference
-        records = transaction_data.get('records', [])
-        for i, record in enumerate(records):
-            record_info = f"""
-Record #{i+1} (ID: {record.get('record_id')}):
-- Material: {record.get('material_type')} ({record.get('material_name_th')})
-- Quantity: {record.get('quantity')} {record.get('unit')}
-- Weight: {record.get('weight_kg')} kg
-- Unit Price: {record.get('unit_price')} per {record.get('unit')}
-- Total Value: {record.get('total_value')}
-- Condition: {record.get('material_condition', 'Not specified')}
-- Quality Score: {record.get('quality_score', 'Not specified')}
-- Contamination Level: {record.get('contamination_level', 'Not specified')}
-- Images Count: {len(record.get('images', []))}
-"""
-            image_analysis_instructions += record_info
-
-            # print("&&&&&&&", image_analysis_instructions)
-        enhanced_prompt = base_prompt + image_analysis_instructions
+        enhanced_prompt = base_prompt + image_instructions
         return enhanced_prompt
+
+    def _call_chatgpt_api_structured(self, content_parts: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Call ChatGPT API with structured content parts (text + images)
+
+        Returns:
+            Dict containing 'content' (response text) and 'usage' (token information)
+        """
+        try:
+            if not OPENAI_AVAILABLE:
+                raise ImportError("OpenAI package not installed. Install with: pip install openai")
+
+            client = OpenAI(api_key=self.openai_api_key)
+
+            # Prepare messages for vision API
+            messages = [
+                # {"role": "developer", "content": "# Juice: 0 !important"},
+                {
+                    "role": "system",
+                    "content": "You are a waste management auditor. Analyze transactions and flag only violations. Be concise."
+                },
+                {
+                    "role": "user",
+                    "content": content_parts
+                }
+            ]
+
+            # Use chat completions for image analysis (vision API)
+            response = client.chat.completions.create(
+                model="gpt-5-nano",  # Use vision model for image analysis
+                messages=messages,
+                # reasoning_effort="minimal"
+            )
+
+            print(response)
+
+            # Extract token usage information
+            usage_info = {
+                'input_tokens': response.usage.prompt_tokens if hasattr(response, 'usage') and response.usage else 0,
+                'output_tokens': response.usage.completion_tokens if hasattr(response, 'usage') and response.usage else 0,
+                'total_tokens': response.usage.total_tokens if hasattr(response, 'usage') and response.usage else 0
+            }
+
+            return {
+                'content': response.choices[0].message.content,
+                'usage': usage_info
+            }
+
+        except Exception as e:
+            logger.error(f"ChatGPT API call failed: {str(e)}")
+            raise
 
     def _call_chatgpt_api(self, prompt: str, images: List[str] = None) -> Dict[str, Any]:
         """
@@ -651,106 +674,70 @@ Respond only with valid JSON format as specified above."""
             raise
 
     def _parse_ai_response(self, ai_response: str, transaction_id: int, audit_rules: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Parse AI response and process rule actions with priority logic"""
+        """Parse optimized AI response with ID-based violations"""
         try:
             # Try to parse JSON response
             ai_data = json.loads(ai_response.strip())
 
-            audits = ai_data.get('audits', [])
-            if not audits:
-                logger.warning(f"No audit results found in AI response for transaction {transaction_id}")
-                return self._create_default_audit_result(transaction_id)
+            violations = ai_data.get('violations', [])
 
-            # Process each rule audit and apply actions
-            processed_audits = []
+            # Build audit rules map by database ID for lookup
+            audit_rules_map_by_id = {rule.get('id'): rule for rule in audit_rules}
+
+            # Process violations
             reject_messages = []
-            warn_messages = []
-            all_reasons = []  # Collect all reasons from all triggered rules
+            triggered_rules = []
 
-            # Get audit rules for action lookup
-            audit_rules_map = self._get_audit_rules_map(audit_rules)
+            for violation in violations:
+                rule_db_id = violation.get('id')
+                msg = violation.get('msg', '')
 
-            has_reject_action = False
+                # Lookup rule to get actions
+                rule = audit_rules_map_by_id.get(rule_db_id)
+                if not rule:
+                    logger.warning(f"Rule with ID {rule_db_id} not found in audit rules")
+                    continue
 
-            for audit in audits:
-                rule_id = audit.get('rule_id')
-                rule_db_id = audit.get('id')
-                reasons = audit.get('reasons', [])
-                triggered = audit.get('trigger', False)
-                message = audit.get('message', '')
+                rule_id = rule.get('rule_id')
+                rule_actions = rule.get('actions', [])
 
-                # Find the rule in our rules map to get actions
-                rule_actions = audit_rules_map.get(rule_id, {}).get('actions', [])
+                # Determine action type from rule
+                has_reject = any(
+                    action.get('type') == 'system_action' and action.get('action', '').lower() == 'reject'
+                    for action in rule_actions
+                )
 
-                processed_audit = {
+                triggered_rules.append({
                     'rule_id': rule_id,
                     'rule_db_id': rule_db_id,
-                    'triggered': triggered,
-                    'message': message,
-                    'reasons': reasons,
-                    'actions_applied': []
-                }
+                    'triggered': True,
+                    'message': msg,
+                    'has_reject': has_reject
+                })
 
-                # Process actions if rule is triggered
-                if triggered and rule_actions:
-                    # Add reasons from this triggered rule to all_reasons
-                    if reasons and isinstance(reasons, list):
-                        for reason in reasons:
-                            all_reasons.append(f"[{rule_id}] {reason}")
+                # Add to reject messages if it has reject action
+                if has_reject:
+                    reject_messages.append(f"[{rule_id}] {msg}")
 
-                    for action in rule_actions:
-                        if action.get('type') == 'system_action':
-                            action_type = action.get('action', '').lower()
-                            action_message = action.get('message', message)
-
-                            processed_audit['actions_applied'].append({
-                                'type': action_type,
-                                'message': action_message
-                            })
-
-                            # New logic: Check for reject or warn actions
-                            if action_type == 'reject':
-                                has_reject_action = True
-                                reject_messages.append(f"[{rule_id}] {action_message}")
-                            elif action_type == 'warn':
-                                warn_messages.append(f"[{rule_id}] {action_message}")
-
-                processed_audits.append(processed_audit)
-
-            # Count triggered rules for tracking
-            triggered_count = sum(1 for audit in processed_audits if audit['triggered'])
-            total_rules = len(processed_audits)
-
-            # NEW LOGIC: If no reject actions → approved, else → rejected
-            # Warn messages just go to notes
-            if has_reject_action:
-                final_status = 'rejected'
-                summary = f"Transaction rejected. Issues: {len(reject_messages)}"
-                all_messages = reject_messages + warn_messages
-            else:
-                final_status = 'approved'
-                summary = f"Transaction approved. {len(warn_messages)} warnings noted."
-                all_messages = warn_messages
+            # Determine final status
+            final_status = 'rejected' if reject_messages else 'approved'
 
             # Structure the final audit result
             audit_result = {
                 'transaction_id': transaction_id,
                 'audit_status': final_status,
-                'rule_results': processed_audits,
+                'triggered_rules': triggered_rules,
                 'reject_messages': reject_messages,
-                'warn_messages': warn_messages,
-                'all_messages': all_messages,
-                'all_reasons': all_reasons,  # Include all reasons from all triggered rules
-                'summary': summary,
                 'audited_at': datetime.now(timezone.utc).isoformat(),
-                'total_rules_evaluated': total_rules,
-                'rules_triggered': triggered_count
+                'total_rules_evaluated': len(audit_rules),
+                'rules_triggered': len(triggered_rules)
             }
 
             return audit_result
 
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse AI response for transaction {transaction_id}: {str(e)}")
+            logger.error(f"Response content: {ai_response}")
             return self._create_default_audit_result(transaction_id, error=f'JSON parsing error: {str(e)}')
         except Exception as e:
             logger.error(f"Unexpected error processing AI response for transaction {transaction_id}: {str(e)}")
@@ -775,7 +762,6 @@ Respond only with valid JSON format as specified above."""
                 transaction = db.query(Transaction).filter(Transaction.id == transaction_id).first()
                 if transaction:
                     # ALWAYS set ai_audit_status regardless of allow_ai_audit
-                    # Only two possible values: approved or rejected (no no_action for now)
                     if audit_status == 'approved':
                         transaction.ai_audit_status = AIAuditStatus.approved
                     elif audit_status == 'rejected':
@@ -788,32 +774,36 @@ Respond only with valid JSON format as specified above."""
                         elif audit_status == 'rejected':
                             transaction.status = TransactionStatus.rejected
 
-                    # Extract triggered rule IDs for reject and warning actions
+                    # Extract triggered rule IDs
                     reject_triggers = []
-                    warning_triggers = []
 
-                    rule_results = result.get('rule_results', [])
-                    for rule_result in rule_results:
-                        if rule_result.get('triggered'):
-                            rule_id = rule_result.get('rule_id')
-                            actions_applied = rule_result.get('actions_applied', [])
+                    triggered_rules = result.get('triggered_rules', [])
+                    for triggered_rule in triggered_rules:
+                        rule_id = triggered_rule.get('rule_id')
+                        has_reject = triggered_rule.get('has_reject', False)
 
-                            # Check action types to categorize triggers
-                            has_reject = any(action.get('type') == 'reject' for action in actions_applied)
-                            has_warn = any(action.get('type') == 'warn' for action in actions_applied)
+                        if has_reject and rule_id:
+                            reject_triggers.append(rule_id)
 
-                            if has_reject and rule_id:
-                                reject_triggers.append(rule_id)
-                            elif has_warn and rule_id:
-                                warning_triggers.append(rule_id)
-
-                    # Save triggers to transaction columns
+                    # Save reject triggers to transaction
                     transaction.reject_triggers = reject_triggers
-                    transaction.warning_triggers = warning_triggers
+                    transaction.warning_triggers = []  # Reset warnings since we now only track rejections
 
-                    # Save complete audit response as JSON string in ai_audit_note
-                    # This preserves all audit data for transparency and analysis
-                    transaction.ai_audit_note = json.dumps(result, ensure_ascii=False, indent=2)
+                    # Save ultra-compact audit response (only essential data)
+                    compact_audit = {
+                        's': audit_status,  # status
+                        'v': [  # violations (only rule_db_id and message)
+                            {
+                                'id': tr.get('rule_db_id'),
+                                'm': tr.get('message')
+                            }
+                            for tr in triggered_rules if tr.get('has_reject')
+                        ],
+                        't': result.get('token_usage', {}),  # token_usage
+                        'at': result.get('audited_at')  # audited_at
+                    }
+
+                    transaction.ai_audit_note = json.dumps(compact_audit, ensure_ascii=False)
 
                     updated_count += 1
 
@@ -846,12 +836,9 @@ Respond only with valid JSON format as specified above."""
         """Create a default audit result for error cases"""
         return {
             'transaction_id': transaction_id,
-            'audit_status': 'pending',
-            'rule_results': [],
+            'audit_status': 'approved',  # Default to approved on error to avoid blocking
+            'triggered_rules': [],
             'reject_messages': [],
-            'warn_messages': ['Manual review required - AI audit failed'],
-            'all_messages': ['Manual review required - AI audit failed'],
-            'summary': 'AI audit failed - manual review required',
             'error': error,
             'audited_at': datetime.now(timezone.utc).isoformat(),
             'total_rules_evaluated': 0,
@@ -873,31 +860,58 @@ Respond only with valid JSON format as specified above."""
         processed_transactions: int,
         updated_transactions: int
     ) -> None:
-        """Save audit history batch to database"""
+        """Save audit history batch with compact transaction-level results"""
         try:
             # Calculate statistics
             approved_count = sum(1 for result in audit_results if result.get('audit_status') == 'approved')
             rejected_count = sum(1 for result in audit_results if result.get('audit_status') == 'rejected')
 
-            # Calculate total token usage across all transactions
+            # Calculate total token usage and prepare compact results
             total_input_tokens = 0
             total_output_tokens = 0
             total_tokens = 0
 
+            # Create compact audit results grouped by transaction
+            compact_results = {}
+
             for result in audit_results:
+                transaction_id = result.get('transaction_id')
                 token_usage = result.get('token_usage', {})
-                total_input_tokens += token_usage.get('input_tokens', 0)
-                total_output_tokens += token_usage.get('output_tokens', 0)
-                total_tokens += token_usage.get('total_tokens', 0)
+
+                # Sum up tokens
+                input_tokens = token_usage.get('input_tokens', 0)
+                output_tokens = token_usage.get('output_tokens', 0)
+                trans_tokens = token_usage.get('total_tokens', 0)
+
+                total_input_tokens += input_tokens
+                total_output_tokens += output_tokens
+                total_tokens += trans_tokens
+
+                # Store ultra-compact result per transaction
+                compact_results[transaction_id] = {
+                    's': result.get('audit_status'),  # status
+                    'v': [  # violations (only rule_db_id and message)
+                        {
+                            'id': tr.get('rule_db_id'),
+                            'm': tr.get('message')
+                        }
+                        for tr in result.get('triggered_rules', []) if tr.get('has_reject')
+                    ],
+                    't': {  # tokens
+                        'i': input_tokens,
+                        'o': output_tokens,
+                        'tot': trans_tokens
+                    }
+                }
 
             logger.info(f"Audit batch token usage - Input: {total_input_tokens}, Output: {total_output_tokens}, Total: {total_tokens}")
 
-            # Create audit history record
+            # Create audit history record with compact data
             audit_history = TransactionAuditHistory(
                 organization_id=organization_id,
                 transactions=transaction_ids,
                 audit_info={
-                    'audit_results': audit_results,
+                    'transaction_results': compact_results,
                     'summary': {
                         'total_transactions': total_transactions,
                         'processed_transactions': processed_transactions,
