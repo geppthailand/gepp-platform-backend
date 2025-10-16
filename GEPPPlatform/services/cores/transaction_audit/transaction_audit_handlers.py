@@ -35,12 +35,12 @@ def handle_transaction_audit_routes(event: Dict[str, Any], data: Dict[str, Any],
     if not db_session:
         raise APIException('Database session not provided')
 
-    # Get OpenAI API key from environment
-    openai_api_key = os.getenv('OPENAI_API_KEY')
-    if not openai_api_key:
-        raise APIException('OpenAI API key not configured')
+    # Get Gemini API key from environment
+    gemini_api_key = os.getenv('GEMINI_API_KEY')
+    if not gemini_api_key:
+        raise APIException('Gemini API key not configured')
 
-    transaction_audit_service = TransactionAuditService(openai_api_key)
+    transaction_audit_service = TransactionAuditService(gemini_api_key)
 
     # Extract current user info from JWT token (passed from app.py)
     current_user = params.get('current_user', {})

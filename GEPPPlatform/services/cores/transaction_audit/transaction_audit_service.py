@@ -5,6 +5,7 @@ Handles synchronous AI audit processing with multi-threading support
 
 import json
 import logging
+import os
 import re
 from typing import List, Dict, Any, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -13,11 +14,11 @@ from sqlalchemy.exc import SQLAlchemyError
 from datetime import datetime, timezone
 
 try:
-    from openai import OpenAI
-    OPENAI_AVAILABLE = True
+    from google import genai
+    GENAI_AVAILABLE = True
 except ImportError:
-    OPENAI_AVAILABLE = False
-    OpenAI = None
+    GENAI_AVAILABLE = False
+    genai = None
 
 
 from ....models.transactions.transactions import Transaction, TransactionStatus, AIAuditStatus
@@ -32,19 +33,29 @@ logger = logging.getLogger(__name__)
 
 class TransactionAuditService:
     """
-    Service for AI-powered transaction auditing using ChatGPT API
+    Service for AI-powered transaction auditing using Google Gemini API
     Supports multi-threaded processing for efficient bulk analysis
     """
 
-    def __init__(self, openai_api_key: str = None):
+    def __init__(self, gemini_api_key: str = None):
         """
         Initialize the TransactionAuditService
 
         Args:
-            openai_api_key: OpenAI API key for ChatGPT integration
+            gemini_api_key: Google Gemini API key for AI audit integration
         """
-        self.openai_api_key = openai_api_key or "your-openai-api-key"
-        self.openai_api_url = "https://api.openai.com/v1/chat/completions"
+        # Get Gemini API key from environment or parameter
+        self.gemini_api_key = gemini_api_key or os.environ.get('GEMINI_API_KEY', '')
+
+        # Initialize Gemini client
+        if self.gemini_api_key and GENAI_AVAILABLE:
+            self.client = genai.Client(api_key=self.gemini_api_key)
+            logger.info("Gemini API client initialized successfully")
+        else:
+            logger.warning("Gemini API key not found or genai library not available")
+            self.client = None
+
+        self.model_name = "gemini-2.5-flash-lite"
         self.max_concurrent_threads = 50
 
         # Initialize presigned URL service for image access
@@ -284,7 +295,7 @@ class TransactionAuditService:
             raise
 
     def _process_transactions_with_ai(self, transactions_data: List[Dict[str, Any]], audit_rules: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Process transactions with ChatGPT API using multi-threading"""
+        """Process transactions with Gemini API using multi-threading"""
         try:
             audit_results = []
 
@@ -327,9 +338,9 @@ class TransactionAuditService:
             raise
 
     def _audit_single_transaction(self, transaction_data: Dict[str, Any], audit_rules: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Audit a single transaction using ChatGPT API with structured record-image grouping"""
+        """Audit a single transaction using Gemini API with structured record-image grouping"""
         try:
-            # Prepare base prompt for ChatGPT
+            # Prepare base prompt for Gemini
             # print(transaction_data)
             prompt = self._create_audit_prompt(transaction_data, audit_rules)
 
@@ -397,10 +408,10 @@ class TransactionAuditService:
             # Call API with structured content
             if has_images:
                 logger.info(f"Processing transaction {transaction_data['transaction_id']} with {len([p for p in content_parts if p['type'] == 'image_url'])} images")
-                api_response = self._call_chatgpt_api_structured(content_parts)
+                api_response = self._call_gemini_api_structured(content_parts)
             else:
                 logger.info(f"Processing transaction {transaction_data['transaction_id']} with text-only analysis")
-                api_response = self._call_chatgpt_api(prompt)
+                api_response = self._call_gemini_api(prompt)
 
             # Extract content and usage from API response
             response_content = api_response.get('content', '')
@@ -427,7 +438,7 @@ class TransactionAuditService:
             raise
 
     def _generate_presigned_urls_for_images(self, image_urls: List[str], organization_id: int, user_id: int) -> List[str]:
-        """Generate presigned URLs for images to allow ChatGPT access"""
+        """Generate presigned URLs for images to allow Gemini API access"""
         try:
             if not self.presigned_url_service:
                 logger.warning("Presigned URL service not available")
@@ -520,157 +531,110 @@ If images contradict data, flag violation with specific reason.
         enhanced_prompt = base_prompt + image_instructions
         return enhanced_prompt
 
-    def _call_chatgpt_api_structured(self, content_parts: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def _call_gemini_api_structured(self, content_parts: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
-        Call ChatGPT API with structured content parts (text + images)
+        Call Gemini API with structured content parts (text + images)
 
         Returns:
             Dict containing 'content' (response text) and 'usage' (token information)
         """
         try:
-            if not OPENAI_AVAILABLE:
-                raise ImportError("OpenAI package not installed. Install with: pip install openai")
+            if not GENAI_AVAILABLE or not self.client:
+                raise ImportError("Google GenAI package not installed or client not initialized. Install with: pip install google-genai")
 
-            client = OpenAI(api_key=self.openai_api_key)
+            # Convert content_parts to Gemini format
+            gemini_content = []
+            system_instruction = "You are a waste management auditor. Analyze transactions and flag only violations. Be concise."
 
-            # Prepare messages for vision API
-            messages = [
-                # {"role": "developer", "content": "# Juice: 0 !important"},
-                {
-                    "role": "system",
-                    "content": "You are a waste management auditor. Analyze transactions and flag only violations. Be concise."
-                },
-                {
-                    "role": "user",
-                    "content": content_parts
+            for part in content_parts:
+                if part['type'] == 'text':
+                    gemini_content.append(part['text'])
+                elif part['type'] == 'image_url':
+                    # Gemini expects image data directly or PIL Image
+                    # For presigned URLs, download the image
+                    import requests
+                    from PIL import Image
+                    from io import BytesIO
+
+                    try:
+                        response = requests.get(part['image_url']['url'], timeout=10)
+                        img = Image.open(BytesIO(response.content))
+                        gemini_content.append(img)
+                    except Exception as img_error:
+                        logger.warning(f"Failed to load image: {str(img_error)}")
+                        gemini_content.append(f"[Image unavailable: {str(img_error)}]")
+
+            # Generate response using the new SDK
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=gemini_content,
+                config={
+                    "system_instruction": system_instruction,
+                    "temperature": 0.1,
                 }
-            ]
-
-            # Use chat completions for image analysis (vision API)
-            response = client.chat.completions.create(
-                model="gpt-5-nano",  # Use vision model for image analysis
-                messages=messages,
-                # reasoning_effort="minimal"
             )
 
-            print(response)
-
             # Extract token usage information
+            usage_metadata = response.usage_metadata if hasattr(response, 'usage_metadata') else None
             usage_info = {
-                'input_tokens': response.usage.prompt_tokens if hasattr(response, 'usage') and response.usage else 0,
-                'output_tokens': response.usage.completion_tokens if hasattr(response, 'usage') and response.usage else 0,
-                'total_tokens': response.usage.total_tokens if hasattr(response, 'usage') and response.usage else 0
+                'input_tokens': usage_metadata.prompt_token_count if usage_metadata else 0,
+                'output_tokens': usage_metadata.candidates_token_count if usage_metadata else 0,
+                'total_tokens': usage_metadata.total_token_count if usage_metadata else 0
             }
 
+            logger.info(f"Gemini API response - Tokens: {usage_info['total_tokens']}")
+
             return {
-                'content': response.choices[0].message.content,
+                'content': response.text,
                 'usage': usage_info
             }
 
         except Exception as e:
-            logger.error(f"ChatGPT API call failed: {str(e)}")
+            logger.error(f"Gemini API call failed: {str(e)}")
             raise
 
-    def _call_chatgpt_api(self, prompt: str, images: List[str] = None) -> Dict[str, Any]:
+    def _call_gemini_api(self, prompt: str, images: List[str] = None) -> Dict[str, Any]:
         """
-        Call ChatGPT API for audit analysis with optional image processing
+        Call Gemini API for audit analysis (text-only fallback)
 
         Returns:
             Dict containing 'content' (response text) and 'usage' (token information)
         """
         try:
-            if not OPENAI_AVAILABLE:
-                raise ImportError("OpenAI package not installed. Install with: pip install openai")
+            if not GENAI_AVAILABLE or not self.client:
+                raise ImportError("Google GenAI package not installed or client not initialized. Install with: pip install google-genai")
 
-            client = OpenAI(api_key=self.openai_api_key)
+            # Prepare content
+            full_prompt = f"{prompt}\n\nRespond only with valid JSON format as specified above."
+            system_instruction = "You are a professional waste management auditor with expertise in compliance and quality control."
 
-            # Prepare messages for vision API
-            messages = [
-                {
-                    "role": "system",
-                    "content": "You are a professional waste management auditor with expertise in compliance and quality control. You can analyze documents, receipts, and waste material images to verify transaction details."
+            # Generate response using the new SDK
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=full_prompt,
+                config={
+                    "system_instruction": system_instruction,
+                    "temperature": 0.1,
                 }
-            ]
+            )
 
-            # Create user message with text
-            user_message = {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": f"{prompt}\n\nRespond only with valid JSON format as specified above."
-                    }
-                ]
+            # Extract token usage information
+            usage_metadata = response.usage_metadata if hasattr(response, 'usage_metadata') else None
+            usage_info = {
+                'input_tokens': usage_metadata.prompt_token_count if usage_metadata else 0,
+                'output_tokens': usage_metadata.candidates_token_count if usage_metadata else 0,
+                'total_tokens': usage_metadata.total_token_count if usage_metadata else 0
             }
 
-            # Add images if provided
-            if images and len(images) > 0:
-                for image_url in images[:10]:  # Limit to 10 images per API call
-                    if image_url and image_url.strip():
-                        try:
-                            # Add image to the message
-                            user_message["content"].append({
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": image_url,
-                                    "detail": "high"  # Use high detail for better OCR
-                                }
-                            })
-                            logger.info(f"Added image to audit analysis: {image_url}")
-                        except Exception as img_error:
-                            logger.warning(f"Failed to add image {image_url}: {str(img_error)}")
+            logger.info(f"Gemini API text-only response - Tokens: {usage_info['total_tokens']}")
 
-            messages.append(user_message)
-
-            # Use chat completions for image analysis (vision API)
-            if images and len(images) > 0:
-                response = client.chat.completions.create(
-                    model="gpt-5-nano",  # Use vision model for image analysis
-                    messages=messages,
-                    # max_tokens=4000,
-                    # temperature=0.1  # Low temperature for consistent auditing
-                )
-
-                # Extract token usage information
-                usage_info = {
-                    'input_tokens': response.usage.prompt_tokens if hasattr(response, 'usage') and response.usage else 0,
-                    'output_tokens': response.usage.completion_tokens if hasattr(response, 'usage') and response.usage else 0,
-                    'total_tokens': response.usage.total_tokens if hasattr(response, 'usage') and response.usage else 0
-                }
-
-                return {
-                    'content': response.choices[0].message.content,
-                    'usage': usage_info
-                }
-            else:
-                # Use responses API for text-only analysis
-                full_input = f"""You are a professional waste management auditor with expertise in compliance and quality control.
-
-{prompt}
-
-Respond only with valid JSON format as specified above."""
-
-                result = client.responses.create(
-                    model="gpt-5-nano",
-                    input=full_input,
-                    reasoning={"effort": "low"},
-                    text={"verbosity": "low"}
-                )
-
-                # Extract token usage information from responses API
-                usage_info = {
-                    'input_tokens': result.usage.input_tokens if hasattr(result, 'usage') and result.usage else 0,
-                    'output_tokens': result.usage.output_tokens if hasattr(result, 'usage') and result.usage else 0,
-                    'total_tokens': (result.usage.input_tokens + result.usage.output_tokens) if hasattr(result, 'usage') and result.usage else 0
-                }
-
-                return {
-                    'content': result.output_text,
-                    'usage': usage_info
-                }
+            return {
+                'content': response.text,
+                'usage': usage_info
+            }
 
         except Exception as e:
-            logger.error(f"ChatGPT API call failed: {str(e)}")
+            logger.error(f"Gemini API call failed: {str(e)}")
             raise
 
     def _parse_ai_response(self, ai_response: str, transaction_id: int, audit_rules: List[Dict[str, Any]]) -> Dict[str, Any]:

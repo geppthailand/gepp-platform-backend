@@ -32,18 +32,18 @@ def process_audit_queue(db: Session) -> Dict[str, Any]:
     try:
         logger.info("Starting audit queue processing")
 
-        # Get OpenAI API key from environment
-        openai_api_key = os.getenv('OPENAI_API_KEY')
-        if not openai_api_key:
-            logger.error('OpenAI API key not configured')
+        # Get Gemini API key from environment
+        gemini_api_key = os.getenv('GEMINI_API_KEY')
+        if not gemini_api_key:
+            logger.error('Gemini API key not configured')
             return {
                 'success': False,
-                'error': 'OpenAI API key not configured',
+                'error': 'Gemini API key not configured',
                 'processed_batches': 0
             }
 
         # Initialize audit service
-        audit_service = TransactionAuditService(openai_api_key)
+        audit_service = TransactionAuditService(gemini_api_key)
 
         # Get all in_progress audit batches
         in_progress_batches = db.query(TransactionAuditHistory).filter(
