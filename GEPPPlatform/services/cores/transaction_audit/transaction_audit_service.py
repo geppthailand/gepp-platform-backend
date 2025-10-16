@@ -570,7 +570,7 @@ If images contradict data, flag violation with specific reason.
                 contents=gemini_content,
                 config={
                     "system_instruction": system_instruction,
-                    "temperature": 0.1,
+                    "temperature": 0.,
                 }
             )
 
@@ -614,7 +614,7 @@ If images contradict data, flag violation with specific reason.
                 contents=full_prompt,
                 config={
                     "system_instruction": system_instruction,
-                    "temperature": 0.1,
+                    "temperature": 0.,
                 }
             )
 
@@ -640,8 +640,24 @@ If images contradict data, flag violation with specific reason.
     def _parse_ai_response(self, ai_response: str, transaction_id: int, audit_rules: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Parse optimized AI response with ID-based violations"""
         try:
+            # Strip markdown code blocks if present (Gemini often wraps JSON in ```json ... ```)
+            cleaned_response = ai_response.strip()
+
+            # Remove markdown code block markers
+            if cleaned_response.startswith('```'):
+                # Find the first newline after the opening ```
+                first_newline = cleaned_response.find('\n')
+                if first_newline != -1:
+                    cleaned_response = cleaned_response[first_newline + 1:]
+
+                # Remove closing ```
+                if cleaned_response.endswith('```'):
+                    cleaned_response = cleaned_response[:-3]
+
+                cleaned_response = cleaned_response.strip()
+
             # Try to parse JSON response
-            ai_data = json.loads(ai_response.strip())
+            ai_data = json.loads(cleaned_response)
 
             violations = ai_data.get('violations', [])
 
