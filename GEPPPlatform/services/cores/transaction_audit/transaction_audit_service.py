@@ -37,12 +37,13 @@ class TransactionAuditService:
     Supports multi-threaded processing for efficient bulk analysis
     """
 
-    def __init__(self, gemini_api_key: str = None):
+    def __init__(self, gemini_api_key: str = None, response_language: str = 'thai'):
         """
         Initialize the TransactionAuditService
 
         Args:
             gemini_api_key: Google Gemini API key for AI audit integration
+            response_language: Language for AI responses (default: 'thai')
         """
         # Get Gemini API key from environment or parameter
         self.gemini_api_key = gemini_api_key or os.environ.get('GEMINI_API_KEY', '')
@@ -57,6 +58,15 @@ class TransactionAuditService:
 
         self.model_name = "gemini-2.5-flash-lite"
         self.max_concurrent_threads = 50
+        self.response_language = response_language.lower()  # Store language preference
+
+        # Language name mapping for prompts
+        self.language_names = {
+            'thai': 'Thai (ภาษาไทย)',
+            'english': 'English',
+            'en': 'English',
+            'th': 'Thai (ภาษาไทย)'
+        }
 
         # Initialize presigned URL service for image access
         try:
@@ -326,7 +336,9 @@ class TransactionAuditService:
                             'token_usage': {
                                 'input_tokens': 0,
                                 'output_tokens': 0,
-                                'total_tokens': 0
+                                'total_tokens': 0,
+                                'reasoning_tokens': 0,
+                                'cached_tokens': 0
                             }
                         })
 
@@ -421,15 +433,18 @@ class TransactionAuditService:
             # Parse AI response
             audit_result = self._parse_ai_response(response_content, transaction_data['transaction_id'], audit_rules)
 
-            # Add token usage information
+            # Add token usage information including reasoning tokens
             audit_result['token_usage'] = {
                 'input_tokens': token_usage.get('input_tokens', 0),
                 'output_tokens': token_usage.get('output_tokens', 0),
-                'total_tokens': token_usage.get('total_tokens', 0)
+                'total_tokens': token_usage.get('total_tokens', 0),
+                'reasoning_tokens': token_usage.get('reasoning_tokens', 0),
+                'cached_tokens': token_usage.get('cached_tokens', 0)
             }
 
             logger.info(f"Transaction {transaction_data['transaction_id']} used {token_usage.get('total_tokens', 0)} tokens "
-                       f"(input: {token_usage.get('input_tokens', 0)}, output: {token_usage.get('output_tokens', 0)})")
+                       f"(input: {token_usage.get('input_tokens', 0)}, output: {token_usage.get('output_tokens', 0)}, "
+                       f"reasoning: {token_usage.get('reasoning_tokens', 0)})")
 
             return audit_result
 
@@ -470,8 +485,28 @@ class TransactionAuditService:
             logger.error(f"Error generating presigned URLs: {str(e)}")
             return []
 
+    def _get_example_messages(self, language_name: str) -> str:
+        """Get example rejection messages in the specified language"""
+        if 'Thai' in language_name or 'ไทย' in language_name:
+            return """- "Record 129: รูปภาพแสดงขยะอินทรีย์ แต่ข้อมูลระบุเป็นขยะรีไซเคิล"
+- "Record 45: ไม่มีรูปภาพแนบมา"
+- "Record 67: น้ำหนักในรูปภาพ (50kg) ไม่ตรงกับข้อมูล (30kg)"
+- "ธุรกรรมไม่มีรูปภาพแนบมา"
+- "ธุรกรรมมีเพียง 4 ประเภทขยะ ขาดประเภท: เศษอาหารและพืช"
+- "ธุรกรรมขาดประเภทขยะที่จำเป็น: ขยะทั่วไป" """
+        else:  # English
+            return """- "Record 129: Image shows organic waste but data says Recyclable waste"
+- "Record 45: No image attached"
+- "Record 67: Weight in image (50kg) differs from data (30kg)"
+- "Transaction has no images attached"
+- "Transaction has only 4 waste types, missing: Food and Plant Waste"
+- "Transaction missing required waste type: General Waste" """
+
     def _create_audit_prompt(self, transaction_data: Dict[str, Any], audit_rules: List[Dict[str, Any]]) -> str:
         """Create an optimized prompt with ID-based rule references"""
+
+        # Get language name for prompt
+        language_name = self.language_names.get(self.response_language, 'Thai (ภาษาไทย)')
 
         # Create compact rules reference with ID-based lookup
         rules_compact = []
@@ -487,7 +522,9 @@ class TransactionAuditService:
             })
 
         prompt = f"""
-Audit waste transaction against rules. Evaluate each rule and return triggered violations only.
+Audit waste transaction against rules using Thai waste classification standards. Evaluate each rule and return triggered violations only.
+
+IMPORTANT: Write all rejection messages in {language_name}.
 
 RULES (ref by id):
 {json.dumps(rules_compact, ensure_ascii=False)}
@@ -495,7 +532,60 @@ RULES (ref by id):
 TRANSACTION:
 {json.dumps(transaction_data, ensure_ascii=False)}
 
-CRITICAL: Images for each transaction_record apply ONLY to that specific record. Do NOT process images across different records unless explicitly instructed by rules.
+THAI WASTE CLASSIFICATION HIERARCHY:
+Understand that waste categories have subcategories. The image showing a specific type is VALID if it matches the parent category:
+
+1. General Waste (ขยะทั่วไป):
+   - Mixed waste, non-recyclable waste, contaminated materials
+
+2. Food and Plant Waste (เศษอาหารและพืช):
+   - Food scraps, vegetable waste, fruit peels, plant materials, organic matter
+
+3. Non-Specific Recyclables (วัสดุรีไซเคิลทั่วไป):
+   - Plastic bottles, glass bottles, cans, paper, cardboard, clean plastics
+   - Metal containers, aluminum, steel
+
+4. Non-Specific Hazardous Waste (ขยะอันตรายทั่วไป):
+   - Aerosols, spray cans, batteries, light bulbs, fluorescent tubes
+   - Chemical containers, paint cans, cleaning products
+   - Electronic waste components
+
+5. Specific Recyclables with Value:
+   - Sorted and clean materials: PET bottles, aluminum cans, copper, etc.
+
+CRITICAL VALIDATION RULES:
+1. Images for each transaction_record apply ONLY to that specific record. Do NOT process images across different records.
+2. If image shows a SUBSET of the category (e.g., aerosols ⊂ Non-Specific Hazardous Waste), it is VALID ✓
+3. If image shows a DIFFERENT category (e.g., organic waste ≠ Recyclables), it is INVALID ✗
+4. Only return violations when there is an ACTUAL problem. If nothing is wrong, return empty violations array.
+5. Do NOT create violations just to report something. Only flag TRUE errors.
+6. Rejection messages MUST be SPECIFIC with actual data:
+   - Include record_id when relevant
+   - Include actual material types/names from data
+   - Include actual values that failed (e.g., weights, quantities)
+   - Only flag TRUE mismatches, not valid subcategories
+
+EXAMPLE VALID MATCHES (DO NOT REJECT):
+✓ Image: aerosols → Data: Non-Specific Hazardous Waste
+✓ Image: plastic bottles → Data: Non-Specific Recyclables
+✓ Image: food scraps → Data: Food and Plant Waste
+✓ Image: mixed waste → Data: General Waste
+
+EXAMPLE INVALID MATCHES (SHOULD REJECT):
+✗ Image: organic waste → Data: Recyclables
+✗ Image: hazardous materials → Data: General Waste
+✗ Image: plastic waste → Data: Food Waste
+
+EXAMPLE GOOD REJECTION MESSAGES (in {language_name}):
+{self._get_example_messages(language_name)}
+
+EXAMPLE BAD MESSAGES (DO NOT USE):
+- Generic messages without specifics ❌
+- "Material type mismatch" ❌
+- "Image doesn't match data" ❌
+- "Image shows bottles, not Non-Specific Recyclables" ❌ (bottles ARE recyclables!)
+- "Transaction has only 4 waste types, missing one of the required types" ❌ (not specific!)
+- "Missing required type" ❌ (which type?)
 
 Respond ONLY rejected items in this JSON format:
 {{
@@ -503,13 +593,18 @@ Respond ONLY rejected items in this JSON format:
     "violations": [
         {{
             "id": <rule_db_id>,
-            "msg": "<short specific rejection reason (max 30 words)>"
+            "msg": "<SPECIFIC rejection reason with record_id and actual data (max 30 words)>"
         }}
     ]
 }}
 
-If NO violations: {{"tr_id": {transaction_data.get('transaction_id', 0)}, "violations": []}}
-Only include triggered rules. Keep messages concise.
+IMPORTANT REMINDERS:
+- If NO violations found: {{"tr_id": {transaction_data.get('transaction_id', 0)}, "violations": []}}
+- Do NOT create fake violations or report non-issues
+- Do NOT say "missing: None" or "no problems found" as a violation
+- Only include actual errors in violations array
+- CHECK ALL RULES CAREFULLY but only flag TRUE violations where material category is completely different
+- Accept valid subcategories (aerosols in hazardous waste, bottles in recyclables, etc.)
 """
         return prompt
 
@@ -572,18 +667,23 @@ If images contradict data, flag violation with specific reason.
                 config={
                     "system_instruction": system_instruction,
                     "temperature": 0.,
+                    "thinkingConfig": {
+                        "thinkingBudget": 1024
+                    }
                 }
             )
 
-            # Extract token usage information
+            # Extract token usage information including reasoning tokens
             usage_metadata = response.usage_metadata if hasattr(response, 'usage_metadata') else None
             usage_info = {
                 'input_tokens': usage_metadata.prompt_token_count if usage_metadata else 0,
                 'output_tokens': usage_metadata.candidates_token_count if usage_metadata else 0,
-                'total_tokens': usage_metadata.total_token_count if usage_metadata else 0
+                'total_tokens': usage_metadata.total_token_count if usage_metadata else 0,
+                'reasoning_tokens': getattr(usage_metadata, 'thoughts_token_count', 0) if usage_metadata else 0,
+                'cached_tokens': getattr(usage_metadata, 'cached_content_token_count', 0) if usage_metadata else 0
             }
 
-            logger.info(f"Gemini API response - Tokens: {usage_info['total_tokens']}")
+            logger.info(f"Gemini API response - Tokens: {usage_info['total_tokens']} (reasoning: {usage_info['reasoning_tokens']})")
 
             return {
                 'content': response.text,
@@ -616,19 +716,24 @@ If images contradict data, flag violation with specific reason.
                 contents=full_prompt,
                 config={
                     "system_instruction": system_instruction,
-                    "temperature": 0.1,
+                    "temperature": 0.,
+                    "thinkingConfig": {
+                        "thinkingBudget": 1024 
+                    }
                 }
             )
 
-            # Extract token usage information
+            # Extract token usage information including reasoning tokens
             usage_metadata = response.usage_metadata if hasattr(response, 'usage_metadata') else None
             usage_info = {
                 'input_tokens': usage_metadata.prompt_token_count if usage_metadata else 0,
                 'output_tokens': usage_metadata.candidates_token_count if usage_metadata else 0,
-                'total_tokens': usage_metadata.total_token_count if usage_metadata else 0
+                'total_tokens': usage_metadata.total_token_count if usage_metadata else 0,
+                'reasoning_tokens': getattr(usage_metadata, 'thoughts_token_count', 0) if usage_metadata else 0,
+                'cached_tokens': getattr(usage_metadata, 'cached_content_token_count', 0) if usage_metadata else 0
             }
 
-            # logger.info(f"Gemini API text-only response - Tokens: {usage_info['total_tokens']}")
+            # logger.info(f"Gemini API text-only response - Tokens: {usage_info['total_tokens']} (reasoning: {usage_info['reasoning_tokens']})")
 
             return {
                 'content': response.text,
@@ -828,7 +933,9 @@ If images contradict data, flag violation with specific reason.
             'token_usage': {
                 'input_tokens': 0,
                 'output_tokens': 0,
-                'total_tokens': 0
+                'total_tokens': 0,
+                'reasoning_tokens': 0,
+                'cached_tokens': 0
             }
         }
 
@@ -860,10 +967,12 @@ If images contradict data, flag violation with specific reason.
                 transaction_id = result.get('transaction_id')
                 token_usage = result.get('token_usage', {})
 
-                # Sum up tokens
+                # Sum up tokens including reasoning tokens
                 input_tokens = token_usage.get('input_tokens', 0)
                 output_tokens = token_usage.get('output_tokens', 0)
                 trans_tokens = token_usage.get('total_tokens', 0)
+                reasoning_tokens = token_usage.get('reasoning_tokens', 0)
+                cached_tokens = token_usage.get('cached_tokens', 0)
 
                 total_input_tokens += input_tokens
                 total_output_tokens += output_tokens
@@ -882,7 +991,9 @@ If images contradict data, flag violation with specific reason.
                     't': {  # tokens
                         'i': input_tokens,
                         'o': output_tokens,
-                        'tot': trans_tokens
+                        'tot': trans_tokens,
+                        'r': reasoning_tokens,  # reasoning tokens
+                        'c': cached_tokens  # cached tokens
                     }
                 }
 
