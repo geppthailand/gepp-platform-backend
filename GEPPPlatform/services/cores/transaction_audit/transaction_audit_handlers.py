@@ -543,8 +543,19 @@ def handle_get_audit_report(
 
         # Count frequency of each rejection reason
         reason_counts = Counter(rejection_reasons)
+
+        # Fetch rule names from audit_rules table
+        from ....models.audit_rules import AuditRule
+        rule_ids = list(reason_counts.keys())
+        audit_rules = db_session.query(AuditRule).filter(AuditRule.rule_id.in_(rule_ids)).all()
+        rule_name_map = {rule.rule_id: rule.rule_name for rule in audit_rules}
+
         rejection_breakdown = [
-            {'rule_id': rule_id, 'count': count}
+            {
+                'rule_id': rule_id,
+                'rule_name': rule_name_map.get(rule_id, rule_id),  # Fallback to rule_id if name not found
+                'count': count
+            }
             for rule_id, count in reason_counts.most_common()
         ]
 
