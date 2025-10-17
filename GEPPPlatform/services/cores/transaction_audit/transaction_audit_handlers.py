@@ -512,24 +512,34 @@ def handle_get_audit_report(
         rejected_percentage = round((rejected_count / total_transactions * 100), 2) if total_transactions > 0 else 0
 
         # Monthly trend data (for stacked bar chart)
-        # Group transactions by month
+        # Initialize all months for current year with zero values
+        from datetime import datetime
+        current_year = datetime.now().year
         monthly_data = {}
+
+        # Initialize all 12 months with zero values
+        month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+        for i in range(1, 13):
+            month_key = f"{current_year}-{i:02d}"
+            monthly_data[month_key] = {'approved': 0, 'rejected': 0, 'month_name': month_names[i-1]}
+
+        # Count transactions by month
         for transaction in transactions:
             if transaction.transaction_date:
                 month_key = transaction.transaction_date.strftime('%Y-%m')
-                if month_key not in monthly_data:
-                    monthly_data[month_key] = {'approved': 0, 'rejected': 0}
-
-                if transaction.ai_audit_status == AIAuditStatus.approved:
-                    monthly_data[month_key]['approved'] += 1
-                elif transaction.ai_audit_status == AIAuditStatus.rejected:
-                    monthly_data[month_key]['rejected'] += 1
+                # Only count if it's from current year
+                if transaction.transaction_date.year == current_year:
+                    if month_key in monthly_data:
+                        if transaction.ai_audit_status == AIAuditStatus.approved:
+                            monthly_data[month_key]['approved'] += 1
+                        elif transaction.ai_audit_status == AIAuditStatus.rejected:
+                            monthly_data[month_key]['rejected'] += 1
 
         # Sort by month and format for frontend
         monthly_trends = []
         for month in sorted(monthly_data.keys()):
             monthly_trends.append({
-                'month': month,
+                'month': monthly_data[month]['month_name'],
                 'approved': monthly_data[month]['approved'],
                 'rejected': monthly_data[month]['rejected']
             })
