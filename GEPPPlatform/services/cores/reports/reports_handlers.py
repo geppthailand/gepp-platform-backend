@@ -1206,6 +1206,8 @@ def handle_reports_routes(event: Dict[str, Any], **common_params) -> Dict[str, A
         
         elif path == '/api/reports/filter/origins':
             filters = _build_filters_from_query_params(query_params)
+            # Remove origin filters - only use material filters for origins endpoint
+            filters.pop('origin_ids', None)
             # Do not apply default YTD for filter endpoints; only use dates if explicitly provided
             has_date = any(k in query_params for k in ('date_from', 'date_to', 'datefrom', 'dateto'))
             if not has_date:
@@ -1215,6 +1217,8 @@ def handle_reports_routes(event: Dict[str, Any], **common_params) -> Dict[str, A
 
         elif path == '/api/reports/filter/materials':
             filters = _build_filters_from_query_params(query_params)
+            # Remove material filters - only use origin filters for materials endpoint
+            filters.pop('material_ids', None)
             # Do not apply default YTD for filter endpoints; only use dates if explicitly provided
             has_date = any(k in query_params for k in ('date_from', 'date_to', 'datefrom', 'dateto'))
             if not has_date:
