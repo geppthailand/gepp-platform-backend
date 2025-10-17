@@ -9,7 +9,7 @@ from GEPPPlatform.models.users.user_location import UserLocation
 from GEPPPlatform.models.subscriptions.organizations import OrganizationSetup
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 
 from ....models.transactions.transactions import Transaction, TransactionStatus
@@ -67,11 +67,44 @@ class ReportsService:
                     query = query.filter(Transaction.origin_id.in_(filters['origin_ids']))
                 
                 # Filter by date range
-                if filters.get('date_from'):
-                    query = query.filter(TransactionRecord.created_date >= filters['date_from'])
-                
-                if filters.get('date_to'):
-                    query = query.filter(TransactionRecord.created_date <= filters['date_to'])
+                date_from = filters.get('date_from')
+                date_to = filters.get('date_to')
+                if report_type == 'comparison':
+                    # For comparison, use provided range as-is, no clamping
+                    if date_from:
+                        query = query.filter(TransactionRecord.created_date >= date_from)
+                    if date_to:
+                        query = query.filter(TransactionRecord.created_date <= date_to)
+                else:
+                    # Apply clamping (max 3 years, date_to <= today)
+                    try:
+                        MAX_DAYS = 365 * 3
+                        now = datetime.utcnow()
+                        end_of_today = now.replace(hour=23, minute=59, second=59, microsecond=999999)
+                        df = datetime.fromisoformat(date_from) if isinstance(date_from, str) else date_from
+                        dt = datetime.fromisoformat(date_to) if isinstance(date_to, str) else date_to
+                        if dt and dt > end_of_today:
+                            dt = end_of_today
+                        if df and dt and (dt - df).days > MAX_DAYS:
+                            df = dt - timedelta(days=MAX_DAYS)
+                        if df:
+                            query = query.filter(TransactionRecord.created_date >= df.isoformat() if isinstance(date_from, str) else df)
+                        if dt:
+                            query = query.filter(TransactionRecord.created_date <= dt.isoformat() if isinstance(date_to, str) else dt)
+                    except Exception:
+                        # If parsing fails, fall back to original filters
+                        if date_from:
+                            query = query.filter(TransactionRecord.created_date >= date_from)
+                        if date_to:
+                            try:
+                                parsed = datetime.fromisoformat(date_to) if isinstance(date_to, str) else date_to
+                                now = datetime.utcnow()
+                                end_of_today = now.replace(hour=23, minute=59, second=59, microsecond=999999)
+                                if parsed and parsed > end_of_today:
+                                    parsed = end_of_today
+                                query = query.filter(TransactionRecord.created_date <= parsed.isoformat() if isinstance(date_to, str) else parsed)
+                            except Exception:
+                                query = query.filter(TransactionRecord.created_date <= date_to)
             
             # Execute query
             transaction_records = query.all()
@@ -181,7 +214,7 @@ class ReportsService:
             logger.error(f"Unexpected error in get_transaction_records_by_organization: {str(e)}")
             raise
 
-    def get_origin_by_organization(self, organization_id: int) -> Dict[str, Any]:
+    def get_origin_by_organization(self, organization_id: int, filters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Get all active origins for a specific organization
         
@@ -193,17 +226,64 @@ class ReportsService:
         """
 
         try:
-            # Base query: Join origins with user_locations
-            # Exclude hub and hub-main type locations
+            # If date filters provided, restrict origins to those that appear in transactions within the range
+            origin_ids_in_range: Optional[set] = None
+            if filters and (filters.get('date_from') or filters.get('date_to')):
+                tr_query = self.db.query(Transaction.origin_id).join(
+                    TransactionRecord,
+                    TransactionRecord.created_transaction_id == Transaction.id
+                ).filter(
+                    Transaction.organization_id == organization_id,
+                    TransactionRecord.is_active == True
+                )
+                # Clamp and apply date range
+                date_from = filters.get('date_from')
+                date_to = filters.get('date_to')
+                try:
+                    MAX_DAYS = 365 * 3
+                    now = datetime.utcnow()
+                    end_of_today = now.replace(hour=23, minute=59, second=59, microsecond=999999)
+                    df = datetime.fromisoformat(date_from) if isinstance(date_from, str) else date_from
+                    dt = datetime.fromisoformat(date_to) if isinstance(date_to, str) else date_to
+                    if dt and dt > end_of_today:
+                        dt = end_of_today
+                    if df and dt and (dt - df).days > MAX_DAYS:
+                        df = dt - timedelta(days=MAX_DAYS)
+                    if df:
+                        tr_query = tr_query.filter(TransactionRecord.created_date >= df.isoformat() if isinstance(date_from, str) else df)
+                    if dt:
+                        tr_query = tr_query.filter(TransactionRecord.created_date <= dt.isoformat() if isinstance(date_to, str) else dt)
+                except Exception:
+                    if date_from:
+                        tr_query = tr_query.filter(TransactionRecord.created_date >= date_from)
+                    if date_to:
+                        try:
+                            parsed = datetime.fromisoformat(date_to) if isinstance(date_to, str) else date_to
+                            now = datetime.utcnow()
+                            end_of_today = now.replace(hour=23, minute=59, second=59, microsecond=999999)
+                            if parsed and parsed > end_of_today:
+                                parsed = end_of_today
+                            tr_query = tr_query.filter(TransactionRecord.created_date <= parsed.isoformat() if isinstance(date_to, str) else parsed)
+                        except Exception:
+                            tr_query = tr_query.filter(TransactionRecord.created_date <= date_to)
+                rows = tr_query.distinct().all()
+                origin_ids_in_range = {row[0] for row in rows if row and row[0] is not None}
+
+            # Base origins query
             query = self.db.query(UserLocation).filter(
                 UserLocation.organization_id == organization_id,
                 UserLocation.is_active == True,
                 UserLocation.is_location == True,
-                UserLocation.type.notin_(['hub', 'hub-main'])  # Exclude hub and hub-main types
+                UserLocation.type.notin_(['hub', 'hub-main'])
             )
-
-            # Execute query
-            origins = query.all()
+            if origin_ids_in_range is not None:
+                if not origin_ids_in_range:
+                    origins = []
+                else:
+                    query = query.filter(UserLocation.id.in_(list(origin_ids_in_range)))
+                    origins = query.all()
+            else:
+                origins = query.all()
 
             # Convert to dict
             origins_data = []
@@ -228,7 +308,7 @@ class ReportsService:
             logger.error(f"Unexpected error in get_origin_by_organization: {str(e)}")
             raise
     
-    def get_material_by_organization(self, organization_id: int) -> Dict[str, Any]:
+    def get_material_by_organization(self, organization_id: int, filters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Get all active materials for a specific organization based on transaction records
         
@@ -247,6 +327,37 @@ class ReportsService:
                 Transaction.organization_id == organization_id,
                 TransactionRecord.is_active == True
             )
+            # Apply optional date range filter (clamped)
+            if filters:
+                date_from = filters.get('date_from')
+                date_to = filters.get('date_to')
+                try:
+                    MAX_DAYS = 365 * 3
+                    now = datetime.utcnow()
+                    end_of_today = now.replace(hour=23, minute=59, second=59, microsecond=999999)
+                    df = datetime.fromisoformat(date_from) if isinstance(date_from, str) else date_from
+                    dt = datetime.fromisoformat(date_to) if isinstance(date_to, str) else date_to
+                    if dt and dt > end_of_today:
+                        dt = end_of_today
+                    if df and dt and (dt - df).days > MAX_DAYS:
+                        df = dt - timedelta(days=MAX_DAYS)
+                    if df:
+                        transaction_records_query = transaction_records_query.filter(TransactionRecord.created_date >= df.isoformat() if isinstance(date_from, str) else df)
+                    if dt:
+                        transaction_records_query = transaction_records_query.filter(TransactionRecord.created_date <= dt.isoformat() if isinstance(date_to, str) else dt)
+                except Exception:
+                    if date_from:
+                        transaction_records_query = transaction_records_query.filter(TransactionRecord.created_date >= date_from)
+                    if date_to:
+                        try:
+                            parsed = datetime.fromisoformat(date_to) if isinstance(date_to, str) else date_to
+                            now = datetime.utcnow()
+                            end_of_today = now.replace(hour=23, minute=59, second=59, microsecond=999999)
+                            if parsed and parsed > end_of_today:
+                                parsed = end_of_today
+                            transaction_records_query = transaction_records_query.filter(TransactionRecord.created_date <= parsed.isoformat() if isinstance(date_to, str) else parsed)
+                        except Exception:
+                            transaction_records_query = transaction_records_query.filter(TransactionRecord.created_date <= date_to)
             
             transaction_records = transaction_records_query.all()
             
