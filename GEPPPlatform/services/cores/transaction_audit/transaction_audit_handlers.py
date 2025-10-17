@@ -266,16 +266,15 @@ def handle_reset_all_transactions(
     """
     Handle POST /api/transaction_audit/reset_all - Reset all transactions to pending status
 
-    Resets all non-pending transactions back to pending status for the organization
+    Resets all transactions back to pending status and ai_audit_status to null for the organization
     """
     try:
         logger.info(f"Resetting all transactions for organization {organization_id}")
 
-        # Query transactions that are not in pending status
-        transactions_to_reset = db_session.query(Transaction).filter(
+        # Query ALL transactions for the organization (not just non-pending ones)
+        all_transactions = db_session.query(Transaction).filter(
             and_(
                 Transaction.organization_id == organization_id,
-                Transaction.status != TransactionStatus.pending,
                 Transaction.deleted_date.is_(None)
             )
         ).all()
@@ -283,18 +282,22 @@ def handle_reset_all_transactions(
         updated_count = 0
 
         # Reset each transaction
-        for transaction in transactions_to_reset:
+        for transaction in all_transactions:
+            # Reset transaction status to pending
             transaction.status = TransactionStatus.pending
-            transaction.ai_audit_status = AIAuditStatus.null  # Use enum value, not None
+
+            # Reset AI audit status to null
+            transaction.ai_audit_status = AIAuditStatus.null
             transaction.ai_audit_note = None
             transaction.reject_triggers = []  # Clear reject triggers
             transaction.warning_triggers = []  # Clear warning triggers
+
             updated_count += 1
 
         # Commit changes
         db_session.commit()
 
-        logger.info(f"Reset {updated_count} transactions to pending status")
+        logger.info(f"Reset {updated_count} transactions to pending status with ai_audit_status null")
 
         return {
             'success': True,
@@ -335,69 +338,44 @@ def handle_add_ai_audit_queue(
         # Get optional transaction IDs filter
         transaction_ids = data.get('transaction_ids', None)
 
-        # Build base query for transactions with 'null' ai_audit_status
-        query = db_session.query(Transaction).filter(
-            and_(
-                Transaction.organization_id == organization_id,
-                Transaction.ai_audit_status == AIAuditStatus.null,
-                Transaction.deleted_date.is_(None)
-            )
-        )
+        # Get Gemini API key from environment
+        gemini_api_key = os.getenv('GEMINI_API_KEY')
+        if not gemini_api_key:
+            raise APIException('Gemini API key not configured')
 
-        # Apply transaction IDs filter if provided
-        if transaction_ids:
-            query = query.filter(Transaction.id.in_(transaction_ids))
+        # Initialize service
+        transaction_audit_service = TransactionAuditService(gemini_api_key)
 
-        transactions_to_queue = query.all()
-        queued_count = 0
-        queued_transaction_ids = []
-
-        # Update ai_audit_status to 'queued' for each transaction
-        for transaction in transactions_to_queue:
-            transaction.ai_audit_status = AIAuditStatus.queued
-            queued_transaction_ids.append(transaction.id)
-            queued_count += 1
-
-        # Create audit history record with 'in_progress' status
-        # This will be picked up and processed by cron job later
-        from datetime import datetime, timezone
-        audit_history = TransactionAuditHistory(
+        # Call service function to queue transactions
+        result = transaction_audit_service.add_transaction_to_ai_audit_queue(
+            db=db_session,
             organization_id=organization_id,
-            triggered_by_user_id=current_user_id,
-            transactions=queued_transaction_ids,
-            audit_info={
-                'status': 'queued',
-                'message': 'Audit batch queued for processing'
-            },
-            total_transactions=queued_count,
-            processed_transactions=0,
-            approved_count=0,
-            rejected_count=0,
-            status='in_progress',
-            started_at=datetime.now(timezone.utc),
-            completed_at=None
+            user_id=current_user_id,
+            transaction_ids=transaction_ids
         )
 
-        db_session.add(audit_history)
-
-        # Commit changes
-        db_session.commit()
-
-        logger.info(f"Queued {queued_count} transactions for AI audit with audit history ID {audit_history.id}")
-
-        return {
-            'success': True,
-            'message': f'Successfully queued {queued_count} transactions for AI audit',
-            'data': {
-                'queued_count': queued_count,
-                'organization_id': organization_id,
-                'audit_history_id': audit_history.id,
-                'transaction_ids': queued_transaction_ids if transaction_ids else None
+        if result['success']:
+            return {
+                'success': True,
+                'message': result['message'],
+                'data': {
+                    'queued_count': result['queued_count'],
+                    'organization_id': result['organization_id'],
+                    'audit_history_id': result['audit_history_id'],
+                    'transaction_ids': result.get('transaction_ids')
+                }
             }
-        }
+        else:
+            return {
+                'success': False,
+                'message': result.get('message', 'Failed to queue transactions'),
+                'error': result.get('error')
+            }
 
+    except APIException:
+        # Re-raise API exceptions as-is
+        raise
     except Exception as e:
-        db_session.rollback()
         logger.error(f"Error queueing transactions for AI audit: {str(e)}")
         logger.error(f"Traceback: {traceback.format_exc()}")
         raise APIException(f'Failed to queue transactions for AI audit: {str(e)}')

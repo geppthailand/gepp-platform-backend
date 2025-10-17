@@ -939,6 +939,99 @@ If images contradict data, flag violation with specific reason.
             }
         }
 
+    def add_transaction_to_ai_audit_queue(
+        self,
+        db: Session,
+        organization_id: int,
+        user_id: Optional[int] = None,
+        transaction_ids: Optional[List[int]] = None
+    ) -> Dict[str, Any]:
+        """
+        Add transactions to AI audit queue by changing ai_audit_status from 'null' to 'queued'
+
+        Args:
+            db: Database session
+            organization_id: Organization ID to filter transactions
+            user_id: User ID who triggered the queueing
+            transaction_ids: Optional list of specific transaction IDs to queue
+
+        Returns:
+            Dict containing queued count and audit history ID
+        """
+        try:
+            logger.info(f"Adding transactions to AI audit queue for organization {organization_id}")
+
+            # Build base query for transactions with 'null' ai_audit_status
+            query = db.query(Transaction).filter(
+                Transaction.organization_id == organization_id,
+                Transaction.ai_audit_status == AIAuditStatus.null,
+                Transaction.deleted_date.is_(None)
+            )
+
+            # Apply transaction IDs filter if provided
+            if transaction_ids:
+                query = query.filter(Transaction.id.in_(transaction_ids))
+
+            transactions_to_queue = query.all()
+            queued_count = 0
+            queued_transaction_ids = []
+
+            # Update ai_audit_status to 'queued' for each transaction
+            for transaction in transactions_to_queue:
+                transaction.ai_audit_status = AIAuditStatus.queued
+                queued_transaction_ids.append(transaction.id)
+                queued_count += 1
+
+            # Create audit history record with 'in_progress' status
+            # This will be picked up and processed by cron job later
+            audit_history = TransactionAuditHistory(
+                organization_id=organization_id,
+                triggered_by_user_id=user_id,
+                transactions=queued_transaction_ids,
+                audit_info={
+                    'status': 'queued',
+                    'message': 'Audit batch queued for processing'
+                },
+                total_transactions=queued_count,
+                processed_transactions=0,
+                approved_count=0,
+                rejected_count=0,
+                status='in_progress',
+                started_at=datetime.now(timezone.utc),
+                completed_at=None
+            )
+
+            db.add(audit_history)
+            db.commit()
+
+            logger.info(f"Queued {queued_count} transactions for AI audit with audit history ID {audit_history.id}")
+
+            return {
+                'success': True,
+                'message': f'Successfully queued {queued_count} transactions for AI audit',
+                'queued_count': queued_count,
+                'organization_id': organization_id,
+                'audit_history_id': audit_history.id,
+                'transaction_ids': queued_transaction_ids if transaction_ids else None
+            }
+
+        except SQLAlchemyError as e:
+            logger.error(f"Database error queueing transactions for AI audit: {str(e)}")
+            db.rollback()
+            return {
+                'success': False,
+                'error': f'Database error: {str(e)}',
+                'queued_count': 0
+            }
+        except Exception as e:
+            logger.error(f"Unexpected error queueing transactions for AI audit: {str(e)}")
+            db.rollback()
+            return {
+                'success': False,
+                'error': f'Unexpected error: {str(e)}',
+                'queued_count': 0
+            }
+
     def _save_audit_history_batch(
         self,
         db: Session,
