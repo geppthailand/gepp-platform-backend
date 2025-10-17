@@ -445,24 +445,26 @@ def handle_get_audit_report(
     Handle GET /api/transaction_audit/audit_report - Get comprehensive audit report with filters
 
     Query parameters:
+    - search: str - Partial match search for transaction ID
     - date_from: str (ISO date) - Filter transactions from this date
     - date_to: str (ISO date) - Filter transactions to this date
-    - location: str - Filter by location name
-    - material_type: str - Filter by material type
-    - status: str - Filter by transaction status
-    - ai_audit_status: str - Filter by AI audit status (approved, rejected)
+    - district: str - Filter by district node ID (level 3)
+    - sub_district: str - Filter by sub-district node ID (level 4)
+    - status: str - Filter by transaction status (not ai_audit_status)
 
     Returns comprehensive report including:
     - Summary statistics (total, approved, rejected counts and percentages)
     - Monthly trend data for charts
     - Rejection reasons breakdown
     - List of transactions with audit details
+    - Filter options for dropdowns
     """
     try:
         import json
         from datetime import datetime
-        from sqlalchemy import func, extract
+        from sqlalchemy import func, extract, String
         from collections import Counter
+        from ....models.subscriptions.organizations import OrganizationSetup
 
         logger.info(f"Generating audit report for organization {organization_id} with filters: {query_params}")
 
@@ -475,27 +477,81 @@ def handle_get_audit_report(
         )
 
         # Apply filters
+        search = query_params.get('search')
         date_from = query_params.get('date_from')
         date_to = query_params.get('date_to')
-        location = query_params.get('location')
-        material_type = query_params.get('material_type')
+        district = query_params.get('district')
+        sub_district = query_params.get('sub_district')
         status = query_params.get('status')
-        ai_audit_status = query_params.get('ai_audit_status')
 
+        # Search filter - partial match on transaction ID
+        if search:
+            query = query.filter(Transaction.id.cast(String).contains(search))
+
+        # Date filters
         if date_from:
             query = query.filter(Transaction.transaction_date >= date_from)
 
         if date_to:
             query = query.filter(Transaction.transaction_date <= date_to)
 
+        # District and sub-district filtering based on organization_setup
+        if district or sub_district:
+            # Get organization setup to access root_nodes
+            org_setup = db_session.query(OrganizationSetup).filter(
+                and_(
+                    OrganizationSetup.organization_id == organization_id,
+                    OrganizationSetup.deleted_date.is_(None)
+                )
+            ).order_by(OrganizationSetup.created_date.desc()).first()
+
+            if org_setup and org_setup.root_nodes:
+                allowed_origin_ids = []
+
+                # Helper function to recursively extract node IDs
+                def extract_node_ids(nodes, target_level, current_level=1, parent_match=False):
+                    node_ids = []
+                    for node in nodes if isinstance(nodes, list) else []:
+                        node_id = node.get('nodeId')
+                        children = node.get('children', [])
+
+                        # If filtering by district (level 3)
+                        if district and current_level == 3:
+                            if node_id == district:
+                                # Found matching district, collect this and all children
+                                node_ids.append(node_id)
+                                node_ids.extend(extract_node_ids(children, target_level, current_level + 1, parent_match=True))
+                        # If filtering by sub_district (level 4)
+                        elif sub_district and current_level == 4:
+                            if node_id == sub_district:
+                                node_ids.append(node_id)
+                        # If parent matched and we're collecting all descendants
+                        elif parent_match:
+                            node_ids.append(node_id)
+                            if children:
+                                node_ids.extend(extract_node_ids(children, target_level, current_level + 1, parent_match=True))
+                        # Otherwise keep traversing
+                        elif children:
+                            node_ids.extend(extract_node_ids(children, target_level, current_level + 1, parent_match=False))
+
+                    return node_ids
+
+                # Extract allowed origin IDs based on filters
+                if sub_district:
+                    allowed_origin_ids = extract_node_ids(org_setup.root_nodes, 4)
+                elif district:
+                    allowed_origin_ids = extract_node_ids(org_setup.root_nodes, 3)
+
+                # Apply filter if we found matching nodes
+                if allowed_origin_ids:
+                    query = query.filter(Transaction.origin_id.in_(allowed_origin_ids))
+                else:
+                    # No matching nodes found, return empty result
+                    query = query.filter(Transaction.id == -1)
+
+        # Status filter (transaction status, not ai_audit_status)
         if status:
             query = query.filter(Transaction.status == status)
-
-        if ai_audit_status:
-            if ai_audit_status == 'approved':
-                query = query.filter(Transaction.ai_audit_status == AIAuditStatus.approved)
-            elif ai_audit_status == 'rejected':
-                query = query.filter(Transaction.ai_audit_status == AIAuditStatus.rejected)
 
         # Get all matching transactions
         transactions = query.all()
@@ -603,6 +659,54 @@ def handle_get_audit_report(
                 'audit_details': audit_details
             })
 
+        # Build filter options for frontend
+        # Get organization setup to extract districts and sub-districts
+        org_setup = db_session.query(OrganizationSetup).filter(
+            and_(
+                OrganizationSetup.organization_id == organization_id,
+                OrganizationSetup.deleted_date.is_(None)
+            )
+        ).order_by(OrganizationSetup.created_date.desc()).first()
+
+        districts = []
+        sub_districts = []
+
+        if org_setup and org_setup.root_nodes:
+            def extract_filter_options(nodes, current_level=1):
+                level3_nodes = []
+                level4_nodes = []
+                for node in nodes if isinstance(nodes, list) else []:
+                    node_id = node.get('nodeId')
+                    node_name = node.get('name', node_id)
+                    children = node.get('children', [])
+
+                    if current_level == 3:
+                        level3_nodes.append({'id': node_id, 'name': node_name})
+                    elif current_level == 4:
+                        level4_nodes.append({'id': node_id, 'name': node_name})
+
+                    if children:
+                        child_l3, child_l4 = extract_filter_options(children, current_level + 1)
+                        level3_nodes.extend(child_l3)
+                        level4_nodes.extend(child_l4)
+
+                return level3_nodes, level4_nodes
+
+            districts, sub_districts = extract_filter_options(org_setup.root_nodes)
+
+        # Status options
+        statuses = [
+            {'value': 'pending', 'label': 'รอดำเนินการ'},
+            {'value': 'approved', 'label': 'อนุมัติ'},
+            {'value': 'rejected', 'label': 'ไม่อนุมัติ'}
+        ]
+
+        filter_options = {
+            'districts': districts,
+            'sub_districts': sub_districts,
+            'statuses': statuses
+        }
+
         # Compile final report
         report = {
             'summary': {
@@ -616,13 +720,14 @@ def handle_get_audit_report(
             'rejection_breakdown': rejection_breakdown,
             'transactions': transaction_list,
             'filters_applied': {
+                'search': search,
                 'date_from': date_from,
                 'date_to': date_to,
-                'location': location,
-                'material_type': material_type,
-                'status': status,
-                'ai_audit_status': ai_audit_status
-            }
+                'district': district,
+                'sub_district': sub_district,
+                'status': status
+            },
+            'filter_options': filter_options
         }
 
         logger.info(f"Successfully generated audit report with {total_transactions} transactions")
