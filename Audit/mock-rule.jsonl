@@ -1,0 +1,167 @@
+// the correct transaction must consists with 4 material types match with this file
+
+// below is the example of transaction_records of the valid transaction
+{
+	"id" : 88, // auto increment
+	"status" : "pending",
+	"weight_kg" : 34.000,
+	"total_amount" : 0.00,
+	"transaction_date" : "2025-10-16T15:29:24.469Z", // random from 2025-01-01 to 2025-10-15
+	"notes" : "Created via api",
+	"images" : "[\"https:\/\/prod-gepp-platform-assets.s3.ap-southeast-1.amazonaws.com\/org\/8\/transactions\/2025\/10\/20251016_152802_08c65328_ท_วไป.jpg\", \"https:\/\/prod-gepp-platform-assets.s3.ap-southeast-1.amazonaws.com\/org\/8\/transactions\/2025\/10\/20251016_152827_578fdc46_ร_ไซเค_ล.jpg\", \"https:\/\/prod-gepp-platform-assets.s3.ap-southeast-1.amazonaws.com\/org\/8\/transactions\/2025\/10\/20251016_152847_4471003a_อ_นตราย.jpeg\", \"https:\/\/prod-gepp-platform-assets.s3.ap-southeast-1.amazonaws.com\/org\/8\/transactions\/2025\/10\/20251016_152915_70f7817c_ร_ปเศษอาหาร_KTB-2.png\"]",
+	"vehicle_info" : "null",
+	"driver_info" : "null",
+	"hazardous_level" : 0,
+	"treatment_method" : null,
+	"disposal_method" : null,
+	"created_by_id" : 26,
+	"updated_by_id" : null,
+	"approved_by_id" : null,
+	"created_date" : "2025-10-16T15:29:25.962Z",
+	"updated_date" : "2025-10-17T17:41:54.280Z",
+	"is_active" : true,
+	"deleted_date" : null,
+	"transaction_records" : "{143,144,145,146}", // update match with transaction records
+	"transaction_method" : "origin",
+	"organization_id" : 8, // use this
+	"origin_id" : 2191, // random from nodeId from the level-4 nodes structure like [{nodeId: ... <level1>, children: [{nodeId: ... <level2>, children: [...]}]}]
+	"destination_id" : null,
+	"arrival_date" : null,
+	"origin_coordinates" : "null",
+	"destination_coordinates" : "null",
+	"transaction_method_id" : null,
+	"ai_audit_status" : "queued",
+	"ai_audit_note" : null,
+	"reject_triggers" : "[]",
+	"warning_triggers" : "[]",
+	"transaction_records": [
+		{
+			"id" : 146, // auto increment
+			"is_active" : true,
+			"status" : "pending",
+			"created_transaction_id" : 88, // create the transaction first then use the id of that transaction
+			"traceability" : "{88}", // set of single transaction id
+			"transaction_type" : "api_input",
+			"material_id" : 97, // use this
+			"main_material_id" : 10, // use this
+			"category_id" : 3, // use this
+			"tags" : "[]", // use this
+			"unit" : "กิโลกรัม", // use this
+			"origin_quantity" : 12.0000, // random 1 - 100
+			"origin_weight_kg" : 12.0000, // equals to origin_quantity
+			"origin_price_per_unit" : 0.0000, // 0
+			"total_amount" : 0.0000, // 0
+			"currency_id" : null, // use this
+			"notes" : "",
+			"images" : "[\"https:\/\/prod-gepp-platform-assets.s3.ap-southeast-1.amazonaws.com\/org\/8\/transactions\/2025\/10\/20251016_152915_70f7817c_ร_ปเศษอาหาร_KTB-2.png\"]", // random from backend/Audit/Organic
+			"origin_coordinates" : "null", // use this
+			"destination_coordinates" : "null", // use this
+			"hazardous_level" : 0, // use this
+			"treatment_method" : null, // use this
+			"disposal_method" : null, // use this
+			"created_by_id" : 26, // use this
+			"approved_by_id" : null, // use this
+			"completed_date" : null, // use this
+			"created_date" : "2025-10-16T15:29:25.962Z",
+			"updated_date" : "2025-10-16T15:29:25.962Z",
+			"deleted_date" : null,
+			"transaction_type_id" : null // use this
+		},
+		{
+			"id" : 145,
+			"is_active" : true,
+			"status" : "pending",
+			"created_transaction_id" : 88,
+			"traceability" : "{88}",
+			"transaction_type" : "api_input",
+			"material_id" : 113,
+			"main_material_id" : 25,
+			"category_id" : 5,
+			"tags" : "[]",
+			"unit" : "กิโลกรัม",
+			"origin_quantity" : 7.0000,
+			"origin_weight_kg" : 7.0000,
+			"origin_price_per_unit" : 0.0000,
+			"total_amount" : 0.0000,
+			"currency_id" : null,
+			"notes" : "Destination: 2178",
+			"images" : "[\"https:\/\/prod-gepp-platform-assets.s3.ap-southeast-1.amazonaws.com\/org\/8\/transactions\/2025\/10\/20251016_152847_4471003a_อ_นตราย.jpeg\"]", // random from backend/Audit/Hazardous
+			"origin_coordinates" : "null",
+			"destination_coordinates" : "null",
+			"hazardous_level" : 0,
+			"treatment_method" : null,
+			"disposal_method" : null,
+			"created_by_id" : 26,
+			"approved_by_id" : null,
+			"completed_date" : null,
+			"created_date" : "2025-10-16T15:29:25.962Z",
+			"updated_date" : "2025-10-16T15:29:25.962Z",
+			"deleted_date" : null,
+			"transaction_type_id" : null
+		},
+		{
+			"id" : 144,
+			"is_active" : true,
+			"status" : "pending",
+			"created_transaction_id" : 88,
+			"traceability" : "{88}",
+			"transaction_type" : "api_input",
+			"material_id" : 298,
+			"main_material_id" : 33,
+			"category_id" : 1,
+			"tags" : "[]",
+			"unit" : "กิโลกรัม",
+			"origin_quantity" : 5.0000,
+			"origin_weight_kg" : 5.0000,
+			"origin_price_per_unit" : 0.0000,
+			"total_amount" : 0.0000,
+			"currency_id" : null,
+			"notes" : "Destination: 2178",
+			"images" : "[\"https:\/\/prod-gepp-platform-assets.s3.ap-southeast-1.amazonaws.com\/org\/8\/transactions\/2025\/10\/20251016_152827_578fdc46_ร_ไซเค_ล.jpg\"]", // random from backend/Audit/Recyclable
+			"origin_coordinates" : "null",
+			"destination_coordinates" : "null",
+			"hazardous_level" : 0,
+			"treatment_method" : null,
+			"disposal_method" : null,
+			"created_by_id" : 26,
+			"approved_by_id" : null,
+			"completed_date" : null,
+			"created_date" : "2025-10-16T15:29:25.962Z",
+			"updated_date" : "2025-10-16T15:29:25.962Z",
+			"deleted_date" : null,
+			"transaction_type_id" : null
+		},
+		{
+			"id" : 143,
+			"is_active" : true,
+			"status" : "pending",
+			"created_transaction_id" : 88,
+			"traceability" : "{88}",
+			"transaction_type" : "api_input",
+			"material_id" : 98,
+			"main_material_id" : 11,
+			"category_id" : 4,
+			"tags" : "[]",
+			"unit" : "กิโลกรัม",
+			"origin_quantity" : 10.0000, // random 1 - 100
+			"origin_weight_kg" : 10.0000, // equals to origin_quantity
+			"origin_price_per_unit" : 0.0000,
+			"total_amount" : 0.0000,
+			"currency_id" : null,
+			"notes" : "Destination: 2178",
+			"images" : "[\"https:\/\/prod-gepp-platform-assets.s3.ap-southeast-1.amazonaws.com\/org\/8\/transactions\/2025\/10\/20251016_152802_08c65328_ท_วไป.jpg\"]", // random from backend/Audit/General
+			"origin_coordinates" : "null",
+			"destination_coordinates" : "null",
+			"hazardous_level" : 0,
+			"treatment_method" : null,
+			"disposal_method" : null,
+			"created_by_id" : 26,
+			"approved_by_id" : null,
+			"completed_date" : null,
+			"created_date" : "2025-10-16T15:29:25.962Z",
+			"updated_date" : "2025-10-16T15:29:25.962Z",
+			"deleted_date" : null,
+			"transaction_type_id" : null
+		}
+	]
+}

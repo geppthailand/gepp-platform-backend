@@ -1,0 +1,24 @@
+{
+  "origin_id": 2391,
+  "transaction_method": "origin",
+  "status": "pending",
+  "transaction_date": "2025-01-06T00:00:00Z",
+  "notes": "Test via mock script",
+  "images": [],
+  "records": [
+    {
+      "material_id": 289,
+      "main_material_id": 1,
+      "category_id": 1,
+      "unit": "กิโลกรัม",
+      "origin_quantity": 1,
+      "origin_weight_kg": 1,
+      "images": [],
+      "origin_price_per_unit": 0,
+      "total_amount": 0,
+      "transaction_type": "manual_input",
+      "hazardous_level": 0,
+      "notes": ""
+    }
+  ]
+}
