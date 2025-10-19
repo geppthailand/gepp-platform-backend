@@ -486,7 +486,8 @@ def handle_get_audit_report(
             query = query.filter(Transaction.transaction_date <= date_to)
 
         # District and sub-district filtering based on organization_setup
-        if district or sub_district:
+        # Skip filtering if district is 'all'
+        if (district and district != 'all') or (sub_district and sub_district != 'all'):
             # Get organization setup to access root_nodes
             org_setup = db_session.query(OrganizationSetup).filter(
                 and_(
@@ -498,6 +499,10 @@ def handle_get_audit_report(
             if org_setup and org_setup.root_nodes:
                 allowed_origin_ids = []
 
+                # Convert district and sub_district to int if they're not 'all'
+                district_int = int(district) if district and district != 'all' else None
+                sub_district_int = int(sub_district) if sub_district and sub_district != 'all' else None
+
                 # Helper function to recursively extract node IDs
                 def extract_node_ids(nodes, target_level, current_level=1, parent_match=False):
                     node_ids = []
@@ -506,14 +511,14 @@ def handle_get_audit_report(
                         children = node.get('children', [])
 
                         # If filtering by district (level 3)
-                        if district and current_level == 3:
-                            if node_id == district:
+                        if district_int and current_level == 3:
+                            if node_id == district_int:
                                 # Found matching district, collect this and all children
                                 node_ids.append(node_id)
                                 node_ids.extend(extract_node_ids(children, target_level, current_level + 1, parent_match=True))
                         # If filtering by sub_district (level 4)
-                        elif sub_district and current_level == 4:
-                            if node_id == sub_district:
+                        elif sub_district_int and current_level == 4:
+                            if node_id == sub_district_int:
                                 node_ids.append(node_id)
                         # If parent matched and we're collecting all descendants
                         elif parent_match:
@@ -527,9 +532,9 @@ def handle_get_audit_report(
                     return node_ids
 
                 # Extract allowed origin IDs based on filters
-                if sub_district:
+                if sub_district_int:
                     allowed_origin_ids = extract_node_ids(org_setup.root_nodes, 4)
-                elif district:
+                elif district_int:
                     allowed_origin_ids = extract_node_ids(org_setup.root_nodes, 3)
 
                 # Apply filter if we found matching nodes
@@ -662,6 +667,8 @@ def handle_get_audit_report(
 
         # Build filter options for frontend
         # Get organization setup to extract districts and sub-districts
+        from ....models.users.user_location import UserLocation
+
         org_setup = db_session.query(OrganizationSetup).filter(
             and_(
                 OrganizationSetup.organization_id == organization_id,
@@ -673,27 +680,44 @@ def handle_get_audit_report(
         sub_districts = []
 
         if org_setup and org_setup.root_nodes:
-            def extract_filter_options(nodes, current_level=1):
-                level3_nodes = []
-                level4_nodes = []
+            # Collect all district (level 3) and sub-district (level 4) IDs from root_nodes
+            district_ids = []
+            sub_district_ids = []
+
+            def extract_location_ids(nodes, current_level=1):
                 for node in nodes if isinstance(nodes, list) else []:
                     node_id = node.get('nodeId')
-                    node_name = node.get('name', node_id)
                     children = node.get('children', [])
 
-                    if current_level == 3:
-                        level3_nodes.append({'id': node_id, 'name': node_name})
-                    elif current_level == 4:
-                        level4_nodes.append({'id': node_id, 'name': node_name})
+                    if current_level == 3:  # District level
+                        district_ids.append(node_id)
+                    elif current_level == 4:  # Sub-district level
+                        sub_district_ids.append(node_id)
 
                     if children:
-                        child_l3, child_l4 = extract_filter_options(children, current_level + 1)
-                        level3_nodes.extend(child_l3)
-                        level4_nodes.extend(child_l4)
+                        extract_location_ids(children, current_level + 1)
 
-                return level3_nodes, level4_nodes
+            extract_location_ids(org_setup.root_nodes)
 
-            districts, sub_districts = extract_filter_options(org_setup.root_nodes)
+            # Fetch actual district names from user_locations table
+            if district_ids:
+                district_records = db_session.query(UserLocation).filter(
+                    UserLocation.id.in_(district_ids)
+                ).all()
+                districts = [
+                    {'id': str(d.id), 'name': d.name_en or d.name_th or d.display_name or str(d.id)}
+                    for d in district_records
+                ]
+
+            # Fetch actual sub-district names from user_locations table
+            if sub_district_ids:
+                sub_district_records = db_session.query(UserLocation).filter(
+                    UserLocation.id.in_(sub_district_ids)
+                ).all()
+                sub_districts = [
+                    {'id': str(sd.id), 'name': sd.name_en or sd.name_th or sd.display_name or str(sd.id)}
+                    for sd in sub_district_records
+                ]
 
         # Status options
         statuses = [
@@ -702,9 +726,17 @@ def handle_get_audit_report(
             {'value': 'rejected', 'label': 'ไม่อนุมัติ'}
         ]
 
+        # Sort districts and sub_districts by name
+        districts_sorted = sorted(districts, key=lambda x: x['name'])
+        sub_districts_sorted = sorted(sub_districts, key=lambda x: x['name'])
+
+        # Add 'all' option to both districts and sub_districts at the beginning
+        districts_with_all = [{'id': 'all', 'name': 'ทั้งหมด'}] + districts_sorted
+        sub_districts_with_all = [{'id': 'all', 'name': 'ทั้งหมด'}] + sub_districts_sorted
+
         filter_options = {
-            'districts': districts,
-            'sub_districts': sub_districts,
+            'districts': districts_with_all,
+            'sub_districts': sub_districts_with_all,
             'statuses': statuses
         }
 
