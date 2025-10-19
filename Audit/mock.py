@@ -38,7 +38,7 @@ import time
 # ============================================================
 
 # JWT Token for authentication (REQUIRED)
-JWT_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoyNiwib3JnYW5pemF0aW9uX2lkIjo4LCJlbWFpbCI6InRvcDNAdG9wLmNvbSIsInR5cGUiOiJhdXRoIiwiZXhwIjoxNzYwODM1MjEwLCJpYXQiOjE3NjA4MzQzMTB9.z2GvDYgE8J45U7_xFGGHh1egC83JWjYZ4RK-X6dU-SU"
+JWT_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoyNiwib3JnYW5pemF0aW9uX2lkIjo4LCJlbWFpbCI6InRvcDNAdG9wLmNvbSIsInR5cGUiOiJhdXRoIiwiZXhwIjoxNzYwODU5MzQyLCJpYXQiOjE3NjA4NTg0NDJ9.gS69qnLZ6JBh_8ALDo97e9CzkYc8UDl7a-Pky6ezBAg"
 
 # Number of transactions to generate for each case
 CASE1_COUNT = 4210  # Correct transactions
@@ -74,14 +74,14 @@ IMAGE_FOLDERS = {
 # Correct material configurations (4 required waste types)
 CORRECT_MATERIALS = [
     {
-        "material_id": 98,
+        "material_id": 94,
         "main_material_id": 11,
         "category_id": 4,
         "folder": "General",
         "name": "General Waste"
     },
     {
-        "material_id": 97,
+        "material_id": 77,
         "main_material_id": 10,
         "category_id": 3,
         "folder": "Organic",

@@ -42,7 +42,7 @@
 			"created_transaction_id" : 88, // create the transaction first then use the id of that transaction
 			"traceability" : "{88}", // set of single transaction id
 			"transaction_type" : "api_input",
-			"material_id" : 97, // use this
+			"material_id" : 77, // use this
 			"main_material_id" : 10, // use this
 			"category_id" : 3, // use this
 			"tags" : "[]", // use this
@@ -138,7 +138,7 @@
 			"created_transaction_id" : 88,
 			"traceability" : "{88}",
 			"transaction_type" : "api_input",
-			"material_id" : 98,
+			"material_id" : 94,
 			"main_material_id" : 11,
 			"category_id" : 4,
 			"tags" : "[]",

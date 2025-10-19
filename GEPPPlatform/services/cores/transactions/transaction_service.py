@@ -4,7 +4,7 @@ Handles CRUD operations, validation, and transaction record linking
 """
 
 from typing import List, Optional, Dict, Any, Tuple
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.exc import SQLAlchemyError
 from datetime import datetime
 import logging
@@ -164,7 +164,11 @@ class TransactionService:
             Dict with success status and transaction data
         """
         try:
-            transaction = self.db.query(Transaction).filter(
+            # Eager load location relationships
+            transaction = self.db.query(Transaction).options(
+                joinedload(Transaction.origin),
+                joinedload(Transaction.destination)
+            ).filter(
                 Transaction.id == transaction_id,
                 Transaction.is_active == True
             ).first()
@@ -179,8 +183,11 @@ class TransactionService:
             transaction_dict = self._transaction_to_dict(transaction)
 
             if include_records:
-                # Get transaction records
-                records = self.db.query(TransactionRecord).filter(
+                # Get transaction records with eager loading of material and category
+                records = self.db.query(TransactionRecord).options(
+                    joinedload(TransactionRecord.material),
+                    joinedload(TransactionRecord.category)
+                ).filter(
                     TransactionRecord.created_transaction_id == transaction_id,
                     TransactionRecord.is_active == True
                 ).all()
@@ -690,6 +697,25 @@ class TransactionService:
         # Handle images - use JSONB field directly to avoid relationship issues
         images = transaction.images if hasattr(transaction, 'images') else []
 
+        # Include location objects if available
+        origin_location = None
+        if hasattr(transaction, 'origin') and transaction.origin:
+            origin_location = {
+                'id': transaction.origin.id,
+                'name_en': transaction.origin.name_en if hasattr(transaction.origin, 'name_en') else None,
+                'name_th': transaction.origin.name_th if hasattr(transaction.origin, 'name_th') else None,
+                'display_name': transaction.origin.display_name if hasattr(transaction.origin, 'display_name') else None
+            }
+
+        destination_location = None
+        if hasattr(transaction, 'destination') and transaction.destination:
+            destination_location = {
+                'id': transaction.destination.id,
+                'name_en': transaction.destination.name_en if hasattr(transaction.destination, 'name_en') else None,
+                'name_th': transaction.destination.name_th if hasattr(transaction.destination, 'name_th') else None,
+                'display_name': transaction.destination.display_name if hasattr(transaction.destination, 'display_name') else None
+            }
+
         return {
             'id': transaction.id,
             'transaction_records': transaction.transaction_records,
@@ -698,6 +724,8 @@ class TransactionService:
             'organization_id': transaction.organization_id,
             'origin_id': transaction.origin_id,
             'destination_id': transaction.destination_id,
+            'origin_location': origin_location,
+            'destination_location': destination_location,
             'weight_kg': float(transaction.weight_kg) if transaction.weight_kg else 0,
             'total_amount': float(transaction.total_amount) if transaction.total_amount else 0,
             'transaction_date': transaction.transaction_date.isoformat() if transaction.transaction_date else None,
@@ -724,6 +752,24 @@ class TransactionService:
 
     def _transaction_record_to_dict(self, record: TransactionRecord) -> Dict[str, Any]:
         """Convert TransactionRecord object to dictionary"""
+        # Include material object if available
+        material = None
+        if hasattr(record, 'material') and record.material:
+            material = {
+                'id': record.material.id,
+                'name_en': record.material.name_en if hasattr(record.material, 'name_en') else None,
+                'name_th': record.material.name_th if hasattr(record.material, 'name_th') else None
+            }
+
+        # Include category object if available
+        category = None
+        if hasattr(record, 'category') and record.category:
+            category = {
+                'id': record.category.id,
+                'name_en': record.category.name_en if hasattr(record.category, 'name_en') else None,
+                'name_th': record.category.name_th if hasattr(record.category, 'name_th') else None
+            }
+
         return {
             'id': record.id,
             'status': record.status,
@@ -733,6 +779,8 @@ class TransactionService:
             'material_id': record.material_id,
             'main_material_id': record.main_material_id,
             'category_id': record.category_id,
+            'material': material,
+            'category': category,
             'tags': record.tags,
             'unit': record.unit,
             'origin_quantity': float(record.origin_quantity) if record.origin_quantity else 0,
