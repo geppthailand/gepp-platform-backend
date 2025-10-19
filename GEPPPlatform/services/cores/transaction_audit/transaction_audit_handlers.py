@@ -429,12 +429,15 @@ def handle_get_audit_report(
     - district: str - Filter by district node ID (level 3)
     - sub_district: str - Filter by sub-district node ID (level 4)
     - status: str - Filter by transaction status (not ai_audit_status)
+    - page: int - Page number for pagination (default: 1)
+    - page_size: int - Items per page (default: 100, max: 100)
 
     Returns comprehensive report including:
-    - Summary statistics (total, approved, rejected counts and percentages)
-    - Monthly trend data for charts
-    - Rejection reasons breakdown
-    - List of transactions with audit details
+    - Summary statistics (total, approved, rejected counts and percentages) - based on ALL filtered transactions
+    - Monthly trend data for charts - based on ALL filtered transactions
+    - Rejection reasons breakdown - based on ALL filtered transactions
+    - List of transactions with audit details - PAGINATED (100 per page, sorted by id)
+    - Pagination metadata (total pages, current page, etc.)
     - Filter options for dropdowns
     """
     try:
@@ -461,6 +464,14 @@ def handle_get_audit_report(
         district = query_params.get('district')
         sub_district = query_params.get('sub_district')
         status = query_params.get('status')
+
+        # Pagination parameters
+        page = int(query_params.get('page', 1))
+        page_size = min(int(query_params.get('page_size', 100)), 100)  # Max 100 per page
+
+        # Ensure page is at least 1
+        if page < 1:
+            page = 1
 
         # Search filter - partial match on transaction ID
         if search:
@@ -531,13 +542,22 @@ def handle_get_audit_report(
         if status:
             query = query.filter(Transaction.status == status)
 
-        # Get all matching transactions
-        transactions = query.all()
+        # Get all matching transactions for statistics (without pagination)
+        all_transactions = query.all()
 
-        # Calculate summary statistics
-        total_transactions = len(transactions)
-        approved_transactions = [t for t in transactions if t.ai_audit_status == AIAuditStatus.approved]
-        rejected_transactions = [t for t in transactions if t.ai_audit_status == AIAuditStatus.rejected]
+        # Get total count for pagination
+        total_count = len(all_transactions)
+        total_pages = (total_count + page_size - 1) // page_size if page_size > 0 else 0
+
+        # Get paginated transactions sorted by id
+        paginated_query = query.order_by(Transaction.id)
+        offset = (page - 1) * page_size
+        paginated_transactions = paginated_query.offset(offset).limit(page_size).all()
+
+        # Calculate summary statistics (based on ALL filtered transactions)
+        total_transactions = len(all_transactions)
+        approved_transactions = [t for t in all_transactions if t.ai_audit_status == AIAuditStatus.approved]
+        rejected_transactions = [t for t in all_transactions if t.ai_audit_status == AIAuditStatus.rejected]
 
         approved_count = len(approved_transactions)
         rejected_count = len(rejected_transactions)
@@ -557,8 +577,8 @@ def handle_get_audit_report(
             month_key = f"{current_year}-{i:02d}"
             monthly_data[month_key] = {'approved': 0, 'rejected': 0, 'month_name': month_names[i-1]}
 
-        # Count transactions by month
-        for transaction in transactions:
+        # Count transactions by month (based on ALL filtered transactions)
+        for transaction in all_transactions:
             if transaction.transaction_date:
                 month_key = transaction.transaction_date.strftime('%Y-%m')
                 # Only count if it's from current year
@@ -603,9 +623,9 @@ def handle_get_audit_report(
             for rule_id, count in reason_counts.most_common()
         ]
 
-        # Prepare transaction list for รายละเอียดการตรวจสอบ
+        # Prepare transaction list for รายละเอียดการตรวจสอบ (PAGINATED)
         transaction_list = []
-        for transaction in transactions:
+        for transaction in paginated_transactions:
             # Parse ai_audit_note if it's JSON
             audit_details = None
             reject_messages = []
@@ -697,6 +717,14 @@ def handle_get_audit_report(
             'monthly_trends': monthly_trends,
             'rejection_breakdown': rejection_breakdown,
             'transactions': transaction_list,
+            'pagination': {
+                'page': page,
+                'page_size': page_size,
+                'total_count': total_count,
+                'total_pages': total_pages,
+                'has_next': page < total_pages,
+                'has_prev': page > 1
+            },
             'filters_applied': {
                 'search': search,
                 'date_from': date_from,
@@ -708,7 +736,7 @@ def handle_get_audit_report(
             'filter_options': filter_options
         }
 
-        logger.info(f"Successfully generated audit report with {total_transactions} transactions")
+        logger.info(f"Successfully generated audit report with {total_transactions} total transactions (page {page}/{total_pages}, showing {len(transaction_list)} transactions)")
 
         return {
             'success': True,

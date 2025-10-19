@@ -31,6 +31,8 @@ from ..transactions.presigned_url_service import TransactionPresignedUrlService
 
 logger = logging.getLogger(__name__)
 
+thinkingBudget = 1024
+
 class TransactionAuditService:
     """
     Service for AI-powered transaction auditing using Google Gemini API
@@ -113,14 +115,14 @@ class TransactionAuditService:
             # Prepare transaction data with records and images
             transaction_audit_data = self._prepare_transaction_data(db, pending_transactions)
 
-            print(";;;=====")
+            # print(";;;=====")
             # Process transactions with AI in multiple threads
             audit_results = self._process_transactions_with_ai(
                 transaction_audit_data,
                 audit_rules
             )
 
-            print("---====-=-=", audit_results)
+            # print("---====-=-=", audit_results)
 
             # Check organization's AI audit permission
             allow_ai_audit = False
@@ -309,6 +311,7 @@ class TransactionAuditService:
         try:
             audit_results = []
 
+            print("ID:", [t["transaction_id"] for t in transactions_data])
             # Process transactions in batches using thread pool
             with ThreadPoolExecutor(max_workers=self.max_concurrent_threads) as executor:
                 # Submit all transactions for processing
@@ -429,7 +432,7 @@ class TransactionAuditService:
             response_content = api_response.get('content', '')
             token_usage = api_response.get('usage', {})
 
-            print(response_content)
+            # print(response_content)
             # Parse AI response
             audit_result = self._parse_ai_response(response_content, transaction_data['transaction_id'], audit_rules)
 
@@ -660,7 +663,7 @@ If images contradict data, flag violation with specific reason.
                         gemini_content.append(f"[Image unavailable: {str(img_error)}]")
 
             # Generate response using the new SDK
-            print(gemini_content)
+            # print(gemini_content)
             response = self.client.models.generate_content(
                 model=self.model_name,
                 contents=gemini_content,
@@ -668,7 +671,7 @@ If images contradict data, flag violation with specific reason.
                     "system_instruction": system_instruction,
                     "temperature": 0.,
                     "thinkingConfig": {
-                        "thinkingBudget": 1024
+                        "thinkingBudget": thinkingBudget
                     }
                 }
             )
@@ -718,7 +721,7 @@ If images contradict data, flag violation with specific reason.
                     "system_instruction": system_instruction,
                     "temperature": 0.,
                     "thinkingConfig": {
-                        "thinkingBudget": 1024 
+                        "thinkingBudget": thinkingBudget 
                     }
                 }
             )

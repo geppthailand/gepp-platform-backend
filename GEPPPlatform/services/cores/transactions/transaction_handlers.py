@@ -189,6 +189,7 @@ def handle_create_transaction(
         for record_data in transaction_records_data:
             record_data['created_by_id'] = int(current_user_id)
 
+        print(transaction_data)
         # Create transaction
         result = transaction_service.create_transaction(
             transaction_data,
@@ -252,6 +253,8 @@ def handle_list_transactions(
 ) -> Dict[str, Any]:
     """
     Handle GET /api/transactions - List transactions with filtering
+
+    Transactions are ordered by ID in descending order (newest first)
     """
     try:
         # Parse query parameters

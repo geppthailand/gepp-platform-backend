@@ -215,6 +215,8 @@ class TransactionService:
         """
         List transactions with filtering and pagination
 
+        Transactions are ordered by ID in descending order (newest first)
+
         Returns:
             Dict with success status, transactions list, and pagination info
         """
@@ -250,7 +252,7 @@ class TransactionService:
             # Apply pagination
             offset = (page - 1) * page_size
             logger.info(f"Applying pagination: offset={offset}, limit={page_size}")
-            transactions = query.order_by(Transaction.transaction_date.desc())\
+            transactions = query.order_by(Transaction.id.desc())\
                               .offset(offset)\
                               .limit(page_size)\
                               .all()
