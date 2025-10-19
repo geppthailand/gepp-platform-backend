@@ -449,6 +449,11 @@ def handle_get_audit_report(
 
         logger.info(f"Generating audit report for organization {organization_id} with filters: {query_params}")
 
+        # Log pagination parameters for debugging
+        page = int(query_params.get('page', 1))
+        page_size = min(int(query_params.get('page_size', 100)), 100)
+        logger.info(f"PAGINATION DEBUG: Requested page={page}, page_size={page_size}")
+
         # Build base query for transactions
         query = db_session.query(Transaction).filter(
             and_(
@@ -464,10 +469,6 @@ def handle_get_audit_report(
         district = query_params.get('district')
         sub_district = query_params.get('sub_district')
         status = query_params.get('status')
-
-        # Pagination parameters
-        page = int(query_params.get('page', 1))
-        page_size = min(int(query_params.get('page_size', 100)), 100)  # Max 100 per page
 
         # Ensure page is at least 1
         if page < 1:
@@ -552,7 +553,9 @@ def handle_get_audit_report(
         # Get paginated transactions sorted by id
         paginated_query = query.order_by(Transaction.id)
         offset = (page - 1) * page_size
+        logger.info(f"PAGINATION DEBUG: Applying offset={offset}, limit={page_size} to query")
         paginated_transactions = paginated_query.offset(offset).limit(page_size).all()
+        logger.info(f"PAGINATION DEBUG: Retrieved {len(paginated_transactions)} transactions")
 
         # Calculate summary statistics (based on ALL filtered transactions)
         total_transactions = len(all_transactions)
