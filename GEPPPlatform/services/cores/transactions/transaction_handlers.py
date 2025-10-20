@@ -265,6 +265,13 @@ def handle_list_transactions(
         destination_id = int(query_params['destination_id']) if query_params.get('destination_id') else None
         include_records = query_params.get('include_records', 'false').lower() == 'true'
 
+        # Additional filter parameters
+        search = query_params.get('search')
+        date_from = query_params.get('date_from')
+        date_to = query_params.get('date_to')
+        district = int(query_params['district']) if query_params.get('district') else None
+        sub_district = int(query_params['sub_district']) if query_params.get('sub_district') else None
+
         # Always filter by user's organization
         result = transaction_service.list_transactions(
             organization_id=current_user_organization_id,
@@ -273,7 +280,12 @@ def handle_list_transactions(
             destination_id=destination_id,
             page=page,
             page_size=page_size,
-            include_records=include_records
+            include_records=include_records,
+            search=search,
+            date_from=date_from,
+            date_to=date_to,
+            district=district,
+            sub_district=sub_district
         )
 
         if result['success']:

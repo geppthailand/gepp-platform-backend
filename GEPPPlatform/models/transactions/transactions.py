@@ -66,6 +66,9 @@ class Transaction(Base, BaseModel):
     reject_triggers = Column(JSONB, nullable=False, default=[])  # Array of rule_ids that triggered rejection
     warning_triggers = Column(JSONB, nullable=False, default=[])  # Array of rule_ids that triggered warnings
 
+    # User Audit Status - tracks if transaction was manually audited by user
+    is_user_audit = Column(Boolean, nullable=False, default=False)
+
     # Organization and locations
     organization_id = Column(BigInteger, ForeignKey('organizations.id'), nullable=True)
     origin_id = Column(BigInteger, ForeignKey('user_locations.id'), nullable=True)

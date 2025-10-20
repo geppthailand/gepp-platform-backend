@@ -13,7 +13,7 @@ from ....models.transactions.transactions import Transaction, TransactionStatus,
 from ....models.transactions.transaction_records import TransactionRecord
 from ...file_upload_service import S3FileUploadService
 from ....models.users.user_location import UserLocation
-from ....models.subscriptions.organizations import Organization
+from ....models.subscriptions.organizations import Organization, OrganizationSetup
 
 logger = logging.getLogger(__name__)
 
@@ -217,12 +217,31 @@ class TransactionService:
         destination_id: Optional[int] = None,
         page: int = 1,
         page_size: int = 20,
-        include_records: bool = False
+        include_records: bool = False,
+        search: Optional[str] = None,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
+        district: Optional[int] = None,
+        sub_district: Optional[int] = None
     ) -> Dict[str, Any]:
         """
         List transactions with filtering and pagination
 
         Transactions are ordered by ID in descending order (newest first)
+
+        Args:
+            organization_id: Filter by organization
+            status: Filter by transaction status
+            origin_id: Filter by origin location
+            destination_id: Filter by destination location
+            page: Page number
+            page_size: Number of items per page
+            include_records: Include transaction records in response
+            search: Search text to filter transactions
+            date_from: Filter transactions from this date (YYYY-MM-DD)
+            date_to: Filter transactions to this date (YYYY-MM-DD)
+            district: Filter by district (user_location level 3)
+            sub_district: Filter by sub-district (user_location level 4)
 
         Returns:
             Dict with success status, transactions list, and pagination info
@@ -250,6 +269,72 @@ class TransactionService:
                 query = query.filter(Transaction.origin_id == origin_id)
             if destination_id:
                 query = query.filter(Transaction.destination_id == destination_id)
+
+            # Search filter - search in notes and transaction ID
+            if search:
+                search_pattern = f'%{search}%'
+                query = query.filter(
+                    (Transaction.notes.ilike(search_pattern)) |
+                    (Transaction.id == int(search) if search.isdigit() else False)
+                )
+
+            # Date range filters
+            if date_from:
+                from datetime import datetime
+                date_from_obj = datetime.fromisoformat(date_from)
+                query = query.filter(Transaction.transaction_date >= date_from_obj)
+            if date_to:
+                from datetime import datetime
+                date_to_obj = datetime.fromisoformat(date_to)
+                query = query.filter(Transaction.transaction_date <= date_to_obj)
+
+            # District/Sub-district filters (filter by origin_id)
+            if district or sub_district:
+                if sub_district:
+                    # Filter by specific subdistrict
+                    query = query.filter(Transaction.origin_id == sub_district)
+                else:
+                    # Filter by all subdistricts under the district
+                    # Get organization_setup to extract subdistricts from root_nodes
+                    org_setup = self.db.query(OrganizationSetup).filter(
+                        OrganizationSetup.organization_id == organization_id
+                    ).first()
+
+                    if org_setup and org_setup.root_nodes:
+                        # Extract all level 4 (subdistrict) IDs that are children of the selected district (level 3)
+                        subdistrict_ids = []
+
+                        def extract_subdistricts(nodes, current_level=1, parent_district_id=None):
+                            """Recursively extract subdistrict IDs from district node"""
+                            for node in nodes if isinstance(nodes, list) else []:
+                                node_id = node.get('nodeId')
+                                children = node.get('children', [])
+
+                                if current_level == 3 and node_id == district:
+                                    # Found the district, extract all its children (subdistricts)
+                                    if children:
+                                        for child in children if isinstance(children, list) else []:
+                                            child_id = child.get('nodeId')
+                                            if child_id:
+                                                subdistrict_ids.append(child_id)
+                                    return True
+                                elif children:
+                                    # Continue searching deeper
+                                    if extract_subdistricts(children, current_level + 1, node_id):
+                                        return True
+                            return False
+
+                        extract_subdistricts(org_setup.root_nodes)
+
+                        if subdistrict_ids:
+                            # Filter by all subdistricts in the district
+                            query = query.filter(Transaction.origin_id.in_(subdistrict_ids))
+                        else:
+                            # No subdistricts found, filter by district itself
+                            query = query.filter(Transaction.origin_id == district)
+                    else:
+                        # No organization setup, just filter by district
+                        query = query.filter(Transaction.origin_id == district)
 
             # Get total count
             logger.info("Getting total count...")
@@ -744,6 +829,7 @@ class TransactionService:
             'approved_by_id': transaction.approved_by_id,
             'ai_audit_status': transaction.ai_audit_status.value if hasattr(transaction, 'ai_audit_status') and transaction.ai_audit_status else None,
             'ai_audit_note': transaction.ai_audit_note if hasattr(transaction, 'ai_audit_note') else None,
+            'is_user_audit': transaction.is_user_audit if hasattr(transaction, 'is_user_audit') else False,
             'is_active': transaction.is_active,
             'created_date': transaction.created_date.isoformat() if transaction.created_date else None,
             'updated_date': transaction.updated_date.isoformat() if transaction.updated_date else None,

@@ -596,7 +596,8 @@ Respond ONLY rejected items in this JSON format:
     "violations": [
         {{
             "id": <rule_db_id>,
-            "msg": "<SPECIFIC rejection reason with record_id and actual data (max 30 words)>"
+            "msg": "<SPECIFIC rejection reason with record_id and actual data (max 30 words)>",
+            "tr": <transaction_record_id or null if violation applies to entire transaction>
         }}
     ]
 }}
@@ -781,6 +782,7 @@ If images contradict data, flag violation with specific reason.
             for violation in violations:
                 rule_db_id = violation.get('id')
                 msg = violation.get('msg', '')
+                transaction_record_id = violation.get('tr')  # Get transaction_record_id from violation
 
                 # Lookup rule to get actions
                 rule = audit_rules_map_by_id.get(rule_db_id)
@@ -802,7 +804,8 @@ If images contradict data, flag violation with specific reason.
                     'rule_db_id': rule_db_id,
                     'triggered': True,
                     'message': msg,
-                    'has_reject': has_reject
+                    'has_reject': has_reject,
+                    'transaction_record_id': transaction_record_id  # Add transaction_record_id to triggered rules
                 })
 
                 # Add to reject messages if it has reject action
@@ -882,10 +885,11 @@ If images contradict data, flag violation with specific reason.
                     # Save ultra-compact audit response (only essential data)
                     compact_audit = {
                         's': audit_status,  # status
-                        'v': [  # violations (only rule_db_id and message)
+                        'v': [  # violations (rule_db_id, message, and transaction_record_id)
                             {
                                 'id': tr.get('rule_db_id'),
-                                'm': tr.get('message')
+                                'm': tr.get('message'),
+                                'tr': tr.get('transaction_record_id')  # transaction_record_id
                             }
                             for tr in triggered_rules if tr.get('has_reject')
                         ],
@@ -1077,10 +1081,11 @@ If images contradict data, flag violation with specific reason.
                 # Store ultra-compact result per transaction
                 compact_results[transaction_id] = {
                     's': result.get('audit_status'),  # status
-                    'v': [  # violations (only rule_db_id and message)
+                    'v': [  # violations (rule_db_id, message, and transaction_record_id)
                         {
                             'id': tr.get('rule_db_id'),
-                            'm': tr.get('message')
+                            'm': tr.get('message'),
+                            'tr': tr.get('transaction_record_id')  # transaction_record_id
                         }
                         for tr in result.get('triggered_rules', []) if tr.get('has_reject')
                     ],
