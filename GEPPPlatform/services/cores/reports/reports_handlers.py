@@ -54,9 +54,10 @@ def _build_filters_from_query_params(query_params: Dict[str, Any]) -> Dict[str, 
             # Single ID
             filters['origin_ids'] = [int(origin_ids_str)]
     
-    # Handle date filters with time adjustments
-    if query_params.get('date_from'):
-        date_from_str = query_params['date_from']
+    # Handle date filters with time adjustments (also accept 'datefrom'/'dateto')
+    date_from_input = query_params.get('date_from') or query_params.get('datefrom')
+    if date_from_input:
+        date_from_str = date_from_input
         try:
             # Parse the date and set to start of day (00:00:00)
             if 'T' in date_from_str or ' ' in date_from_str:
@@ -71,9 +72,10 @@ def _build_filters_from_query_params(query_params: Dict[str, Any]) -> Dict[str, 
         except Exception:
             # Fallback to original value if parsing fails
             filters['date_from'] = date_from_str
-    
-    if query_params.get('date_to'):
-        date_to_str = query_params['date_to']
+
+    date_to_input = query_params.get('date_to') or query_params.get('dateto')
+    if date_to_input:
+        date_to_str = date_to_input
         try:
             # Parse the date and set to end of day (23:59:59.999999)
             if 'T' in date_to_str or ' ' in date_to_str:
@@ -96,7 +98,54 @@ def _build_filters_from_query_params(query_params: Dict[str, Any]) -> Dict[str, 
         filters['leftSelection'] = query_params['leftSelection']
     if query_params.get('rightSelection'):
         filters['rightSelection'] = query_params['rightSelection']
-        
+    
+    # Default YTD if no explicit dates provided (first day of current year -> end of today)
+    if not filters.get('date_from') and not filters.get('date_to'):
+        now = datetime.utcnow()
+        start_of_year = datetime(now.year, 1, 1, 0, 0, 0, 0)
+        end_of_today = now.replace(hour=23, minute=59, second=59, microsecond=999999)
+        filters['date_from'] = start_of_year.isoformat()
+        filters['date_to'] = end_of_today.isoformat()
+
+    # Clamp date range constraints globally:
+    # - date_to must not be in the future
+    # - date range must not exceed 3 years (by day count)
+    try:
+        MAX_DAYS = 365 * 3
+        now = datetime.utcnow()
+        end_of_today = now.replace(hour=23, minute=59, second=59, microsecond=999999)
+
+        dt_from = _parse_datetime(filters.get('date_from')) if filters.get('date_from') else None
+        dt_to = _parse_datetime(filters.get('date_to')) if filters.get('date_to') else None
+
+        # If only date_from is provided, set date_to to today (clamped later)
+        if dt_from and not dt_to:
+            dt_to = end_of_today
+            filters['date_to'] = dt_to.isoformat()
+
+        # If only date_to is provided, compute date_from as at most 3 years before
+        if dt_to and not dt_from:
+            if dt_to > end_of_today:
+                dt_to = end_of_today
+                filters['date_to'] = dt_to.isoformat()
+            dt_from = dt_to - timedelta(days=MAX_DAYS)
+            filters['date_from'] = dt_from.isoformat()
+
+        # Clamp date_to to today if provided
+        if dt_to and dt_to > end_of_today:
+            dt_to = end_of_today
+            filters['date_to'] = dt_to.isoformat()
+
+        # Enforce max window if both bounds present
+        if dt_from and dt_to:
+            delta_days = (dt_to - dt_from).days
+            if delta_days > MAX_DAYS:
+                dt_from = dt_to - timedelta(days=MAX_DAYS)
+                filters['date_from'] = dt_from.isoformat()
+    except Exception:
+        # Best-effort clamp; ignore parsing issues
+        pass
+
     return filters
 
 
@@ -292,7 +341,8 @@ def _handle_overview_report(
     recyclable_ghg_reduction = 0.0
     origin_waste_map = {}
     category_waste_map = {}
-    month_totals = {}
+    # Track monthly totals grouped by year
+    month_totals_by_year = {}
     
     # Aggregate metrics from transaction records
     for record in result.get('data', []):
@@ -311,7 +361,11 @@ def _handle_overview_report(
         # Aggregate by month for chart_data
         dt = _parse_datetime(record.get('created_date'))
         if dt:
-            month_totals[dt.month] = month_totals.get(dt.month, 0.0) + weight
+            y = dt.year
+            m = dt.month
+            if y not in month_totals_by_year:
+                month_totals_by_year[y] = {}
+            month_totals_by_year[y][m] = month_totals_by_year[y].get(m, 0.0) + weight
         
         # Plastic saved calculation
         if material.get('is_plastic'):
@@ -345,7 +399,7 @@ def _handle_overview_report(
             category_waste_map[cat_id] += weight
     
     # Calculate recycle rate
-    recycle_rate = (recyclable_waste / total_waste) if total_waste > 0 else 0.0
+    recycle_rate = ((recyclable_waste / total_waste) * 100) if total_waste > 0 else 0.0
     
     # Build top recyclables (top 5 origins)
     top_origin_ids = sorted(origin_waste_map.items(), key=lambda kv: kv[1], reverse=True)[:5]
@@ -370,11 +424,17 @@ def _handle_overview_report(
             for oid, w in top_origin_ids
         ]
     
-    # Build chart_data sorted by calendar month
-    chart_data = [
-        {'month': datetime(2000, m, 1).strftime('%b'), 'value': month_totals[m]}
-        for m in sorted(month_totals.keys())
-    ]
+    # Build chart_data grouped by year with months sorted Jan..Dec
+    chart_data = {}
+    for year in sorted(month_totals_by_year.keys()):
+        monthly = month_totals_by_year[year]
+        chart_data[str(year)] = [
+            {
+                'month': datetime(2000, m, 1).strftime('%b'),
+                'value': round(monthly[m], 2)
+            }
+            for m in sorted(monthly.keys())
+        ]
     
     # Build waste_type_proportions by category
     category_names_map = _fetch_category_names(reports_service.db, set(category_waste_map.keys()))
@@ -474,6 +534,7 @@ def _handle_materials_report(
         
         material = record.get('material') or {}
         material_id = record.get('material_id') or material.get('id')
+        main_id_for_sub = material.get('main_material_id') or record.get('main_material_id')
         if material_id is None:
             continue
         
@@ -486,6 +547,7 @@ def _handle_materials_report(
             sub_material_agg_map[material_id] = {
                 'material_id': material_id,
                 'material_name': material.get('name_en') or material.get('name_th'),
+                'main_material_id': main_id_for_sub,
                 'total_waste': 0.0,
                 'ghg_reduction': 0.0,
             }
@@ -499,6 +561,26 @@ def _handle_materials_report(
         item['proportion_percent'] = (item['total_waste'] / sub_total_waste * 100) if sub_total_waste > 0 else 0.0
         sub_proportions.append(item)
     sub_proportions.sort(key=lambda x: x['total_waste'], reverse=True)
+
+    # Group sub materials by main material name for easier consumption
+    grouped_by_main = {}
+    for item in sub_proportions:
+        main_id = item.get('main_material_id')
+        main_name = name_map.get(main_id) if main_id is not None else None
+        key_name = main_name or f"Material {main_id}" if main_id is not None else "Unknown"
+        if key_name not in grouped_by_main:
+            grouped_by_main[key_name] = []
+        # Exclude main_material_id inside each sub-item for cleaner payload
+        grouped_by_main[key_name].append({
+            'material_id': item.get('material_id'),
+            'material_name': item.get('material_name'),
+            'total_waste': item.get('total_waste'),
+            'ghg_reduction': item.get('ghg_reduction'),
+            'proportion_percent': item.get('proportion_percent'),
+        })
+    # Sort each group's sub-materials by total_waste desc
+    for k in grouped_by_main:
+        grouped_by_main[k].sort(key=lambda x: x['total_waste'], reverse=True)
     
     return {
         'main_material': {
@@ -506,7 +588,8 @@ def _handle_materials_report(
             'total_waste': total_waste_main,
         },
         'sub_material': {
-            'porportions': sub_proportions,
+            'porportions': sub_proportions,  # flat list (kept for compatibility)
+            'porportions_grouped': grouped_by_main,  # new grouped structure by main material name
             'total_waste': sub_total_waste,
         }
     }
@@ -532,7 +615,8 @@ def _handle_diversion_report(
     sankey_map = {}
     material_table_map = {}
     main_material_ids = set()
-    destination_ids = set()
+    # Track unique disposal methods (used instead of destination IDs)
+    disposal_methods = set()
     
     # Process all records
     for record in result.get('data', []):
@@ -558,14 +642,14 @@ def _handle_diversion_report(
         transaction_map[transaction_id]['records'].append({'status': status, 'weight': weight})
         transaction_map[transaction_id]['total_weight'] += weight
         
-        # Extract destination
-        destination_id = _extract_destination_id(record.get('notes', ''))
+        # Use disposal_method directly from transaction_records (instead of destination in notes)
+        disposal_method = (record.get('disposal_method') or '').strip() or None
         
-        # Build sankey data (MainMaterial -> Destination flows)
-        if main_material_id and destination_id:
+        # Build sankey data (MainMaterial -> DisposalMethod flows)
+        if main_material_id and disposal_method:
             main_material_ids.add(main_material_id)
-            destination_ids.add(destination_id)
-            key = (main_material_id, destination_id)
+            disposal_methods.add(disposal_method)
+            key = (main_material_id, disposal_method)
             sankey_map[key] = sankey_map.get(key, 0.0) + weight
         
         # Build material_table data
@@ -593,25 +677,24 @@ def _handle_diversion_report(
                     material_entry['transactions'][transaction_id] = []
                 material_entry['transactions'][transaction_id].append(status)
             
-            # Track destinations
-            if destination_id:
-                destination_ids.add(destination_id)
-                material_entry['destinations'].add(destination_id)
+            # Track disposal methods for this main material
+            if disposal_method:
+                disposal_methods.add(disposal_method)
+                material_entry['destinations'].add(disposal_method)
     
     # Calculate completion metrics
     total_transactions, completed_transactions, complete_transfer = _check_transaction_completion(transaction_map)
     completed_rate = (completed_transactions / total_transactions * 100) if total_transactions > 0 else 0.0
     processing_transfer = 100.0 - completed_rate
     
-    # Fetch names from database
+    # Fetch main material names; disposal methods are already human-readable strings
     main_material_names = _fetch_main_material_names(reports_service.db, main_material_ids)
-    destination_names = _fetch_destination_names(reports_service.db, destination_ids)
     
     # Build sankey_data array
     sankey_data = [["From", "To", "Weight"]]
-    for (mm_id, dest_id), weight in sankey_map.items():
+    for (mm_id, method), weight in sankey_map.items():
         from_name = main_material_names.get(mm_id, f"Material {mm_id}")
-        to_name = destination_names.get(dest_id, f"Location {dest_id}")
+        to_name = method or "Unknown Disposal"
         sankey_data.append([from_name, to_name, weight])
     
     # Build material_table
@@ -633,11 +716,8 @@ def _handle_diversion_report(
         )
         status = 'Completed' if all_completed else 'Processing'
         
-        # Get destination names
-        destination_names_list = [
-            destination_names.get(dest_id, f"Location {dest_id}")
-            for dest_id in entry['destinations']
-        ]
+        # Get disposal methods list
+        destination_names_list = [dm for dm in entry['destinations']]
         
         # Get material name
         material_name = main_material_names.get(main_material_id, f"Material {main_material_id}")
@@ -740,6 +820,7 @@ def _handle_performance_report(
         material_metrics = {}
         total_weight = 0.0
         recyclable_weight = 0.0
+        general_weight = 0.0
         
         for record in records:
             material = record.get('material') or {}
@@ -759,6 +840,9 @@ def _handle_performance_report(
             # Check if recyclable (category 1 or 3)
             if cat_id_int in (1, 3):
                 recyclable_weight += weight
+            # Sum general weight (category 4)
+            if cat_id_int == 4:
+                general_weight += weight
         
         recycling_rate = (recyclable_weight / total_weight * 100) if total_weight > 0 else 0.0
         
@@ -769,7 +853,8 @@ def _handle_performance_report(
             'metrics': metrics,
             'totalWasteKg': round(total_weight, 2),
             'recyclingRatePercent': round(recycling_rate, 2),
-            'recyclable_weight': round(recyclable_weight, 2)
+            'recyclable_weight': round(recyclable_weight, 2),
+            'general_weight': round(general_weight, 2)
         }
     
     # Determine the maximum depth of the hierarchy
@@ -901,6 +986,7 @@ def _handle_performance_report(
             if level == 0:
                 item['recyclingRatePercent'] = calc['recyclingRatePercent']
                 item['recyclable_weight'] = calc['recyclable_weight']
+                item['general_weight'] = calc['general_weight']
             
             # Get config for this level
             if level < len(level_configs):
@@ -943,11 +1029,10 @@ def _handle_comparison_report(
     # Build left and right date ranges
     left_from, left_to = _compute_period_range(period, left_sel)
     right_from, right_to = _compute_period_range(period, right_sel)
-    print('LEFT FILTER',   left_from, left_to, left_sel)
-    print('RIGHT FILTER', right_from, right_to, right_sel)
 
     def fetch_side(date_from: Optional[str], date_to: Optional[str]) -> Dict[str, Any]:
-        side_filters = {k: v for k, v in filters.items() if k not in ('period', 'leftSelection', 'rightSelection', 'date_from', 'date_to')}
+        # For comparison, only use period-derived date range; ignore all other filters
+        side_filters = {}
         if date_from:
             side_filters['date_from'] = date_from
         if date_to:
@@ -1044,6 +1129,17 @@ def _handle_comparison_report(
         ordered_material_items = sorted(material_map.items(), key=lambda kv: kv[1], reverse=True)
         ordered_material_map: Dict[str, float] = {name: val for name, val in ordered_material_items}
 
+        # Clamp tiny floating point residuals and round values
+        EPS = 1e-6
+        def clamp_round(x: float) -> float:
+            if -EPS < x < EPS:
+                return 0.0
+            return round(x, 2)
+
+        ordered_material_map = {k: clamp_round(v) for k, v in ordered_material_map.items()}
+        ordered_month_map = {k: clamp_round(v) for k, v in ordered_month_map.items()}
+        total_waste = clamp_round(total_waste)
+
         return {
             'material': ordered_material_map,
             'month': ordered_month_map,
@@ -1109,10 +1205,26 @@ def handle_reports_routes(event: Dict[str, Any], **common_params) -> Dict[str, A
             return _handle_diversion_report(reports_service, organization_id, filters)
         
         elif path == '/api/reports/filter/origins':
-            return reports_service.get_origin_by_organization(organization_id=organization_id)
+            filters = _build_filters_from_query_params(query_params)
+            # Remove origin filters - only use material filters for origins endpoint
+            filters.pop('origin_ids', None)
+            # Do not apply default YTD for filter endpoints; only use dates if explicitly provided
+            has_date = any(k in query_params for k in ('date_from', 'date_to', 'datefrom', 'dateto'))
+            if not has_date:
+                filters.pop('date_from', None)
+                filters.pop('date_to', None)
+            return reports_service.get_origin_by_organization(organization_id=organization_id, filters=filters)
 
         elif path == '/api/reports/filter/materials':
-            return reports_service.get_material_by_organization(organization_id=organization_id)
+            filters = _build_filters_from_query_params(query_params)
+            # Remove material filters - only use origin filters for materials endpoint
+            filters.pop('material_ids', None)
+            # Do not apply default YTD for filter endpoints; only use dates if explicitly provided
+            has_date = any(k in query_params for k in ('date_from', 'date_to', 'datefrom', 'dateto'))
+            if not has_date:
+                filters.pop('date_from', None)
+                filters.pop('date_to', None)
+            return reports_service.get_material_by_organization(organization_id=organization_id, filters=filters)
         
         elif path == '/api/reports/comparison':
             filters = _build_filters_from_query_params(query_params)
