@@ -681,23 +681,31 @@ def handle_get_audit_report(
 
         if org_setup and org_setup.root_nodes:
             # Collect all district (level 3) and sub-district (level 4) IDs from root_nodes
+            # Also maintain the parent-child relationship
             district_ids = []
-            sub_district_ids = []
+            district_subdistrict_map = {}  # {district_id: [subdistrict_ids]}
 
-            def extract_location_ids(nodes, current_level=1):
+            def extract_location_hierarchy(nodes, current_level=1, parent_district_id=None):
                 for node in nodes if isinstance(nodes, list) else []:
                     node_id = node.get('nodeId')
                     children = node.get('children', [])
 
                     if current_level == 3:  # District level
                         district_ids.append(node_id)
+                        district_subdistrict_map[node_id] = []
+                        # Recursively process children with this district as parent
+                        if children:
+                            extract_location_hierarchy(children, current_level + 1, parent_district_id=node_id)
                     elif current_level == 4:  # Sub-district level
-                        sub_district_ids.append(node_id)
+                        # Add this sub-district to its parent district's list
+                        if parent_district_id and parent_district_id in district_subdistrict_map:
+                            district_subdistrict_map[parent_district_id].append(node_id)
+                    else:
+                        # Continue traversing for other levels
+                        if children:
+                            extract_location_hierarchy(children, current_level + 1, parent_district_id)
 
-                    if children:
-                        extract_location_ids(children, current_level + 1)
-
-            extract_location_ids(org_setup.root_nodes)
+            extract_location_hierarchy(org_setup.root_nodes)
 
             # Fetch actual district names from user_locations table
             if district_ids:
@@ -709,14 +717,30 @@ def handle_get_audit_report(
                     for d in district_records
                 ]
 
+            # Fetch all sub-district IDs
+            all_subdistrict_ids = []
+            for subdistrict_list in district_subdistrict_map.values():
+                all_subdistrict_ids.extend(subdistrict_list)
+
             # Fetch actual sub-district names from user_locations table
-            if sub_district_ids:
+            subdistrict_records_dict = {}
+            if all_subdistrict_ids:
                 sub_district_records = db_session.query(UserLocation).filter(
-                    UserLocation.id.in_(sub_district_ids)
+                    UserLocation.id.in_(all_subdistrict_ids)
                 ).all()
-                sub_districts = [
-                    {'id': str(sd.id), 'name': sd.name_en or sd.name_th or sd.display_name or str(sd.id)}
+                # Create a dict for quick lookup
+                subdistrict_records_dict = {
+                    str(sd.id): {'id': str(sd.id), 'name': sd.name_en or sd.name_th or sd.display_name or str(sd.id)}
                     for sd in sub_district_records
+                }
+
+            # Build sub_districts structure: {district_id: [subdistrict objects]}
+            sub_districts = {}
+            for district_id, subdistrict_ids in district_subdistrict_map.items():
+                sub_districts[str(district_id)] = [
+                    subdistrict_records_dict[str(sd_id)]
+                    for sd_id in subdistrict_ids
+                    if str(sd_id) in subdistrict_records_dict
                 ]
 
         # Status options
@@ -726,17 +750,22 @@ def handle_get_audit_report(
             {'value': 'rejected', 'label': 'ไม่อนุมัติ'}
         ]
 
-        # Sort districts and sub_districts by name
+        # Sort districts by name
         districts_sorted = sorted(districts, key=lambda x: x['name'])
-        sub_districts_sorted = sorted(sub_districts, key=lambda x: x['name'])
 
-        # Add 'all' option to both districts and sub_districts at the beginning
+        # Add 'all' option to districts at the beginning
         districts_with_all = [{'id': 'all', 'name': 'ทั้งหมด'}] + districts_sorted
-        sub_districts_with_all = [{'id': 'all', 'name': 'ทั้งหมด'}] + sub_districts_sorted
+
+        # Sort sub_districts within each district and add 'all' option
+        sub_districts_sorted = {}
+        for district_id, subdistrict_list in sub_districts.items():
+            sorted_list = sorted(subdistrict_list, key=lambda x: x['name'])
+            # Add 'all' option for each district's sub-district list
+            sub_districts_sorted[district_id] = [{'id': 'all', 'name': 'ทั้งหมด'}] + sorted_list
 
         filter_options = {
             'districts': districts_with_all,
-            'sub_districts': sub_districts_with_all,
+            'sub_districts': sub_districts_sorted,
             'statuses': statuses
         }
 
