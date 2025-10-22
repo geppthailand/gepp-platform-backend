@@ -10,6 +10,7 @@ from typing import Dict, Any, Optional
 
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy import update
 
 from ...models.transactions.transactions import Transaction, TransactionStatus
 from ...database import get_session
@@ -94,15 +95,12 @@ def reset_all_transactions_to_pending(user_id: int, organization_id: int, **kwar
                         }
                     }
 
-                # Reset all transactions to pending status
+                # Collect transaction IDs and old statuses
                 updated_transactions = []
+                transaction_ids = []
                 for transaction in transactions_to_reset:
                     old_status = transaction.status.value if hasattr(transaction.status, 'value') else str(transaction.status)
-                    transaction.status = TransactionStatus.pending
-                    transaction.updated_date = datetime.now(timezone.utc)
-
-                    # Clear any audit notes to allow fresh auditing
-                    transaction.notes = None
+                    transaction_ids.append(transaction.id)
 
                     updated_transactions.append({
                         "transaction_id": transaction.id,
@@ -111,6 +109,20 @@ def reset_all_transactions_to_pending(user_id: int, organization_id: int, **kwar
                     })
 
                     logger.info(f"Reset transaction {transaction.id} from {old_status} to pending")
+
+                # Use SQL UPDATE to reset all transactions at once
+                # This ensures ai_audit_status is explicitly set to NULL
+                session.execute(
+                    update(Transaction)
+                    .where(Transaction.id.in_(transaction_ids))
+                    .values(
+                        status=TransactionStatus.pending,
+                        updated_date=datetime.now(timezone.utc),
+                        notes=None,
+                        ai_audit_status=None,
+                        ai_audit_note=None
+                    )
+                )
 
                 # Commit the changes
                 session.commit()
@@ -157,15 +169,12 @@ def reset_all_transactions_to_pending(user_id: int, organization_id: int, **kwar
                         }
                     }
 
-                # Reset all transactions to pending status
+                # Collect transaction IDs and old statuses
                 updated_transactions = []
+                transaction_ids = []
                 for transaction in transactions_to_reset:
                     old_status = transaction.status.value if hasattr(transaction.status, 'value') else str(transaction.status)
-                    transaction.status = TransactionStatus.pending
-                    transaction.updated_date = datetime.now(timezone.utc)
-
-                    # Clear any audit notes to allow fresh auditing
-                    transaction.notes = None
+                    transaction_ids.append(transaction.id)
 
                     updated_transactions.append({
                         "transaction_id": transaction.id,
@@ -174,6 +183,20 @@ def reset_all_transactions_to_pending(user_id: int, organization_id: int, **kwar
                     })
 
                     logger.info(f"Reset transaction {transaction.id} from {old_status} to pending")
+
+                # Use SQL UPDATE to reset all transactions at once
+                # This ensures ai_audit_status is explicitly set to NULL
+                session.execute(
+                    update(Transaction)
+                    .where(Transaction.id.in_(transaction_ids))
+                    .values(
+                        status=TransactionStatus.pending,
+                        updated_date=datetime.now(timezone.utc),
+                        notes=None,
+                        ai_audit_status=None,
+                        ai_audit_note=None
+                    )
+                )
 
                 # Commit the changes
                 session.commit()

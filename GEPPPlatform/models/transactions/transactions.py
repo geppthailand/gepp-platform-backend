@@ -37,6 +37,13 @@ class TransactionPriority(enum.Enum):
     HIGH = 'high'
     URGENT = 'urgent'
 
+class AIAuditStatus(enum.Enum):
+    null = 'null'  # Not yet queued for audit (mimics NULL)
+    queued = 'queued'  # Queued for AI audit
+    approved = 'approved'
+    rejected = 'rejected'
+    no_action = 'no_action'
+
 class Transaction(Base, BaseModel):
     """
     Main transaction table - represents a batch/shipment of materials
@@ -52,6 +59,15 @@ class Transaction(Base, BaseModel):
 
     # Status
     status = Column(Enum(TransactionStatus), default=TransactionStatus.pending)
+
+    # AI Audit Status - separate from actual status
+    ai_audit_status = Column(Enum(AIAuditStatus), nullable=False, default=AIAuditStatus.null)
+    ai_audit_note = Column(Text, nullable=True)  # Stores full audit response JSONB as text
+    reject_triggers = Column(JSONB, nullable=False, default=[])  # Array of rule_ids that triggered rejection
+    warning_triggers = Column(JSONB, nullable=False, default=[])  # Array of rule_ids that triggered warnings
+
+    # User Audit Status - tracks if transaction was manually audited by user
+    is_user_audit = Column(Boolean, nullable=False, default=False)
 
     # Organization and locations
     organization_id = Column(BigInteger, ForeignKey('organizations.id'), nullable=True)

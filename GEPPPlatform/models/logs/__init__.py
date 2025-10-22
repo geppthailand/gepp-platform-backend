@@ -11,25 +11,31 @@ from .audit_logs import (
     ComplianceLog, SecurityLog
 )
 
-# Platform logging models  
+# Platform logging models
 from .platform_logs import (
     PlatformType, ConfigurationType, ChangeImpact, ApprovalStatus,
     PlatformConfigurationLog, FeatureFlagLog, SystemSettingLog,
     IntegrationConfigLog, BusinessRuleLog, PlatformMetricsLog
 )
 
+# Transaction audit history
+from .transaction_audit_history import TransactionAuditHistory
+
 __all__ = [
     # Audit logging enums
     'ActionType', 'ActorType', 'ResourceType', 'Severity',
-    
+
     # Platform logging enums
     'PlatformType', 'ConfigurationType', 'ChangeImpact', 'ApprovalStatus',
-    
+
     # Audit logging models
     'AuditLog', 'AdminActionLog', 'UserActivityLog', 'SystemLog',
     'ComplianceLog', 'SecurityLog',
-    
+
     # Platform logging models
     'PlatformConfigurationLog', 'FeatureFlagLog', 'SystemSettingLog',
-    'IntegrationConfigLog', 'BusinessRuleLog', 'PlatformMetricsLog'
+    'IntegrationConfigLog', 'BusinessRuleLog', 'PlatformMetricsLog',
+
+    # Transaction audit history
+    'TransactionAuditHistory'
 ]

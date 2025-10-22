@@ -205,19 +205,12 @@ class ManualAuditService:
                     'data': None
                 }
 
-            # Check if transaction is in pending status
-            if transaction.status != TransactionStatus.pending:
-                return {
-                    'success': False,
-                    'error': f'Transaction {transaction_id} is not pending (current status: {transaction.status.value})',
-                    'data': None
-                }
-
-            # Update transaction status to approved
+            # Update transaction status to approved (allow re-auditing regardless of current status)
             transaction.status = TransactionStatus.approved
             transaction.approved_by_id = auditor_user_id
             transaction.updated_by_id = auditor_user_id
             transaction.updated_date = datetime.now(timezone.utc)
+            transaction.is_user_audit = True  # Mark as manually audited by user
 
             # Add audit notes
             audit_note = f"Manual Audit - APPROVED by User #{auditor_user_id} at {datetime.now(timezone.utc).isoformat()}"
@@ -294,19 +287,12 @@ class ManualAuditService:
                     'data': None
                 }
 
-            # Check if transaction is in pending status
-            if transaction.status != TransactionStatus.pending:
-                return {
-                    'success': False,
-                    'error': f'Transaction {transaction_id} is not pending (current status: {transaction.status.value})',
-                    'data': None
-                }
-
-            # Update transaction status to rejected
+            # Update transaction status to rejected (allow re-auditing regardless of current status)
             transaction.status = TransactionStatus.rejected
             transaction.approved_by_id = auditor_user_id  # Track who made the decision
             transaction.updated_by_id = auditor_user_id
             transaction.updated_date = datetime.now(timezone.utc)
+            transaction.is_user_audit = True  # Mark as manually audited by user
 
             # Add rejection notes
             rejection_note = f"Manual Audit - REJECTED by User #{auditor_user_id} at {datetime.now(timezone.utc).isoformat()}"
@@ -382,6 +368,9 @@ class ManualAuditService:
             'created_by_id': transaction.created_by_id,
             'updated_by_id': transaction.updated_by_id,
             'approved_by_id': transaction.approved_by_id,
+            'ai_audit_status': transaction.ai_audit_status.value if hasattr(transaction, 'ai_audit_status') and transaction.ai_audit_status else None,
+            'ai_audit_note': transaction.ai_audit_note if hasattr(transaction, 'ai_audit_note') else None,
+            'is_user_audit': transaction.is_user_audit if hasattr(transaction, 'is_user_audit') else False,
             'is_active': transaction.is_active,
             'created_date': transaction.created_date.isoformat() if transaction.created_date else None,
             'updated_date': transaction.updated_date.isoformat() if transaction.updated_date else None,

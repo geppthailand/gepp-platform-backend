@@ -51,7 +51,7 @@ class AuditRulesService:
                 thresholds=rule_data.get('thresholds'),
                 metrics=rule_data.get('metrics'),
                 actions=rule_data.get('actions', []),
-                is_global=rule_data.get('is_global', True),
+                is_global=rule_data.get('is_global', False),  # Default to False for organization-specific rules
                 organization_id=rule_data.get('organization_id'),
                 is_active=rule_data.get('is_active', True)
             )
@@ -132,8 +132,8 @@ class AuditRulesService:
                     query = query.filter(AuditRule.is_global == filters['is_global'])
 
                 # Filter by organization
-                # if filters.get('organization_id'):
-                #     query = query.filter(AuditRule.organization_id == filters['organization_id'])
+                if filters.get('organization_id'):
+                    query = query.filter(AuditRule.organization_id == filters['organization_id'])
 
                 # Text search in rule name, rule_id, or condition
                 if filters.get('search'):
@@ -200,8 +200,15 @@ class AuditRulesService:
             if not rule:
                 raise NotFoundException(f'Audit rule with ID {rule_id} not found')
 
+            # Merge update data with current rule data for validation
+            validation_data = {
+                'is_global': rule.is_global,
+                'organization_id': rule.organization_id
+            }
+            validation_data.update(update_data)
+
             # Validate update data
-            validation_result = self._validate_rule_data(update_data, is_update=True)
+            validation_result = self._validate_rule_data(validation_data, is_update=True)
             if not validation_result['valid']:
                 error_messages = '; '.join(validation_result['errors'])
                 raise ValidationException(f'Rule validation failed: {error_messages}')
@@ -410,7 +417,9 @@ class AuditRulesService:
                         errors.append(f'actions[{i}] must have an "action" field')
 
         # Validate organization_id if not global
-        if not rule_data.get('is_global', True) and not rule_data.get('organization_id'):
+        # For non-global rules (is_global=False), organization_id is required
+        is_global = rule_data.get('is_global', False if is_update else True)
+        if is_global == False and not rule_data.get('organization_id'):
             errors.append('organization_id is required for non-global rules')
 
         return {

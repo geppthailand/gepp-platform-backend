@@ -358,8 +358,10 @@ def _handle_overview_report(
         total_waste += weight
         ghg_reduction += record_ghg
         
-        # Aggregate by month for chart_data
-        dt = _parse_datetime(record.get('created_date'))
+        # Aggregate by month for chart_data (use transaction_date, not created_date)
+        # First try transaction_date from the record, fallback to created_date
+        transaction_date = record.get('transaction_date') or record.get('created_date')
+        dt = _parse_datetime(transaction_date)
         if dt:
             y = dt.year
             m = dt.month

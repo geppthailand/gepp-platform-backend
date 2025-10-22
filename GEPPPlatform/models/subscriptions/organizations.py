@@ -9,13 +9,14 @@ from ..base import Base, BaseModel
 
 class Organization(Base, BaseModel):
     __tablename__ = 'organizations'
-    
+
     name = Column(String(255))
     description = Column(Text)
     organization_info_id = Column(BigInteger, ForeignKey('organization_info.id'))
     owner_id = Column(BigInteger, ForeignKey('user_locations.id'))  # Organization owner
     subscription_id = Column(BigInteger, ForeignKey('subscriptions.id'))  # Current subscription
     system_role_id = Column(BigInteger, ForeignKey('system_roles.id'))  # System permissions role
+    allow_ai_audit = Column(Boolean, default=False)  # Permission to use AI for transaction auditing
     
     # Relationships
     organization_info = relationship("OrganizationInfo", back_populates="organization")
