@@ -40,7 +40,22 @@ def handle_user_routes(event: Dict[str, Any], data: Dict[str, Any], **params) ->
     current_user_email = current_user.get('email')
 
     # Route to specific handlers
-    if '/api/users/invite' in path and method == 'POST':
+    # IMPORTANT: Profile routes must come BEFORE generic /api/users/{user_id} routes
+    # to avoid treating "profile" as a user_id
+
+    if '/api/users/profile/upload-presigned-url' in path and method == 'POST':
+        # Get presigned URL for profile image upload: /api/users/profile/upload-presigned-url
+        return handle_get_profile_upload_presigned_url(user_service, data, current_user_id)
+
+    elif '/api/users/profile' in path and method == 'GET':
+        # Get current user's profile: /api/users/profile
+        return handle_get_user_profile(user_service, current_user_id)
+
+    elif '/api/users/profile' in path and method == 'PUT':
+        # Update current user's profile: /api/users/profile
+        return handle_update_user_profile(user_service, data, current_user_id)
+
+    elif '/api/users/invite' in path and method == 'POST':
         return handle_send_invitation(user_service, data, current_user_id)
 
     elif '/api/users/invitation/' in path and method == 'POST':
@@ -50,21 +65,6 @@ def handle_user_routes(event: Dict[str, Any], data: Dict[str, Any], **params) ->
 
     elif '/api/users/bulk' in path and method == 'POST':
         return handle_bulk_operations(user_service, data, current_user_id)
-
-    elif '/api/users/' in path and method == 'GET':
-        # Get user details: /api/users/{user_id}
-        user_id = path.split('/users/')[1].rstrip('/')
-        return handle_get_user_details(user_service, user_id)
-
-    elif '/api/users/' in path and method == 'PUT':
-        # Update user: /api/users/{user_id}
-        user_id = path.split('/users/')[1].rstrip('/')
-        return handle_update_user(user_service, user_id, data, current_user_id)
-
-    elif '/api/users/' in path and method == 'DELETE':
-        # Delete user: /api/users/{user_id}
-        user_id = path.split('/users/')[1].rstrip('/')
-        return handle_delete_user(user_service, user_id, current_user_id)
 
     elif '/api/users/' in path and '/suspend' in path and method == 'POST':
         # Suspend user: /api/users/{user_id}/suspend
@@ -80,6 +80,21 @@ def handle_user_routes(event: Dict[str, Any], data: Dict[str, Any], **params) ->
         # Reset password: /api/users/{user_id}/reset-password
         user_id = path.split('/users/')[1].split('/')[0]
         return handle_reset_password(user_service, user_id, current_user_id)
+
+    elif '/api/users/' in path and method == 'GET':
+        # Get user details: /api/users/{user_id}
+        user_id = path.split('/users/')[1].rstrip('/')
+        return handle_get_user_details(user_service, user_id)
+
+    elif '/api/users/' in path and method == 'PUT':
+        # Update user: /api/users/{user_id}
+        user_id = path.split('/users/')[1].rstrip('/')
+        return handle_update_user(user_service, user_id, data, current_user_id)
+
+    elif '/api/users/' in path and method == 'DELETE':
+        # Delete user: /api/users/{user_id}
+        user_id = path.split('/users/')[1].rstrip('/')
+        return handle_delete_user(user_service, user_id, current_user_id)
 
     elif '/api/users' == path and method == 'GET':
         # List users with filters (pass current_user for organization filtering)
@@ -509,3 +524,57 @@ def handle_get_locations(user_service: UserService, query_params: Dict[str, Any]
 
     except Exception as e:
         raise APIException(f'Error fetching locations: {str(e)}')
+
+
+def handle_get_user_profile(user_service: UserService, current_user_id: str) -> Dict[str, Any]:
+    """Handle GET /api/users/profile - Get current user's profile"""
+    try:
+        result = user_service.get_user_profile(current_user_id)
+        if not result:
+            raise NotFoundException('User profile not found')
+
+        return result
+
+    except Exception as e:
+        raise APIException(f'Failed to get user profile: {str(e)}')
+
+
+def handle_update_user_profile(
+    user_service: UserService,
+    data: Dict[str, Any],
+    current_user_id: str
+) -> Dict[str, Any]:
+    """Handle PUT /api/users/profile - Update current user's profile"""
+    try:
+        result = user_service.update_user_profile(
+            user_id=current_user_id,
+            updates=data
+        )
+
+        return result
+
+    except Exception as e:
+        raise APIException(f'Failed to update user profile: {str(e)}')
+
+
+def handle_get_profile_upload_presigned_url(
+    user_service: UserService,
+    data: Dict[str, Any],
+    current_user_id: str
+) -> Dict[str, Any]:
+    """Handle POST /api/users/profile/upload-presigned-url - Get presigned URL for profile image upload"""
+    try:
+        # Validate required fields
+        file_name = data.get('file_name')
+        if not file_name:
+            raise ValidationException('Missing required field: file_name')
+
+        result = user_service.get_profile_image_presigned_url(
+            user_id=current_user_id,
+            file_name=file_name
+        )
+
+        return result
+
+    except Exception as e:
+        raise APIException(f'Failed to get presigned URL: {str(e)}')

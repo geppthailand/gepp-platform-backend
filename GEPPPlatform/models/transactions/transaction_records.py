@@ -55,7 +55,8 @@ class TransactionRecord(Base, BaseModel):
     created_by_id = Column(BigInteger, ForeignKey('user_locations.id'), nullable=False)
     approved_by_id = Column(BigInteger, ForeignKey('user_locations.id'), nullable=True)
 
-    # Completion tracking
+    # Date tracking
+    transaction_date = Column(DateTime)  # Specific transaction date (can differ from created_date)
     completed_date = Column(DateTime)
 
     # Constraints

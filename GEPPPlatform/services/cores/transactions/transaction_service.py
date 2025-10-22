@@ -585,6 +585,16 @@ class TransactionService:
                     'errors': validation_errors
                 }
 
+            # Parse transaction_date if provided
+            transaction_date = None
+            if record_data.get('transaction_date'):
+                from datetime import datetime
+                if isinstance(record_data['transaction_date'], str):
+                    # Parse ISO format string
+                    transaction_date = datetime.fromisoformat(record_data['transaction_date'].replace('Z', '+00:00'))
+                elif isinstance(record_data['transaction_date'], datetime):
+                    transaction_date = record_data['transaction_date']
+
             # Create transaction record
             transaction_record = TransactionRecord(
                 status=record_data.get('status', TransactionRecordStatus.pending.value),
@@ -608,6 +618,7 @@ class TransactionService:
                 hazardous_level=record_data.get('hazardous_level', 0),
                 treatment_method=record_data.get('treatment_method'),
                 disposal_method=record_data.get('disposal_method'),
+                transaction_date=transaction_date,  # Add transaction_date
                 created_by_id=record_data.get('created_by_id')
             )
 
@@ -883,6 +894,7 @@ class TransactionService:
             'disposal_method': record.disposal_method,
             'created_by_id': record.created_by_id,
             'approved_by_id': record.approved_by_id,
+            'transaction_date': record.transaction_date.isoformat() if record.transaction_date else None,
             'completed_date': record.completed_date.isoformat() if record.completed_date else None,
             'is_active': record.is_active,
             'created_date': record.created_date.isoformat() if record.created_date else None,
