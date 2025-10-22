@@ -174,22 +174,16 @@ class ReportsService:
             records_data = []
             for record in transaction_records:
                 record_dict = self._transaction_record_to_dict(record)
-
+                
                 # Add material data if report_type needs it
                 if report_type in ('overview', 'diversion', 'performance', 'materials', 'comparison') and record.material_id:
                     record_dict['material'] = materials_map.get(record.material_id)
-
-                # Include origin_id and transaction_date from the created transaction for downstream aggregations
+                
+                # Include origin_id from the created transaction for downstream aggregations
                 try:
-                    if record.created_transaction:
-                        record_dict['origin_id'] = record.created_transaction.origin_id
-                        record_dict['transaction_date'] = record.created_transaction.transaction_date.isoformat() if record.created_transaction.transaction_date else None
-                    else:
-                        record_dict['origin_id'] = None
-                        record_dict['transaction_date'] = None
+                    record_dict['origin_id'] = record.created_transaction.origin_id if record.created_transaction else None
                 except Exception:
                     record_dict['origin_id'] = None
-                    record_dict['transaction_date'] = None
 
                 # Mark rejection status for downstream filtering
                 try:
@@ -197,7 +191,7 @@ class ReportsService:
                     record_dict['is_rejected'] = (tx_status == TransactionStatus.rejected)
                 except Exception:
                     record_dict['is_rejected'] = False
-
+                
                 records_data.append(record_dict)
             
             return {
