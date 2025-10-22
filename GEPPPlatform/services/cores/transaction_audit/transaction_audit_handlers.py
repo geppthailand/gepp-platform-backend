@@ -271,28 +271,22 @@ def handle_reset_all_transactions(
     try:
         logger.info(f"Resetting all transactions for organization {organization_id}")
 
-        # Query ALL transactions for the organization (not just non-pending ones)
-        all_transactions = db_session.query(Transaction).filter(
+        # Use bulk update SQL query for better performance
+        updated_count = db_session.query(Transaction).filter(
             and_(
                 Transaction.organization_id == organization_id,
                 Transaction.deleted_date.is_(None)
             )
-        ).all()
-
-        updated_count = 0
-
-        # Reset each transaction
-        for transaction in all_transactions:
-            # Reset transaction status to pending
-            transaction.status = TransactionStatus.pending
-
-            # Reset AI audit status to null
-            transaction.ai_audit_status = AIAuditStatus.null
-            transaction.ai_audit_note = None
-            transaction.reject_triggers = []  # Clear reject triggers
-            transaction.warning_triggers = []  # Clear warning triggers
-
-            updated_count += 1
+        ).update(
+            {
+                Transaction.status: TransactionStatus.pending,
+                Transaction.ai_audit_status: AIAuditStatus.null,
+                Transaction.ai_audit_note: None,
+                Transaction.reject_triggers: [],
+                Transaction.warning_triggers: []
+            },
+            synchronize_session=False
+        )
 
         # Commit changes
         db_session.commit()
@@ -566,12 +560,15 @@ def handle_get_audit_report(
         total_transactions = len(all_transactions)
         approved_transactions = [t for t in all_transactions if t.ai_audit_status == AIAuditStatus.approved]
         rejected_transactions = [t for t in all_transactions if t.ai_audit_status == AIAuditStatus.rejected]
+        queued_transactions = [t for t in all_transactions if t.ai_audit_status == AIAuditStatus.queued]
 
         approved_count = len(approved_transactions)
         rejected_count = len(rejected_transactions)
+        queued_count = len(queued_transactions)
 
         approved_percentage = round((approved_count / total_transactions * 100), 2) if total_transactions > 0 else 0
         rejected_percentage = round((rejected_count / total_transactions * 100), 2) if total_transactions > 0 else 0
+        queued_percentage = round((queued_count / total_transactions * 100), 2) if total_transactions > 0 else 0
 
         # Monthly trend data (for stacked bar chart)
         # Initialize all months for current year with zero values
@@ -775,8 +772,10 @@ def handle_get_audit_report(
                 'total_transactions': total_transactions,
                 'approved_count': approved_count,
                 'rejected_count': rejected_count,
+                'queued_count': queued_count,
                 'approved_percentage': approved_percentage,
-                'rejected_percentage': rejected_percentage
+                'rejected_percentage': rejected_percentage,
+                'queued_percentage': queued_percentage
             },
             'monthly_trends': monthly_trends,
             'rejection_breakdown': rejection_breakdown,

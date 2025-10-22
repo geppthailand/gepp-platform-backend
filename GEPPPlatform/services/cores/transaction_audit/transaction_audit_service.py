@@ -968,8 +968,8 @@ If images contradict data, flag violation with specific reason.
         try:
             logger.info(f"Adding transactions to AI audit queue for organization {organization_id}")
 
-            # Build base query for transactions with 'null' ai_audit_status
-            query = db.query(Transaction).filter(
+            # First, get the transaction IDs that will be queued (for audit history)
+            id_query = db.query(Transaction.id).filter(
                 Transaction.organization_id == organization_id,
                 Transaction.ai_audit_status == AIAuditStatus.null,
                 Transaction.deleted_date.is_(None)
@@ -977,17 +977,26 @@ If images contradict data, flag violation with specific reason.
 
             # Apply transaction IDs filter if provided
             if transaction_ids:
-                query = query.filter(Transaction.id.in_(transaction_ids))
+                id_query = id_query.filter(Transaction.id.in_(transaction_ids))
 
-            transactions_to_queue = query.all()
-            queued_count = 0
-            queued_transaction_ids = []
+            queued_transaction_ids = [txn_id for (txn_id,) in id_query.all()]
 
-            # Update ai_audit_status to 'queued' for each transaction
-            for transaction in transactions_to_queue:
-                transaction.ai_audit_status = AIAuditStatus.queued
-                queued_transaction_ids.append(transaction.id)
-                queued_count += 1
+            # Build update query for transactions with 'null' ai_audit_status
+            update_query = db.query(Transaction).filter(
+                Transaction.organization_id == organization_id,
+                Transaction.ai_audit_status == AIAuditStatus.null,
+                Transaction.deleted_date.is_(None)
+            )
+
+            # Apply transaction IDs filter if provided
+            if transaction_ids:
+                update_query = update_query.filter(Transaction.id.in_(transaction_ids))
+
+            # Use bulk update SQL query for better performance
+            queued_count = update_query.update(
+                {Transaction.ai_audit_status: AIAuditStatus.queued},
+                synchronize_session=False
+            )
 
             # Create audit history record with 'in_progress' status
             # This will be picked up and processed by cron job later
