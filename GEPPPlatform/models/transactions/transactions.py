@@ -73,6 +73,9 @@ class Transaction(Base, BaseModel):
     organization_id = Column(BigInteger, ForeignKey('organizations.id'), nullable=True)
     origin_id = Column(BigInteger, ForeignKey('user_locations.id'), nullable=True)
     destination_id = Column(BigInteger, ForeignKey('user_locations.id'), nullable=True)
+    location_tag_id = Column(BigInteger, nullable=True)
+    ext_id_1 = Column(String(50), nullable=True)
+    ext_id_2 = Column(String(50), nullable=True)
 
     # Aggregated data
     weight_kg = Column(DECIMAL(15, 4), nullable=False, default=0)
