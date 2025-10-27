@@ -220,14 +220,21 @@ def cron_process_audits(event, context):
                             allow_ai_audit
                         )
 
-                        # Increment ai_audit_usage by number of successfully processed transactions
-                        subscription.ai_audit_usage += len(audit_results)
+                        # Increment ai_audit_usage ONLY by number of SUCCESSFULLY processed transactions (no errors)
+                        # Filter out failed audits (those with 'error' key, like quota exceeded, API failures, etc.)
+                        successful_audits = [r for r in audit_results if not r.get('error')]
+                        failed_audits = [r for r in audit_results if r.get('error')]
+
+                        if failed_audits:
+                            logger.warning(f"Batch {batch_count}: {len(failed_audits)} audits failed and will not count toward quota. Errors: {[r.get('error')[:100] for r in failed_audits[:3]]}")
+
+                        subscription.ai_audit_usage += len(successful_audits)
                         db.commit()
 
                         batch_processed += len(audit_results)
                         batch_updated += updated_count
 
-                        logger.info(f"Batch {batch_count}: Processed {len(audit_results)} transactions, updated {updated_count} for organization {org_id}. AI audit usage: {subscription.ai_audit_usage}/{subscription.ai_audit_limit}")
+                        logger.info(f"Batch {batch_count}: Processed {len(audit_results)} transactions ({len(successful_audits)} successful, {len(failed_audits)} failed), updated {updated_count} for organization {org_id}. AI audit usage: {subscription.ai_audit_usage}/{subscription.ai_audit_limit}")
 
                     except Exception as org_error:
                         logger.error(f"Batch {batch_count}: Error processing organization {org_id}: {str(org_error)}")
