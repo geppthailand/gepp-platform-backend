@@ -752,3 +752,262 @@ class UserService:
             # Recursively extract from children
             if 'children' in node and isinstance(node['children'], list):
                 self._extract_node_ids(node['children'], location_ids)
+
+    # ========== PROFILE MANAGEMENT ==========
+
+    def get_user_profile(self, user_id: str) -> Dict[str, Any]:
+        """
+        Get user profile information (for the current logged-in user)
+        Returns all user_location fields relevant for profile editing
+        Profile image URL is converted to a presigned URL for secure viewing
+        """
+        user = self.crud.get_user_by_id(user_id, include_relations=True)
+        if not user:
+            from ....exceptions import NotFoundException
+            raise NotFoundException('User not found')
+
+        # Generate presigned URL for profile image if exists
+        profile_image_presigned_url = None
+        if user.profile_image_url:
+            profile_image_presigned_url = self._generate_view_presigned_url(
+                user.profile_image_url,
+                user.organization_id or 0,
+                int(user_id)
+            )
+
+        # Serialize user profile with all editable fields
+        profile_data = {
+            'id': user.id,
+            'display_name': user.display_name,
+            'name_en': user.name_en,
+            'name_th': user.name_th,
+            'email': user.email,
+            'phone': user.phone,
+            'profile_image_url': profile_image_presigned_url,  # Presigned URL for viewing
+            'profile_image_s3_url': user.profile_image_url,  # Original S3 URL (for reference)
+
+            # Address information
+            'address': user.address,
+            'postal_code': user.postal_code,
+            'country_id': user.country_id,
+            'province_id': user.province_id,
+            'district_id': user.district_id,
+            'subdistrict_id': user.subdistrict_id,
+            'coordinate': user.coordinate,
+
+            # Company information
+            'company_name': user.company_name,
+            'company_email': user.company_email,
+            'company_phone': user.company_phone,
+            'tax_id': user.tax_id,
+            'business_type': user.business_type,
+            'business_industry': user.business_industry,
+            'business_sub_industry': user.business_sub_industry,
+
+            # Profile documents
+            'national_id': user.national_id,
+            'national_card_image': user.national_card_image,
+            'business_registration_certificate': user.business_registration_certificate,
+
+            # Localization
+            'locale': user.locale,
+            'nationality_id': user.nationality_id,
+            'currency_id': user.currency_id,
+            'phone_code_id': user.phone_code_id,
+
+            # Additional info
+            'note': user.note,
+            'platform': user.platform.value if user.platform else None,
+            'organization_id': user.organization_id,
+            'is_active': user.is_active,
+            'created_date': user.created_date.isoformat() if user.created_date else None,
+            'updated_date': user.updated_date.isoformat() if user.updated_date else None,
+        }
+
+        # Add location relationships if available
+        if hasattr(user, 'country') and user.country:
+            profile_data['country'] = {
+                'id': user.country.id,
+                'name_en': user.country.name_en,
+                'name_th': getattr(user.country, 'name_th', None)
+            }
+
+        if hasattr(user, 'province') and user.province:
+            profile_data['province'] = {
+                'id': user.province.id,
+                'name_en': user.province.name_en,
+                'name_th': getattr(user.province, 'name_th', None)
+            }
+
+        if hasattr(user, 'district') and user.district:
+            profile_data['district'] = {
+                'id': user.district.id,
+                'name_en': user.district.name_en,
+                'name_th': getattr(user.district, 'name_th', None)
+            }
+
+        if hasattr(user, 'subdistrict') and user.subdistrict:
+            profile_data['subdistrict'] = {
+                'id': user.subdistrict.id,
+                'name_en': user.subdistrict.name_en,
+                'name_th': getattr(user.subdistrict, 'name_th', None)
+            }
+
+        return {
+            'success': True,
+            'data': profile_data
+        }
+
+    def update_user_profile(
+        self,
+        user_id: str,
+        updates: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Update user profile information
+        Only allows updating profile-related fields, not sensitive fields like password
+        """
+        try:
+            # Define allowed fields for profile updates
+            allowed_fields = {
+                'display_name', 'name_en', 'name_th', 'phone',
+                'address', 'postal_code', 'country_id', 'province_id',
+                'district_id', 'subdistrict_id', 'coordinate',
+                'company_name', 'company_email', 'company_phone', 'tax_id',
+                'business_type', 'business_industry', 'business_sub_industry',
+                'national_id', 'national_card_image', 'business_registration_certificate',
+                'profile_image_url', 'locale', 'nationality_id', 'currency_id',
+                'phone_code_id', 'note'
+            }
+
+            # Filter updates to only allowed fields
+            filtered_updates = {k: v for k, v in updates.items() if k in allowed_fields}
+
+            if not filtered_updates:
+                from ....exceptions import ValidationException
+                raise ValidationException('No valid fields to update')
+
+            # Update user
+            user = self.crud.update_user(user_id, filtered_updates, updated_by_id=user_id)
+            if not user:
+                from ....exceptions import NotFoundException
+                raise NotFoundException('User not found')
+
+            return {
+                'success': True,
+                'message': 'Profile updated successfully',
+                'data': self._serialize_user(user)
+            }
+
+        except Exception as e:
+            raise e
+
+    def get_profile_image_presigned_url(
+        self,
+        user_id: str,
+        file_name: str
+    ) -> Dict[str, Any]:
+        """
+        Generate presigned URL for profile image upload
+        Uses the existing TransactionPresignedUrlService
+        """
+        try:
+            from ..transactions.presigned_url_service import TransactionPresignedUrlService
+
+            # Get user to retrieve organization_id
+            user = self.crud.get_user_by_id(user_id)
+            if not user:
+                from ....exceptions import NotFoundException
+                raise NotFoundException('User not found')
+
+            organization_id = user.organization_id or 0  # Use 0 if no organization
+
+            # Initialize presigned URL service
+            presigned_service = TransactionPresignedUrlService()
+
+            # Generate presigned URL for profile image
+            # Modify the S3 key structure for profile images
+            import uuid
+            from datetime import datetime
+
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            file_extension = file_name.rsplit('.', 1)[1] if '.' in file_name else 'jpg'
+            unique_filename = f"profile_{user_id}_{timestamp}_{uuid.uuid4().hex[:8]}.{file_extension}"
+
+            # Use the standard presigned URL method but with profile-specific path
+            result = presigned_service.get_transaction_file_upload_presigned_urls(
+                file_names=[unique_filename],
+                organization_id=organization_id,
+                user_id=int(user_id)
+            )
+
+            if result.get('success') and result.get('presigned_urls'):
+                presigned_data = result['presigned_urls'][0]
+
+                # Modify the S3 key to use profile path instead of transactions path
+                original_key = presigned_data['s3_key']
+                # Change from org/{org_id}/transactions/... to org/{org_id}/profiles/...
+                profile_key = original_key.replace('/transactions/', '/profiles/')
+
+                return {
+                    'success': True,
+                    'data': {
+                        'upload_url': presigned_data['upload_url'],
+                        'upload_fields': presigned_data['upload_fields'],
+                        'final_s3_url': presigned_data['final_s3_url'].replace('/transactions/', '/profiles/'),
+                        's3_key': profile_key,
+                        'content_type': presigned_data['content_type'],
+                        'expires_at': presigned_data['expires_at']
+                    }
+                }
+            else:
+                from ....exceptions import APIException
+                raise APIException('Failed to generate presigned URL')
+
+        except Exception as e:
+            raise e
+
+    def _generate_view_presigned_url(
+        self,
+        s3_url: str,
+        organization_id: int,
+        user_id: int,
+        expiration_seconds: int = 3600
+    ) -> str:
+        """
+        Generate a presigned URL for viewing an S3 file
+
+        Args:
+            s3_url: The S3 URL to generate a presigned URL for
+            organization_id: Organization ID for access control
+            user_id: User ID for audit trail
+            expiration_seconds: URL expiration time (default: 1 hour)
+
+        Returns:
+            Presigned URL string for viewing the file
+        """
+        try:
+            from ..transactions.presigned_url_service import TransactionPresignedUrlService
+
+            # Initialize presigned URL service
+            presigned_service = TransactionPresignedUrlService()
+
+            # Generate presigned URL for viewing
+            result = presigned_service.get_transaction_file_view_presigned_urls(
+                file_urls=[s3_url],
+                organization_id=organization_id,
+                user_id=user_id,
+                expiration_seconds=expiration_seconds
+            )
+
+            if result.get('success') and result.get('presigned_urls'):
+                return result['presigned_urls'][0]['view_url']
+            else:
+                # If presigned URL generation fails, return original URL
+                # (fallback for public files or development)
+                return s3_url
+
+        except Exception as e:
+            # If there's an error, log it and return the original URL
+            print(f"Error generating presigned URL for viewing: {str(e)}")
+            return s3_url
