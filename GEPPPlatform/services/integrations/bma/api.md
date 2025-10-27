@@ -29,6 +29,302 @@ The organization_id is automatically extracted from the JWT token.
 
 ## Endpoints
 
+### GET /usage
+
+Get subscription usage information for the organization.
+
+#### Endpoint
+
+```
+GET /{deployment_state}/api/integration/bma/usage
+```
+
+#### Headers
+
+```
+Authorization: Bearer <your_jwt_token>
+```
+
+#### Response
+
+##### Success Response (200 OK)
+
+```json
+{
+  "success": true,
+  "data": {
+    "subscription_usage": {
+      "create_transaction_limit": 100,
+      "create_transaction_usage": 45,
+      "ai_audit_limit": 10,
+      "ai_audit_usage": 3
+    }
+  }
+}
+```
+
+##### Response Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `success` | Boolean | Overall success status |
+| `data.subscription_usage.create_transaction_limit` | Integer | Maximum number of transactions allowed to create |
+| `data.subscription_usage.create_transaction_usage` | Integer | Current number of transactions created |
+| `data.subscription_usage.ai_audit_limit` | Integer | Maximum number of AI audits allowed |
+| `data.subscription_usage.ai_audit_usage` | Integer | Current number of AI audits used |
+
+##### Error Responses
+
+###### 400 Bad Request
+
+No active subscription found:
+
+```json
+{
+  "success": false,
+  "message": "No active subscription found for organization X",
+  "error_code": "BAD_REQUEST"
+}
+```
+
+###### 401 Unauthorized
+
+Missing or invalid authentication:
+
+```json
+{
+  "success": false,
+  "message": "Missing or invalid authorization header",
+  "error_code": "UNAUTHORIZED"
+}
+```
+
+###### 500 Internal Server Error
+
+Server error:
+
+```json
+{
+  "success": false,
+  "message": "Failed to get subscription usage: Database error",
+  "error_code": "USAGE_RETRIEVAL_ERROR"
+}
+```
+
+#### Usage Example
+
+```bash
+curl -X GET "https://api.gepp.com/dev/api/integration/bma/usage" \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+```
+
+---
+
+### GET /audit_status
+
+Get audit status summary for transactions in the past year.
+
+#### Endpoint
+
+```
+GET /{deployment_state}/api/integration/bma/audit_status
+```
+
+#### Headers
+
+```
+Authorization: Bearer <your_jwt_token>
+```
+
+#### Response
+
+##### Success Response (200 OK)
+
+```json
+{
+  "success": true,
+  "data": {
+    "start_date": "2024-10-27",
+    "num_transactions": 150,
+    "ai_audit": {
+      "not_audit": 45,
+      "queued": 30,
+      "approved": 50,
+      "rejected": 25
+    },
+    "actual_status": {
+      "pending": 60,
+      "approved": 70,
+      "rejected": 20
+    }
+  }
+}
+```
+
+##### Response Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `success` | Boolean | Overall success status |
+| `data.start_date` | String | Start date for the summary (today - 1 year) in YYYY-MM-DD format |
+| `data.num_transactions` | Integer | Total number of transactions in the period |
+| `data.ai_audit.not_audit` | Integer | Number of transactions not yet audited by AI (ai_audit_status is null) |
+| `data.ai_audit.queued` | Integer | Number of transactions queued for AI audit |
+| `data.ai_audit.approved` | Integer | Number of transactions approved by AI audit |
+| `data.ai_audit.rejected` | Integer | Number of transactions rejected by AI audit |
+| `data.actual_status.pending` | Integer | Number of transactions with pending status |
+| `data.actual_status.approved` | Integer | Number of transactions with approved status |
+| `data.actual_status.rejected` | Integer | Number of transactions with rejected status |
+
+##### Filters Applied
+
+The summary includes transactions that meet ALL of the following criteria:
+- **Organization**: Matches the authenticated user's organization
+- **Date Range**: Created within the past 365 days (from today - 1 year to today)
+- **Active Only**: `deleted_date` is NULL and `is_active` is true
+
+##### Error Responses
+
+###### 401 Unauthorized
+
+Missing or invalid authentication:
+
+```json
+{
+  "success": false,
+  "message": "Missing or invalid authorization header",
+  "error_code": "UNAUTHORIZED"
+}
+```
+
+###### 500 Internal Server Error
+
+Server error:
+
+```json
+{
+  "success": false,
+  "message": "Failed to get audit status summary: Database error",
+  "error_code": "AUDIT_STATUS_RETRIEVAL_ERROR"
+}
+```
+
+#### Usage Example
+
+```bash
+curl -X GET "https://api.gepp.com/dev/api/integration/bma/audit_status" \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+```
+
+---
+
+### POST /add_transactions_to_audit_queue
+
+Add all transactions with `ai_audit_status = 'null'` to the AI audit queue.
+
+#### Endpoint
+
+```
+POST /{deployment_state}/api/integration/bma/add_transactions_to_audit_queue
+```
+
+#### Headers
+
+```
+Authorization: Bearer <your_jwt_token>
+```
+
+#### Request Body
+
+No request body required.
+
+#### Response
+
+##### Success Response (200 OK)
+
+```json
+{
+  "success": true,
+  "data": {
+    "transactions_queued": 45,
+    "message": "Successfully added 45 transactions to audit queue"
+  }
+}
+```
+
+##### Response Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `success` | Boolean | Overall success status |
+| `data.transactions_queued` | Integer | Number of transactions added to the audit queue |
+| `data.message` | String | Success message with count |
+
+##### What This Endpoint Does
+
+This endpoint performs a bulk update on all transactions that meet the following criteria:
+- **Organization**: Matches the authenticated user's organization
+- **AI Audit Status**: Currently set to `'null'` (not yet queued for audit)
+- **Active Only**: `deleted_date` is NULL and `is_active` is true
+
+**SQL Operation:**
+```sql
+UPDATE transactions
+SET ai_audit_status = 'queued',
+    updated_date = NOW()
+WHERE organization_id = <your_org_id>
+AND ai_audit_status = 'null'
+AND deleted_date IS NULL
+AND is_active = true
+```
+
+**Performance:**
+- Uses optimized raw SQL for bulk updates
+- Returns the count of updated transactions
+- Automatically updates the `updated_date` timestamp
+
+##### Error Responses
+
+###### 401 Unauthorized
+
+Missing or invalid authentication:
+
+```json
+{
+  "success": false,
+  "message": "Missing or invalid authorization header",
+  "error_code": "UNAUTHORIZED"
+}
+```
+
+###### 500 Internal Server Error
+
+Server error:
+
+```json
+{
+  "success": false,
+  "message": "Failed to add transactions to audit queue: Database error",
+  "error_code": "AUDIT_QUEUE_ERROR"
+}
+```
+
+#### Usage Example
+
+```bash
+curl -X POST "https://api.gepp.com/dev/api/integration/bma/add_transactions_to_audit_queue" \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+```
+
+#### Use Cases
+
+1. **Trigger AI Auditing**: Queue all pending transactions for AI audit processing
+2. **Bulk Processing**: Efficiently update hundreds or thousands of transactions at once
+3. **Workflow Integration**: Integrate with external AI audit systems that poll for queued transactions
+4. **Recovery**: Re-queue transactions that were not processed due to system issues
+
+---
+
 ### POST /transaction
 
 Create or update transactions in batch from BMA system data.
@@ -153,6 +449,12 @@ The request body should contain a `batch` object with the following hierarchical
       "created": 2,
       "updated": 1,
       "errors": []
+    },
+    "subscription_usage": {
+      "create_transaction_limit": 100,
+      "create_transaction_usage": 45,
+      "ai_audit_limit": 10,
+      "ai_audit_usage": 3
     }
   }
 }
@@ -169,6 +471,10 @@ The request body should contain a `batch` object with the following hierarchical
 | `data.results.created` | Integer | Number of new transactions created |
 | `data.results.updated` | Integer | Number of existing transactions updated |
 | `data.results.errors` | Array | List of errors encountered during processing |
+| `data.subscription_usage.create_transaction_limit` | Integer | Maximum number of transactions allowed to create |
+| `data.subscription_usage.create_transaction_usage` | Integer | Current number of transactions created (increments only on new transactions) |
+| `data.subscription_usage.ai_audit_limit` | Integer | Maximum number of AI audits allowed |
+| `data.subscription_usage.ai_audit_usage` | Integer | Current number of AI audits used |
 
 ##### Error Response with Partial Success (200 OK)
 
@@ -191,6 +497,12 @@ When some transactions succeed but others fail:
           "error": "Invalid timestamp format"
         }
       ]
+    },
+    "subscription_usage": {
+      "create_transaction_limit": 100,
+      "create_transaction_usage": 45,
+      "ai_audit_limit": 10,
+      "ai_audit_usage": 3
     }
   }
 }
@@ -206,6 +518,26 @@ Missing or invalid request data:
 {
   "success": false,
   "message": "Missing \"batch\" field in request",
+  "error_code": "BAD_REQUEST"
+}
+```
+
+Transaction limit reached:
+
+```json
+{
+  "success": false,
+  "message": "Transaction creation limit reached. Usage: 100/100",
+  "error_code": "BAD_REQUEST"
+}
+```
+
+Invalid origin_id:
+
+```json
+{
+  "success": false,
+  "message": "Invalid origin_id. Only origin_id 2170 is allowed for BMA integration.",
   "error_code": "BAD_REQUEST"
 }
 ```
@@ -261,6 +593,23 @@ Server error:
 
 ## Business Logic
 
+### Subscription Limits
+
+**Transaction Creation Limits**: Each organization has a subscription with usage limits.
+
+- `create_transaction_limit`: Maximum number of transactions allowed to create
+- `create_transaction_usage`: Current number of transactions created
+- **Only NEW transactions count** toward the limit (updates do not count)
+- If `create_transaction_usage >= create_transaction_limit`, the API will reject the request with error: `"Transaction creation limit reached. Usage: X/Y"`
+- Usage counter increments by the number of **new transactions created** in each batch
+- The response always includes current subscription usage for all limits
+
+Example:
+- Batch with 5 houses: 3 new, 2 existing (updates)
+- `create_transaction_usage` increases by **3** (only new transactions)
+- `results.created` = 3
+- `results.updated` = 2
+
 ### Origin ID Validation
 
 **IMPORTANT**: The BMA integration **ONLY accepts origin_id = 2170**.
@@ -297,9 +646,11 @@ When creating a new transaction:
 
 When updating an existing transaction:
 1. Update `transaction_date` from timestamp
-2. For each material in the request:
-   - If transaction_record exists with matching `material_id` → Append new `image_url` to existing images
+2. Update `origin_id` to 2170
+3. For each material in the request:
+   - If transaction_record exists with matching `material_id` → **Replace** `image_url` with new data (not appended)
    - If transaction_record doesn't exist → Create new transaction_record and add to `transaction_records` array
+4. **Does NOT increment** `create_transaction_usage` (only new transactions count)
 
 ### Material Records
 
@@ -431,7 +782,7 @@ fetch(url, {
 ### Image URLs
 - Optional but recommended
 - Should be publicly accessible URLs or pre-signed URLs
-- Multiple images can be added to the same material by sending multiple requests
+- When updating an existing transaction with the same material_id, the new image URL **replaces** the old one (not appended)
 - Images are stored as JSONB array in the database
 
 ### Transaction Versioning
@@ -451,8 +802,21 @@ fetch(url, {
 
 ## Changelog
 
+### v1.1.0 (2025-10-27)
+- Added subscription usage limits
+- Added GET `/usage` endpoint to check subscription limits
+- Added GET `/audit_status` endpoint to get transaction audit status summary for the past year
+- Added POST `/add_transactions_to_audit_queue` endpoint to bulk queue transactions for AI audit
+- Added `audit_date` and `ai_audit_date` timestamp columns to track when audits were performed
+- `create_transaction_usage` increments only for new transactions (updates don't count)
+- Response now includes `subscription_usage` with all limits and current usage
+- API rejects requests when transaction limit is reached
+- Image URLs are now replaced (not appended) when updating existing material records
+- All records use organization owner's ID for `created_by_id`
+
 ### v1.0.0 (2025-10-23)
 - Initial release
 - POST /transaction endpoint
 - Support for 4 material types (general, organic, recyclable, hazardous)
 - Batch processing with partial error handling
+- Origin ID validation (only 2170 allowed)

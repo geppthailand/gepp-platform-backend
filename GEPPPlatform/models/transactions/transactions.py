@@ -63,11 +63,13 @@ class Transaction(Base, BaseModel):
     # AI Audit Status - separate from actual status
     ai_audit_status = Column(Enum(AIAuditStatus), nullable=False, default=AIAuditStatus.null)
     ai_audit_note = Column(Text, nullable=True)  # Stores full audit response JSONB as text
+    ai_audit_date = Column(DateTime, nullable=True)  # Timestamp when AI audit was performed
     reject_triggers = Column(JSONB, nullable=False, default=[])  # Array of rule_ids that triggered rejection
     warning_triggers = Column(JSONB, nullable=False, default=[])  # Array of rule_ids that triggered warnings
 
     # User Audit Status - tracks if transaction was manually audited by user
     is_user_audit = Column(Boolean, nullable=False, default=False)
+    audit_date = Column(DateTime, nullable=True)  # Timestamp when manual audit was performed
 
     # Organization and locations
     organization_id = Column(BigInteger, ForeignKey('organizations.id'), nullable=True)

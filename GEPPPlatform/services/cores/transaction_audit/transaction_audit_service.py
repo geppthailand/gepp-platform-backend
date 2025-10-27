@@ -58,8 +58,8 @@ class TransactionAuditService:
             logger.warning("Gemini API key not found or genai library not available")
             self.client = None
 
-        self.model_name = "gemini-2.5-flash-lite"
-        self.max_concurrent_threads = 50
+        self.model_name = "gemini-2.5-flash"
+        self.max_concurrent_threads = 200
         self.response_language = response_language.lower()  # Store language preference
 
         # Language name mapping for prompts
@@ -445,6 +445,9 @@ class TransactionAuditService:
                 'cached_tokens': token_usage.get('cached_tokens', 0)
             }
 
+            # Save the audit prompt for debugging
+            audit_result['audit_prompt'] = prompt
+
             logger.info(f"Transaction {transaction_data['transaction_id']} used {token_usage.get('total_tokens', 0)} tokens "
                        f"(input: {token_usage.get('input_tokens', 0)}, output: {token_usage.get('output_tokens', 0)}, "
                        f"reasoning: {token_usage.get('reasoning_tokens', 0)})")
@@ -491,19 +494,39 @@ class TransactionAuditService:
     def _get_example_messages(self, language_name: str) -> str:
         """Get example rejection messages in the specified language"""
         if 'Thai' in language_name or 'ไทย' in language_name:
-            return """- "Record 129: รูปภาพแสดงขยะอินทรีย์ แต่ข้อมูลระบุเป็นขยะรีไซเคิล"
+            return """- "Record 129: รูปภาพแสดงเศษอาหารเท่านั้น แต่ข้อมูลระบุเป็นขยะรีไซเคิล"
 - "Record 45: ไม่มีรูปภาพแนบมา"
 - "Record 67: น้ำหนักในรูปภาพ (50kg) ไม่ตรงกับข้อมูล (30kg)"
+- "Record 58042: รูปภาพแสดงขยะผสม (เศษอาหาร + แก้วกาแฟ + บรรจุภัณฑ์) แต่ข้อมูลระบุเป็นเศษอาหารและพืช ควรเป็นขยะทั่วไป"
+- "Record 78: รูปภาพแสดงเศษอาหารที่บรรจุในภาชนะพลาสติก แต่ข้อมูลระบุเป็นเศษอาหารและพืช ควรเป็นขยะทั่วไป"
+- "Record 91: รูปภาพแสดงแบตเตอรี่ แต่ข้อมูลระบุเป็นขยะทั่วไป ควรเป็นขยะอันตราย"
+- "Record 123: รูปภาพแสดงแบตเตอรี่และกระป๋องสเปรย์ (ขยะอันตราย) แต่ข้อมูลระบุเป็นเศษอาหารและพืช ประเภทไม่ตรงกันอย่างสิ้นเชิง"
 - "ธุรกรรมไม่มีรูปภาพแนบมา"
-- "ธุรกรรมมีเพียง 4 ประเภทขยะ ขาดประเภท: เศษอาหารและพืช"
-- "ธุรกรรมขาดประเภทขยะที่จำเป็น: ขยะทั่วไป" """
+- "ธุรกรรมมีเพียง 3 ประเภทขยะ ขาดประเภท: เศษอาหารและพืช"
+
+🚨 CRITICAL MISMATCHES THAT MUST BE FLAGGED:
+- Batteries/Spray cans → Food and Plant Waste (WRONG!)
+- Food scraps → Hazardous Waste (WRONG!)
+- Plastic bottles → Food and Plant Waste (WRONG!)
+
+IMPORTANT: Do NOT reject if image shows mixed waste and data says General Waste - this is CORRECT! """
         else:  # English
-            return """- "Record 129: Image shows organic waste but data says Recyclable waste"
+            return """- "Record 129: Image shows pure organic waste only but data says Recyclable waste"
 - "Record 45: No image attached"
 - "Record 67: Weight in image (50kg) differs from data (30kg)"
+- "Record 58042: Image shows mixed waste (food + coffee cup + packaging) but data says Food and Plant Waste, should be General Waste"
+- "Record 78: Image shows food in plastic container but data says Food and Plant Waste, should be General Waste"
+- "Record 91: Image shows batteries but data says General Waste, should be Hazardous Waste"
+- "Record 123: Image shows batteries and spray cans (hazardous waste) but data says Food and Plant Waste, completely wrong category"
 - "Transaction has no images attached"
-- "Transaction has only 4 waste types, missing: Food and Plant Waste"
-- "Transaction missing required waste type: General Waste" """
+- "Transaction has only 3 waste types, missing: Food and Plant Waste"
+
+🚨 CRITICAL MISMATCHES THAT MUST BE FLAGGED:
+- Batteries/Spray cans → Food and Plant Waste (WRONG!)
+- Food scraps → Hazardous Waste (WRONG!)
+- Plastic bottles → Food and Plant Waste (WRONG!)
+
+IMPORTANT: Do NOT reject if image shows mixed waste and data says General Waste - this is CORRECT! """
 
     def _create_audit_prompt(self, transaction_data: Dict[str, Any], audit_rules: List[Dict[str, Any]]) -> str:
         """Create an optimized prompt with ID-based rule references"""
@@ -525,28 +548,170 @@ class TransactionAuditService:
             })
 
         prompt = f"""
-Audit waste transaction against rules using Thai waste classification standards. Evaluate each rule and return triggered violations only.
+⚠️ TRANSACTION QUICK CHECK ⚠️
+
+Record Count: {len(transaction_data.get('records', []))} records
+Present Material Types: {[r.get('material_type') for r in transaction_data.get('records', [])]}
+
+🚨 CRITICAL RULES TO CHECK CAREFULLY 🚨
+
+Before evaluating all rules, pay special attention to these common critical rules if they exist in the rules list:
+
+1. **RECORD COUNT RULES** - If there's a rule about "ต้องมี 4 Transaction_Record" or "number of records" or "4_RECORDS":
+   → ⚠️ COUNT THE RECORDS FIRST ⚠️
+   → This transaction has {len(transaction_data.get('records', []))} records
+
+   → ❌ MUST TRIGGER VIOLATION IF:
+     • Number of records ≠ 4 (if rule requires 4 records) ❌
+     • Example: Transaction has {len(transaction_data.get('records', []))} records but requires 4 = VIOLATION!
+
+   → ✅ DO NOT TRIGGER IF:
+     • Number of records matches requirement ✅
+
+   → Example message: "ธุรกรรมมี {len(transaction_data.get('records', []))} Records แต่ต้องมี 4 Records"
+
+2. **WASTE TYPE COMPLETENESS RULES** - If there's a rule about "ครบ 4 ประเภทขยะ" or "all 4 waste types" or "4_WASTE_TYPE":
+   → ⚠️ CRITICAL CHECK - COUNT THE UNIQUE WASTE TYPES ⚠️
+   → Required: ALL 4 types must be present:
+     1. General Waste (ขยะทั่วไป)
+     2. Organic/Food Waste (เศษอาหารและพืช)
+     3. Hazardous Waste (ขยะอันตราย)
+     4. Recyclable Waste (รีไซเคิล)
+   → Present in this transaction: {[r.get('material_type') for r in transaction_data.get('records', [])]}
+   → Count of unique types: {len(set([r.get('material_type') for r in transaction_data.get('records', [])]))}
+
+   → ❌ MUST TRIGGER VIOLATION IF:
+     • Count of unique types < 4 (Missing any required type) ❌
+     • Example: Only has "General Waste" and "Hazardous Waste" = 2 types = VIOLATION!
+
+   → ✅ DO NOT TRIGGER IF:
+     • All 4 types are present ✅
+
+   → Example message: "ธุรกรรมมี {len(set([r.get('material_type') for r in transaction_data.get('records', [])]))} ประเภทขยะ แต่ต้องมีครบ 4 ประเภท (ขยะทั่วไป, เศษอาหารและพืช, ขยะอันตราย, รีไซเคิล)"
+
+3. **IMAGE-MATERIAL MATCHING RULES** - If there's a rule about "Material Type ไม่ตรงกับรูปภาพ":
+   → CHECK EACH RECORD: Does the image content match the material_type field?
+   → Examples of CRITICAL MISMATCHES (MUST flag):
+     • Image shows batteries/spray cans → material_type: "Food and Plant Waste" ❌ VIOLATION!
+     • Image shows food scraps → material_type: "Hazardous Waste" ❌ VIOLATION!
+     • Image shows plastic bottles → material_type: "Food and Plant Waste" ❌ VIOLATION!
+   → Use medium strictness (5/10) - only flag COMPLETELY DIFFERENT categories
+   → Partial matches or similar items within same category are acceptable
+
+4. **IMAGE VISIBILITY RULES** - If there's a rule about "ถุงดำ" or "ไม่สามารถมองเห็นประเภทของขยะ" or "black bag" or "WASTE_IMAGE":
+   → ⚠️ THIS IS A CRITICAL RULE - CHECK VERY CAREFULLY ⚠️
+   → YOU MUST EXAMINE EACH RECORD'S IMAGES ONE BY ONE
+   → Ask yourself: "Can I clearly see the INDIVIDUAL waste items inside the bag?"
+
+   → ❌ MUST TRIGGER VIOLATION IF:
+     • Waste is in a CLOSED/TIED black, dark green, or opaque bag where you CANNOT see inside ❌
+     • Waste is in ANY opaque bag (any dark color) where contents are NOT clearly visible ❌
+     • You can only see the OUTSIDE of the bag, not the waste items inside ❌
+     • Bag is tied/sealed and you cannot identify specific waste items ❌
+     • Image is fake/stock photo/not actual waste ❌
+
+   → ✅ DO NOT TRIGGER IF:
+     • Bag is FULLY OPENED at the top and you can clearly see all waste items inside ✅
+     • Waste is in completely transparent/clear bag where you can see through it ✅
+     • Waste is NOT in any bag at all and is clearly visible ✅
+
+   → IMPORTANT: Even if you can see ONE item sticking out (like a can on top), if the REST of the waste is hidden inside an opaque bag, this is STILL A VIOLATION!
+   → Example: Green/black bag tied closed with only a can visible on top = VIOLATION (cannot see what else is inside)
+   → Example message: "Record {{record_id}}: ขยะใส่ในถุงดำและไม่สามารถมองเห็นประเภทของขยะได้ชัดเจน"
+
+---
+
+
+You are a waste transaction auditor. Your job is to evaluate rules and flag violations when rules are TRIGGERED.
+
+🔥 CRITICAL: UNDERSTANDING RULE TRIGGERING 🔥
+
+A RULE IS TRIGGERED when its condition is TRUE (something is WRONG):
+- Rule triggered = Condition met = Problem found = Add to violations array
+- Rule NOT triggered = Condition not met = Everything OK = Do NOT add to violations
+
+Example 1 - Rule: "Transaction must have 4 waste types"
+- Transaction has 2 types → Rule TRIGGERED (wrong) → Add violation: "ธุรกรรมมี 2 ประเภทขยะ แต่ต้องมี 4 ประเภท"
+- Transaction has 4 types → Rule NOT triggered (correct) → violations: []
+
+Example 2 - Rule: "Image must match material type"
+- Image shows organic, data says recyclable → Rule TRIGGERED (mismatch) → Add violation
+- Image shows organic, data says organic → Rule NOT triggered (match) → violations: []
+
+CRITICAL INSTRUCTIONS:
+1. The "violations" array contains TRIGGERED RULES ONLY
+2. If a rule condition is TRUE (triggered), add it to violations
+3. If a rule condition is FALSE (not triggered), do NOT add to violations
+4. NEVER write "ถูกต้อง" (correct) in a violation message - that means the rule is NOT triggered!
+5. Empty violations array means NO RULES were triggered (everything is correct)
+
+Audit the transaction against the rules below. Add violations ONLY when rule conditions are TRUE (triggered).
 
 IMPORTANT: Write all rejection messages in {language_name}.
 
-RULES (ref by id):
+RULES TO EVALUATE (ref by id):
 {json.dumps(rules_compact, ensure_ascii=False)}
+
+TRANSACTION DATA STRUCTURE:
+Each transaction contains a "records" array with material-specific records.
+Each record has:
+- material_type: The type of waste
+- images: Array of image URLs for this specific material
+- Other fields: quantity, weight, etc.
+
+To check if a material has images, look at: record["images"]
+If images array is not empty, the material HAS images attached.
 
 TRANSACTION:
 {json.dumps(transaction_data, ensure_ascii=False)}
+
+🔥 MANDATORY RULE EVALUATION PROCESS 🔥
+
+STEP 1: COUNT RECORDS
+Count: len(transaction["records"])
+Current transaction has: {len(transaction_data.get('records', []))} records
+
+STEP 2: EVALUATE RULE "4_RECORDS" (id: 51)
+Condition: "ต้องมี 4 Transaction_Record ที่ประเภทขยะแตกต่างกัน"
+Check: Does transaction have exactly 4 records with different material types?
+- If record count != 4 → Rule TRIGGERED → Add: {{"id": 51, "m": "ธุรกรรมมี {len(transaction_data.get('records', []))} Record แต่ต้องมี 4 Records", "tr": null}}
+- If record count == 4 → Rule NOT triggered → Skip
+
+STEP 3: CHECK WASTE TYPE COVERAGE
+Required types: General Waste, Organic/Food Waste, Hazardous Waste, Recyclables
+Present types: {[r.get('material_type') for r in transaction_data.get('records', [])]}
+
+Material type mapping:
+- "General Waste" = general waste ✓
+- "Food and Plant Waste" OR "Organic Waste" = organic/food waste ✓
+- "Non-Specific Hazardous Waste" OR "Hazardous Waste" = hazardous waste ✓
+- "Non-Specific Recyclables" OR "Recyclable Waste" = recyclables ✓
+
+STEP 4: EVALUATE RULE "4_WASTE_TYPE" (id: 50)
+Condition: "รูปขยะไม่ครบ 4 ประเภทขยะ: general, organic/food, hazardous, recyclables"
+Check: Are all 4 required waste types present?
+- If any type is missing → Rule TRIGGERED → Add: {{"id": 50, "m": "ธุรกรรมขาดประเภทขยะ: [list missing types]", "tr": null}}
+- If all 4 types present → Rule NOT triggered → Skip
+
+STEP 5: CHECK OTHER RULES
+Evaluate remaining rules (image presence, image match, etc.) following the same logic.
 
 THAI WASTE CLASSIFICATION HIERARCHY:
 Understand that waste categories have subcategories. The image showing a specific type is VALID if it matches the parent category:
 
 1. General Waste (ขยะทั่วไป):
    - Mixed waste, non-recyclable waste, contaminated materials
+   - Paper cups, plastic cups with food residue, straws, food-contaminated packaging
+   - Disposable items that cannot be recycled
 
 2. Food and Plant Waste (เศษอาหารและพืช):
    - Food scraps, vegetable waste, fruit peels, plant materials, organic matter
+   - Pure organic waste WITHOUT non-organic containers
 
 3. Non-Specific Recyclables (วัสดุรีไซเคิลทั่วไป):
    - Plastic bottles, glass bottles, cans, paper, cardboard, clean plastics
    - Metal containers, aluminum, steel
+   - MUST be clean and uncontaminated
 
 4. Non-Specific Hazardous Waste (ขยะอันตรายทั่วไป):
    - Aerosols, spray cans, batteries, light bulbs, fluorescent tubes
@@ -557,27 +722,40 @@ Understand that waste categories have subcategories. The image showing a specifi
    - Sorted and clean materials: PET bottles, aluminum cans, copper, etc.
 
 CRITICAL VALIDATION RULES:
-1. Images for each transaction_record apply ONLY to that specific record. Do NOT process images across different records.
-2. If image shows a SUBSET of the category (e.g., aerosols ⊂ Non-Specific Hazardous Waste), it is VALID ✓
-3. If image shows a DIFFERENT category (e.g., organic waste ≠ Recyclables), it is INVALID ✗
-4. Only return violations when there is an ACTUAL problem. If nothing is wrong, return empty violations array.
-5. Do NOT create violations just to report something. Only flag TRUE errors.
-6. Rejection messages MUST be SPECIFIC with actual data:
+1. **RECORD-LEVEL IMAGES**: Each transaction has multiple records (materials). Images are attached to individual records, NOT the transaction level. Check each record's "images" array to see if it has images.
+2. **IMAGE PRESENCE CHECK**: A material type is complete if its record has images in the "images" array. Do NOT say a material is missing images if the images array is not empty.
+3. If image shows a SUBSET of the category (e.g., aerosols ⊂ Non-Specific Hazardous Waste), it is VALID ✓
+4. **MIXED WASTE IS GENERAL WASTE**: If image shows mixed waste (multiple types of waste together like food + containers + packaging), and data says "General Waste" (ขยะทั่วไป), this is CORRECT and VALID ✓ Do NOT reject!
+5. **PURE ORGANIC ONLY FOR FOOD WASTE**: Only pure organic matter without ANY containers, packaging, or non-organic items should be "Food and Plant Waste". If there are ANY containers (cups, boxes, plastic bags) or mixed materials, it MUST be "General Waste".
+6. **CONTAMINATION RULE**: Food containers (coffee cups, food boxes, bowls, packaging) with food residue are "General Waste" even if they contain organic matter.
+7. Only return violations when there is an ACTUAL problem. If nothing is wrong, return empty violations array.
+8. Do NOT create violations just to report something. Only flag TRUE errors.
+9. Do NOT reject if image shows mixed waste and data correctly says "General Waste" - this is the CORRECT classification!
+10. Rejection messages MUST be SPECIFIC with actual data:
    - Include record_id when relevant
    - Include actual material types/names from data
    - Include actual values that failed (e.g., weights, quantities)
    - Only flag TRUE mismatches, not valid subcategories
 
-EXAMPLE VALID MATCHES (DO NOT REJECT):
+EXAMPLE VALID MATCHES (DO NOT REJECT THESE):
 ✓ Image: aerosols → Data: Non-Specific Hazardous Waste
 ✓ Image: plastic bottles → Data: Non-Specific Recyclables
-✓ Image: food scraps → Data: Food and Plant Waste
-✓ Image: mixed waste → Data: General Waste
+✓ Image: pure food scraps without containers → Data: Food and Plant Waste
+✓ Image: mixed waste (any combination of materials) → Data: General Waste ✅ CORRECT!
+✓ Image: food scraps + coffee cup + packaging → Data: General Waste ✅ CORRECT! (mixed waste belongs in general)
+✓ Image: banana peels in plastic bag → Data: General Waste ✅ CORRECT! (contaminated)
+✓ Image: coffee cup with residue → Data: General Waste ✅ CORRECT! (container)
+✓ Image: pizza + chicken + vegetables + cups → Data: General Waste ✅ CORRECT! (mixed waste)
 
-EXAMPLE INVALID MATCHES (SHOULD REJECT):
-✗ Image: organic waste → Data: Recyclables
-✗ Image: hazardous materials → Data: General Waste
-✗ Image: plastic waste → Data: Food Waste
+EXAMPLE INVALID MATCHES (SHOULD REJECT THESE):
+✗ Image: batteries, spray cans → Data: Food and Plant Waste (COMPLETELY WRONG - batteries are hazardous!)
+✗ Image: pure organic waste without containers → Data: Recyclables (WRONG category)
+✗ Image: hazardous materials like batteries → Data: General Waste (WRONG - should be hazardous)
+✗ Image: plastic waste only → Data: Food and Plant Waste (WRONG category)
+✗ Image: food scraps only → Data: Hazardous Waste (COMPLETELY WRONG - food is organic!)
+✗ Image: food scraps + coffee cup (mixed) → Data: Food and Plant Waste (WRONG - mixed waste must be General Waste)
+✗ Image: vegetables in plastic container (mixed) → Data: Food and Plant Waste (WRONG - contaminated must be General Waste)
+✗ Image: pure banana peels only → Data: General Waste (WRONG - pure organic should be Food and Plant Waste)
 
 EXAMPLE GOOD REJECTION MESSAGES (in {language_name}):
 {self._get_example_messages(language_name)}
@@ -587,28 +765,126 @@ EXAMPLE BAD MESSAGES (DO NOT USE):
 - "Material type mismatch" ❌
 - "Image doesn't match data" ❌
 - "Image shows bottles, not Non-Specific Recyclables" ❌ (bottles ARE recyclables!)
+- "รูปภาพแสดงขยะผสม แต่ข้อมูลระบุเป็นขยะทั่วไป" ❌ (mixed waste IS general waste! This is CORRECT!)
 - "Transaction has only 4 waste types, missing one of the required types" ❌ (not specific!)
 - "Missing required type" ❌ (which type?)
 
-Respond ONLY rejected items in this JSON format:
+🚨 CRITICAL: VIOLATIONS ARRAY IS FOR ERRORS ONLY 🚨
+
+The "violations" array (v) must ONLY contain actual ERRORS/PROBLEMS.
+If something is CORRECT (ถูกต้อง), DO NOT add it to violations array!
+
+CORRECT CLASSIFICATION = NO VIOLATION = NOT IN ARRAY
+
+Examples of what to do:
+- Image shows mixed waste → Data says General Waste = CORRECT = violations: []
+- Image shows organic only → Data says Food Waste = CORRECT = violations: []
+- Image shows batteries → Data says Hazardous = CORRECT = violations: []
+- Image shows plastic bottles → Data says Recyclables = CORRECT = violations: []
+
+🚨 NEVER add violations that say "ซึ่งถูกต้อง" (which is correct) 🚨
+If you think something is correct, DO NOT put it in the violations array!
+
+Only add to violations if something is WRONG:
+- Image shows PURE organic waste but data says Recyclables (WRONG category)
+- Image shows mixed waste but data says Food and Plant Waste (WRONG - should be General)
+- Image shows one category but data shows completely different category (WRONG)
+
+🚨 VIOLATION FORMAT REQUIREMENTS 🚨
+
+When you add a violation to the array, you MUST include ALL THREE FIELDS:
+1. "id": The rule ID number (REQUIRED - INTEGER)
+2. "m": A clear, descriptive message explaining what is wrong (REQUIRED - CANNOT BE EMPTY STRING!)
+3. "tr": The transaction_record ID if violation is for a specific record, or null if for entire transaction (REQUIRED - INTEGER OR NULL)
+
+❌ INVALID VIOLATIONS (DO NOT DO THIS):
+{{"id": 41, "m": "", "tr": 59391}}  // WRONG! Message field "m" is empty!
+{{"id": 50, "m": "", "tr": null}}  // WRONG! Message field "m" is empty!
+{{"id": 42, "tr": 123}}  // WRONG! Missing "m" field!
+
+✅ VALID VIOLATIONS (CORRECT FORMAT):
+{{"id": 41, "m": "Record 59391: รูปภาพแสดงแบตเตอรี่ (ขยะอันตราย) แต่ข้อมูลระบุเป็นเศษอาหารและพืช", "tr": 59391}}
+{{"id": 50, "m": "ธุรกรรมมี 2 ประเภทขยะ แต่ต้องมีครบ 4 ประเภท (ขยะทั่วไป, เศษอาหารและพืช, ขยะอันตราย, รีไซเคิล)", "tr": null}}
+{{"id": 42, "m": "Record 12345: ขยะใส่ในถุงดำและไม่สามารถมองเห็นประเภทของขยะได้ชัดเจน", "tr": 12345}}
+
+The "m" field (message) MUST:
+- Explain WHAT is wrong in detail
+- Be written in {language_name}
+- Be specific and actionable
+- Include record ID when relevant
+- NEVER be an empty string ""
+- NEVER be null or missing
+
+⚠️ CRITICAL: If "m" is empty or missing, the violation will be USELESS and the user won't know what to fix!
+
+🔥 STEP-BY-STEP PROCESS FOR ADDING A VIOLATION 🔥
+
+When you identify a rule violation, you MUST:
+1. Identify the rule ID number → This becomes "id"
+2. WRITE A DETAILED MESSAGE explaining the problem in {language_name} → This becomes "m"
+3. Identify the transaction_record ID if applicable → This becomes "tr"
+
+DO NOT just write {{"id": X, "m": "", "tr": Y}} ❌
+You MUST fill in the "m" field with actual text! ✅
+
+Example process:
+- Found Rule 41 triggered for record 60753
+- Image shows batteries, but data says "Food and Plant Waste"
+- Write message: "Record 60753: รูปภาพแสดงแบตเตอรี่ (ขยะอันตราย) แต่ข้อมูลระบุเป็นเศษอาหารและพืช"
+- Final: {{"id": 41, "m": "Record 60753: รูปภาพแสดงแบตเตอรี่ (ขยะอันตราย) แต่ข้อมูลระบุเป็นเศษอาหารและพืช", "tr": 60753}}
+
+Respond in this JSON format:
 {{
     "tr_id": {transaction_data.get('transaction_id', 0)},
     "violations": [
-        {{
-            "id": <rule_db_id>,
-            "msg": "<SPECIFIC rejection reason with record_id and actual data (max 30 words)>",
-            "tr": <transaction_record_id or null if violation applies to entire transaction>
-        }}
+        // ONLY add items here if there is an ACTUAL ERROR
+        // If everything is correct, this array must be EMPTY
+        // Each violation MUST have all three fields: id (integer), m (non-empty string), tr (integer or null)
+        // Example:
+        // {{"id": 41, "m": "Record 123: รูปภาพแสดงขยะผสม แต่ข้อมูลระบุเป็นเศษอาหารและพืช ควรเป็นขยะทั่วไป", "tr": 123}}
     ]
 }}
 
+DECISION TREE FOR RULE EVALUATION:
+
+For EACH rule, ask:
+1. What is the rule condition? (e.g., "must have 4 types", "image must match", "must have images")
+2. Is the condition TRUE (violated)?
+   - YES → Rule TRIGGERED → Add to violations with rule ID
+   - NO → Rule NOT triggered → Don't add to violations
+3. Move to next rule
+
+Examples:
+- Rule: "Must have 4 waste types"
+  - Transaction has 1 type → Condition TRUE (has 1, not 4) → TRIGGERED → Add violation
+  - Transaction has 4 types → Condition FALSE (has 4) → NOT triggered → Skip
+
+- Rule: "Image must match material type"
+  - Image = organic, Data = recyclable → Condition TRUE (mismatch) → TRIGGERED → Add violation
+  - Image = organic, Data = organic → Condition FALSE (match) → NOT triggered → Skip
+
+- Rule: "Must have images for all materials"
+  - Record has images: [] → Condition TRUE (empty) → TRIGGERED → Add violation
+  - Record has images: ["url1", "url2"] → Condition FALSE (has images) → NOT triggered → Skip
+
 IMPORTANT REMINDERS:
-- If NO violations found: {{"tr_id": {transaction_data.get('transaction_id', 0)}, "violations": []}}
+- If NO violations found (everything is correct): {{"tr_id": {transaction_data.get('transaction_id', 0)}, "violations": []}}
+- If EVERY record is correct: {{"tr_id": {transaction_data.get('transaction_id', 0)}, "violations": []}}
+- NEVER add a violation that says "ถูกต้อง" or "correct" in the message
+- MIXED WASTE classified as General Waste is CORRECT - violations: []
 - Do NOT create fake violations or report non-issues
 - Do NOT say "missing: None" or "no problems found" as a violation
 - Only include actual errors in violations array
 - CHECK ALL RULES CAREFULLY but only flag TRUE violations where material category is completely different
-- Accept valid subcategories (aerosols in hazardous waste, bottles in recyclables, etc.)
+- Accept valid subcategories (aerosols in hazardous waste, bottles in recyclables, mixed waste in general waste, etc.)
+
+🔍 BEFORE FLAGGING "MISSING IMAGES" OR "MISSING MATERIAL TYPE":
+1. Look at the TRANSACTION JSON DATA above
+2. Count the records in transaction["records"] array
+3. Check EACH record's "images" field
+4. Example: If record has "images": ["https://s3.../image1.jpg", "https://s3.../image2.jpg"], then images ARE present!
+5. Only flag missing images if "images": [] (empty array) or "images": null
+6. Do NOT hallucinate missing material types - if 4 records exist in the data with images, all 4 types are present!
 """
         return prompt
 
@@ -643,7 +919,13 @@ If images contradict data, flag violation with specific reason.
 
             # Convert content_parts to Gemini format
             gemini_content = []
-            system_instruction = "You are a waste management auditor. Analyze transactions and flag only violations. Be concise."
+            system_instruction = """You are a waste management auditor. Your job is to find ACTUAL ERRORS only.
+
+CRITICAL: The violations array is for ERRORS ONLY. If a classification is correct, do NOT add it to violations.
+Only flag TRUE MISMATCHES where image content contradicts the data category.
+If everything is correct, return empty violations array: {"violations": []}
+
+NEVER write "ถูกต้อง" or "correct" in a violation message - if something is correct, don't add it to violations!"""
 
             for part in content_parts:
                 if part['type'] == 'text':
@@ -711,7 +993,13 @@ If images contradict data, flag violation with specific reason.
 
             # Prepare content
             full_prompt = f"{prompt}\n\nRespond only with valid JSON format as specified above."
-            system_instruction = "You are a professional waste management auditor with expertise in compliance and quality control."
+            system_instruction = """You are a professional waste management auditor with expertise in compliance and quality control.
+
+CRITICAL: The violations array is for ERRORS ONLY. If a classification is correct, do NOT add it to violations.
+Only flag TRUE MISMATCHES where image content contradicts the data category.
+If everything is correct, return empty violations array: {"violations": []}
+
+NEVER write "ถูกต้อง" or "correct" in a violation message - if something is correct, don't add it to violations!"""
 
             # logger.info(full_prompt)
             # Generate response using the new SDK
@@ -781,8 +1069,13 @@ If images contradict data, flag violation with specific reason.
 
             for violation in violations:
                 rule_db_id = violation.get('id')
-                msg = violation.get('msg', '')
+                msg = violation.get('m', violation.get('msg', ''))  # Try 'm' first, fallback to 'msg'
                 transaction_record_id = violation.get('tr')  # Get transaction_record_id from violation
+
+                # Validate that message is not empty
+                if not msg or msg.strip() == '':
+                    logger.warning(f"Empty message in violation for rule {rule_db_id}, transaction_record {transaction_record_id}")
+                    msg = f"Rule {rule_db_id} triggered (no message provided)"
 
                 # Lookup rule to get actions
                 rule = audit_rules_map_by_id.get(rule_db_id)
@@ -867,6 +1160,9 @@ If images contradict data, flag violation with specific reason.
                         elif audit_status == 'rejected':
                             transaction.status = TransactionStatus.rejected
 
+                    # Set ai_audit_date to mark when AI audit was performed
+                    transaction.ai_audit_date = datetime.now(timezone.utc)
+
                     # Extract triggered rule IDs
                     reject_triggers = []
 
@@ -898,6 +1194,17 @@ If images contradict data, flag violation with specific reason.
                     }
 
                     transaction.ai_audit_note = json.dumps(compact_audit, ensure_ascii=False)
+
+                    # Save audit prompt to notes for debugging
+                    audit_prompt = result.get('audit_prompt', '')
+                    # print("--------------AAAAAAAA--------------", audit_prompt)
+                    # if audit_prompt:
+                    #     audit_note = f"\n\n--- AI Audit Debug Info (สำหรับ debug) ---\nAudited at: {result.get('audited_at')}\nStatus: {audit_status}\nTokens: {result.get('token_usage', {}).get('total_tokens', 0)}\n\n=== Audit Prompt ===\n{audit_prompt[:2000]}..."  # Limit to first 2000 chars
+
+                    #     if transaction.notes:
+                    #         transaction.notes += audit_note
+                    #     else:
+                    #         transaction.notes = audit_note
 
                     updated_count += 1
 

@@ -46,6 +46,24 @@ def handle_bma_routes(event: Dict[str, Any], data: Dict[str, Any], **params) -> 
                 current_user_organization_id
             )
 
+        elif '/api/integration/bma/usage' in path and method == 'GET':
+            return handle_bma_usage(
+                bma_service,
+                current_user_organization_id
+            )
+
+        elif '/api/integration/bma/audit_status' in path and method == 'GET':
+            return handle_bma_audit_status(
+                bma_service,
+                current_user_organization_id
+            )
+
+        elif '/api/integration/bma/add_transactions_to_audit_queue' in path and method == 'POST':
+            return handle_add_transactions_to_audit_queue(
+                bma_service,
+                current_user_organization_id
+            )
+
         else:
             raise APIException(
                 message='Route not found',
@@ -116,4 +134,94 @@ def handle_bma_transaction_batch(
             message=f"Failed to process transaction batch: {str(e)}",
             status_code=500,
             error_code='BATCH_PROCESSING_ERROR'
+        )
+
+
+def handle_bma_usage(
+    bma_service: BMAIntegrationService,
+    organization_id: int
+) -> Dict[str, Any]:
+    """
+    Handle GET /api/integration/bma/usage
+    Get subscription usage information
+
+    Returns subscription usage limits and current usage
+    """
+    try:
+        result = bma_service.get_subscription_usage(
+            organization_id=organization_id
+        )
+
+        return result
+
+    except (BadRequestException, ValidationException):
+        raise
+
+    except Exception as e:
+        logger.error(f"Error getting subscription usage: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise APIException(
+            message=f"Failed to get subscription usage: {str(e)}",
+            status_code=500,
+            error_code='USAGE_RETRIEVAL_ERROR'
+        )
+
+
+def handle_bma_audit_status(
+    bma_service: BMAIntegrationService,
+    organization_id: int
+) -> Dict[str, Any]:
+    """
+    Handle GET /api/integration/bma/audit_status
+    Get audit status summary for transactions in the past year
+
+    Returns summary of transaction statuses and AI audit statuses
+    """
+    try:
+        result = bma_service.get_audit_status_summary(
+            organization_id=organization_id
+        )
+
+        return result
+
+    except (BadRequestException, ValidationException):
+        raise
+
+    except Exception as e:
+        logger.error(f"Error getting audit status summary: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise APIException(
+            message=f"Failed to get audit status summary: {str(e)}",
+            status_code=500,
+            error_code='AUDIT_STATUS_RETRIEVAL_ERROR'
+        )
+
+
+def handle_add_transactions_to_audit_queue(
+    bma_service: BMAIntegrationService,
+    organization_id: int
+) -> Dict[str, Any]:
+    """
+    Handle POST /api/integration/bma/add_transactions_to_audit_queue
+    Add all transactions with ai_audit_status = 'null' to the audit queue
+
+    Returns number of transactions queued
+    """
+    try:
+        result = bma_service.add_transactions_to_audit_queue(
+            organization_id=organization_id
+        )
+
+        return result
+
+    except (BadRequestException, ValidationException):
+        raise
+
+    except Exception as e:
+        logger.error(f"Error adding transactions to audit queue: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise APIException(
+            message=f"Failed to add transactions to audit queue: {str(e)}",
+            status_code=500,
+            error_code='AUDIT_QUEUE_ERROR'
         )

@@ -13,6 +13,7 @@ import logging
 from ....models.transactions.transactions import Transaction, TransactionStatus
 from ....models.transactions.transaction_records import TransactionRecord
 from ....models.subscriptions.organizations import Organization
+from ....models.subscriptions.subscription_models import Subscription
 from ....exceptions import BadRequestException, ValidationException
 
 logger = logging.getLogger(__name__)
@@ -105,12 +106,28 @@ class BMAIntegrationService:
 
             organization_owner_id = organization.owner_id
 
+            # Check subscription limits
+            subscription = self.db.query(Subscription).filter(
+                Subscription.organization_id == organization_id,
+                Subscription.is_active == True
+            ).first()
+
+            if not subscription:
+                raise BadRequestException(f'No active subscription found for organization {organization_id}')
+
+            # Check if user has reached transaction creation limit
+            if subscription.create_transaction_usage >= subscription.create_transaction_limit:
+                raise BadRequestException(
+                    f'Transaction creation limit reached. Usage: {subscription.create_transaction_usage}/{subscription.create_transaction_limit}'
+                )
+
             batch = batch_data['batch']
             results = {
                 'processed': 0,
                 'created': 0,
                 'updated': 0,
-                'errors': []
+                'errors': [],
+                'transactions_created_count': 0  # Track new transactions for usage increment
             }
 
             # Iterate through transaction versions
@@ -153,6 +170,7 @@ class BMAIntegrationService:
                             results['processed'] += 1
                             if result['action'] == 'created':
                                 results['created'] += 1
+                                results['transactions_created_count'] += 1
                             elif result['action'] == 'updated':
                                 results['updated'] += 1
 
@@ -165,12 +183,25 @@ class BMAIntegrationService:
                                 'error': str(e)
                             })
 
+            # Increment subscription usage by the number of NEW transactions created
+            if results['transactions_created_count'] > 0:
+                subscription.create_transaction_usage += results['transactions_created_count']
+
             self.db.commit()
+
+            # Remove internal tracking field from results before returning
+            results.pop('transactions_created_count', 0)
 
             return {
                 'success': True,
                 'message': f"Processed {results['processed']} transactions",
-                'results': results
+                'results': results,
+                'subscription_usage': {
+                    'create_transaction_limit': subscription.create_transaction_limit,
+                    'create_transaction_usage': subscription.create_transaction_usage,
+                    'ai_audit_limit': subscription.ai_audit_limit,
+                    'ai_audit_usage': subscription.ai_audit_usage
+                }
             }
 
         except BadRequestException:
@@ -277,6 +308,7 @@ class BMAIntegrationService:
 
         # Create transaction records for each material
         transaction_record_ids = []
+        all_images = []
         for material_type, material_info in materials_data.items():
             if material_type in BMA_MATERIAL_MAPPING:
                 record = self._create_material_record(
@@ -288,11 +320,15 @@ class BMAIntegrationService:
                 )
                 if record:
                     transaction_record_ids.append(record.id)
+                    # Collect images from record
+                    if record.images:
+                        all_images.extend(record.images)
 
-        # Update transaction with record IDs
+        # Update transaction with record IDs and collected images
         transaction.transaction_records = transaction_record_ids
+        transaction.images = all_images
 
-        logger.info(f"Created transaction {transaction.id} with {len(transaction_record_ids)} records")
+        logger.info(f"Created transaction {transaction.id} with {len(transaction_record_ids)} records and {len(all_images)} images")
 
         return {
             'action': 'created',
@@ -367,7 +403,21 @@ class BMAIntegrationService:
                         transaction.transaction_records = current_records
                     records_created += 1
 
-        logger.info(f"Updated transaction {transaction.id}: {records_updated} records updated, {records_created} records created")
+        # Collect all images from all transaction records and update transaction.images
+        # This ensures images are visible in transaction list
+        all_records = self.db.query(TransactionRecord).filter(
+            TransactionRecord.created_transaction_id == transaction.id,
+            TransactionRecord.is_active == True
+        ).all()
+
+        all_images = []
+        for record in all_records:
+            if record.images:
+                all_images.extend(record.images)
+
+        transaction.images = all_images
+
+        logger.info(f"Updated transaction {transaction.id}: {records_updated} records updated, {records_created} records created, {len(all_images)} total images collected")
 
         return {
             'action': 'updated',
@@ -418,3 +468,166 @@ class BMAIntegrationService:
         logger.info(f"Created transaction record {record.id} for material {material_type}")
 
         return record
+
+    def get_subscription_usage(self, organization_id: int) -> Dict[str, Any]:
+        """
+        Get subscription usage information for an organization
+
+        Args:
+            organization_id: Organization ID
+
+        Returns:
+            Dict with subscription usage information
+        """
+        try:
+            # Get subscription for organization
+            subscription = self.db.query(Subscription).filter(
+                Subscription.organization_id == organization_id,
+                Subscription.is_active == True
+            ).first()
+
+            if not subscription:
+                raise BadRequestException(f'No active subscription found for organization {organization_id}')
+
+            return {
+                'success': True,
+                'data': {
+                    'subscription_usage': {
+                        'create_transaction_limit': subscription.create_transaction_limit,
+                        'create_transaction_usage': subscription.create_transaction_usage,
+                        'ai_audit_limit': subscription.ai_audit_limit,
+                        'ai_audit_usage': subscription.ai_audit_usage
+                    }
+                }
+            }
+
+        except BadRequestException:
+            raise
+        except Exception as e:
+            logger.error(f"Error getting subscription usage: {str(e)}")
+            raise ValidationException(f"Failed to get subscription usage: {str(e)}")
+
+    def get_audit_status_summary(self, organization_id: int) -> Dict[str, Any]:
+        """
+        Get audit status summary for transactions in the past year
+
+        Args:
+            organization_id: Organization ID
+
+        Returns:
+            Dict with audit status summary
+        """
+        try:
+            from datetime import timedelta
+            from sqlalchemy import func
+
+            # Calculate start date (today - 1 year)
+            today = datetime.now()
+            start_date = today - timedelta(days=365)
+
+            # Query transactions from the past year for this organization
+            transactions = self.db.query(Transaction).filter(
+                Transaction.organization_id == organization_id,
+                Transaction.created_date >= start_date,
+                Transaction.deleted_date.is_(None),
+                Transaction.is_active == True
+            ).all()
+
+            # Count total transactions
+            num_transactions = len(transactions)
+
+            # Initialize counters for AI audit status
+            ai_audit_counts = {
+                'not_audit': 0,
+                'queued': 0,
+                'approved': 0,
+                'rejected': 0
+            }
+
+            # Initialize counters for actual status
+            actual_status_counts = {
+                'pending': 0,
+                'rejected': 0,
+                'approved': 0
+            }
+
+            # Count transactions by status
+            for transaction in transactions:
+                # Count AI audit status
+                ai_status = transaction.ai_audit_status
+                if ai_status is None or (hasattr(ai_status, 'value') and ai_status.value == 'null'):
+                    ai_audit_counts['not_audit'] += 1
+                elif hasattr(ai_status, 'value'):
+                    status_value = ai_status.value
+                    if status_value in ai_audit_counts:
+                        ai_audit_counts[status_value] += 1
+
+                # Count actual status
+                actual_status = transaction.status
+                if actual_status and hasattr(actual_status, 'value'):
+                    status_value = actual_status.value
+                    if status_value in actual_status_counts:
+                        actual_status_counts[status_value] += 1
+
+            return {
+                'success': True,
+                'data': {
+                    'start_date': start_date.strftime('%Y-%m-%d'),
+                    'num_transactions': num_transactions,
+                    'ai_audit': ai_audit_counts,
+                    'actual_status': actual_status_counts
+                }
+            }
+
+        except Exception as e:
+            logger.error(f"Error getting audit status summary: {str(e)}")
+            raise ValidationException(f"Failed to get audit status summary: {str(e)}")
+
+    def add_transactions_to_audit_queue(self, organization_id: int) -> Dict[str, Any]:
+        """
+        Add all transactions with ai_audit_status = 'null' to the audit queue
+        Updates ai_audit_status to 'queued' for all matching transactions
+
+        Args:
+            organization_id: Organization ID
+
+        Returns:
+            Dict with number of transactions added to queue
+        """
+        try:
+            from sqlalchemy import text
+
+            # Use raw SQL for optimized bulk update
+            sql = text("""
+                UPDATE transactions
+                SET ai_audit_status = 'queued',
+                    updated_date = NOW()
+                WHERE organization_id = :org_id
+                AND ai_audit_status = 'null'
+                AND deleted_date IS NULL
+                AND is_active = true
+                RETURNING id
+            """)
+
+            # Execute the update and get the count of updated rows
+            result = self.db.execute(sql, {'org_id': organization_id})
+            updated_ids = [row[0] for row in result]
+            updated_count = len(updated_ids)
+
+            # Commit the changes
+            self.db.commit()
+
+            logger.info(f"Added {updated_count} transactions to audit queue for organization {organization_id}")
+
+            return {
+                'success': True,
+                'data': {
+                    'transactions_queued': updated_count,
+                    'message': f"Successfully added {updated_count} transactions to audit queue"
+                }
+            }
+
+        except Exception as e:
+            self.db.rollback()
+            logger.error(f"Error adding transactions to audit queue: {str(e)}")
+            raise ValidationException(f"Failed to add transactions to audit queue: {str(e)}")

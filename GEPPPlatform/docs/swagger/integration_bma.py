@@ -13,6 +13,169 @@ def get_bma_integration_paths() -> Dict[str, Any]:
         Dictionary of path specifications for BMA Integration endpoints
     """
     return {
+        "/api/integration/bma/audit_status": {
+            "get": {
+                "tags": ["BMA Integration"],
+                "summary": "Get audit status summary",
+                "description": """
+Get a summary of transaction audit statuses for the past year.
+
+This endpoint returns:
+- Total number of transactions in the past year
+- Breakdown of AI audit statuses (not_audit, queued, approved, rejected)
+- Breakdown of actual transaction statuses (pending, approved, rejected)
+
+Filters:
+- Only includes transactions from the past 365 days
+- Only includes active transactions (deleted_date is NULL)
+- Scoped to the authenticated user's organization
+                """,
+                "operationId": "getBmaAuditStatusSummary",
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Audit status summary retrieved successfully",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/BmaAuditStatusResponse"
+                                },
+                                "example": {
+                                    "success": True,
+                                    "data": {
+                                        "start_date": "2024-10-27",
+                                        "num_transactions": 150,
+                                        "ai_audit": {
+                                            "not_audit": 45,
+                                            "queued": 30,
+                                            "approved": 50,
+                                            "rejected": 25
+                                        },
+                                        "actual_status": {
+                                            "pending": 60,
+                                            "approved": 70,
+                                            "rejected": 20
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/UnauthorizedError"
+                    },
+                    "500": {
+                        "$ref": "#/components/responses/InternalServerError"
+                    }
+                }
+            }
+        },
+        "/api/integration/bma/usage": {
+            "get": {
+                "tags": ["BMA Integration"],
+                "summary": "Get subscription usage information",
+                "description": """
+Get current subscription usage limits and consumption for the organization.
+
+This endpoint returns:
+- Transaction creation limits and current usage
+- AI audit limits and current usage
+
+Useful for checking remaining quota before creating transactions.
+                """,
+                "operationId": "getBmaSubscriptionUsage",
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Subscription usage information retrieved successfully",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/BmaUsageResponse"
+                                },
+                                "example": {
+                                    "success": True,
+                                    "data": {
+                                        "subscription_usage": {
+                                            "create_transaction_limit": 100,
+                                            "create_transaction_usage": 45,
+                                            "ai_audit_limit": 10,
+                                            "ai_audit_usage": 3
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "$ref": "#/components/responses/BadRequestError"
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/UnauthorizedError"
+                    },
+                    "500": {
+                        "$ref": "#/components/responses/InternalServerError"
+                    }
+                }
+            }
+        },
+        "/api/integration/bma/add_transactions_to_audit_queue": {
+            "post": {
+                "tags": ["BMA Integration"],
+                "summary": "Add transactions to AI audit queue",
+                "description": """
+Add all transactions with ai_audit_status = 'null' to the AI audit queue.
+
+This endpoint:
+- Updates all non-audited transactions to 'queued' status
+- Uses optimized raw SQL for bulk updates
+- Only affects transactions in the authenticated user's organization
+- Only affects active transactions (deleted_date is NULL)
+
+**Use Case:**
+Trigger AI auditing for all pending transactions that haven't been queued yet.
+                """,
+                "operationId": "addTransactionsToAuditQueue",
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Transactions successfully added to audit queue",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/BmaAuditQueueResponse"
+                                },
+                                "example": {
+                                    "success": True,
+                                    "data": {
+                                        "transactions_queued": 45,
+                                        "message": "Successfully added 45 transactions to audit queue"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/UnauthorizedError"
+                    },
+                    "500": {
+                        "$ref": "#/components/responses/InternalServerError"
+                    }
+                }
+            }
+        },
         "/api/integration/bma/transaction": {
             "post": {
                 "tags": ["BMA Integration"],
@@ -140,6 +303,12 @@ This endpoint allows BMA systems to:
                                                     "created": 2,
                                                     "updated": 1,
                                                     "errors": []
+                                                },
+                                                "subscription_usage": {
+                                                    "create_transaction_limit": 100,
+                                                    "create_transaction_usage": 45,
+                                                    "ai_audit_limit": 10,
+                                                    "ai_audit_usage": 3
                                                 }
                                             }
                                         }
@@ -162,6 +331,12 @@ This endpoint allows BMA systems to:
                                                             "error": "Invalid timestamp format"
                                                         }
                                                     ]
+                                                },
+                                                "subscription_usage": {
+                                                    "create_transaction_limit": 100,
+                                                    "create_transaction_usage": 45,
+                                                    "ai_audit_limit": 10,
+                                                    "ai_audit_usage": 3
                                                 }
                                             }
                                         }
@@ -349,6 +524,31 @@ def get_bma_integration_schemas() -> Dict[str, Any]:
                 }
             }
         },
+        "BmaSubscriptionUsage": {
+            "type": "object",
+            "properties": {
+                "create_transaction_limit": {
+                    "type": "integer",
+                    "description": "Maximum number of transactions allowed to create",
+                    "example": 100
+                },
+                "create_transaction_usage": {
+                    "type": "integer",
+                    "description": "Current number of transactions created",
+                    "example": 45
+                },
+                "ai_audit_limit": {
+                    "type": "integer",
+                    "description": "Maximum number of AI audits allowed",
+                    "example": 10
+                },
+                "ai_audit_usage": {
+                    "type": "integer",
+                    "description": "Current number of AI audits used",
+                    "example": 3
+                }
+            }
+        },
         "BmaTransactionBatchResponse": {
             "type": "object",
             "properties": {
@@ -369,6 +569,122 @@ def get_bma_integration_schemas() -> Dict[str, Any]:
                         },
                         "results": {
                             "$ref": "#/components/schemas/BmaTransactionResults"
+                        },
+                        "subscription_usage": {
+                            "$ref": "#/components/schemas/BmaSubscriptionUsage"
+                        }
+                    }
+                }
+            }
+        },
+        "BmaUsageResponse": {
+            "type": "object",
+            "properties": {
+                "success": {
+                    "type": "boolean",
+                    "example": True
+                },
+                "data": {
+                    "type": "object",
+                    "properties": {
+                        "subscription_usage": {
+                            "$ref": "#/components/schemas/BmaSubscriptionUsage"
+                        }
+                    }
+                }
+            }
+        },
+        "BmaAuditStatusResponse": {
+            "type": "object",
+            "properties": {
+                "success": {
+                    "type": "boolean",
+                    "example": True
+                },
+                "data": {
+                    "type": "object",
+                    "properties": {
+                        "start_date": {
+                            "type": "string",
+                            "format": "date",
+                            "description": "Start date for the summary (today - 1 year)",
+                            "example": "2024-10-27"
+                        },
+                        "num_transactions": {
+                            "type": "integer",
+                            "description": "Total number of transactions in the period",
+                            "example": 150
+                        },
+                        "ai_audit": {
+                            "type": "object",
+                            "description": "Breakdown of AI audit statuses",
+                            "properties": {
+                                "not_audit": {
+                                    "type": "integer",
+                                    "description": "Number of transactions not yet audited by AI",
+                                    "example": 45
+                                },
+                                "queued": {
+                                    "type": "integer",
+                                    "description": "Number of transactions queued for AI audit",
+                                    "example": 30
+                                },
+                                "approved": {
+                                    "type": "integer",
+                                    "description": "Number of transactions approved by AI audit",
+                                    "example": 50
+                                },
+                                "rejected": {
+                                    "type": "integer",
+                                    "description": "Number of transactions rejected by AI audit",
+                                    "example": 25
+                                }
+                            }
+                        },
+                        "actual_status": {
+                            "type": "object",
+                            "description": "Breakdown of actual transaction statuses",
+                            "properties": {
+                                "pending": {
+                                    "type": "integer",
+                                    "description": "Number of transactions with pending status",
+                                    "example": 60
+                                },
+                                "approved": {
+                                    "type": "integer",
+                                    "description": "Number of transactions with approved status",
+                                    "example": 70
+                                },
+                                "rejected": {
+                                    "type": "integer",
+                                    "description": "Number of transactions with rejected status",
+                                    "example": 20
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "BmaAuditQueueResponse": {
+            "type": "object",
+            "properties": {
+                "success": {
+                    "type": "boolean",
+                    "example": True
+                },
+                "data": {
+                    "type": "object",
+                    "properties": {
+                        "transactions_queued": {
+                            "type": "integer",
+                            "description": "Number of transactions added to the audit queue",
+                            "example": 45
+                        },
+                        "message": {
+                            "type": "string",
+                            "description": "Success message",
+                            "example": "Successfully added 45 transactions to audit queue"
                         }
                     }
                 }

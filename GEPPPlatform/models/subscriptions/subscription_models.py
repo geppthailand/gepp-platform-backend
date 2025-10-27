@@ -55,6 +55,12 @@ class Subscription(Base, BaseModel):
     transactions_count_this_month = Column(Integer, default=0)
     storage_used_gb = Column(Integer, default=0)
     api_calls_today = Column(Integer, default=0)
+
+    # Transaction and AI audit limits
+    create_transaction_limit = Column(Integer, default=100)
+    create_transaction_usage = Column(Integer, default=0)
+    ai_audit_limit = Column(Integer, default=10)
+    ai_audit_usage = Column(Integer, default=0)
     
     # Relationships
     organization = relationship("Organization", foreign_keys=[organization_id])

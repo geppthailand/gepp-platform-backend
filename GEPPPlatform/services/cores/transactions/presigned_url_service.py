@@ -235,18 +235,23 @@ class TransactionPresignedUrlService:
             logger.info(f"File URLs: {file_urls}")
 
             presigned_data = []
+            errors = []
 
             for file_url in file_urls:
                 try:
                     # Extract S3 key from the URL
                     s3_key = self._extract_s3_key_from_url(file_url)
                     if not s3_key:
-                        logger.warning(f"Could not extract S3 key from URL: {file_url}")
+                        error_msg = f"Could not extract S3 key from URL: {file_url}"
+                        logger.warning(error_msg)
+                        errors.append({'url': file_url, 'error': 'Invalid S3 URL format'})
                         continue
 
                     # Verify the file belongs to the organization (basic security check)
                     if not s3_key.startswith(f"org/{organization_id}/"):
-                        logger.warning(f"File does not belong to organization {organization_id}: {s3_key}")
+                        error_msg = f"File does not belong to organization {organization_id}: {s3_key}"
+                        logger.warning(error_msg)
+                        errors.append({'url': file_url, 'error': 'Access denied - file does not belong to organization'})
                         continue
 
                     logger.info(f"Generating view presigned URL for key: {s3_key}")
@@ -272,24 +277,38 @@ class TransactionPresignedUrlService:
 
                 except ClientError as e:
                     error_code = e.response['Error']['Code']
-                    logger.error(f"AWS ClientError for {file_url} - Code: {error_code}, Message: {str(e)}")
+                    error_msg = f"AWS ClientError for {file_url} - Code: {error_code}, Message: {str(e)}"
+                    logger.error(error_msg)
+                    errors.append({'url': file_url, 'error': f"AWS Error ({error_code}): {str(e)}"})
                     continue
                 except Exception as e:
-                    logger.error(f"Error processing {file_url}: {str(e)}")
+                    error_msg = f"Error processing {file_url}: {str(e)}"
+                    logger.error(error_msg)
+                    errors.append({'url': file_url, 'error': str(e)})
                     continue
 
             if not presigned_data:
+                error_details = '; '.join([f"{err['url']}: {err['error']}" for err in errors[:3]])  # Show first 3 errors
                 return {
                     'success': False,
-                    'message': 'Failed to generate any view presigned URLs'
+                    'message': f'Failed to generate any view presigned URLs. Errors: {error_details}',
+                    'errors': errors
                 }
 
             logger.info(f"Successfully generated {len(presigned_data)} view presigned URLs")
+
+            # Prepare response message
+            if errors:
+                message = f'Generated {len(presigned_data)} view presigned URLs ({len(errors)} failed)'
+            else:
+                message = f'Generated {len(presigned_data)} view presigned URLs'
+
             return {
                 'success': True,
-                'message': f'Generated {len(presigned_data)} view presigned URLs',
+                'message': message,
                 'presigned_urls': presigned_data,
-                'expires_in_seconds': expiration_seconds
+                'expires_in_seconds': expiration_seconds,
+                'errors': errors if errors else []
             }
 
         except Exception as e:
