@@ -359,7 +359,7 @@ def _handle_overview_report(
         ghg_reduction += record_ghg
         
         # Aggregate by month for chart_data
-        dt = _parse_datetime(record.get('created_date'))
+        dt = _parse_datetime(record.get('transaction_date'))
         if dt:
             y = dt.year
             m = dt.month
@@ -666,7 +666,7 @@ def _handle_diversion_report(
             material_entry = material_table_map[main_material_id]
             
             # Aggregate by month
-            dt = _parse_datetime(record.get('created_date'))
+            dt = _parse_datetime(record.get('transaction_date'))
             if dt:
                 month = dt.month
                 material_entry['monthly_data'][month] = material_entry['monthly_data'].get(month, 0.0) + weight
@@ -1104,7 +1104,7 @@ def _handle_comparison_report(
                 continue
             material_name = category_names.get(cat_id_int, f"Category {cat_id_int}")
             weight = _calculate_weight(record, material)
-            dt = _parse_datetime(record.get('created_date'))
+            dt = _parse_datetime(record.get('transaction_date'))
             if not dt:
                 continue
             month_label = datetime(2000, dt.month, 1).strftime('%b')
