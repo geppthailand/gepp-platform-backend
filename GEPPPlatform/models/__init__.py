@@ -67,7 +67,7 @@ __all__ = [
     
     # User models
     'UserLocation', 'user_subusers',
-    'UserBank', 'UserSubscription', 'UserInputChannel',
+    'UserBank', 'UserSubscription', 'UserInputChannel', 'IntegrationToken',
     
     # Transaction models
     'Transaction', 'TransactionStatus', 'TransactionPriority',

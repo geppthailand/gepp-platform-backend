@@ -14,6 +14,7 @@ from ....models.transactions.transactions import Transaction, TransactionStatus
 from ....models.transactions.transaction_records import TransactionRecord
 from ....models.subscriptions.organizations import Organization
 from ....models.subscriptions.subscription_models import Subscription
+from ....models.users.integration_tokens import IntegrationToken
 from ....exceptions import BadRequestException, ValidationException
 
 logger = logging.getLogger(__name__)
@@ -58,7 +59,8 @@ class BMAIntegrationService:
     def process_bma_transaction_batch(
         self,
         batch_data: Dict[str, Any],
-        organization_id: int
+        organization_id: int,
+        jwt_token: str = None
     ) -> Dict[str, Any]:
         """
         Process BMA transaction batch data
@@ -105,6 +107,18 @@ class BMAIntegrationService:
                 raise BadRequestException(f'Organization {organization_id} does not have an owner')
 
             organization_owner_id = organization.owner_id
+
+            # Find integration_id from JWT token (find once before loop)
+            integration_id = None
+            if jwt_token:
+                integration_token = self.db.query(IntegrationToken).filter(
+                    IntegrationToken.jwt == jwt_token,
+                    IntegrationToken.valid == True,
+                    IntegrationToken.is_active == True,
+                    IntegrationToken.deleted_date.is_(None)
+                ).first()
+                if integration_token:
+                    integration_id = integration_token.id
 
             # Check subscription limits
             subscription = self.db.query(Subscription).filter(
@@ -164,7 +178,8 @@ class BMAIntegrationService:
                                 house_id=house_id,
                                 house_data=house_data,
                                 organization_id=organization_id,
-                                created_by_id=organization_owner_id
+                                created_by_id=organization_owner_id,
+                                integration_id=integration_id
                             )
 
                             results['processed'] += 1
@@ -222,7 +237,8 @@ class BMAIntegrationService:
         house_id: str,
         house_data: Dict[str, Any],
         organization_id: int,
-        created_by_id: int
+        created_by_id: int,
+        integration_id: int = None
     ) -> Dict[str, Any]:
         """
         Process a single house transaction
@@ -272,7 +288,8 @@ class BMAIntegrationService:
                 materials_data=materials_data,
                 transaction_date=transaction_date,
                 organization_id=organization_id,
-                created_by_id=created_by_id
+                created_by_id=created_by_id,
+                integration_id=integration_id
             )
 
     def _create_transaction_with_materials(
@@ -283,7 +300,8 @@ class BMAIntegrationService:
         materials_data: Dict[str, Any],
         transaction_date: datetime,
         organization_id: int,
-        created_by_id: int
+        created_by_id: int,
+        integration_id: int = None
     ) -> Dict[str, Any]:
         """
         Create a new transaction with material records
@@ -300,7 +318,8 @@ class BMAIntegrationService:
             weight_kg=0,
             total_amount=0,
             images=[],
-            created_by_id=created_by_id  # Set to organization owner
+            created_by_id=created_by_id,  # Set to organization owner
+            integration_id=integration_id  # Link to integration token
         )
 
         self.db.add(transaction)
@@ -631,3 +650,330 @@ class BMAIntegrationService:
             self.db.rollback()
             logger.error(f"Error adding transactions to audit queue: {str(e)}")
             raise ValidationException(f"Failed to add transactions to audit queue: {str(e)}")
+
+    def get_transactions(
+        self,
+        organization_id: int,
+        limit: int = 100,
+        page: int = 1,
+        transaction_version: Optional[str] = None,
+        origin_id: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """
+        Get list of transactions filtered by parameters with pagination
+
+        Args:
+            organization_id: Organization ID
+            limit: Max number of transactions to return per page (default: 100, max: 1000)
+            page: Page number (default: 1, starts from 1)
+            transaction_version: Filter by transaction version (ext_id_1)
+            origin_id: Filter by origin ID
+
+        Returns:
+            Dict with transactions in nested format, origins mapping, and pagination info
+        """
+        try:
+            from ....models.users.user_location import UserLocation
+            import json
+
+            # Validate pagination parameters
+            limit = max(1, min(limit, 1000))  # Between 1 and 1000
+            page = max(1, page)  # Minimum page 1
+
+            # Build query
+            query = self.db.query(Transaction).filter(
+                Transaction.organization_id == organization_id,
+                Transaction.is_active == True,
+                Transaction.deleted_date == None
+            )
+
+            # Apply filters
+            if transaction_version:
+                query = query.filter(Transaction.ext_id_1 == transaction_version)
+            if origin_id:
+                query = query.filter(Transaction.origin_id == origin_id)
+
+            # Get total count before pagination
+            total_count = query.count()
+
+            # Calculate pagination
+            offset = (page - 1) * limit
+            total_pages = (total_count + limit - 1) // limit  # Ceiling division
+
+            # Order by ext_id_2 (house_id) ascending and apply pagination
+            query = query.order_by(Transaction.ext_id_2.asc()).offset(offset).limit(limit)
+
+            transactions = query.all()
+
+            # Build nested response structure
+            transactions_data = {}
+            origins_data = {}
+
+            for transaction in transactions:
+                version = transaction.ext_id_1 or "unknown"
+                origin = transaction.origin_id
+                house = transaction.ext_id_2 or str(transaction.id)
+
+                # Get origin name if not already cached
+                if origin and origin not in origins_data:
+                    location = self.db.query(UserLocation).filter_by(id=origin).first()
+                    if location:
+                        origins_data[origin] = location.name_en or location.name_local or f"Location {origin}"
+                    else:
+                        origins_data[origin] = f"Location {origin}"
+
+                # Initialize nested structure
+                if version not in transactions_data:
+                    transactions_data[version] = {}
+                if origin not in transactions_data[version]:
+                    transactions_data[version][origin] = {}
+                if house not in transactions_data[version][origin]:
+                    transactions_data[version][origin][house] = {}
+
+                # Get transaction records (materials)
+                records = self.db.query(TransactionRecord).filter(
+                    TransactionRecord.created_transaction_id == transaction.id,
+                    TransactionRecord.is_active == True
+                ).all()
+
+                # Create mapping of record ID to record for violation assignment
+                records_by_id = {record.id: record for record in records}
+
+                # Map material IDs to BMA material type names
+                material_type_map = {
+                    94: "general",      # General Waste
+                    77: "organic",      # Food and Plant Waste
+                    298: "recyclable",  # Non-Specific Recyclables
+                    113: "hazardous"    # Non-Specific Hazardous Waste
+                }
+
+                # Parse violations from ai_audit_note (structure: {"s": "...", "v": [...]})
+                overall_violations = []
+                violations_by_record = {}  # record_id -> list of violations
+
+                if transaction.ai_audit_note:
+                    try:
+                        audit_data = json.loads(transaction.ai_audit_note) if isinstance(transaction.ai_audit_note, str) else transaction.ai_audit_note
+
+                        # Get violations array from "v" key
+                        violations_array = audit_data.get("v", []) if isinstance(audit_data, dict) else []
+
+                        for v in violations_array:
+                            if not isinstance(v, dict):
+                                continue
+
+                            # Extract message from "m" field
+                            violation_message = v.get("m", "")
+                            if not violation_message:
+                                continue
+
+                            # Check if violation has 'tr' field (transaction_record id)
+                            record_id = v.get("tr")
+                            if record_id and record_id in records_by_id:
+                                # This violation belongs to a specific material/record
+                                if record_id not in violations_by_record:
+                                    violations_by_record[record_id] = []
+                                violations_by_record[record_id].append(violation_message)
+                            else:
+                                # This is a transaction-level violation (no tr or invalid tr)
+                                overall_violations.append(violation_message)
+                    except:
+                        pass
+
+                # Build materials dictionary
+                materials = {}
+                for record in records:
+                    # Get material type name using BMA material mapping
+                    material_type = "unknown"
+                    if record.material_id and record.material_id in material_type_map:
+                        material_type = material_type_map[record.material_id]
+
+                    # Get violations for this specific record
+                    record_violations = violations_by_record.get(record.id, [])
+
+                    # Get first image from images array
+                    image_url = None
+                    if record.images and isinstance(record.images, list) and len(record.images) > 0:
+                        image_url = record.images[0]
+
+                    materials[material_type] = {
+                        "image_url": image_url,
+                        "violations": record_violations
+                    }
+
+                # Create house audit structure
+                transactions_data[version][origin][house] = {
+                    "audit": {
+                        "status": transaction.status.value if transaction.status else "pending",
+                        "ai_audit": transaction.ai_audit_status.value if transaction.ai_audit_status else "null",
+                        "overall_violations": overall_violations,
+                        "materials": materials
+                    }
+                }
+
+            return {
+                'success': True,
+                'data': {
+                    'transactions': transactions_data,
+                    'origins': origins_data,
+                    'pagination': {
+                        'page': page,
+                        'limit': limit,
+                        'total': total_count,
+                        'total_pages': total_pages,
+                        'has_next': page < total_pages,
+                        'has_prev': page > 1
+                    }
+                }
+            }
+
+        except Exception as e:
+            logger.error(f"Error getting transactions: {str(e)}")
+            raise ValidationException(f"Failed to get transactions: {str(e)}")
+
+    def get_transaction_by_ids(
+        self,
+        organization_id: int,
+        transaction_version: str,
+        house_id: str
+    ) -> Dict[str, Any]:
+        """
+        Get a specific transaction by ext_id_1 (transaction_version) and ext_id_2 (house_id)
+
+        Args:
+            organization_id: Organization ID
+            transaction_version: Transaction version (ext_id_1)
+            house_id: House ID (ext_id_2)
+
+        Returns:
+            Dict with transaction in nested format and origins mapping
+        """
+        try:
+            from ....models.users.user_location import UserLocation
+            import json
+
+            # Find transaction
+            transaction = self.db.query(Transaction).filter(
+                Transaction.ext_id_1 == transaction_version,
+                Transaction.ext_id_2 == house_id,
+                Transaction.organization_id == organization_id,
+                Transaction.is_active == True,
+                Transaction.deleted_date == None
+            ).first()
+
+            if not transaction:
+                raise ValidationException(f"Transaction not found: {transaction_version}/{house_id}")
+
+            # Build nested response structure
+            transactions_data = {}
+            origins_data = {}
+
+            version = transaction.ext_id_1 or "unknown"
+            origin = transaction.origin_id
+            house = transaction.ext_id_2 or str(transaction.id)
+
+            # Get origin name
+            if origin:
+                location = self.db.query(UserLocation).filter_by(id=origin).first()
+                if location:
+                    origins_data[origin] = location.name_en or location.name_local or f"Location {origin}"
+                else:
+                    origins_data[origin] = f"Location {origin}"
+
+            # Initialize nested structure
+            transactions_data[version] = {origin: {house: {}}}
+
+            # Get transaction records (materials)
+            records = self.db.query(TransactionRecord).filter(
+                TransactionRecord.created_transaction_id == transaction.id,
+                TransactionRecord.is_active == True
+            ).all()
+
+            # Create mapping of record ID to record for violation assignment
+            records_by_id = {record.id: record for record in records}
+
+            # Map material IDs to BMA material type names
+            material_type_map = {
+                94: "general",      # General Waste
+                77: "organic",      # Food and Plant Waste
+                298: "recyclable",  # Non-Specific Recyclables
+                113: "hazardous"    # Non-Specific Hazardous Waste
+            }
+
+            # Parse violations from ai_audit_note (structure: {"s": "...", "v": [...]})
+            overall_violations = []
+            violations_by_record = {}  # record_id -> list of violations
+
+            if transaction.ai_audit_note:
+                try:
+                    audit_data = json.loads(transaction.ai_audit_note) if isinstance(transaction.ai_audit_note, str) else transaction.ai_audit_note
+
+                    # Get violations array from "v" key
+                    violations_array = audit_data.get("v", []) if isinstance(audit_data, dict) else []
+
+                    for v in violations_array:
+                        if not isinstance(v, dict):
+                            continue
+
+                        # Extract message from "m" field
+                        violation_message = v.get("m", "")
+                        if not violation_message:
+                            continue
+
+                        # Check if violation has 'tr' field (transaction_record id)
+                        record_id = v.get("tr")
+                        if record_id and record_id in records_by_id:
+                            # This violation belongs to a specific material/record
+                            if record_id not in violations_by_record:
+                                violations_by_record[record_id] = []
+                            violations_by_record[record_id].append(violation_message)
+                        else:
+                            # This is a transaction-level violation (no tr or invalid tr)
+                            overall_violations.append(violation_message)
+                except:
+                    pass
+
+            # Build materials dictionary
+            materials = {}
+            for record in records:
+                # Get material type name using BMA material mapping
+                material_type = "unknown"
+                if record.material_id and record.material_id in material_type_map:
+                    material_type = material_type_map[record.material_id]
+
+                # Get violations for this specific record
+                record_violations = violations_by_record.get(record.id, [])
+
+                # Get first image from images array
+                image_url = None
+                if record.images and isinstance(record.images, list) and len(record.images) > 0:
+                    image_url = record.images[0]
+
+                materials[material_type] = {
+                    "image_url": image_url,
+                    "violations": record_violations
+                }
+
+            # Create house audit structure
+            transactions_data[version][origin][house] = {
+                "audit": {
+                    "status": transaction.status.value if transaction.status else "pending",
+                    "ai_audit": transaction.ai_audit_status.value if transaction.ai_audit_status else "null",
+                    "overall_violations": overall_violations,
+                    "materials": materials
+                }
+            }
+
+            return {
+                'success': True,
+                'data': {
+                    'transactions': transactions_data,
+                    'origins': origins_data
+                }
+            }
+
+        except ValidationException:
+            raise
+        except Exception as e:
+            logger.error(f"Error getting transaction by IDs: {str(e)}")
+            raise ValidationException(f"Failed to get transaction: {str(e)}")

@@ -8,6 +8,7 @@ import json
 
 from .base import get_base_swagger_config
 from .integration_bma import get_bma_integration_paths, get_bma_integration_schemas
+from .auth import get_auth_paths, get_auth_schemas
 
 
 def merge_deep(base: Dict, update: Dict) -> Dict:
@@ -43,16 +44,26 @@ def get_full_swagger_spec(deployment_state: str = "dev") -> Dict[str, Any]:
     # Start with base configuration
     spec = get_base_swagger_config(deployment_state)
 
-    # Add BMA Integration paths
-    bma_paths = get_bma_integration_paths()
-    spec["paths"] = merge_deep(spec.get("paths", {}), bma_paths)
+    # Add Auth paths and schemas
+    auth_paths = get_auth_paths()
+    spec["paths"] = merge_deep(spec.get("paths", {}), auth_paths)
 
-    # Add BMA Integration schemas
-    bma_schemas = get_bma_integration_schemas()
+    auth_schemas = get_auth_schemas()
     if "components" not in spec:
         spec["components"] = {}
     if "schemas" not in spec["components"]:
         spec["components"]["schemas"] = {}
+    spec["components"]["schemas"] = merge_deep(
+        spec["components"]["schemas"],
+        auth_schemas
+    )
+
+    # Add BMA Integration paths
+    bma_paths = get_bma_integration_paths()
+    spec["paths"] = merge_deep(spec["paths"], bma_paths)
+
+    # Add BMA Integration schemas
+    bma_schemas = get_bma_integration_schemas()
     spec["components"]["schemas"] = merge_deep(
         spec["components"]["schemas"],
         bma_schemas
@@ -113,8 +124,8 @@ def get_swagger_ui_html(deployment_state: str = "dev") -> str:
         window.onload = function() {{
             // Get the current path and construct the OpenAPI spec URL
             const currentPath = window.location.pathname;
-            const basePath = currentPath.replace(/\/docs.*$/, '');
-            const specUrl = basePath + '/docs/openapi.json';
+            const basePath = currentPath.replace(/\/documents\/api-docs.*$/, '');
+            const specUrl = basePath + '/documents/api-docs/openapi.json';
 
             // Construct the server URL from current location
             const protocol = window.location.protocol;
@@ -223,8 +234,8 @@ def get_redoc_html(deployment_state: str = "dev") -> str:
     <script>
         // Get the current path and construct the OpenAPI spec URL
         const currentPath = window.location.pathname;
-        const basePath = currentPath.replace(/\/docs.*$/, '');
-        const specUrl = basePath + '/docs/openapi.json';
+        const basePath = currentPath.replace(/\/documents\/api-docs.*$/, '');
+        const specUrl = basePath + '/documents/api-docs/openapi.json';
 
         // Initialize Redoc
         Redoc.init(specUrl, {{}}, document.getElementById('redoc-container'));

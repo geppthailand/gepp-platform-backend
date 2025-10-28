@@ -12,6 +12,10 @@ from .swagger.aggregator import (
     get_swagger_ui_html,
     get_redoc_html
 )
+from .swagger.bma_public import (
+    get_bma_public_swagger_spec,
+    get_bma_public_swagger_html
+)
 
 logger = logging.getLogger(__name__)
 
@@ -21,10 +25,10 @@ def handle_docs_routes(event: Dict[str, Any], **params) -> Dict[str, Any]:
     Main handler for documentation routes
 
     Routes:
-    - GET /docs - Swagger UI (default)
-    - GET /docs/swagger - Swagger UI
-    - GET /docs/redoc - ReDoc UI
-    - GET /docs/openapi.json - OpenAPI JSON specification
+    - GET /documents/api-docs - Swagger UI (default)
+    - GET /documents/api-docs/swagger - Swagger UI
+    - GET /documents/api-docs/redoc - ReDoc UI
+    - GET /documents/api-docs/openapi.json - OpenAPI JSON specification
     """
     path = event.get("rawPath", "")
     method = params.get('method', 'GET')
@@ -34,29 +38,45 @@ def handle_docs_routes(event: Dict[str, Any], **params) -> Dict[str, Any]:
     deployment_state = path_params.get('deployment_state', 'dev')
 
     try:
+        # BMA Public Documentation (specific hash-protected endpoint)
+        if '/docs/bma/0a70bf9ef2fcb7c2dc6c2b046ebb052c' in path:
+            if path.endswith('/openapi.json'):
+                # Return BMA public OpenAPI spec
+                spec = get_bma_public_swagger_spec(deployment_state)
+                return {
+                    'content_type': 'application/json',
+                    'body': json.dumps(spec, indent=2)
+                }
+            else:
+                # Return BMA public Swagger UI
+                return {
+                    'content_type': 'text/html',
+                    'body': get_bma_public_swagger_html(deployment_state)
+                }
+
         # Swagger UI (default)
-        if path.endswith('/docs') or path.endswith('/docs/'):
+        elif path.endswith('/documents/api-docs') or path.endswith('/documents/api-docs/'):
             return {
                 'content_type': 'text/html',
                 'body': get_swagger_ui_html(deployment_state)
             }
 
         # Swagger UI (explicit)
-        elif path.endswith('/docs/swagger') or path.endswith('/docs/swagger/'):
+        elif path.endswith('/documents/api-docs/swagger') or path.endswith('/documents/api-docs/swagger/'):
             return {
                 'content_type': 'text/html',
                 'body': get_swagger_ui_html(deployment_state)
             }
 
         # ReDoc UI
-        elif path.endswith('/docs/redoc') or path.endswith('/docs/redoc/'):
+        elif path.endswith('/documents/api-docs/redoc') or path.endswith('/documents/api-docs/redoc/'):
             return {
                 'content_type': 'text/html',
                 'body': get_redoc_html(deployment_state)
             }
 
         # OpenAPI JSON specification
-        elif path.endswith('/docs/openapi.json'):
+        elif path.endswith('/documents/api-docs/openapi.json'):
             spec = get_full_swagger_spec(deployment_state)
             return {
                 'content_type': 'application/json',
@@ -64,12 +84,12 @@ def handle_docs_routes(event: Dict[str, Any], **params) -> Dict[str, Any]:
             }
 
         # OpenAPI YAML specification
-        elif path.endswith('/docs/openapi.yaml') or path.endswith('/docs/openapi.yml'):
+        elif path.endswith('/documents/api-docs/openapi.yaml') or path.endswith('/documents/api-docs/openapi.yml'):
             try:
                 import yaml
                 spec = get_full_swagger_spec(deployment_state)
                 return {
-                    'content_type': 'application/x-yaml',
+                'content_type': 'application/x-yaml',
                     'body': yaml.dump(spec, default_flow_style=False, sort_keys=False)
                 }
             except ImportError:
@@ -77,12 +97,12 @@ def handle_docs_routes(event: Dict[str, Any], **params) -> Dict[str, Any]:
                     'content_type': 'application/json',
                     'body': json.dumps({
                         'error': 'YAML support not available. Install PyYAML package.',
-                        'alternative': f'/{deployment_state}/docs/openapi.json'
+                        'alternative': f'/{deployment_state}/documents/api-docs/openapi.json'
                     })
                 }
 
         # Index page
-        elif '/docs' in path:
+        elif '/documents/api-docs' in path:
             return {
                 'content_type': 'text/html',
                 'body': get_docs_index_html(deployment_state)
@@ -94,11 +114,11 @@ def handle_docs_routes(event: Dict[str, Any], **params) -> Dict[str, Any]:
                 'body': json.dumps({
                     'error': 'Route not found',
                     'available_routes': [
-                        f'/{deployment_state}/docs',
-                        f'/{deployment_state}/docs/swagger',
-                        f'/{deployment_state}/docs/redoc',
-                        f'/{deployment_state}/docs/openapi.json',
-                        f'/{deployment_state}/docs/openapi.yaml'
+                        f'/{deployment_state}/documents/api-docs',
+                        f'/{deployment_state}/documents/api-docs/swagger',
+                        f'/{deployment_state}/documents/api-docs/redoc',
+                        f'/{deployment_state}/documents/api-docs/openapi.json',
+                        f'/{deployment_state}/documents/api-docs/openapi.yaml'
                     ]
                 })
             }

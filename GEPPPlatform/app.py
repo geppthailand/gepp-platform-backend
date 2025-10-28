@@ -116,7 +116,7 @@ def main(event, context):
                 auth_result = handle_auth_routes(path, data=body, **commonParams)
                 results = {"data": auth_result}
 
-            elif "/docs" in raw_path:
+            elif "/documents/api-docs" in raw_path or "/docs/bma/" in raw_path:
                 # Handle documentation routes (no authorization required)
                 from .docs.docs_handlers import handle_docs_routes
 
@@ -149,14 +149,14 @@ def main(event, context):
                 token = auth_header[7:]  # Remove 'Bearer ' prefix
                 # Create AuthHandlers instance for token verification
                 auth_handler = AuthHandlers(session)
-                token_data = auth_handler.verify_jwt_token(token)
+                token_data = auth_handler.verify_jwt_token(token, path)
                 print(token_data)
 
                 if token_data is None:
                     return {
                         "statusCode": 401,
                         "headers": headers,
-                        "body": json.dumps({'success': False, 'message': 'Invalid token'})
+                        "body": json.dumps({'success': False, 'message': 'Invalid token or insufficient permissions'})
                     }
 
                 # Extract full user info from JWT token and add to commonParams

@@ -109,6 +109,9 @@ class Transaction(Base, BaseModel):
     updated_by_id = Column(BigInteger, ForeignKey('user_locations.id'), nullable=True)
     approved_by_id = Column(BigInteger, ForeignKey('user_locations.id'), nullable=True)
 
+    # Integration tracking
+    integration_id = Column(BigInteger, ForeignKey('integration_tokens.id', ondelete='SET NULL'), nullable=True)
+
     # Constraints
     __table_args__ = (
         CheckConstraint('transaction_method IN (\'origin\', \'transport\', \'transform\')', name='chk_transaction_method'),
@@ -124,6 +127,7 @@ class Transaction(Base, BaseModel):
     created_by = relationship("UserLocation", foreign_keys=[created_by_id])
     updated_by = relationship("UserLocation", foreign_keys=[updated_by_id])
     approved_by = relationship("UserLocation", foreign_keys=[approved_by_id])
+    integration_token = relationship("IntegrationToken", foreign_keys=[integration_id])
     # Note: Using JSONB fields for images instead of relationships to avoid table dependencies
     
     def calculate_totals(self):

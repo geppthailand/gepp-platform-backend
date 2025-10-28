@@ -177,6 +177,180 @@ Trigger AI auditing for all pending transactions that haven't been queued yet.
             }
         },
         "/api/integration/bma/transaction": {
+            "get": {
+                "tags": ["BMA Integration"],
+                "summary": "Get list of transactions with pagination",
+                "description": """
+Get a paginated list of transactions filtered by query parameters, sorted by ID in ascending order.
+
+**Response Structure:**
+Returns transactions in nested format organized by:
+- transaction_version (ext_id_1)
+- origin_id
+- house_id (ext_id_2)
+- audit (status, ai_audit, overall_violations, materials)
+  - materials (general, organic, recyclable, hazardous)
+
+**Sorting:**
+- Transactions are sorted by **house_id (ext_id_2)** in ascending order
+
+**Pagination:**
+- Use `page` and `limit` parameters for pagination
+- Response includes pagination metadata: page, limit, total, total_pages, has_next, has_prev
+
+**Query Parameters:**
+- `limit`: Number of transactions per page (default: 100, max: 1000)
+- `page`: Page number (default: 1, starts from 1)
+- `transaction_version`: Filter by transaction version (ext_id_1)
+- `origin_id`: Filter by origin ID (default: 2170)
+
+**Example:**
+- Page 1: `GET /api/integration/bma/transaction?page=1&limit=100`
+- Page 2: `GET /api/integration/bma/transaction?page=2&limit=100`
+                """,
+                "operationId": "getBmaTransactions",
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "parameters": [
+                    {
+                        "name": "limit",
+                        "in": "query",
+                        "description": "Maximum number of transactions to return per page",
+                        "required": False,
+                        "schema": {
+                            "type": "integer",
+                            "default": 100,
+                            "maximum": 1000,
+                            "minimum": 1
+                        }
+                    },
+                    {
+                        "name": "page",
+                        "in": "query",
+                        "description": "Page number (starts from 1)",
+                        "required": False,
+                        "schema": {
+                            "type": "integer",
+                            "default": 1,
+                            "minimum": 1,
+                            "example": 1
+                        }
+                    },
+                    {
+                        "name": "transaction_version",
+                        "in": "query",
+                        "description": "Filter by transaction version (ext_id_1)",
+                        "required": False,
+                        "schema": {
+                            "type": "string",
+                            "example": "v2025-Q4"
+                        }
+                    },
+                    {
+                        "name": "origin_id",
+                        "in": "query",
+                        "description": "Filter by origin ID",
+                        "required": False,
+                        "schema": {
+                            "type": "integer",
+                            "default": 2170,
+                            "example": 2170
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Transactions retrieved successfully",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/BmaTransactionListResponse"
+                                },
+                                "example": {
+                                    "success": True,
+                                    "data": {
+                                        "transactions": {
+                                            "v2025-Q4": {
+                                                "2170": {
+                                                    "00000000001": {
+                                                        "audit": {
+                                                            "status": "approved",
+                                                            "ai_audit": "approved",
+                                                            "overall_violations": [],
+                                                            "materials": {
+                                                                "general": {
+                                                                    "image_url": "https://s3.example.com/general.jpg",
+                                                                    "violations": []
+                                                                },
+                                                                "organic": {
+                                                                    "image_url": "https://s3.example.com/organic.jpg",
+                                                                    "violations": []
+                                                                },
+                                                                "recyclable": {
+                                                                    "image_url": "https://s3.example.com/recyclable.jpg",
+                                                                    "violations": []
+                                                                },
+                                                                "hazardous": {
+                                                                    "image_url": "https://s3.example.com/hazardous.jpg",
+                                                                    "violations": []
+                                                                }
+                                                            }
+                                                        }
+                                                    },
+                                                    "00000000002": {
+                                                        "audit": {
+                                                            "status": "rejected",
+                                                            "ai_audit": "rejected",
+                                                            "overall_violations": [
+                                                                "Incomplete transaction: Missing required material types"
+                                                            ],
+                                                            "materials": {
+                                                                "general": {
+                                                                    "image_url": "https://s3.example.com/general2.jpg",
+                                                                    "violations": [
+                                                                        "Image-material mismatch: Appears to be hazardous waste"
+                                                                    ]
+                                                                },
+                                                                "organic": {
+                                                                    "image_url": None,
+                                                                    "violations": []
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        },
+                                        "origins": {
+                                            "2170": "BMA Collection Center"
+                                        },
+                                        "pagination": {
+                                            "page": 1,
+                                            "limit": 100,
+                                            "total": 2,
+                                            "total_pages": 1,
+                                            "has_next": False,
+                                            "has_prev": False
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "$ref": "#/components/responses/BadRequestError"
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/UnauthorizedError"
+                    },
+                    "500": {
+                        "$ref": "#/components/responses/InternalServerError"
+                    }
+                }
+            },
             "post": {
                 "tags": ["BMA Integration"],
                 "summary": "Process BMA transaction batch",
@@ -192,6 +366,11 @@ This endpoint allows BMA systems to:
 - Transactions are matched using `ext_id_1` (transaction_version) and `ext_id_2` (house_id)
 - If a match is found, the transaction is updated
 - If no match is found, a new transaction is created
+
+**House ID Format:**
+- **Recommended:** Use 11-digit format (e.g., '00000000001', '00000000002')
+- Ensures consistency and easy sorting
+- Example: '00000000123' instead of 'HOUSE-123'
 
 **Material Types:**
 - `general` - General Waste (material_id: 94)
@@ -220,7 +399,7 @@ This endpoint allows BMA systems to:
                                         "batch": {
                                             "v2025-Q1": {
                                                 "2170": {
-                                                    "HOUSE-001": {
+                                                    "00000000001": {
                                                         "timestamp": "2025-10-23T08:30:00+07:00",
                                                         "material": {
                                                             "general": {
@@ -242,7 +421,7 @@ This endpoint allows BMA systems to:
                                         "batch": {
                                             "v2025-Q1": {
                                                 "2170": {
-                                                    "HOUSE-001": {
+                                                    "00000000001": {
                                                         "timestamp": "2025-10-23T08:30:00+07:00",
                                                         "material": {
                                                             "general": {
@@ -250,7 +429,7 @@ This endpoint allows BMA systems to:
                                                             }
                                                         }
                                                     },
-                                                    "HOUSE-002": {
+                                                    "00000000002": {
                                                         "timestamp": "2025-10-23T09:15:00+07:00",
                                                         "material": {
                                                             "organic": {
@@ -265,7 +444,7 @@ This endpoint allows BMA systems to:
                                             },
                                             "v2025-Q2": {
                                                 "2170": {
-                                                    "HOUSE-003": {
+                                                    "00000000003": {
                                                         "timestamp": "2025-10-23T10:00:00+07:00",
                                                         "material": {
                                                             "recyclable": {
@@ -356,6 +535,125 @@ This endpoint allows BMA systems to:
                     }
                 }
             }
+        },
+        "/api/integration/bma/transaction/{transaction_version}/{house_id}": {
+            "get": {
+                "tags": ["BMA Integration"],
+                "summary": "Get specific transaction by IDs",
+                "description": """
+Get a specific transaction by transaction_version (ext_id_1) and house_id (ext_id_2).
+
+Returns transaction in the same nested format as the list endpoint:
+- transaction_version (ext_id_1)
+- origin_id
+- house_id (ext_id_2)
+- material_name
+
+Also includes origin names mapping.
+                """,
+                "operationId": "getBmaTransactionByIds",
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "parameters": [
+                    {
+                        "name": "transaction_version",
+                        "in": "path",
+                        "description": "Transaction version (ext_id_1)",
+                        "required": True,
+                        "schema": {
+                            "type": "string",
+                            "example": "v2025-Q4"
+                        }
+                    },
+                    {
+                        "name": "house_id",
+                        "in": "path",
+                        "description": "House ID (ext_id_2)",
+                        "required": True,
+                        "schema": {
+                            "type": "string",
+                            "example": "00000000001"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Transaction retrieved successfully",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/BmaTransactionGetResponse"
+                                },
+                                "example": {
+                                    "success": True,
+                                    "data": {
+                                        "transactions": {
+                                            "v2025-Q4": {
+                                                "2170": {
+                                                    "00000000001": {
+                                                        "audit": {
+                                                            "status": "approved",
+                                                            "ai_audit": "approved",
+                                                            "overall_violations": [],
+                                                            "materials": {
+                                                                "general": {
+                                                                    "image_url": "https://s3.example.com/general.jpg",
+                                                                    "violations": []
+                                                                },
+                                                                "organic": {
+                                                                    "image_url": "https://s3.example.com/organic.jpg",
+                                                                    "violations": []
+                                                                },
+                                                                "recyclable": {
+                                                                    "image_url": "https://s3.example.com/recyclable.jpg",
+                                                                    "violations": []
+                                                                },
+                                                                "hazardous": {
+                                                                    "image_url": "https://s3.example.com/hazardous.jpg",
+                                                                    "violations": []
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        },
+                                        "origins": {
+                                            "2170": "BMA Collection Center"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "$ref": "#/components/responses/BadRequestError"
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/UnauthorizedError"
+                    },
+                    "404": {
+                        "description": "Transaction not found",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/Error"
+                                },
+                                "example": {
+                                    "success": False,
+                                    "message": "Transaction not found: v2025-Q4/00000000001"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "$ref": "#/components/responses/InternalServerError"
+                    }
+                }
+            }
         }
     }
 
@@ -408,12 +706,12 @@ def get_bma_integration_schemas() -> Dict[str, Any]:
         },
         "BmaOriginData": {
             "type": "object",
-            "description": "Houses grouped under an origin_id (must be 2170)",
+            "description": "Houses grouped under an origin_id (must be 2170). House IDs should use 11-digit format (e.g., '00000000001', '00000000002').",
             "additionalProperties": {
                 "$ref": "#/components/schemas/BmaHouseData"
             },
             "example": {
-                "HOUSE-001": {
+                "00000000001": {
                     "timestamp": "2025-10-23T08:30:00+07:00",
                     "material": {
                         "general": {
@@ -421,7 +719,7 @@ def get_bma_integration_schemas() -> Dict[str, Any]:
                         }
                     }
                 },
-                "HOUSE-002": {
+                "00000000002": {
                     "timestamp": "2025-10-23T09:15:00+07:00",
                     "material": {
                         "organic": {
@@ -439,7 +737,7 @@ def get_bma_integration_schemas() -> Dict[str, Any]:
             },
             "example": {
                 "2170": {
-                    "HOUSE-001": {
+                    "00000000001": {
                         "timestamp": "2025-10-23T08:30:00+07:00",
                         "material": {
                             "general": {
@@ -463,7 +761,7 @@ def get_bma_integration_schemas() -> Dict[str, Any]:
                     "example": {
                         "v2025-Q1": {
                             "2170": {
-                                "HOUSE-001": {
+                                "00000000001": {
                                     "timestamp": "2025-10-23T08:30:00+07:00",
                                     "material": {
                                         "general": {
@@ -487,8 +785,8 @@ def get_bma_integration_schemas() -> Dict[str, Any]:
                 },
                 "house_id": {
                     "type": "string",
-                    "description": "The house ID that failed",
-                    "example": "HOUSE-001"
+                    "description": "The house ID that failed (11-digit format recommended)",
+                    "example": "00000000001"
                 },
                 "error": {
                     "type": "string",
@@ -685,6 +983,163 @@ def get_bma_integration_schemas() -> Dict[str, Any]:
                             "type": "string",
                             "description": "Success message",
                             "example": "Successfully added 45 transactions to audit queue"
+                        }
+                    }
+                }
+            }
+        },
+        "BmaMaterialAudit": {
+            "type": "object",
+            "properties": {
+                "image_url": {
+                    "type": ["string", "null"],
+                    "description": "URL to the material image (first image from images array, null if not available)",
+                    "example": "https://s3.example.com/general.jpg"
+                },
+                "audit": {
+                    "type": "object",
+                    "properties": {
+                        "status": {
+                            "type": "string",
+                            "description": "Transaction status",
+                            "enum": ["pending", "approved", "rejected"],
+                            "example": "approved"
+                        },
+                        "ai_audit_status": {
+                            "type": "string",
+                            "description": "AI audit status",
+                            "enum": ["null", "queued", "approved", "rejected"],
+                            "example": "approved"
+                        },
+                        "violations": {
+                            "type": "array",
+                            "description": "List of audit violations",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "message": {
+                                        "type": "string",
+                                        "description": "Violation message",
+                                        "example": "Incomplete transaction: Missing required material types"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "BmaTransactionListResponse": {
+            "type": "object",
+            "properties": {
+                "success": {
+                    "type": "boolean",
+                    "example": True
+                },
+                "data": {
+                    "type": "object",
+                    "properties": {
+                        "transactions": {
+                            "type": "object",
+                            "description": "Nested structure: transaction_version > origin_id > house_id > material_name > material data",
+                            "additionalProperties": {
+                                "type": "object",
+                                "additionalProperties": {
+                                    "type": "object",
+                                    "additionalProperties": {
+                                        "type": "object",
+                                        "additionalProperties": {
+                                            "$ref": "#/components/schemas/BmaMaterialAudit"
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        "origins": {
+                            "type": "object",
+                            "description": "Mapping of origin_id to location name",
+                            "additionalProperties": {
+                                "type": "string"
+                            },
+                            "example": {
+                                "2170": "BMA Collection Center"
+                            }
+                        },
+                        "pagination": {
+                            "type": "object",
+                            "description": "Pagination information",
+                            "properties": {
+                                "page": {
+                                    "type": "integer",
+                                    "description": "Current page number",
+                                    "example": 1
+                                },
+                                "limit": {
+                                    "type": "integer",
+                                    "description": "Number of items per page",
+                                    "example": 100
+                                },
+                                "total": {
+                                    "type": "integer",
+                                    "description": "Total number of items",
+                                    "example": 250
+                                },
+                                "total_pages": {
+                                    "type": "integer",
+                                    "description": "Total number of pages",
+                                    "example": 3
+                                },
+                                "has_next": {
+                                    "type": "boolean",
+                                    "description": "Whether there is a next page",
+                                    "example": True
+                                },
+                                "has_prev": {
+                                    "type": "boolean",
+                                    "description": "Whether there is a previous page",
+                                    "example": False
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "BmaTransactionGetResponse": {
+            "type": "object",
+            "properties": {
+                "success": {
+                    "type": "boolean",
+                    "example": True
+                },
+                "data": {
+                    "type": "object",
+                    "properties": {
+                        "transactions": {
+                            "type": "object",
+                            "description": "Nested structure: transaction_version > origin_id > house_id > material_name > material data",
+                            "additionalProperties": {
+                                "type": "object",
+                                "additionalProperties": {
+                                    "type": "object",
+                                    "additionalProperties": {
+                                        "type": "object",
+                                        "additionalProperties": {
+                                            "$ref": "#/components/schemas/BmaMaterialAudit"
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        "origins": {
+                            "type": "object",
+                            "description": "Mapping of origin_id to location name",
+                            "additionalProperties": {
+                                "type": "string"
+                            },
+                            "example": {
+                                "2170": "BMA Collection Center"
+                            }
                         }
                     }
                 }

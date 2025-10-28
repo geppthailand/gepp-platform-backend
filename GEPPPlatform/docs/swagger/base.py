@@ -173,6 +173,22 @@ Access the API at: `/{deployment_state}/api/*`
                         }
                     }
                 },
+                "ValidationError": {
+                    "description": "Validation error",
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/Error"
+                            },
+                            "example": {
+                                "success": False,
+                                "message": "Validation failed",
+                                "error_code": "VALIDATION_ERROR",
+                                "errors": ["Email already registered"]
+                            }
+                        }
+                    }
+                },
                 "InternalServerError": {
                     "description": "Internal server error",
                     "content": {
