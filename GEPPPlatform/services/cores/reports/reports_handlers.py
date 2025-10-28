@@ -367,8 +367,17 @@ def _handle_overview_report(
                 month_totals_by_year[y] = {}
             month_totals_by_year[y][m] = month_totals_by_year[y].get(m, 0.0) + weight
         
-        # Plastic saved calculation
-        if material.get('is_plastic'):
+        # Plastic saved calculation - materials with main_material_id = 1 and category_id = 1
+        main_material_id = material.get('main_material_id')
+        category_id = material.get('category_id') if material else record.get('category_id')
+        try:
+            main_material_id_int = int(main_material_id) if main_material_id is not None else None
+            category_id_int = int(category_id) if category_id is not None else None
+        except Exception:
+            main_material_id_int = None
+            category_id_int = None
+        
+        if main_material_id_int == 1 and category_id_int == 1:
             plastic_saved += weight
         
         # Recyclable waste (category_id in {1, 3})

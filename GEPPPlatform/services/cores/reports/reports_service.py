@@ -53,7 +53,8 @@ class ReportsService:
                 TransactionRecord.created_transaction_id == Transaction.id
             ).filter(
                 Transaction.organization_id == organization_id,
-                TransactionRecord.is_active == True
+                TransactionRecord.is_active == True,
+                Transaction.status != TransactionStatus.rejected
             )
             
             # Apply additional filters if provided
@@ -234,7 +235,8 @@ class ReportsService:
                     TransactionRecord.created_transaction_id == Transaction.id
                 ).filter(
                     Transaction.organization_id == organization_id,
-                    TransactionRecord.is_active == True
+                    TransactionRecord.is_active == True,
+                    Transaction.status != TransactionStatus.rejected
                 )
                 # Clamp and apply date range
                 date_from = filters.get('date_from')
@@ -325,7 +327,8 @@ class ReportsService:
                 TransactionRecord.created_transaction_id == Transaction.id
             ).filter(
                 Transaction.organization_id == organization_id,
-                TransactionRecord.is_active == True
+                TransactionRecord.is_active == True,
+                Transaction.status != TransactionStatus.rejected
             )
             # Apply optional date range filter (clamped)
             if filters:
