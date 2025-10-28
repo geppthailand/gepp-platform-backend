@@ -95,11 +95,13 @@ curl -H "Authorization: Bearer YOUR_TOKEN_HERE" \
 {
   "batch": {
     "v2025-Q1": {
-      "HOUSE-001": {
-        "timestamp": "2025-10-23T08:30:00+07:00",
-        "material": {
-          "general": {
-            "image_url": "https://example.com/image.jpg"
+      "2170": {
+        "00000000001": {
+          "timestamp": "2025-10-23T08:30:00+07:00",
+          "material": {
+            "general": {
+              "image_url": "https://example.com/image.jpg"
+            }
           }
         }
       }
@@ -107,6 +109,8 @@ curl -H "Authorization: Bearer YOUR_TOKEN_HERE" \
   }
 }
 ```
+
+**Note:** Use 11-digit house IDs (e.g., '00000000001', '00000000002') for consistency.
 
 ### 2. List Transactions
 

@@ -394,7 +394,7 @@ The request body should contain a `batch` object with the following hierarchical
   "batch": {
     "v2025-Q1": {
       "2170": {
-        "HOUSE-001": {
+        "00000000001": {
           "timestamp": "2025-10-23T08:30:00+07:00",
           "material": {
             "general": {
@@ -405,7 +405,7 @@ The request body should contain a `batch` object with the following hierarchical
             }
           }
         },
-        "HOUSE-002": {
+        "00000000002": {
           "timestamp": "2025-10-23T09:15:00+07:00",
           "material": {
             "organic": {
@@ -420,7 +420,7 @@ The request body should contain a `batch` object with the following hierarchical
     },
     "v2025-Q2": {
       "2170": {
-        "HOUSE-003": {
+        "00000000003": {
           "timestamp": "2025-10-23T10:00:00+07:00",
           "material": {
             "general": {
@@ -433,6 +433,8 @@ The request body should contain a `batch` object with the following hierarchical
   }
 }
 ```
+
+> **Note:** Use 11-digit house IDs (e.g., '00000000001', '00000000002') for consistency and easy sorting.
 
 #### Response
 
@@ -493,7 +495,7 @@ When some transactions succeed but others fail:
       "errors": [
         {
           "transaction_version": "v2025-Q1",
-          "house_id": "HOUSE-004",
+          "house_id": "00000000004",
           "error": "Invalid timestamp format"
         }
       ]
@@ -678,7 +680,7 @@ curl -X POST "https://api.gepp.com/dev/api/integration/bma/transaction" \
     "batch": {
       "v2025-Q1": {
         "2170": {
-          "HOUSE-001": {
+          "00000000001": {
             "timestamp": "2025-10-23T08:30:00+07:00",
             "material": {
               "general": {
@@ -711,7 +713,7 @@ payload = {
     "batch": {
         "v2025-Q1": {
             "2170": {
-                "HOUSE-001": {
+                "00000000001": {
                     "timestamp": "2025-10-23T08:30:00+07:00",
                     "material": {
                         "general": {
@@ -741,7 +743,7 @@ const payload = {
   batch: {
     'v2025-Q1': {
       '2170': {
-        'HOUSE-001': {
+        '00000000001': {
           timestamp: '2025-10-23T08:30:00+07:00',
           material: {
             general: {

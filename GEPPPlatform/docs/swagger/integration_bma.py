@@ -506,7 +506,7 @@ This endpoint allows BMA systems to:
                                                     "errors": [
                                                         {
                                                             "transaction_version": "v2025-Q1",
-                                                            "house_id": "HOUSE-004",
+                                                            "house_id": "00000000004",
                                                             "error": "Invalid timestamp format"
                                                         }
                                                     ]
