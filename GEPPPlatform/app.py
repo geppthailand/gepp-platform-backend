@@ -101,6 +101,14 @@ def main(event, context):
             elif path == "/health" or "/health" in path:
                 # Health check endpoint (no authorization required)
                 results = {"status": "healthy", "timestamp": datetime.now().isoformat(), "method": http_method}
+            
+            elif "/api/auth/iot-devices" in path:
+                # Handle all iot devices auth routes through iot devices module (no authorization required)
+                iot_devices_result = handle_auth_routes(path, data=body, **commonParams)
+                results = {
+                    "success": True,
+                    "data": iot_devices_result
+                }
 
             else:
                 # All other routes require authorization

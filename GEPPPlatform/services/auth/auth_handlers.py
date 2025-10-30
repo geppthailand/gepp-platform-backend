@@ -403,3 +403,52 @@ class AuthHandlers:
         """Logout user"""
         # TODO: Implement logout logic (invalidate token)
         raise APIException('Logout endpoint not implemented')
+
+    def login_iot_user(self, data: Dict[str, Any], **kwargs) -> Dict[str, Any]:
+        """Login user with QRCode containing obj of username and password using SQLAlchemy"""
+        try:
+            payload = jwt.decode(data["token"], self.jwt_secret, algorithms=['HS256'])
+            if payload is None:
+                raise BadRequestException("Invalid login token")
+            email = payload.get('email')
+            password = payload.get('password')
+            expired_date_value = payload.get("expired_date")
+            if expired_date_value is None:
+                raise BadRequestException("Invalid login token")
+            if datetime.now(timezone.utc) > expired_date_value:
+                raise UnauthorizedException("Expired login token")
+
+            session = self.db_session
+            # Get user by email
+            user = session.query(UserLocation).filter_by(
+                email=email,
+                is_active=True
+            ).first()
+
+            if not user:
+                raise NotFoundException('User not found')
+
+            # Verify password
+            if not self.verify_password(password, user.password):
+                raise UnauthorizedException('Invalid email or password')
+
+            # Generate JWT auth and refresh tokens
+            tokens = self.generate_jwt_tokens(user.id, user.organization_id, email)
+
+            return {
+                'success': True,
+                'auth_token': tokens['auth_token'],
+                'refresh_token': tokens['refresh_token'],
+                'token_type': 'Bearer',
+                'expires_in': 900,  # 15 minutes in seconds
+                'user': {
+                    'id': user.id,
+                    'email': email,
+                    'displayName': user.display_name,
+                    'organizationId': user.organization_id
+                }
+            }
+
+        except Exception as e:
+            raise APIException(str(e))
+                
