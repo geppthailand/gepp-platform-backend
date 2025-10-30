@@ -297,6 +297,7 @@ def get_docs_index_html(deployment_state: str = "dev") -> str:
                 <li><strong>Audit</strong> - Transaction auditing and compliance</li>
                 <li><strong>Reports</strong> - Analytics and reporting</li>
                 <li><strong>Integration</strong> - External system integrations (BMA)</li>
+                <li><strong>IOT Devices</strong> - IoT device management and telemetry</li>
             </ul>
         </div>
 
