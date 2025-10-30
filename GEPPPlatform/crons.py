@@ -53,6 +53,7 @@ def cron_process_audits(event, context):
     import time
     from collections import defaultdict
     from GEPPPlatform.models.transactions.transactions import Transaction, AIAuditStatus
+    from GEPPPlatform.models.subscriptions.subscription_models import Subscription
     from GEPPPlatform.services.cores.transaction_audit.transaction_audit_service import TransactionAuditService
 
     logger = logging.getLogger(__name__)
@@ -83,24 +84,49 @@ def cron_process_audits(event, context):
     try:
         # Get database session using context manager
         with get_session() as db:
-            # Check if there are any queued transactions before starting
+            # Step 0: Check subscription limits and get allowed organization IDs
+            allowed_org_ids = set()
+            subscriptions = db.query(Subscription).filter(
+                Subscription.status == 'active'
+            ).all()
+
+            for subscription in subscriptions:
+                # Check if organization has remaining AI audit quota
+                if subscription.ai_audit_usage < subscription.ai_audit_limit:
+                    allowed_org_ids.add(subscription.organization_id)
+                    logger.info(f"Organization {subscription.organization_id} has AI audit quota: {subscription.ai_audit_usage}/{subscription.ai_audit_limit}")
+                else:
+                    logger.warning(f"Organization {subscription.organization_id} has reached AI audit limit: {subscription.ai_audit_usage}/{subscription.ai_audit_limit}")
+
+            if not allowed_org_ids:
+                logger.info("No organizations with available AI audit quota")
+                return {
+                    'success': True,
+                    'message': 'No organizations with available AI audit quota',
+                    'processed_count': 0,
+                    'updated_count': 0,
+                    'batches': 0,
+                    'elapsed_seconds': 0
+                }
+            # Check if there are any queued transactions for allowed organizations
             initial_count = db.query(Transaction).filter(
                 Transaction.ai_audit_status == AIAuditStatus.queued,
+                Transaction.organization_id.in_(allowed_org_ids),
                 Transaction.deleted_date.is_(None)
             ).count()
 
             if initial_count == 0:
-                logger.info("No queued transactions found at start. Exiting immediately.")
+                logger.info("No queued transactions found for organizations with available quota. Exiting immediately.")
                 return {
                     'success': True,
-                    'message': 'No queued transactions to process',
+                    'message': 'No queued transactions to process for organizations with quota',
                     'processed_count': 0,
                     'updated_count': 0,
                     'batches': 0,
                     'elapsed_seconds': 0
                 }
 
-            logger.info(f"Found {initial_count} queued transactions in total at start")
+            logger.info(f"Found {initial_count} queued transactions for {len(allowed_org_ids)} organizations with quota")
 
             # Loop while we have time remaining
             while True:
@@ -113,9 +139,10 @@ def cron_process_audits(event, context):
                 batch_count += 1
                 logger.info(f"Starting batch {batch_count} (elapsed: {elapsed_time:.2f}s)")
 
-                # Step 1: Get up to 50 queued transactions (sorted by transaction.id)
+                # Step 1: Get up to 200 queued transactions for allowed organizations (sorted by transaction.id)
                 queued_transactions = db.query(Transaction).filter(
                     Transaction.ai_audit_status == AIAuditStatus.queued,
+                    Transaction.organization_id.in_(allowed_org_ids),
                     Transaction.deleted_date.is_(None)
                 ).order_by(Transaction.id).limit(200).all()
 
@@ -140,6 +167,27 @@ def cron_process_audits(event, context):
                     try:
                         logger.info(f"Batch {batch_count}: Processing {len(org_transactions)} transactions for organization {org_id}")
 
+                        # Double-check subscription quota before processing
+                        subscription = db.query(Subscription).filter(
+                            Subscription.organization_id == org_id,
+                            Subscription.status == 'active'
+                        ).first()
+
+                        if not subscription:
+                            logger.warning(f"No active subscription found for organization {org_id}, skipping")
+                            continue
+
+                        # Check remaining quota
+                        remaining_quota = subscription.ai_audit_limit - subscription.ai_audit_usage
+                        if remaining_quota <= 0:
+                            logger.warning(f"Organization {org_id} has no remaining AI audit quota ({subscription.ai_audit_usage}/{subscription.ai_audit_limit}), skipping")
+                            continue
+
+                        # Limit transactions to remaining quota
+                        transactions_to_process = org_transactions[:remaining_quota]
+                        if len(org_transactions) > remaining_quota:
+                            logger.warning(f"Organization {org_id} has only {remaining_quota} quota remaining, processing {len(transactions_to_process)} of {len(org_transactions)} queued transactions")
+
                         # Get audit rules for this organization
                         audit_rules = audit_service._get_audit_rules(db, org_id)
 
@@ -148,7 +196,7 @@ def cron_process_audits(event, context):
                             continue
 
                         # Prepare transaction data
-                        transaction_audit_data = audit_service._prepare_transaction_data(db, org_transactions)
+                        transaction_audit_data = audit_service._prepare_transaction_data(db, transactions_to_process)
 
                         # Process with AI using threading
                         audit_results = audit_service._process_transactions_with_ai(
@@ -165,19 +213,32 @@ def cron_process_audits(event, context):
                             allow_ai_audit = org.allow_ai_audit
 
                         # Update transaction statuses (only ai_audit_status, not the main status)
+                        # Also updates ai_audit_date for each transaction
                         updated_count = audit_service._update_transaction_statuses(
                             db,
                             audit_results,
                             allow_ai_audit
                         )
 
+                        # Increment ai_audit_usage ONLY by number of SUCCESSFULLY processed transactions (no errors)
+                        # Filter out failed audits (those with 'error' key, like quota exceeded, API failures, etc.)
+                        successful_audits = [r for r in audit_results if not r.get('error')]
+                        failed_audits = [r for r in audit_results if r.get('error')]
+
+                        if failed_audits:
+                            logger.warning(f"Batch {batch_count}: {len(failed_audits)} audits failed and will not count toward quota. Errors: {[r.get('error')[:100] for r in failed_audits[:3]]}")
+
+                        subscription.ai_audit_usage += len(successful_audits)
+                        db.commit()
+
                         batch_processed += len(audit_results)
                         batch_updated += updated_count
 
-                        logger.info(f"Batch {batch_count}: Processed {len(audit_results)} transactions, updated {updated_count} for organization {org_id}")
+                        logger.info(f"Batch {batch_count}: Processed {len(audit_results)} transactions ({len(successful_audits)} successful, {len(failed_audits)} failed), updated {updated_count} for organization {org_id}. AI audit usage: {subscription.ai_audit_usage}/{subscription.ai_audit_limit}")
 
                     except Exception as org_error:
                         logger.error(f"Batch {batch_count}: Error processing organization {org_id}: {str(org_error)}")
+                        db.rollback()
                         # Continue with next organization
                         continue
 

@@ -63,16 +63,21 @@ class Transaction(Base, BaseModel):
     # AI Audit Status - separate from actual status
     ai_audit_status = Column(Enum(AIAuditStatus), nullable=False, default=AIAuditStatus.null)
     ai_audit_note = Column(Text, nullable=True)  # Stores full audit response JSONB as text
+    ai_audit_date = Column(DateTime, nullable=True)  # Timestamp when AI audit was performed
     reject_triggers = Column(JSONB, nullable=False, default=[])  # Array of rule_ids that triggered rejection
     warning_triggers = Column(JSONB, nullable=False, default=[])  # Array of rule_ids that triggered warnings
 
     # User Audit Status - tracks if transaction was manually audited by user
     is_user_audit = Column(Boolean, nullable=False, default=False)
+    audit_date = Column(DateTime, nullable=True)  # Timestamp when manual audit was performed
 
     # Organization and locations
     organization_id = Column(BigInteger, ForeignKey('organizations.id'), nullable=True)
     origin_id = Column(BigInteger, ForeignKey('user_locations.id'), nullable=True)
     destination_id = Column(BigInteger, ForeignKey('user_locations.id'), nullable=True)
+    location_tag_id = Column(BigInteger, nullable=True)
+    ext_id_1 = Column(String(50), nullable=True)
+    ext_id_2 = Column(String(50), nullable=True)
 
     # Aggregated data
     weight_kg = Column(DECIMAL(15, 4), nullable=False, default=0)
@@ -104,6 +109,9 @@ class Transaction(Base, BaseModel):
     updated_by_id = Column(BigInteger, ForeignKey('user_locations.id'), nullable=True)
     approved_by_id = Column(BigInteger, ForeignKey('user_locations.id'), nullable=True)
 
+    # Integration tracking
+    integration_id = Column(BigInteger, ForeignKey('integration_tokens.id', ondelete='SET NULL'), nullable=True)
+
     # Constraints
     __table_args__ = (
         CheckConstraint('transaction_method IN (\'origin\', \'transport\', \'transform\')', name='chk_transaction_method'),
@@ -119,6 +127,7 @@ class Transaction(Base, BaseModel):
     created_by = relationship("UserLocation", foreign_keys=[created_by_id])
     updated_by = relationship("UserLocation", foreign_keys=[updated_by_id])
     approved_by = relationship("UserLocation", foreign_keys=[approved_by_id])
+    integration_token = relationship("IntegrationToken", foreign_keys=[integration_id])
     # Note: Using JSONB fields for images instead of relationships to avoid table dependencies
     
     def calculate_totals(self):

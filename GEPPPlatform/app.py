@@ -40,10 +40,24 @@ def main(event, context):
     try:
         # Get HTTP method
         http_method = event['requestContext']['http'].get("method", "POST")
-        path = event.get("rawPath")
-        
+        raw_path = event.get("rawPath")
 
-        
+        # Extract deployment state from path if present
+        # Support pattern: /{deployment_state}/api/* or /api/*
+        deployment_state = None
+        path = raw_path
+
+        # Check if path starts with /{something}/api/
+        path_parts = raw_path.strip('/').split('/')
+        if len(path_parts) >= 2 and path_parts[1] == 'api':
+            # Path has format: /{deployment_state}/api/*
+            deployment_state = path_parts[0]
+            # Normalize path to /api/* for routing
+            path = '/' + '/'.join(path_parts[1:])
+        elif path_parts[0] == 'api':
+            # Path has format: /api/*
+            path = raw_path
+
         # Handle CORS preflight
         if http_method == "OPTIONS":
             return {
@@ -53,11 +67,15 @@ def main(event, context):
                 },
                 "body": json.dumps({"message": "CORS preflight"})
             }
-        
+
         # Parse request body and query parameters
         body = {}
         query_params = event.get("queryStringParameters") or {}
         path_params = event.get("pathParameters") or {}
+
+        # Add deployment state to path params if present
+        if deployment_state:
+            path_params['deployment_state'] = deployment_state
         
         if event.get("body"):
             try:
@@ -98,6 +116,21 @@ def main(event, context):
                 auth_result = handle_auth_routes(path, data=body, **commonParams)
                 results = {"data": auth_result}
 
+            elif "/documents/api-docs" in raw_path or "/docs/bma/" in raw_path:
+                # Handle documentation routes (no authorization required)
+                from .docs.docs_handlers import handle_docs_routes
+
+                docs_result = handle_docs_routes(event, **commonParams)
+                content_type = docs_result.get('content_type', 'application/json')
+
+                return {
+                    "statusCode": 200,
+                    "headers": {
+                        "Content-Type": content_type,
+                    },
+                    "body": docs_result.get('body', '')
+                }
+
             elif path == "/health" or "/health" in path:
                 # Health check endpoint (no authorization required)
                 results = {"status": "healthy", "timestamp": datetime.now().isoformat(), "method": http_method}
@@ -124,14 +157,14 @@ def main(event, context):
                 token = auth_header[7:]  # Remove 'Bearer ' prefix
                 # Create AuthHandlers instance for token verification
                 auth_handler = AuthHandlers(session)
-                token_data = auth_handler.verify_jwt_token(token)
+                token_data = auth_handler.verify_jwt_token(token, path)
                 print(token_data)
 
                 if token_data is None:
                     return {
                         "statusCode": 401,
                         "headers": headers,
-                        "body": json.dumps({'success': False, 'message': 'Invalid token'})
+                        "body": json.dumps({'success': False, 'message': 'Invalid token or insufficient permissions'})
                     }
 
                 # Extract full user info from JWT token and add to commonParams
@@ -236,9 +269,36 @@ def main(event, context):
                             "data": debug_result
                         }
 
+                    elif "/api/integration" in path:
+                        # Handle all integration routes
+                        if "/api/integration/bma" in path:
+                            # Handle BMA integration routes
+                            from .services.integrations.bma.bma_handlers import handle_bma_routes
+
+                            bma_result = handle_bma_routes(event, data=body, **commonParams)
+                            results = {
+                                "success": True,
+                                "data": bma_result
+                            }
+                        else:
+                            # Handle other integration routes here
+                            available_integration_routes = ["/api/integration/bma/*"]
+                            return {
+                                "statusCode": 404,
+                                "headers": headers,
+                                "body": json.dumps({
+                                    "success": False,
+                                    "message": "Integration route not found",
+                                    "error_code": "ROUTE_NOT_FOUND",
+                                    "path": path,
+                                    "method": http_method,
+                                    "available_integration_routes": available_integration_routes
+                                })
+                            }
+
                     else:
                         # Handle other future modules here
-                        available_routes = ["/api/auth/*", "/api/users/*", "/api/organizations/*", "/api/materials/*", "/api/reports/*", "/api/transactions/*", "/api/transaction_audit/*", "/api/audit/*", "/api/debug/*", "/health"]
+                        available_routes = ["/api/auth/*", "/api/users/*", "/api/organizations/*", "/api/materials/*", "/api/reports/*", "/api/transactions/*", "/api/transaction_audit/*", "/api/audit/*", "/api/debug/*", "/api/integration/*", "/health"]
                         return {
                             "statusCode": 404,
                             "headers": headers,

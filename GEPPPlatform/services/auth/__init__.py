@@ -30,6 +30,10 @@ def handle_auth_routes(path: str, data: dict, **commonParams):
             return auth_handler.register(data, **commonParams)
         elif internal_path == "/login":
             return auth_handler.login(data, **commonParams)
+        elif internal_path == "/integration":
+            return auth_handler.integration_login(data, **commonParams)
+        elif internal_path == "/integration/secret":
+            return auth_handler.generate_integration_secret(data, **commonParams)
         elif internal_path == "/validate":
             return auth_handler.validate_token(data, **commonParams)
         elif internal_path == "/refresh":
