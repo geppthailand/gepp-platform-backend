@@ -909,10 +909,14 @@ class UserService:
     ) -> Dict[str, Any]:
         """
         Generate presigned URL for profile image upload
-        Uses the existing TransactionPresignedUrlService
+        Creates a direct presigned POST URL for S3 with /profiles/ path
         """
         try:
-            from ..transactions.presigned_url_service import TransactionPresignedUrlService
+            import boto3
+            import os
+            import uuid
+            from datetime import datetime, timedelta
+            from botocore.exceptions import ClientError
 
             # Get user to retrieve organization_id
             user = self.crud.get_user_by_id(user_id)
@@ -920,52 +924,71 @@ class UserService:
                 from ....exceptions import NotFoundException
                 raise NotFoundException('User not found')
 
-            organization_id = user.organization_id or 0  # Use 0 if no organization
+            organization_id = user.organization_id or 0
 
-            # Initialize presigned URL service
-            presigned_service = TransactionPresignedUrlService()
+            # Initialize S3 client
+            aws_region = os.getenv('AWS_REGION', 'ap-southeast-1')
+            s3_client = boto3.client('s3', region_name=aws_region)
+            bucket_name = os.getenv('S3_BUCKET_NAME', 'prod-gepp-platform-assets')
 
-            # Generate presigned URL for profile image
-            # Modify the S3 key structure for profile images
-            import uuid
-            from datetime import datetime
-
+            # Generate unique filename for profile
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             file_extension = file_name.rsplit('.', 1)[1] if '.' in file_name else 'jpg'
             unique_filename = f"profile_{user_id}_{timestamp}_{uuid.uuid4().hex[:8]}.{file_extension}"
 
-            # Use the standard presigned URL method but with profile-specific path
-            result = presigned_service.get_transaction_file_upload_presigned_urls(
-                file_names=[unique_filename],
-                organization_id=organization_id,
-                user_id=int(user_id)
+            # S3 key structure for PROFILES (not transactions!)
+            current_date = datetime.now()
+            s3_key = f"org/{organization_id}/profiles/{current_date.year}/{current_date.month:02d}/{unique_filename}"
+
+            # Determine content type
+            content_types = {
+                'jpg': 'image/jpeg',
+                'jpeg': 'image/jpeg',
+                'png': 'image/png',
+                'gif': 'image/gif',
+            }
+            content_type = content_types.get(file_extension.lower(), 'image/jpeg')
+
+            # Generate presigned POST URL
+            response = s3_client.generate_presigned_post(
+                Bucket=bucket_name,
+                Key=s3_key,
+                Fields={
+                    'Content-Type': content_type,
+                },
+                Conditions=[
+                    {"bucket": bucket_name},
+                    ["starts-with", "$key", s3_key],
+                    {"Content-Type": content_type},
+                    ["content-length-range", 1, 10 * 1024 * 1024]  # 1 byte to 10MB
+                ],
+                ExpiresIn=3600
             )
 
-            if result.get('success') and result.get('presigned_urls'):
-                presigned_data = result['presigned_urls'][0]
-
-                # Modify the S3 key to use profile path instead of transactions path
-                original_key = presigned_data['s3_key']
-                # Change from org/{org_id}/transactions/... to org/{org_id}/profiles/...
-                profile_key = original_key.replace('/transactions/', '/profiles/')
-
-                return {
-                    'success': True,
-                    'data': {
-                        'upload_url': presigned_data['upload_url'],
-                        'upload_fields': presigned_data['upload_fields'],
-                        'final_s3_url': presigned_data['final_s3_url'].replace('/transactions/', '/profiles/'),
-                        's3_key': profile_key,
-                        'content_type': presigned_data['content_type'],
-                        'expires_at': presigned_data['expires_at']
-                    }
-                }
+            # Final S3 URL after upload
+            if aws_region == 'us-east-1':
+                final_url = f"https://{bucket_name}.s3.amazonaws.com/{s3_key}"
             else:
-                from ....exceptions import APIException
-                raise APIException('Failed to generate presigned URL')
+                final_url = f"https://{bucket_name}.s3.{aws_region}.amazonaws.com/{s3_key}"
 
+            return {
+                'success': True,
+                'data': {
+                    'upload_url': response['url'],
+                    'upload_fields': response['fields'],
+                    'final_s3_url': final_url,
+                    's3_key': s3_key,
+                    'content_type': content_type,
+                    'expires_at': (datetime.now() + timedelta(seconds=3600)).isoformat()
+                }
+            }
+
+        except ClientError as e:
+            from ....exceptions import APIException
+            raise APIException(f'AWS S3 Error: {str(e)}')
         except Exception as e:
-            raise e
+            from ....exceptions import APIException
+            raise APIException(f'Failed to generate presigned URL: {str(e)}')
 
     def _generate_view_presigned_url(
         self,

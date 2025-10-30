@@ -211,6 +211,7 @@ class ManualAuditService:
             transaction.updated_by_id = auditor_user_id
             transaction.updated_date = datetime.now(timezone.utc)
             transaction.is_user_audit = True  # Mark as manually audited by user
+            transaction.audit_date = datetime.now(timezone.utc)  # Set audit date when manual audit is performed
 
             # Add audit notes
             audit_note = f"Manual Audit - APPROVED by User #{auditor_user_id} at {datetime.now(timezone.utc).isoformat()}"
@@ -293,6 +294,7 @@ class ManualAuditService:
             transaction.updated_by_id = auditor_user_id
             transaction.updated_date = datetime.now(timezone.utc)
             transaction.is_user_audit = True  # Mark as manually audited by user
+            transaction.audit_date = datetime.now(timezone.utc)  # Set audit date when manual audit is performed
 
             # Add rejection notes
             rejection_note = f"Manual Audit - REJECTED by User #{auditor_user_id} at {datetime.now(timezone.utc).isoformat()}"

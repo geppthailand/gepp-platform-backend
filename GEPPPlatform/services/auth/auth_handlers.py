@@ -6,6 +6,7 @@ import os
 import jwt
 import bcrypt
 import json
+import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional
 
@@ -15,6 +16,7 @@ from sqlalchemy.orm import Session
 
 # Database imports
 from GEPPPlatform.models.users.user_location import UserLocation
+from GEPPPlatform.models.users.integration_tokens import IntegrationToken
 from GEPPPlatform.models.subscriptions.organizations import Organization, OrganizationInfo
 from GEPPPlatform.models.subscriptions.subscription_models import SubscriptionPlan, Subscription
 from ..cores.organizations.organization_role_presets import OrganizationRolePresets
@@ -41,6 +43,10 @@ class AuthHandlers:
     def verify_password(self, password: str, hashed: str) -> bool:
         """Verify a password against a hash"""
         return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
+
+    def generate_secret_key(self) -> str:
+        """Generate a random secret key for integration authentication (64 characters)"""
+        return secrets.token_urlsafe(48)  # Generates ~64 characters
 
     def generate_jwt_tokens(self, user_id: int, organization_id: int, email: str) -> Dict[str, str]:
         """Generate JWT auth_token and refresh_token"""
@@ -88,14 +94,50 @@ class AuthHandlers:
         token = jwt.encode(payload, self.jwt_secret, algorithm='HS256')
         return token
 
-    def verify_jwt_token(self, token: str) -> Optional[Dict[str, Any]]:
-        """Verify and decode a JWT token"""
+    def verify_jwt_token(self, token: str, path: str = None) -> Optional[Dict[str, Any]]:
+        """Verify and decode a JWT token. For integration tokens, verifies with user-specific secret."""
         try:
-            payload = jwt.decode(token, self.jwt_secret, algorithms=['HS256'])
-            return payload
+            # First decode without verification to check token type
+            unverified_payload = jwt.decode(token, options={"verify_signature": False})
+
+            # Check if this is an integration token
+            if unverified_payload.get('type') == 'integration':
+                # Integration tokens must be used on /api/integration/* routes only
+                if path and not path.startswith('/api/integration'):
+                    print(f"Integration token used on non-integration route: {path}")
+                    return None
+
+                # Get user's secret key from database
+                user_id = unverified_payload.get('user_id')
+                if not user_id:
+                    return None
+
+                session = self.db_session
+                user = session.query(UserLocation).filter_by(id=user_id, is_active=True).first()
+
+                if not user or not user.secret:
+                    print(f"User not found or no secret key for user_id: {user_id}")
+                    return None
+
+                # Verify token with user's secret key
+                payload = jwt.decode(token, user.secret, algorithms=['HS256'])
+                return payload
+            else:
+                # Regular tokens - verify with global secret
+                payload = jwt.decode(token, self.jwt_secret, algorithms=['HS256'])
+
+                # Regular tokens cannot access /api/integration/* routes
+                if path and path.startswith('/api/integration'):
+                    print(f"Regular token used on integration route: {path}")
+                    return None
+
+                return payload
+
         except jwt.ExpiredSignatureError:
+            print("Token expired")
             return None
-        except jwt.InvalidTokenError:
+        except jwt.InvalidTokenError as e:
+            print(f"Invalid token: {e}")
             return None
 
     def register(self, data: Dict[str, Any], **kwargs) -> Dict[str, Any]:
@@ -269,12 +311,124 @@ class AuthHandlers:
                 'auth_token': tokens['auth_token'],
                 'refresh_token': tokens['refresh_token'],
                 'token_type': 'Bearer',
-                'expires_in': 900,  # 15 minutes in seconds
+                'expires_in': 3600,  # 60 minutes in seconds
                 'user': {
                     'id': user.id,
                     'email': email,
                     'displayName': user.display_name,
                     'organizationId': user.organization_id
+                }
+            }
+
+        except Exception as e:
+            raise APIException(str(e))
+
+    def integration_login(self, data: Dict[str, Any], **kwargs) -> Dict[str, Any]:
+        """Login for integration with long-lived token (7 days) using email and password. Uses user.secret as JWT secret."""
+        try:
+            email = data.get('email')
+            password = data.get('password')
+
+            if not email or not password:
+                raise ValidationException('Email and password are required')
+
+            session = self.db_session
+            # Get user by email
+            user = session.query(UserLocation).filter_by(
+                email=email,
+                is_active=True
+            ).first()
+
+            if not user:
+                raise UnauthorizedException('Invalid email or password')
+
+            # Verify password
+            if not user.password or not bcrypt.checkpw(password.encode('utf-8'), user.password.encode('utf-8')):
+                raise UnauthorizedException('Invalid email or password')
+
+            # Check if user has a secret key set, generate one if not
+            if not user.secret:
+                # Auto-generate secret key on first integration login
+                user.secret = self.generate_secret_key()
+                session.commit()
+
+            # Generate integration token (7 days expiry with 'integration' tag)
+            # Use user.secret as the JWT secret instead of global jwt_secret
+            now = datetime.now(timezone.utc)
+            integration_payload = {
+                'user_id': user.id,
+                'organization_id': user.organization_id,
+                'email': email,
+                'type': 'integration',  # Tag as integration
+                'exp': now + timedelta(days=7),
+                'iat': now
+            }
+
+            integration_token = jwt.encode(integration_payload, user.secret, algorithm='HS256')
+
+            # Save token to integration_tokens table
+            token_record = IntegrationToken(
+                user_id=user.id,
+                jwt=integration_token,
+                description=f"Integration token for {email}",
+                valid=True
+            )
+            session.add(token_record)
+            session.commit()
+
+            return {
+                'success': True,
+                'token': integration_token,
+                'token_type': 'Bearer',
+                'expires_in': 604800,  # 7 days in seconds
+                'user': {
+                    'id': user.id,
+                    'email': email,
+                    'displayName': user.display_name,
+                    'organizationId': user.organization_id
+                }
+            }
+
+        except Exception as e:
+            raise APIException(str(e))
+
+    def generate_integration_secret(self, data: Dict[str, Any], **kwargs) -> Dict[str, Any]:
+        """Generate or regenerate integration secret key for authenticated user"""
+        try:
+            # Get user from token
+            headers = kwargs.get('headers', {})
+            auth_header = headers.get('Authorization') or headers.get('authorization')
+
+            if not auth_header or not auth_header.startswith("Bearer "):
+                raise UnauthorizedException('Authorization header with Bearer token is required')
+
+            token = auth_header.split(" ")[1]
+            payload = self.verify_jwt_token(token)
+
+            if not payload:
+                raise UnauthorizedException('Invalid or expired token')
+
+            session = self.db_session
+            user = session.query(UserLocation).filter_by(
+                id=payload['user_id'],
+                is_active=True
+            ).first()
+
+            if not user:
+                raise NotFoundException('User not found')
+
+            # Generate new secret key
+            new_secret = self.generate_secret_key()
+            user.secret = new_secret
+            session.commit()
+
+            return {
+                'success': True,
+                'message': 'Integration secret key generated successfully',
+                'secret': new_secret,
+                'user': {
+                    'id': user.id,
+                    'email': user.email
                 }
             }
 

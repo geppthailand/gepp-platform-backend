@@ -539,14 +539,22 @@ def handle_get_view_presigned_urls(
         )
 
         if result['success']:
-            return {
+            response = {
                 'success': True,
                 'message': result['message'],
                 'presigned_urls': result['presigned_urls'],
                 'expires_in_seconds': result.get('expires_in_seconds', 3600)
             }
+            # Include errors if any occurred (partial success)
+            if result.get('errors'):
+                response['errors'] = result['errors']
+            return response
         else:
-            raise APIException(result['message'])
+            # Include error details in the exception
+            error_message = result.get('message', 'Failed to generate view presigned URLs')
+            if result.get('errors'):
+                error_message += f"\nErrors: {result['errors']}"
+            raise APIException(error_message)
 
     except Exception as e:
         if isinstance(e, (BadRequestException, APIException)):
