@@ -1,0 +1,1632 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BMA Integration API Documentation</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;600;700&family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Sarabun', 'Tahoma', 'Arial', sans-serif;
+            line-height: 1.8;
+            color: #2c3e50;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 40px 20px;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            background: white;
+            padding: 60px;
+            border-radius: 15px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+        }
+
+        h1 {
+            color: #667eea;
+            font-size: 42px;
+            font-weight: 700;
+            margin-bottom: 30px;
+            padding-bottom: 20px;
+            border-bottom: 4px solid #667eea;
+            text-align: center;
+        }
+
+        h2 {
+            color: #764ba2;
+            font-size: 32px;
+            font-weight: 600;
+            margin-top: 50px;
+            margin-bottom: 25px;
+            padding-bottom: 15px;
+            border-bottom: 3px solid #e0e0e0;
+        }
+
+        h3 {
+            color: #667eea;
+            font-size: 26px;
+            font-weight: 600;
+            margin-top: 35px;
+            margin-bottom: 20px;
+        }
+
+        h4 {
+            color: #555;
+            font-size: 20px;
+            font-weight: 600;
+            margin-top: 25px;
+            margin-bottom: 15px;
+            padding-left: 15px;
+            border-left: 4px solid #667eea;
+        }
+
+        p {
+            margin: 15px 0;
+            font-size: 16px;
+            line-height: 1.8;
+        }
+
+        code {
+            background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-family: 'IBM Plex Mono', 'Monaco', 'Courier New', monospace;
+            font-size: 14px;
+            color: #e74c3c;
+            font-weight: 600;
+        }
+
+        pre {
+            background: #2c3e50;
+            color: #ecf0f1;
+            padding: 25px;
+            border-radius: 8px;
+            overflow-x: auto;
+            overflow-wrap: break-word;
+            word-wrap: break-word;
+            word-break: break-all;
+            white-space: pre-wrap;
+            margin: 25px 0;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+        }
+
+        pre code {
+            background: transparent;
+            color: #ecf0f1;
+            padding: 0;
+            font-size: 14px;
+            font-weight: 400;
+            word-break: break-all;
+            white-space: pre-wrap;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 25px 0;
+            font-size: 15px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+
+        thead {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        th {
+            padding: 15px;
+            text-align: left;
+            font-weight: 600;
+            font-size: 16px;
+        }
+
+        td {
+            padding: 15px;
+            border-bottom: 1px solid #e0e0e0;
+        }
+
+        tr:nth-child(even) {
+            background-color: #f8f9fa;
+        }
+
+        tr:hover {
+            background-color: #f0f0f0;
+            transition: background-color 0.3s;
+        }
+
+        ul, ol {
+            margin: 15px 0;
+            padding-left: 40px;
+        }
+
+        li {
+            margin: 10px 0;
+            font-size: 16px;
+        }
+
+        hr {
+            border: none;
+            border-top: 2px solid #e0e0e0;
+            margin: 40px 0;
+        }
+
+        strong {
+            font-weight: 600;
+            color: #2c3e50;
+        }
+
+        a {
+            color: #667eea;
+            text-decoration: none;
+            border-bottom: 2px solid transparent;
+            transition: border-color 0.3s;
+        }
+
+        a:hover {
+            border-bottom: 2px solid #667eea;
+        }
+
+        blockquote {
+            border-left: 5px solid #667eea;
+            padding-left: 20px;
+            margin: 25px 0;
+            color: #555;
+            font-style: italic;
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 5px;
+        }
+
+        /* Print styles */
+        @media print {
+            body {
+                background: white;
+                padding: 0;
+            }
+
+            .container {
+                box-shadow: none;
+                padding: 40px;
+            }
+
+            h1 {
+                page-break-before: avoid;
+            }
+
+            h2 {
+                page-break-before: always;
+            }
+
+            h2:first-of-type {
+                page-break-before: avoid;
+            }
+
+            pre, table {
+                page-break-inside: avoid;
+            }
+
+            pre {
+                overflow-x: visible;
+                word-break: break-all;
+                white-space: pre-wrap;
+            }
+
+            pre code {
+                word-break: break-all;
+                white-space: pre-wrap;
+            }
+        }
+
+        /* Warning boxes */
+        p:has(> strong:first-child) {
+            background: linear-gradient(135deg, #fff9e6 0%, #ffe8cc 100%);
+            border-left: 5px solid #ff9800;
+            padding: 20px;
+            margin: 25px 0;
+            border-radius: 5px;
+            box-shadow: 0 2px 10px rgba(255, 152, 0, 0.2);
+        }
+
+        /* Code examples */
+        .language-json,
+        .language-javascript,
+        .language-python {
+            font-size: 13px;
+        }
+
+        /* Print button */
+        .print-button {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 15px 30px;
+            border-radius: 50px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+            transition: transform 0.3s, box-shadow 0.3s;
+            font-family: 'Sarabun', sans-serif;
+        }
+
+        .print-button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(102, 126, 234, 0.6);
+        }
+
+        /* JWT Token Container */
+        .jwt-container {
+            position: relative;
+            margin: 25px 0;
+            background: #f8f9fa;
+            border: 2px solid #667eea;
+            border-radius: 8px;
+            padding: 20px;
+        }
+
+        .jwt-token {
+            font-family: 'IBM Plex Mono', 'Monaco', 'Courier New', monospace;
+            font-size: 13px;
+            color: #2c3e50;
+            background: white;
+            padding: 15px;
+            border-radius: 5px;
+            border: 1px solid #e0e0e0;
+            word-break: break-all;
+            overflow-wrap: break-word;
+            line-height: 1.8;
+            user-select: all;
+            -webkit-user-select: all;
+            -moz-user-select: all;
+            -ms-user-select: all;
+        }
+
+        .copy-jwt-btn {
+            position: absolute;
+            top: 15px;
+            right: 15px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 8px 15px;
+            border-radius: 5px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            font-family: 'Sarabun', sans-serif;
+            box-shadow: 0 2px 8px rgba(102, 126, 234, 0.3);
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .copy-jwt-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.5);
+        }
+
+        .copy-jwt-btn:active {
+            transform: translateY(0);
+        }
+
+        .copy-feedback {
+            display: none;
+            position: absolute;
+            top: 15px;
+            right: 15px;
+            background: #10b981;
+            color: white;
+            padding: 8px 15px;
+            border-radius: 5px;
+            font-size: 14px;
+            font-weight: 600;
+            font-family: 'Sarabun', sans-serif;
+            box-shadow: 0 2px 8px rgba(16, 185, 129, 0.3);
+        }
+
+        .copy-feedback.show {
+            display: block;
+        }
+
+        @media print {
+            .print-button {
+                display: none;
+            }
+
+            .copy-jwt-btn {
+                display: none;
+            }
+
+            .copy-feedback {
+                display: none;
+            }
+
+            .jwt-token {
+                page-break-inside: avoid;
+            }
+        }
+    </style>
+</head>
+<body>
+    <button class="print-button" onclick="window.print()">🖨️ พิมพ์เป็น PDF</button>
+    <div class="container">
+        <h1 id="คมอการใชงาน-bma-integration-api">คู่มือการใช้งาน BMA Integration API</h1>
+
+<h2 id="เรมตนใชงาน">เริ่มต้นใช้งาน</h2>
+
+<h3 id="ขนตอนท-1-เขาถง-swagger-documentation">ขั้นตอนที่ 1: เข้าถึง Swagger Documentation</h3>
+
+<p>เปิดเว็บเบราว์เซอร์และเข้าไปที่:</p>
+
+<pre><code>https://api.geppdata.com/v1/docs/bma/0a70bf9ef2fcb7c2dc6c2b046ebb052c
+</code></pre>
+
+<h3 id="ขนตอนท-2-ใชงาน-jwt-token">ขั้นตอนที่ 2: ใช้งาน JWT Token</h3>
+
+<p><strong>JWT Token สำหรับทดสอบ:</strong></p>
+
+<div class="jwt-container">
+                <div class="jwt-token" id="jwt-token">eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoyNiwib3JnYW5pemF0aW9uX2lkIjo4LCJlbWFpbCI6ImJtYUBnZXBwLm1lIiwidHlwZSI6ImludGVncmF0aW9uIiwiZXhwIjoxNzYyMjM4NTA2LCJpYXQiOjE3NjE2MzM3MDZ9.q1v6QIH_14c_sNAomOYvoMYNmmlPhgPBPyTsA4KB1Oo</div>
+                <button class="copy-jwt-btn" onclick="copyJWT()" title="คัดลอก JWT Token">
+                    📋 คัดลอก
+                </button>
+                <span class="copy-feedback" id="copy-feedback">✅ คัดลอกแล้ว!</span>
+            </div>
+
+<p><strong>วิธีใช้งาน:</strong><br />
+1. คัดลอก JWT Token ข้างต้น<br />
+2. ใน Swagger UI คลิกปุ่ม <strong>"Authorize"</strong> ที่มุมบนขวา<br />
+3. วาง Token ในช่อง Value (ไม่ต้องใส่คำว่า "Bearer" ข้างหน้า)<br />
+4. คลิก <strong>"Authorize"</strong> แล้วปิดหน้าต่าง</p>
+
+<p><strong>หมายเหตุ:</strong> ใช้ Token นี้ได้เลยโดยไม่ต้องเรียก <code>/api/auth/integration</code> ก่อน</p>
+
+<hr />
+
+<h2 id="ขอมลสาคญ">⚠️ ข้อมูลสำคัญ</h2>
+
+<p><strong>origin_id สำหรับ API นี้:</strong><br />
+- ใช้ค่า <strong>2170</strong> เท่านั้น<br />
+- แทนพื้นที่: <strong>แขวงช่องนนทรี</strong><br />
+- ใช้เป็น Mock Data สำหรับ API version นี้<br />
+- ในอนาคตอาจมีการเพิ่ม origin_id อื่นๆ สำหรับแขวงต่างๆ</p>
+
+<p><strong>ห้ามใช้ origin_id อื่นนอกเหนือจาก 2170</strong> มิฉะนั้นจะได้รับ Error</p>
+
+<hr />
+
+<h2 id="คาศพทและตวแปรสาคญ">คำศัพท์และตัวแปรสำคัญ</h2>
+
+<h3 id="1-ตวระบขอมล-identifiers">1. ตัวระบุข้อมูล (Identifiers)</h3>
+
+<h4 id="transaction_version-ext_id_1"><code>transaction_version</code> (ext_id_1)</h4>
+
+<ul>
+<li><strong>คืออะไร</strong>: รุ่นของการบันทึกข้อมูล เช่น "v2025-Q1", "v2025-Q2"</li>
+<li><strong>รูปแบบ</strong>: ใช้ตามความต้องการของคุณ แนะนำให้ใช้รูปแบบ vYYYY-XX ซึ่งอาจหมายถึงไตรมาส เดือน หรือจำนวนครั้งที่สำหรับปีนั้นๆได้</li>
+<li><strong>ตัวอย่าง</strong>: <code>"v2025-Q1"</code>, <code>"v2025-Q2"</code>, <code>"v2025-10"</code></li>
+<li><strong>วัตถุประสงค์</strong>: ใช้จัดกลุ่มข้อมูลตามช่วงเวลาหรือรอบการเก็บข้อมูล</li>
+</ul>
+
+<h4 id="house_id-ext_id_2"><code>house_id</code> (ext_id_2)</h4>
+
+<ul>
+<li><strong>คืออะไร</strong>: รหัสบ้านเลขที่</li>
+<li><strong>รูปแบบแนะนำ</strong>: เลข 11 หลัก เช่น <code>"00000000001"</code>, <code>"00000000002"</code></li>
+<li><strong>ตัวอย่าง</strong>: <code>"00000000001"</code> (บ้านเลขที่ 1), <code>"00000000123"</code> (บ้านเลขที่ 123)</li>
+<li><strong>เหตุผล</strong>: รูปแบบนี้ทำให้เรียงลำดับได้ง่ายและสม่ำเสมอ</li>
+</ul>
+
+<h4 id="origin_id"><code>origin_id</code></h4>
+
+<ul>
+<li><strong>คืออะไร</strong>: รหัสจุดรับของเสีย</li>
+<li><strong>ค่าที่ใช้ได้</strong>: <strong>2170 เท่านั้น</strong></li>
+<li><strong>origin_name</strong>: "แขวงช่องนนทรี"</li>
+<li><strong>หมายเหตุ</strong>:
+<ul>
+<li>ระบบรองรับเฉพาะ origin_id 2170 สำหรับ BMA</li>
+<li>รหัส 2170 แทนแขวงช่องนนทรี ซึ่งใช้เป็น Mock Data สำหรับ API version นี้</li>
+<li>ในอนาคตอาจมีการเพิ่ม origin_id อื่นๆ สำหรับแขวงอื่นๆ</li>
+</ul></li>
+</ul>
+
+<h3 id="2-ประเภทขยะ-material-types">2. ประเภทขยะ (Material Types)</h3>
+
+<table>
+<thead>
+<tr>
+  <th>ชื่อภาษาอังกฤษ</th>
+  <th>ชื่อภาษาไทย</th>
+  <th>material_id</th>
+  <th>ใช้ใน API</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td><strong>general</strong></td>
+  <td>ขยะทั่วไป</td>
+  <td>94</td>
+  <td><code>"general"</code></td>
+</tr>
+<tr>
+  <td><strong>organic</strong></td>
+  <td>ขยะอินทรีย์/อาหาร</td>
+  <td>77</td>
+  <td><code>"organic"</code></td>
+</tr>
+<tr>
+  <td><strong>recyclable</strong></td>
+  <td>ขยะรีไซเคิล</td>
+  <td>298</td>
+  <td><code>"recyclable"</code></td>
+</tr>
+<tr>
+  <td><strong>hazardous</strong></td>
+  <td>ขยะอันตราย</td>
+  <td>113</td>
+  <td><code>"hazardous"</code></td>
+</tr>
+</tbody>
+</table>
+
+<p><strong>คำอธิบาย:</strong><br />
+- <strong>general</strong>: ขยะทั่วไป ไม่สามารถนำกลับมาใช้ใหม่ได้<br />
+- <strong>organic</strong>: ขยะเปียก เศษอาหาร เศษพืช<br />
+- <strong>recyclable</strong>: ขยะแห้งที่สามารถนำกลับมาใช้ใหม่ได้ เช่น กระดาษ พลาสติก<br />
+- <strong>hazardous</strong>: ขยะอันตราย เช่น แบตเตอรี่ สารเคมี</p>
+
+<h3 id="3-pagination-การแบงหนา">3. Pagination (การแบ่งหน้า)</h3>
+
+<h4 id="limit"><code>limit</code></h4>
+
+<ul>
+<li><strong>คืออะไร</strong>: จำนวนรายการต่อหน้า</li>
+<li><strong>ค่าเริ่มต้น</strong>: 100</li>
+<li><strong>ค่าสูงสุด</strong>: 1000</li>
+<li><strong>ตัวอย่าง</strong>: <code>?limit=50</code> (แสดง 50 รายการต่อหน้า)</li>
+</ul>
+
+<h4 id="page"><code>page</code></h4>
+
+<ul>
+<li><strong>คืออะไร</strong>: หมายเลขหน้า</li>
+<li><strong>ค่าเริ่มต้น</strong>: 1</li>
+<li><strong>เริ่มนับจาก</strong>: 1 (หน้าแรกคือหน้าที่ 1)</li>
+<li><strong>ตัวอย่าง</strong>: <code>?page=2</code> (แสดงหน้าที่ 2)</li>
+</ul>
+
+<p><strong>ข้อมูล Pagination ที่ได้รับกลับมา:</strong></p>
+
+<div class="codehilite">
+<pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;pagination&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;page&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w">              </span><span class="c1">// หน้าปัจจุบัน</span>
+<span class="w">    </span><span class="nt">&quot;limit&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">100</span><span class="p">,</span><span class="w">           </span><span class="c1">// จำนวนรายการต่อหน้า</span>
+<span class="w">    </span><span class="nt">&quot;total&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">250</span><span class="p">,</span><span class="w">           </span><span class="c1">// จำนวนรายการทั้งหมด</span>
+<span class="w">    </span><span class="nt">&quot;total_pages&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span><span class="w">       </span><span class="c1">// จำนวนหน้าทั้งหมด</span>
+<span class="w">    </span><span class="nt">&quot;has_next&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w">       </span><span class="c1">// มีหน้าถัดไปหรือไม่</span>
+<span class="w">    </span><span class="nt">&quot;has_prev&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="w">       </span><span class="c1">// มีหน้าก่อนหน้าหรือไม่</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre>
+</div>
+
+<h3 id="4-quota-และ-usage-โควตาการใชงาน">4. Quota และ Usage (โควต้าการใช้งาน)</h3>
+
+<h4 id="create_transaction_limit"><code>create_transaction_limit</code></h4>
+
+<ul>
+<li><strong>คืออะไร</strong>: จำนวนครั้งสูงสุดที่สามารถสร้าง Transaction ได้</li>
+<li><strong>หน่วย</strong>: ครั้ง/เดือน</li>
+<li><strong>ดูได้จาก</strong>: <code>/api/integration/bma/usage</code></li>
+</ul>
+
+<h4 id="create_transaction_usage"><code>create_transaction_usage</code></h4>
+
+<ul>
+<li><strong>คืออะไร</strong>: จำนวนครั้งที่ใช้ไปแล้วในการสร้าง Transaction</li>
+<li><strong>การคำนวณ</strong>:
+<ul>
+<li>✅ <strong>นับ</strong>: เมื่อสร้าง Transaction <strong>ใหม่</strong> (create)</li>
+<li>❌ <strong>ไม่นับ</strong>: เมื่ออัพเดท Transaction เดิม (update)</li>
+<li>นับทีละ 1 ต่อ 1 house_id ที่สร้างใหม่</li>
+</ul></li>
+<li><strong>ตัวอย่าง</strong>: ส่ง 10 บ้านใหม่ = เพิ่ม 10, ส่ง 10 บ้านเดิม (อัพเดท) = ไม่เพิ่ม</li>
+<li><strong>ดูได้จาก</strong>: <code>/api/integration/bma/usage</code></li>
+</ul>
+
+<h4 id="ai_audit_limit"><code>ai_audit_limit</code></h4>
+
+<ul>
+<li><strong>คืออะไร</strong>: จำนวนครั้งสูงสุดที่สามารถใช้ AI Audit ได้</li>
+<li><strong>หน่วย</strong>: ครั้ง/เดือน</li>
+<li><strong>ดูได้จาก</strong>: <code>/api/integration/bma/usage</code></li>
+</ul>
+
+<h4 id="ai_audit_usage"><code>ai_audit_usage</code></h4>
+
+<ul>
+<li><strong>คืออะไร</strong>: จำนวนครั้งที่ใช้ AI Audit ไปแล้ว</li>
+<li><strong>การคำนวณ</strong>:
+<ul>
+<li>✅ <strong>นับ</strong>: ทุกครั้งที่ส่ง Transaction เข้าระบบ AI Audit</li>
+<li>นับทั้งการสร้างใหม่ (create) และอัพเดท (update)</li>
+<li>นับทีละ 1 ต่อ 1 Transaction ที่ส่งเข้า Audit</li>
+</ul></li>
+<li><strong>ตัวอย่าง</strong>: ส่งเข้า Audit 5 Transaction = เพิ่ม 5</li>
+<li><strong>ดูได้จาก</strong>: <code>/api/integration/bma/usage</code></li>
+</ul>
+
+<h3 id="5-audit-status-และ-violations">5. Audit Status และ Violations</h3>
+
+<h4 id="ai_audit-สถานะ-ai-audit"><code>ai_audit</code> (สถานะ AI Audit)</h4>
+
+<ul>
+<li><strong>คืออะไร</strong>: ผลการตรวจสอบโดย AI</li>
+<li><strong>ค่าที่เป็นไปได้</strong>:
+<ul>
+<li><code>"null"</code> - ยังไม่ได้ตรวจสอบ</li>
+<li><code>"queued"</code> - อยู่ในคิวรอตรวจสอบ</li>
+<li><code>"approved"</code> - ผ่านการตรวจสอบ</li>
+<li><code>"rejected"</code> - ไม่ผ่านการตรวจสอบ</li>
+<li><code>"no_action"</code> - ไม่ต้องดำเนินการ</li>
+</ul></li>
+</ul>
+
+<p><strong>⚠️ สำคัญ:</strong> ใช้ <code>ai_audit</code> เป็นสถานะหลักแทน <code>status</code></p>
+
+<h4 id="status-สถานะทวไป"><code>status</code> (สถานะทั่วไป)</h4>
+
+<ul>
+<li><strong>คืออะไร</strong>: สถานะทั่วไปของ Transaction</li>
+<li><strong>ค่าที่เป็นไปได้</strong>: pending, approved, rejected, completed</li>
+<li><strong>หมายเหตุ</strong>: ไม่แนะนำให้ใช้ ให้ใช้ <code>ai_audit</code> แทน</li>
+</ul>
+
+<h4 id="overall_violations"><code>overall_violations</code></h4>
+
+<ul>
+<li><strong>คืออะไร</strong>: รายการข้อผิดพลาดระดับบ้าน (ไม่เจาะจงประเภทขยะ)</li>
+<li><strong>รูปแบบ</strong>: Array ของข้อความ</li>
+<li><strong>ตัวอย่าง</strong>:</li>
+</ul>
+
+<div class="codehilite">
+<pre><span></span><code><span class="nt">&quot;overall_violations&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">  </span><span class="s2">&quot;ภาพไม่ชัดเจน กรุณาถ่ายใหม่&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="s2">&quot;ไม่พบข้อมูลที่อยู่&quot;</span>
+<span class="p">]</span>
+</code></pre>
+</div>
+
+<h4 id="violations-ระดบประเภทขยะ"><code>violations</code> (ระดับประเภทขยะ)</h4>
+
+<ul>
+<li><strong>คืออะไร</strong>: รายการข้อผิดพลาดเฉพาะประเภทขยะ</li>
+<li><strong>ตำแหน่ง</strong>: อยู่ภายใต้แต่ละประเภทขยะใน materials</li>
+<li><strong>ตัวอย่าง</strong>:</li>
+</ul>
+
+<div class="codehilite">
+<pre><span></span><code><span class="nt">&quot;materials&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;general&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;image_url&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;violations&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">      </span><span class="s2">&quot;พบขยะรีไซเคิลปนในถังขยะทั่วไป&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="s2">&quot;ขยะไม่ได้คัดแยก&quot;</span>
+<span class="w">    </span><span class="p">]</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre>
+</div>
+
+<h4 id="image_url"><code>image_url</code></h4>
+
+<ul>
+<li><strong>คืออะไร</strong>: URL ของรูปภาพขยะ</li>
+<li><strong>รูปแบบ</strong>: URL แบบ S3 หรือ HTTPS</li>
+<li><strong>ตัวอย่าง</strong>: <code>"https://s3.example.com/bma/house001-general.jpg"</code></li>
+<li><strong>ตำแหน่ง</strong>: อยู่ภายใต้แต่ละประเภทขยะ</li>
+<li><strong>⚠️ ข้อกำหนดสำคัญ</strong>:
+<ul>
+<li><strong>ต้องเป็น Public URL</strong> ที่สามารถเข้าถึงได้โดยไม่ต้อง Authentication</li>
+<li>ระบบจะดึงรูปภาพจาก URL นี้เพื่อส่งไป AI Audit</li>
+<li>หาก URL ไม่สามารถเข้าถึงได้ การ Audit จะล้มเหลว</li>
+<li>แนะนำใช้ S3 Presigned URL หรือ Public Bucket</li>
+</ul></li>
+</ul>
+
+<hr />
+
+<h2 id="การใชงาน-api-แตละตว">การใช้งาน API แต่ละตัว</h2>
+
+<h3 id="1-ตรวจสอบสถานะการ-audit">1. ตรวจสอบสถานะการ Audit</h3>
+
+<p><strong>Endpoint:</strong> <code>GET /api/integration/bma/audit_status</code></p>
+
+<p><strong>วัตถุประสงค์:</strong> ดูสถิติการตรวจสอบของ Transaction ย้อนหลัง 1 ปี</p>
+
+<p><strong>วิธีใช้:</strong><br />
+1. ไปที่ Swagger UI<br />
+2. เลือก <strong>GET /api/integration/bma/audit_status</strong><br />
+3. คลิก <strong>"Try it out"</strong><br />
+4. คลิก <strong>"Execute"</strong></p>
+
+<p><strong>Response ที่ได้รับ:</strong></p>
+
+<div class="codehilite">
+<pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;success&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;data&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;start_date&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2024-10-27&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;num_transactions&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">150</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;ai_audit&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;not_audit&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">45</span><span class="p">,</span><span class="w">      </span><span class="c1">// ยังไม่ได้ตรวจ</span>
+<span class="w">      </span><span class="nt">&quot;queued&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">30</span><span class="p">,</span><span class="w">         </span><span class="c1">// รอตรวจ</span>
+<span class="w">      </span><span class="nt">&quot;approved&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">50</span><span class="p">,</span><span class="w">       </span><span class="c1">// ผ่าน</span>
+<span class="w">      </span><span class="nt">&quot;rejected&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">25</span><span class="w">        </span><span class="c1">// ไม่ผ่าน</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">    </span><span class="nt">&quot;actual_status&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;pending&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">60</span><span class="p">,</span><span class="w">        </span><span class="c1">// รอดำเนินการ</span>
+<span class="w">      </span><span class="nt">&quot;approved&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">70</span><span class="p">,</span><span class="w">       </span><span class="c1">// อนุมัติ</span>
+<span class="w">      </span><span class="nt">&quot;rejected&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">20</span><span class="w">        </span><span class="c1">// ปฏิเสธ</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre>
+</div>
+
+<p><strong>คำอธิบายข้อมูล:</strong><br />
+- <code>start_date</code>: วันที่เริ่มนับ (1 ปีย้อนหลัง)<br />
+- <code>num_transactions</code>: จำนวน Transaction ทั้งหมด<br />
+- <code>ai_audit</code>: สถิติการตรวจสอบโดย AI<br />
+- <code>actual_status</code>: สถิติสถานะจริงของ Transaction</p>
+
+<hr />
+
+<h3 id="2-ตรวจสอบโควตาการใชงาน">2. ตรวจสอบโควต้าการใช้งาน</h3>
+
+<p><strong>Endpoint:</strong> <code>GET /api/integration/bma/usage</code></p>
+
+<p><strong>วัตถุประสงค์:</strong> ดูโควต้าและการใช้งานปัจจุบัน</p>
+
+<p><strong>วิธีใช้:</strong><br />
+1. ไปที่ Swagger UI<br />
+2. เลือก <strong>GET /api/integration/bma/usage</strong><br />
+3. คลิก <strong>"Try it out"</strong><br />
+4. คลิก <strong>"Execute"</strong></p>
+
+<p><strong>Response ที่ได้รับ:</strong></p>
+
+<div class="codehilite">
+<pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;success&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;data&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;create_transaction_limit&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1000</span><span class="p">,</span><span class="w">    </span><span class="c1">// โควต้าสูงสุด</span>
+<span class="w">    </span><span class="nt">&quot;create_transaction_usage&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">450</span><span class="p">,</span><span class="w">     </span><span class="c1">// ใช้ไปแล้ว</span>
+<span class="w">    </span><span class="nt">&quot;ai_audit_limit&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">100</span><span class="p">,</span><span class="w">               </span><span class="c1">// โควต้า AI</span>
+<span class="w">    </span><span class="nt">&quot;ai_audit_usage&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">35</span><span class="w">                 </span><span class="c1">// ใช้ AI ไปแล้ว</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre>
+</div>
+
+<p><strong>การตีความข้อมูล:</strong><br />
+- สามารถสร้าง Transaction ได้อีก: <code>1000 - 450 = 550 ครั้ง</code><br />
+- สามารถใช้ AI Audit ได้อีก: <code>100 - 35 = 65 ครั้ง</code></p>
+
+<p><strong>เมื่อไหร่ควรตรวจสอบ:</strong><br />
+- ก่อนส่งข้อมูลจำนวนมาก<br />
+- เมื่อได้รับ Error เกี่ยวกับโควต้า<br />
+- เพื่อวางแผนการใช้งานประจำเดือน</p>
+
+<hr />
+
+<h3 id="3-บนทกขอมลขยะ-batch-upload">3. บันทึกข้อมูลขยะ (Batch Upload)</h3>
+
+<p><strong>Endpoint:</strong> <code>POST /api/integration/bma/transaction</code></p>
+
+<p><strong>วัตถุประสงค์:</strong> บันทึกข้อมูลขยะทีละหลายบ้านในคลิกเดียว</p>
+
+<p><strong>💡 แนะนำ:</strong><br />
+- <strong>สามารถส่งหลายๆ house_id พร้อมกันได้</strong> ในคำขอเดียว (Batch Processing)<br />
+- <strong>แนะนำไม่เกิน 1,000 house_id ต่อครั้ง</strong> เพื่อประสิทธิภาพที่ดีที่สุด<br />
+- หากมีข้อมูลมากกว่า 1,000 บ้าน ควรแบ่งส่งหลายๆ ครั้ง</p>
+
+<p><strong>รูปแบบข้อมูล:</strong></p>
+
+<div class="codehilite">
+<pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;batch&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;v2025-Q1&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w">                    </span><span class="c1">// transaction_version</span>
+<span class="w">      </span><span class="nt">&quot;2170&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w">                      </span><span class="c1">// origin_id (ต้องเป็น 2170 = แขวงช่องนนทรี)</span>
+<span class="w">        </span><span class="nt">&quot;00000000001&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w">             </span><span class="c1">// house_id (บ้านเลขที่)</span>
+<span class="w">          </span><span class="nt">&quot;timestamp&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2025-10-23T08:30:00+07:00&quot;</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">&quot;material&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="nt">&quot;general&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w">             </span><span class="c1">// ขยะทั่วไป</span>
+<span class="w">              </span><span class="nt">&quot;image_url&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;https://s3.example.com/bma/house001-general.jpg&quot;</span>
+<span class="w">            </span><span class="p">},</span>
+<span class="w">            </span><span class="nt">&quot;recyclable&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w">          </span><span class="c1">// ขยะรีไซเคิล</span>
+<span class="w">              </span><span class="nt">&quot;image_url&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;https://s3.example.com/bma/house001-recyclable.jpg&quot;</span>
+<span class="w">            </span><span class="p">}</span>
+<span class="w">          </span><span class="p">}</span>
+<span class="w">        </span><span class="p">},</span>
+<span class="w">        </span><span class="nt">&quot;00000000002&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w">             </span><span class="c1">// บ้านที่ 2</span>
+<span class="w">          </span><span class="nt">&quot;timestamp&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2025-10-23T09:15:00+07:00&quot;</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">&quot;material&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="nt">&quot;organic&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w">             </span><span class="c1">// ขยะอินทรีย์</span>
+<span class="w">              </span><span class="nt">&quot;image_url&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;https://s3.example.com/bma/house002-organic.jpg&quot;</span>
+<span class="w">            </span><span class="p">}</span>
+<span class="w">          </span><span class="p">}</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre>
+</div>
+
+<p><strong>วิธีใช้งานใน Swagger:</strong><br />
+1. เลือก <strong>POST /api/integration/bma/transaction</strong><br />
+2. คลิก <strong>"Try it out"</strong><br />
+3. แก้ไข Request body ตามรูปแบบข้างต้น<br />
+4. เปลี่ยน:<br />
+   - <code>transaction_version</code> ให้ตรงกับรุ่นของคุณ<br />
+   - <code>house_id</code> เป็นรหัสบ้านจริง (11 หลัก)<br />
+   - <code>timestamp</code> เป็นเวลาที่เก็บขยะ<br />
+   - <code>image_url</code> เป็น URL รูปภาพจริง<br />
+5. คลิก <strong>"Execute"</strong></p>
+
+<p><strong>Response ที่ได้รับ:</strong></p>
+
+<div class="codehilite">
+<pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;success&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;message&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Processed 2 transactions&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;results&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;processed&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w">               </span><span class="c1">// ประมวลผลทั้งหมด</span>
+<span class="w">    </span><span class="nt">&quot;created&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w">                 </span><span class="c1">// สร้างใหม่</span>
+<span class="w">    </span><span class="nt">&quot;updated&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w">                 </span><span class="c1">// อัพเดท</span>
+<span class="w">    </span><span class="nt">&quot;errors&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[]</span><span class="w">                  </span><span class="c1">// ข้อผิดพลาด (ถ้ามี)</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;subscription_usage&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;create_transaction_limit&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1000</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;create_transaction_usage&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">452</span><span class="p">,</span><span class="w">     </span><span class="c1">// เพิ่มขึ้น 2</span>
+<span class="w">    </span><span class="nt">&quot;ai_audit_limit&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">100</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;ai_audit_usage&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">35</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre>
+</div>
+
+<p><strong>กรณีมี Error:</strong></p>
+
+<div class="codehilite">
+<pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;success&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;results&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;processed&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;created&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;updated&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;errors&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">      </span><span class="p">{</span>
+<span class="w">        </span><span class="nt">&quot;transaction_version&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;v2025-Q1&quot;</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;house_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;00000000003&quot;</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;error&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Invalid timestamp format&quot;</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">]</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre>
+</div>
+
+<p><strong>ข้อควรระวัง:</strong><br />
+- ใช้ <code>origin_id</code> เป็น <strong>2170</strong> เท่านั้น<br />
+- <code>timestamp</code> ต้องเป็นรูปแบบ ISO 8601 พร้อม timezone<br />
+- <code>image_url</code> <strong>ต้องเป็น Public URL</strong> ที่ระบบสามารถเข้าถึงได้โดยไม่ต้อง authentication<br />
+- ถ้าบันทึกบ้านเดิมซ้ำ (transaction_version + house_id เหมือนกัน) จะเป็นการ<strong>อัพเดท</strong></p>
+
+<hr />
+
+<h3 id="4-ดงรายการขอมลขยะ-list">4. ดึงรายการข้อมูลขยะ (List)</h3>
+
+<p><strong>Endpoint:</strong> <code>GET /api/integration/bma/transaction</code></p>
+
+<p><strong>วัตถุประสงค์:</strong> ดูรายการข้อมูลขยะทั้งหมดพร้อมแบ่งหน้า</p>
+
+<p><strong>Parameters:</strong><br />
+- <code>limit</code> (optional): จำนวนต่อหน้า (ค่าเริ่มต้น: 100, สูงสุด: 1000)<br />
+- <code>page</code> (optional): หมายเลขหน้า (ค่าเริ่มต้น: 1)<br />
+- <code>transaction_version</code> (optional): กรองตามรุ่น<br />
+- <code>origin_id</code> (optional): กรองตามจุดรับ</p>
+
+<p><strong>ตัวอย่างการใช้งาน:</strong></p>
+
+<p><strong>ดูหน้าแรก (100 รายการ):</strong></p>
+
+<pre><code>GET /api/integration/bma/transaction
+</code></pre>
+
+<p><strong>ดูหน้าที่ 2, แสดง 50 รายการ:</strong></p>
+
+<pre><code>GET /api/integration/bma/transaction?page=2&amp;limit=50
+</code></pre>
+
+<p><strong>กรองเฉพาะรุ่น v2025-Q1:</strong></p>
+
+<pre><code>GET /api/integration/bma/transaction?transaction_version=v2025-Q1
+</code></pre>
+
+<p><strong>กรองรุ่น v2025-Q1 จาก origin 2170 หน้าที่ 3:</strong></p>
+
+<pre><code>GET /api/integration/bma/transaction?transaction_version=v2025-Q1&amp;origin_id=2170&amp;page=3&amp;limit=100
+</code></pre>
+
+<p><strong>วิธีใช้ใน Swagger:</strong><br />
+1. เลือก <strong>GET /api/integration/bma/transaction</strong><br />
+2. คลิก <strong>"Try it out"</strong><br />
+3. กรอก Parameters ที่ต้องการ<br />
+4. คลิก <strong>"Execute"</strong></p>
+
+<p><strong>Response ที่ได้รับ:</strong></p>
+
+<div class="codehilite">
+<pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;success&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;data&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;transactions&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;v2025-Q1&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w">                      </span><span class="c1">// transaction_version</span>
+<span class="w">        </span><span class="nt">&quot;2170&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w">                        </span><span class="c1">// origin_id</span>
+<span class="w">          </span><span class="nt">&quot;00000000001&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w">               </span><span class="c1">// house_id</span>
+<span class="w">            </span><span class="nt">&quot;audit&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">              </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;pending&quot;</span><span class="p">,</span>
+<span class="w">              </span><span class="nt">&quot;ai_audit&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;approved&quot;</span><span class="p">,</span><span class="w">    </span><span class="c1">// ⭐ ใช้ตัวนี้เป็นสถานะหลัก</span>
+<span class="w">              </span><span class="nt">&quot;overall_violations&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">                </span><span class="s2">&quot;ภาพไม่ชัดเจน&quot;</span><span class="w">           </span><span class="c1">// ข้อผิดพลาดระดับบ้าน</span>
+<span class="w">              </span><span class="p">],</span>
+<span class="w">              </span><span class="nt">&quot;materials&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="nt">&quot;general&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                  </span><span class="nt">&quot;image_url&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;https://...&quot;</span><span class="p">,</span>
+<span class="w">                  </span><span class="nt">&quot;violations&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="w">        </span><span class="c1">// ข้อผิดพลาดเฉพาะประเภท</span>
+<span class="w">                    </span><span class="s2">&quot;พบขยะรีไซเคิลปน&quot;</span>
+<span class="w">                  </span><span class="p">]</span>
+<span class="w">                </span><span class="p">},</span>
+<span class="w">                </span><span class="nt">&quot;organic&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                  </span><span class="nt">&quot;image_url&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;https://...&quot;</span><span class="p">,</span>
+<span class="w">                  </span><span class="nt">&quot;violations&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[]</span>
+<span class="w">                </span><span class="p">}</span>
+<span class="w">              </span><span class="p">}</span>
+<span class="w">            </span><span class="p">}</span>
+<span class="w">          </span><span class="p">}</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">    </span><span class="nt">&quot;origins&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;2170&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;แขวงช่องนนทรี&quot;</span><span class="w">   </span><span class="c1">// ชื่อจุดรับ</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">    </span><span class="nt">&quot;pagination&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;page&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;limit&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">100</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;total&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">250</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;total_pages&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;has_next&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;has_prev&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre>
+</div>
+
+<p><strong>โครงสร้างข้อมูล:</strong></p>
+
+<pre><code>transactions
+└── [transaction_version]
+    └── [origin_id]
+        └── [house_id]
+            └── audit
+                ├── status: สถานะทั่วไป
+                ├── ai_audit: ⭐ สถานะ AI (ใช้ตัวนี้)
+                ├── overall_violations: ข้อผิดพลาดระดับบ้าน
+                └── materials
+                    ├── general
+                    │   ├── image_url
+                    │   └── violations
+                    ├── organic
+                    ├── recyclable
+                    └── hazardous
+</code></pre>
+
+<p><strong>การนำไปใช้:</strong><br />
+- ตรวจสอบสถานะด้วย <code>ai_audit</code> ไม่ใช่ <code>status</code><br />
+- <code>overall_violations</code> = ปัญหาทั่วไปของบ้าน<br />
+- <code>violations</code> ใน materials = ปัญหาเฉพาะประเภทขยะ<br />
+- ถ้า <code>violations</code> เป็น <code>[]</code> = ไม่มีปัญหา</p>
+
+<hr />
+
+<h3 id="5-ดขอมลบานเฉพาะเจาะจง">5. ดูข้อมูลบ้านเฉพาะเจาะจง</h3>
+
+<p><strong>Endpoint:</strong> <code>GET /api/integration/bma/transaction/{transaction_version}/{house_id}</code></p>
+
+<p><strong>วัตถุประสงค์:</strong> ดูข้อมูลบ้านเดียวแบบละเอียด</p>
+
+<p><strong>Parameters:</strong><br />
+- <code>transaction_version</code>: รุ่นของข้อมูล (เช่น "v2025-Q1")<br />
+- <code>house_id</code>: รหัสบ้าน (เช่น "00000000001")</p>
+
+<p><strong>ตัวอย่างการใช้งาน:</strong></p>
+
+<p><strong>ดูบ้านเลขที่ 1 รุ่น v2025-Q1:</strong></p>
+
+<pre><code>GET /api/integration/bma/transaction/v2025-Q1/00000000001
+</code></pre>
+
+<p><strong>วิธีใช้ใน Swagger:</strong><br />
+1. เลือก <strong>GET /api/integration/bma/transaction/{transaction_version}/{house_id}</strong><br />
+2. คลิก <strong>"Try it out"</strong><br />
+3. กรอก <code>transaction_version</code> เช่น <code>v2025-Q1</code><br />
+4. กรอก <code>house_id</code> เช่น <code>00000000001</code><br />
+5. คลิก <strong>"Execute"</strong></p>
+
+<p><strong>Response ที่ได้รับ:</strong></p>
+
+<div class="codehilite">
+<pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;success&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;data&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;transaction_version&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;v2025-Q1&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;house_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;00000000001&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;origin_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2170&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;origin_name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;แขวงช่องนนทรี&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;audit&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;pending&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;ai_audit&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;rejected&quot;</span><span class="p">,</span><span class="w">              </span><span class="c1">// ⭐ สถานะ AI</span>
+<span class="w">      </span><span class="nt">&quot;overall_violations&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">        </span><span class="s2">&quot;ภาพไม่ชัดเจน กรุณาถ่ายใหม่&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="p">],</span>
+<span class="w">      </span><span class="nt">&quot;materials&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nt">&quot;general&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nt">&quot;image_url&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;https://s3.example.com/bma/house001-general.jpg&quot;</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">&quot;violations&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">            </span><span class="s2">&quot;พบขยะรีไซเคิลปนอยู่ในถังขยะทั่วไป&quot;</span><span class="p">,</span>
+<span class="w">          </span><span class="p">]</span>
+<span class="w">        </span><span class="p">},</span>
+<span class="w">        </span><span class="nt">&quot;recyclable&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nt">&quot;image_url&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;https://s3.example.com/bma/house001-recyclable.jpg&quot;</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">&quot;violations&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[]</span><span class="w">                 </span><span class="c1">// ไม่มีปัญหา</span>
+<span class="w">        </span><span class="p">},</span>
+<span class="w">        </span><span class="nt">&quot;organic&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nt">&quot;image_url&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span><span class="w">               </span><span class="c1">// ไม่มีรูป</span>
+<span class="w">          </span><span class="nt">&quot;violations&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[]</span>
+<span class="w">        </span><span class="p">},</span>
+<span class="w">        </span><span class="nt">&quot;hazardous&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nt">&quot;image_url&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">&quot;violations&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[]</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre>
+</div>
+
+<p><strong>การตีความผลลัพธ์:</strong></p>
+
+<p><strong>บ้านนี้มีปัญหา:</strong><br />
+- <code>ai_audit = "rejected"</code> → ไม่ผ่าน AI Audit<br />
+- <code>overall_violations</code> มี 2 รายการ → ปัญหาระดับบ้าน<br />
+- ขยะทั่วไป (general) มี <code>violations</code> 2 รายการ → ปัญหาเฉพาะประเภท<br />
+- ขยะรีไซเคิล (recyclable) ไม่มีปัญหา</p>
+
+<p><strong>แนวทางแก้ไข:</strong><br />
+1. ถ่ายภาพใหม่ให้ชัดเจน<br />
+2. ถ่ายป้ายบ้านเลขที่ให้เห็น<br />
+3. คัดแยกขยะรีไซเคิลออกจากถังขยะทั่วไป<br />
+4. ส่งข้อมูลใหม่ (POST) ด้วย transaction_version และ house_id เดิม (จะเป็นการอัพเดท)</p>
+
+<hr />
+
+<h2 id="กรณตวอยางการใชงานจรง">กรณีตัวอย่างการใช้งานจริง</h2>
+
+<h3 id="สถานการณท-1-สงขอมลบานใหม-10-บาน">สถานการณ์ที่ 1: ส่งข้อมูลบ้านใหม่ 10 บ้าน</h3>
+
+<p><strong>ขั้นตอน:</strong></p>
+
+<ol>
+<li><p><strong>ตรวจสอบโควต้า:</strong></p>
+
+<pre><code>GET /api/integration/bma/usage
+</code></pre>
+
+<p>ตรวจสอบว่า <code>create_transaction_usage</code> + 10 ไม่เกิน <code>create_transaction_limit</code></p></li>
+<li><p><strong>เตรียมข้อมูล:</strong></p>
+
+<div class="codehilite">
+<pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;batch&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;v2025-Q1&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;2170&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nt">&quot;00000000001&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;timestamp&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;material&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="err">...</span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="nt">&quot;00000000002&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;timestamp&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;material&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="err">...</span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="err">...</span>
+<span class="w">        </span><span class="nt">&quot;00000000010&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;timestamp&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;material&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="err">...</span><span class="p">}</span><span class="w"> </span><span class="p">}</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre>
+</div></li>
+<li><p><strong>ส่งข้อมูล:</strong></p>
+
+<pre><code>POST /api/integration/bma/transaction
+</code></pre></li>
+<li><p><strong>ตรวจสอบผล:</strong></p>
+
+<ul>
+<li>ดู <code>results.created</code> ควรเป็น 10</li>
+<li>ดู <code>results.errors</code> ถ้ามีบ้านไหนผิดพลาด</li>
+</ul></li>
+</ol>
+
+<hr />
+
+<h3 id="สถานการณท-2-ตรวจสอบบานทไมผาน-ai-audit">สถานการณ์ที่ 2: ตรวจสอบบ้านที่ไม่ผ่าน AI Audit</h3>
+
+<p><strong>ขั้นตอน:</strong></p>
+
+<ol>
+<li><p><strong>ดูสถิติ:</strong></p>
+
+<pre><code>GET /api/integration/bma/audit_status
+</code></pre>
+
+<p>ดู <code>ai_audit.rejected</code> มีกี่บ้าน</p></li>
+<li><p><strong>ดูรายการทั้งหมด:</strong></p>
+
+<pre><code>GET /api/integration/bma/transaction?limit=1000
+</code></pre></li>
+<li><p><strong>กรองในโปรแกรม:</strong> หาบ้านที่ <code>ai_audit = "rejected"</code></p></li>
+<li><p><strong>ดูรายละเอียด:</strong></p>
+
+<pre><code>GET /api/integration/bma/transaction/v2025-Q1/00000000123
+</code></pre>
+
+<p>ดู <code>overall_violations</code> และ <code>violations</code> ในแต่ละประเภทขยะ</p></li>
+<li><p><strong>แก้ไขและส่งใหม่:</strong></p>
+
+<div class="codehilite">
+<pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;batch&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;v2025-Q1&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;2170&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nt">&quot;00000000123&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nt">&quot;timestamp&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2025-10-24T10:00:00+07:00&quot;</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">&quot;material&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="nt">&quot;general&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">              </span><span class="nt">&quot;image_url&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;https://... (รูปใหม่)&quot;</span>
+<span class="w">            </span><span class="p">}</span>
+<span class="w">          </span><span class="p">}</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre>
+</div></li>
+</ol>
+
+<hr />
+
+<h3 id="สถานการณท-3-ดงขอมลเดอนตลาคม-2025">สถานการณ์ที่ 3: ดึงข้อมูลเดือนตุลาคม 2025</h3>
+
+<p><strong>ขั้นตอน:</strong></p>
+
+<ol>
+<li><p><strong>กรองตามรุ่น:</strong></p>
+
+<pre><code>GET /api/integration/bma/transaction?transaction_version=v2025-10&amp;limit=1000
+</code></pre></li>
+<li><p><strong>ถ้ามีเกิน 1000 รายการ:</strong></p>
+
+<pre><code>GET /api/integration/bma/transaction?transaction_version=v2025-10&amp;page=1&amp;limit=1000
+GET /api/integration/bma/transaction?transaction_version=v2025-10&amp;page=2&amp;limit=1000
+...
+</code></pre>
+
+<p>ดูจนกว่า <code>pagination.has_next = false</code></p></li>
+<li><p><strong>ประมวลผลข้อมูล:</strong> วนลูปผ่านทุก transaction และตรวจสอบ <code>ai_audit</code> status</p></li>
+</ol>
+
+<hr />
+
+<h3 id="สถานการณท-4-สงขอมลจานวนมาก-มากกวา-1000-บาน">สถานการณ์ที่ 4: ส่งข้อมูลจำนวนมาก (มากกว่า 1,000 บ้าน)</h3>
+
+<p><strong>สถานการณ์:</strong> มีข้อมูล 2,500 บ้านที่ต้องส่งเข้าระบบ</p>
+
+<p><strong>วิธีการ:</strong> แบ่งส่งเป็นหลายๆ ครั้ง ครั้งละไม่เกิน 1,000 บ้าน</p>
+
+<p><strong>ขั้นตอน:</strong></p>
+
+<ol>
+<li><p><strong>ตรวจสอบโควต้า:</strong></p>
+
+<pre><code>GET /api/integration/bma/usage
+</code></pre>
+
+<p>ตรวจสอบว่ามี quota เพียงพอ (2,500 บ้าน)</p></li>
+<li><p><strong>แบ่งข้อมูลออกเป็น 3 ชุด:</strong></p>
+
+<ul>
+<li>ชุดที่ 1: บ้าน 1-1,000 (1,000 บ้าน)</li>
+<li>ชุดที่ 2: บ้าน 1,001-2,000 (1,000 บ้าน)</li>
+<li>ชุดที่ 3: บ้าน 2,001-2,500 (500 บ้าน)</li>
+</ul></li>
+<li><p><strong>ส่งชุดที่ 1 (1,000 บ้านแรก):</strong></p>
+
+<div class="codehilite">
+<pre><span></span><code><span class="err">POST</span><span class="w"> </span><span class="err">/api/i</span><span class="kc">nte</span><span class="err">gra</span><span class="kc">t</span><span class="err">io</span><span class="kc">n</span><span class="err">/bma/</span><span class="kc">transa</span><span class="err">c</span><span class="kc">t</span><span class="err">io</span><span class="kc">n</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;batch&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;v2025-Q1&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;2170&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nt">&quot;00000000001&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;timestamp&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;material&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="err">...</span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="nt">&quot;00000000002&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;timestamp&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;material&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="err">...</span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="err">...</span>
+<span class="w">        </span><span class="nt">&quot;00000001000&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;timestamp&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;material&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="err">...</span><span class="p">}</span><span class="w"> </span><span class="p">}</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre>
+</div>
+
+<p><strong>Response:</strong></p>
+
+<div class="codehilite">
+<pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;success&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;message&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Processed 1000 transactions&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;results&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;processed&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1000</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;created&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1000</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;updated&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;errors&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[]</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre>
+</div></li>
+<li><p><strong>ส่งชุดที่ 2 (1,000 บ้านถัดไป):</strong></p>
+
+<div class="codehilite">
+<pre><span></span><code><span class="err">POST</span><span class="w"> </span><span class="err">/api/i</span><span class="kc">nte</span><span class="err">gra</span><span class="kc">t</span><span class="err">io</span><span class="kc">n</span><span class="err">/bma/</span><span class="kc">transa</span><span class="err">c</span><span class="kc">t</span><span class="err">io</span><span class="kc">n</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;batch&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;v2025-Q1&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;2170&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nt">&quot;00000001001&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;timestamp&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;material&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="err">...</span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="nt">&quot;00000001002&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;timestamp&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;material&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="err">...</span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="err">...</span>
+<span class="w">        </span><span class="nt">&quot;00000002000&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;timestamp&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;material&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="err">...</span><span class="p">}</span><span class="w"> </span><span class="p">}</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre>
+</div>
+
+<p><strong>Response:</strong></p>
+
+<div class="codehilite">
+<pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;success&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;message&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Processed 1000 transactions&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;results&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;processed&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1000</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;created&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1000</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;updated&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;errors&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[]</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre>
+</div></li>
+<li><p><strong>ส่งชุดที่ 3 (500 บ้านสุดท้าย):</strong></p>
+
+<div class="codehilite">
+<pre><span></span><code><span class="err">POST</span><span class="w"> </span><span class="err">/api/i</span><span class="kc">nte</span><span class="err">gra</span><span class="kc">t</span><span class="err">io</span><span class="kc">n</span><span class="err">/bma/</span><span class="kc">transa</span><span class="err">c</span><span class="kc">t</span><span class="err">io</span><span class="kc">n</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;batch&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;v2025-Q1&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;2170&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nt">&quot;00000002001&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;timestamp&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;material&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="err">...</span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="nt">&quot;00000002002&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;timestamp&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;material&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="err">...</span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="err">...</span>
+<span class="w">        </span><span class="nt">&quot;00000002500&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;timestamp&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;material&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="err">...</span><span class="p">}</span><span class="w"> </span><span class="p">}</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre>
+</div>
+
+<p><strong>Response:</strong></p>
+
+<div class="codehilite">
+<pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;success&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;message&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Processed 500 transactions&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;results&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;processed&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">500</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;created&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">500</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;updated&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;errors&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[]</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre>
+</div></li>
+<li><p><strong>ตรวจสอบผลรวม:</strong></p>
+
+<ul>
+<li>ส่งทั้งหมด: 1,000 + 1,000 + 500 = 2,500 บ้าน</li>
+<li><code>create_transaction_usage</code> เพิ่มขึ้น 2,500</li>
+<li>ตรวจสอบ <code>errors</code> ในแต่ละ response</li>
+</ul></li>
+</ol>
+
+<p><strong>ประโยชน์ของการแบ่งส่ง:</strong><br />
+- ✅ ป้องกัน Request Timeout (คำขอไม่หมดเวลา)<br />
+- ✅ ติดตาม Error ได้ง่ายขึ้น (รู้ชุดไหนผิด)<br />
+- ✅ สามารถ Retry เฉพาะชุดที่มีปัญหา<br />
+- ✅ ประมวลผลเร็วขึ้น</p>
+
+<p><strong>ตัวอย่างโค้ด JavaScript สำหรับแบ่งส่ง:</strong></p>
+
+<div class="codehilite">
+<pre><span></span><code><span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">sendBatchInChunks</span><span class="p">(</span><span class="nx">allHouses</span><span class="p">,</span><span class="w"> </span><span class="nx">chunkSize</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">1000</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">results</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">totalSent</span><span class="o">:</span><span class="w"> </span><span class="mf">0</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">totalCreated</span><span class="o">:</span><span class="w"> </span><span class="mf">0</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">totalUpdated</span><span class="o">:</span><span class="w"> </span><span class="mf">0</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">allErrors</span><span class="o">:</span><span class="w"> </span><span class="p">[]</span>
+<span class="w">  </span><span class="p">};</span>
+
+<span class="w">  </span><span class="c1">// แบ่งข้อมูลเป็น chunks</span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">let</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="nx">allHouses</span><span class="p">.</span><span class="nx">length</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="nx">chunkSize</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">chunk</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">allHouses</span><span class="p">.</span><span class="nx">slice</span><span class="p">(</span><span class="nx">i</span><span class="p">,</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">chunkSize</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="sb">`Sending chunk </span><span class="si">${</span><span class="nb">Math</span><span class="p">.</span><span class="nx">floor</span><span class="p">(</span><span class="nx">i</span><span class="o">/</span><span class="nx">chunkSize</span><span class="p">)</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mf">1</span><span class="si">}</span><span class="sb">...`</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// เตรียม batch data</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">batchData</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">batch</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="s2">&quot;v2025-Q1&quot;</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="s2">&quot;2170&quot;</span><span class="o">:</span><span class="w"> </span><span class="p">{}</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">};</span>
+
+<span class="w">    </span><span class="c1">// เติมข้อมูลบ้าน</span>
+<span class="w">    </span><span class="nx">chunk</span><span class="p">.</span><span class="nx">forEach</span><span class="p">(</span><span class="nx">house</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">batchData</span><span class="p">.</span><span class="nx">batch</span><span class="p">[</span><span class="s2">&quot;v2025-Q1&quot;</span><span class="p">][</span><span class="s2">&quot;2170&quot;</span><span class="p">][</span><span class="nx">house</span><span class="p">.</span><span class="nx">id</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">timestamp</span><span class="o">:</span><span class="w"> </span><span class="nx">house</span><span class="p">.</span><span class="nx">timestamp</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">material</span><span class="o">:</span><span class="w"> </span><span class="nx">house</span><span class="p">.</span><span class="nx">material</span>
+<span class="w">      </span><span class="p">};</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="c1">// ส่ง request</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">response</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">fetch</span><span class="p">(</span><span class="s1">&#39;/api/integration/bma/transaction&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">method</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;POST&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">headers</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="s1">&#39;Authorization&#39;</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Bearer YOUR_JWT_TOKEN&#39;</span><span class="p">,</span>
+<span class="w">          </span><span class="s1">&#39;Content-Type&#39;</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;application/json&#39;</span>
+<span class="w">        </span><span class="p">},</span>
+<span class="w">        </span><span class="nx">body</span><span class="o">:</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">(</span><span class="nx">batchData</span><span class="p">)</span>
+<span class="w">      </span><span class="p">});</span>
+
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">response</span><span class="p">.</span><span class="nx">json</span><span class="p">();</span>
+
+<span class="w">      </span><span class="c1">// รวมผลลัพธ์</span>
+<span class="w">      </span><span class="nx">results</span><span class="p">.</span><span class="nx">totalSent</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="nx">data</span><span class="p">.</span><span class="nx">results</span><span class="p">.</span><span class="nx">processed</span><span class="p">;</span>
+<span class="w">      </span><span class="nx">results</span><span class="p">.</span><span class="nx">totalCreated</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="nx">data</span><span class="p">.</span><span class="nx">results</span><span class="p">.</span><span class="nx">created</span><span class="p">;</span>
+<span class="w">      </span><span class="nx">results</span><span class="p">.</span><span class="nx">totalUpdated</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="nx">data</span><span class="p">.</span><span class="nx">results</span><span class="p">.</span><span class="nx">updated</span><span class="p">;</span>
+<span class="w">      </span><span class="nx">results</span><span class="p">.</span><span class="nx">allErrors</span><span class="p">.</span><span class="nx">push</span><span class="p">(...</span><span class="nx">data</span><span class="p">.</span><span class="nx">results</span><span class="p">.</span><span class="nx">errors</span><span class="p">);</span>
+
+<span class="w">      </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="sb">`✅ Chunk </span><span class="si">${</span><span class="nb">Math</span><span class="p">.</span><span class="nx">floor</span><span class="p">(</span><span class="nx">i</span><span class="o">/</span><span class="nx">chunkSize</span><span class="p">)</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mf">1</span><span class="si">}</span><span class="sb"> done: </span><span class="si">${</span><span class="nx">data</span><span class="p">.</span><span class="nx">results</span><span class="p">.</span><span class="nx">created</span><span class="si">}</span><span class="sb"> created`</span><span class="p">);</span>
+
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">error</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">console</span><span class="p">.</span><span class="nx">error</span><span class="p">(</span><span class="sb">`❌ Chunk </span><span class="si">${</span><span class="nb">Math</span><span class="p">.</span><span class="nx">floor</span><span class="p">(</span><span class="nx">i</span><span class="o">/</span><span class="nx">chunkSize</span><span class="p">)</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mf">1</span><span class="si">}</span><span class="sb"> failed:`</span><span class="p">,</span><span class="w"> </span><span class="nx">error</span><span class="p">);</span>
+<span class="w">      </span><span class="nx">results</span><span class="p">.</span><span class="nx">allErrors</span><span class="p">.</span><span class="nx">push</span><span class="p">({</span>
+<span class="w">        </span><span class="nx">chunk</span><span class="o">:</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">floor</span><span class="p">(</span><span class="nx">i</span><span class="o">/</span><span class="nx">chunkSize</span><span class="p">)</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mf">1</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="nx">error</span><span class="p">.</span><span class="nx">message</span>
+<span class="w">      </span><span class="p">});</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// พักเล็กน้อยระหว่างแต่ละ chunk (optional)</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Promise</span><span class="p">(</span><span class="nx">resolve</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">setTimeout</span><span class="p">(</span><span class="nx">resolve</span><span class="p">,</span><span class="w"> </span><span class="mf">1000</span><span class="p">));</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">results</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="c1">// ใช้งาน</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">allHouses</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span>
+<span class="w">  </span><span class="p">{</span><span class="w"> </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;00000000001&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">timestamp</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">material</span><span class="o">:</span><span class="w"> </span><span class="p">{...}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="p">{</span><span class="w"> </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;00000000002&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">timestamp</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">material</span><span class="o">:</span><span class="w"> </span><span class="p">{...}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="c1">// ... 2,500 บ้าน</span>
+<span class="p">];</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">results</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">sendBatchInChunks</span><span class="p">(</span><span class="nx">allHouses</span><span class="p">,</span><span class="w"> </span><span class="mf">1000</span><span class="p">);</span>
+<span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;Summary:&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">results</span><span class="p">);</span>
+</code></pre>
+</div>
+
+<p><strong>สรุป:</strong><br />
+- 📊 ข้อมูลมาก = แบ่งส่ง<br />
+- 🔢 แนะนำไม่เกิน 1,000 บ้านต่อครั้ง<br />
+- ⏱️ ป้องกันปัญหา timeout<br />
+- 🔍 ติดตาม error ได้ง่ายขึ้น</p>
+
+<hr />
+
+<h2 id="ขอควรระวงและคาแนะนา">ข้อควรระวังและคำแนะนำ</h2>
+
+<h3 id="สงทควรทา">✅ สิ่งที่ควรทำ</h3>
+
+<ol>
+<li><p><strong>ใช้ <code>ai_audit</code> แทน <code>status</code></strong></p>
+
+<div class="codehilite">
+<pre><span></span><code><span class="c1">// ถูกต้อง ✅</span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">transaction</span><span class="p">.</span><span class="nx">audit</span><span class="p">.</span><span class="nx">ai_audit</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s2">&quot;approved&quot;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// ผ่าน</span>
+<span class="p">}</span>
+
+<span class="c1">// ไม่แนะนำ ❌</span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">transaction</span><span class="p">.</span><span class="nx">audit</span><span class="p">.</span><span class="nx">status</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s2">&quot;approved&quot;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// อาจไม่ตรงกับผล AI</span>
+<span class="p">}</span>
+</code></pre>
+</div></li>
+<li><p><strong>ใช้ house_id แบบ 11 หลัก</strong></p>
+
+<pre><code>✅ "00000000001", "00000000123"
+❌ "HOUSE-001", "1", "H001"
+</code></pre></li>
+<li><p><strong>ใช้ origin_id เป็น 2170 เท่านั้น</strong></p>
+
+<div class="codehilite">
+<pre><span></span><code><span class="err">✅</span><span class="w"> </span><span class="s2">&quot;2170&quot;</span><span class="w">  </span><span class="c1">// แขวงช่องนนทรี (Mock Data)</span>
+<span class="err">❌</span><span class="w"> </span><span class="s2">&quot;2171&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;1234&quot;</span><span class="p">,</span><span class="w"> </span><span class="err">อื่นๆ</span>
+</code></pre>
+</div></li>
+<li><p><strong>ตรวจสอบโควต้าก่อนส่งข้อมูลจำนวนมาก</strong></p></li>
+<li><p><strong>ระบุ timestamp ให้ถูกต้อง</strong></p>
+
+<pre><code>✅ "2025-10-23T08:30:00+07:00"  (ISO 8601 + timezone)
+❌ "2025-10-23 08:30:00"
+❌ "23/10/2025"
+</code></pre></li>
+<li><p><strong>ใช้ image_url ที่สามารถเข้าถึงได้</strong></p>
+
+<pre><code>✅ "https://s3.amazonaws.com/bucket/image.jpg"  (Public URL)
+✅ "https://storage.googleapis.com/bucket/image.jpg"  (Public GCS)
+✅ "https://s3.example.com/image.jpg?AWSAccessKeyId=..."  (Presigned URL)
+❌ "file:///local/path/image.jpg"  (Local file)
+❌ "https://private.example.com/image.jpg"  (ต้อง authentication)
+</code></pre>
+
+<p><strong>หมายเหตุ</strong>: ระบบต้องสามารถดาวน์โหลดรูปภาพได้เพื่อส่งไป AI Audit</p></li>
+</ol>
+
+<h3 id="สงทควรหลกเลยง">⚠️ สิ่งที่ควรหลีกเลี่ยง</h3>
+
+<ol>
+<li><p><strong>ส่ง origin_id ไม่ใช่ 2170</strong></p>
+
+<ul>
+<li>จะได้ Error: "Only origin_id 2170 is allowed for BMA integration"</li>
+</ul></li>
+<li><p><strong>ส่งข้อมูลซ้ำโดยไม่ตั้งใจ</strong></p>
+
+<ul>
+<li>ถ้า transaction_version + house_id เหมือนกัน = อัพเดท (ไม่ใช่สร้างใหม่)</li>
+<li>ตรวจสอบให้แน่ใจว่าต้องการอัพเดทจริง</li>
+</ul></li>
+<li><p><strong>ไม่ได้อ่าน violations</strong></p>
+
+<ul>
+<li>AI Audit อาจ reject แต่ <code>overall_violations</code> และ <code>violations</code> จะบอกสาเหตุ</li>
+<li>อ่านทุกครั้งเพื่อปรับปรุงข้อมูล</li>
+</ul></li>
+<li><p><strong>ใช้ limit สูงเกินไปโดยไม่จำเป็น</strong></p>
+
+<ul>
+<li>limit=1000 จะช้ากว่า limit=100</li>
+<li>ใช้แค่พอดีกับที่ต้องการ</li>
+</ul></li>
+<li><p><strong>ใช้ image_url ที่เข้าถึงไม่ได้</strong></p>
+
+<ul>
+<li>URL ต้องเป็น Public หรือ Presigned URL ที่ระบบดาวน์โหลดได้</li>
+<li>ถ้า URL ไม่สามารถเข้าถึง จะทำให้ AI Audit ล้มเหลว</li>
+<li>ตรวจสอบว่า URL ยังใช้งานได้ (ไม่หมดอายุ) ก่อนส่ง</li>
+</ul></li>
+</ol>
+
+<hr />
+
+<h2 id="ตวอยางการตรวจสอบและแกไข">ตัวอย่างการตรวจสอบและแก้ไข</h2>
+
+<h3 id="ขนตอนการตรวจสอบขอมลทสงไปแลว">ขั้นตอนการตรวจสอบข้อมูลที่ส่งไปแล้ว</h3>
+
+<div class="codehilite">
+<pre><span></span><code><span class="c1">// 1. ดึงข้อมูลทั้งหมด</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">response</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">fetch</span><span class="p">(</span><span class="s1">&#39;/api/integration/bma/transaction?limit=100&#39;</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">response</span><span class="p">.</span><span class="nx">json</span><span class="p">();</span>
+
+<span class="c1">// 2. วนลูปตรวจสอบแต่ละบ้าน</span>
+<span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">version</span><span class="w"> </span><span class="ow">in</span><span class="w"> </span><span class="nx">data</span><span class="p">.</span><span class="nx">data</span><span class="p">.</span><span class="nx">transactions</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">origin</span><span class="w"> </span><span class="ow">in</span><span class="w"> </span><span class="nx">data</span><span class="p">.</span><span class="nx">data</span><span class="p">.</span><span class="nx">transactions</span><span class="p">[</span><span class="nx">version</span><span class="p">])</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">houseId</span><span class="w"> </span><span class="ow">in</span><span class="w"> </span><span class="nx">data</span><span class="p">.</span><span class="nx">data</span><span class="p">.</span><span class="nx">transactions</span><span class="p">[</span><span class="nx">version</span><span class="p">][</span><span class="nx">origin</span><span class="p">])</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">house</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">data</span><span class="p">.</span><span class="nx">data</span><span class="p">.</span><span class="nx">transactions</span><span class="p">[</span><span class="nx">version</span><span class="p">][</span><span class="nx">origin</span><span class="p">][</span><span class="nx">houseId</span><span class="p">];</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">audit</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">house</span><span class="p">.</span><span class="nx">audit</span><span class="p">;</span>
+
+<span class="w">      </span><span class="c1">// 3. ตรวจสอบสถานะ AI Audit</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">audit</span><span class="p">.</span><span class="nx">ai_audit</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s2">&quot;rejected&quot;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="sb">`บ้าน </span><span class="si">${</span><span class="nx">houseId</span><span class="si">}</span><span class="sb"> ไม่ผ่าน AI Audit`</span><span class="p">);</span>
+
+<span class="w">        </span><span class="c1">// 4. ดูปัญหาระดับบ้าน</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">audit</span><span class="p">.</span><span class="nx">overall_violations</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s2">&quot;ปัญหาทั่วไป:&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">audit</span><span class="p">.</span><span class="nx">overall_violations</span><span class="p">);</span>
+<span class="w">        </span><span class="p">}</span>
+
+<span class="w">        </span><span class="c1">// 5. ดูปัญหาแต่ละประเภทขยะ</span>
+<span class="w">        </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">materialType</span><span class="w"> </span><span class="ow">in</span><span class="w"> </span><span class="nx">audit</span><span class="p">.</span><span class="nx">materials</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="kd">const</span><span class="w"> </span><span class="nx">material</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">audit</span><span class="p">.</span><span class="nx">materials</span><span class="p">[</span><span class="nx">materialType</span><span class="p">];</span>
+<span class="w">          </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">material</span><span class="p">.</span><span class="nx">violations</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="sb">`ปัญหา</span><span class="si">${</span><span class="nx">materialType</span><span class="si">}</span><span class="sb">:`</span><span class="p">,</span><span class="w"> </span><span class="nx">material</span><span class="p">.</span><span class="nx">violations</span><span class="p">);</span>
+<span class="w">          </span><span class="p">}</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre>
+</div>
+
+<hr />
+
+<h2 id="สรป">สรุป</h2>
+
+<h3 id="api-ทง-5-ตว">API ทั้ง 5 ตัว</h3>
+
+<table>
+<thead>
+<tr>
+  <th>Endpoint</th>
+  <th>Method</th>
+  <th>วัตถุประสงค์</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td><code>/audit_status</code></td>
+  <td>GET</td>
+  <td>ดูสถิติการ Audit</td>
+</tr>
+<tr>
+  <td><code>/usage</code></td>
+  <td>GET</td>
+  <td>ดูโควต้า</td>
+</tr>
+<tr>
+  <td><code>/transaction</code></td>
+  <td>POST</td>
+  <td>ส่งข้อมูลขยะ (batch)</td>
+</tr>
+<tr>
+  <td><code>/transaction</code></td>
+  <td>GET</td>
+  <td>ดูรายการทั้งหมด</td>
+</tr>
+<tr>
+  <td><code>/transaction/{version}/{id}</code></td>
+  <td>GET</td>
+  <td>ดูบ้านเจาะจง</td>
+</tr>
+</tbody>
+</table>
+
+<h3 id="คาสาคญทตองจา">ค่าสำคัญที่ต้องจำ</h3>
+
+<ul>
+<li><strong>origin_id</strong>: 2170 เท่านั้น</li>
+<li><strong>house_id</strong>: แนะนำ 11 หลัก (00000000001)</li>
+<li><strong>สถานะ</strong>: ใช้ <code>ai_audit</code> ไม่ใช่ <code>status</code></li>
+<li><strong>ขยะ</strong>: general, organic, recyclable, hazardous</li>
+</ul>
+
+<h3 id="link-สาคญ">Link สำคัญ</h3>
+
+<ul>
+<li><strong>Swagger UI</strong>: https://api.geppdata.com/v1/docs/bma/0a70bf9ef2fcb7c2dc6c2b046ebb052c</li>
+<li><strong>JWT Token</strong>: [ใช้ Token ที่ให้ไว้ด้านบน]</li>
+</ul>
+
+<hr />
+
+<p><strong>หากมีปัญหาหรือข้อสงสัย:</strong><br />
+- กรุณาติดต่อทีมงาน GEPP Sa-Ard </p>
+
+    </div>
+
+    <script>
+        // Copy JWT Token function
+        function copyJWT() {
+            const jwtToken = document.getElementById('jwt-token');
+            const copyBtn = document.querySelector('.copy-jwt-btn');
+            const feedback = document.getElementById('copy-feedback');
+
+            if (jwtToken) {
+                // Get the text content (this will be without line breaks)
+                const text = jwtToken.textContent;
+
+                // Copy to clipboard
+                navigator.clipboard.writeText(text).then(() => {
+                    // Show feedback
+                    copyBtn.style.display = 'none';
+                    feedback.classList.add('show');
+
+                    // Hide feedback after 2 seconds
+                    setTimeout(() => {
+                        feedback.classList.remove('show');
+                        copyBtn.style.display = 'block';
+                    }, 2000);
+                }).catch(err => {
+                    console.error('Failed to copy:', err);
+                    alert('ไม่สามารถคัดลอกได้ กรุณาลองใหม่อีกครั้ง');
+                });
+            }
+        }
+
+        // Allow selecting JWT by clicking
+        document.addEventListener('DOMContentLoaded', () => {
+            const jwtToken = document.getElementById('jwt-token');
+            if (jwtToken) {
+                jwtToken.addEventListener('click', () => {
+                    const selection = window.getSelection();
+                    const range = document.createRange();
+                    range.selectNodeContents(jwtToken);
+                    selection.removeAllRanges();
+                    selection.addRange(range);
+                });
+            }
+        });
+
+        // Smooth scroll for anchors
+        document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+            anchor.addEventListener('click', function (e) {
+                e.preventDefault();
+                const target = document.querySelector(this.getAttribute('href'));
+                if (target) {
+                    target.scrollIntoView({
+                        behavior: 'smooth'
+                    });
+                }
+            });
+        });
+    </script>
+</body>
+</html>
