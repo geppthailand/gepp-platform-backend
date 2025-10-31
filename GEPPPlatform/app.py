@@ -200,6 +200,16 @@ def main(event, context):
                             "data": materials_result
                         }
 
+                    elif "/api/locations" in path:
+                        # Handle all locations management routes
+                        from .services.cores.locations.locations_handlers import handle_locations_routes
+
+                        locations_result = handle_locations_routes(event, **commonParams)
+                        results = {
+                            "success": True,
+                            "data": locations_result
+                        }
+
                     elif "/api/reports" in path:
                         # Handle all materials management routes
                         from .services.cores.reports.reports_handlers import handle_reports_routes
@@ -290,7 +300,7 @@ def main(event, context):
 
                     else:
                         # Handle other future modules here
-                        available_routes = ["/api/auth/*", "/api/users/*", "/api/organizations/*", "/api/materials/*", "/api/reports/*", "/api/transactions/*", "/api/transaction_audit/*", "/api/audit/*", "/api/debug/*", "/api/integration/*", "/health"]
+                        available_routes = ["/api/auth/*", "/api/users/*", "/api/organizations/*", "/api/materials/*", "/api/locations/*", "/api/reports/*", "/api/transactions/*", "/api/transaction_audit/*", "/api/audit/*", "/api/debug/*", "/api/integration/*", "/health"]
                         return {
                             "statusCode": 404,
                             "headers": headers,
