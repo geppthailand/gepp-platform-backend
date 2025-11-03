@@ -9,7 +9,6 @@ from GEPPPlatform.models.users.user_location import UserLocation
 from GEPPPlatform.models.subscriptions.organizations import OrganizationSetup
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy import func, case, extract, and_
 from datetime import datetime, timedelta
 import logging
 
@@ -27,73 +26,6 @@ class ReportsService:
 
     def __init__(self, db: Session):
         self.db = db
-
-    # ========== OPTIMIZED OVERVIEW REPORT ==========
-
-    def get_overview_aggregated(
-        self,
-        organization_id: int,
-        filters: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
-        """
-        Get aggregated overview data using SQL aggregation for better performance
-
-        Args:
-            organization_id: The organization ID to filter by
-            filters: Optional filters (e.g., date range, material type)
-
-        Returns:
-            Dict with aggregated overview data
-        """
-        try:
-            # Build base query with filters
-            base_query = self.db.query(TransactionRecord).join(
-                Transaction,
-                TransactionRecord.created_transaction_id == Transaction.id
-            ).filter(
-                Transaction.organization_id == organization_id,
-                TransactionRecord.is_active == True,
-                Transaction.status != TransactionStatus.rejected  # Exclude rejected
-            )
-
-            # Apply date filters
-            if filters:
-                date_from = filters.get('date_from')
-                date_to = filters.get('date_to')
-                if date_from or date_to:
-                    try:
-                        MAX_DAYS = 365 * 3
-                        now = datetime.utcnow()
-                        end_of_today = now.replace(hour=23, minute=59, second=59, microsecond=999999)
-                        df = datetime.fromisoformat(date_from) if isinstance(date_from, str) else date_from
-                        dt = datetime.fromisoformat(date_to) if isinstance(date_to, str) else date_to
-                        if dt and dt > end_of_today:
-                            dt = end_of_today
-                        if df and dt and (dt - df).days > MAX_DAYS:
-                            df = dt - timedelta(days=MAX_DAYS)
-                        if df:
-                            base_query = base_query.filter(TransactionRecord.created_date >= df)
-                        if dt:
-                            base_query = base_query.filter(TransactionRecord.created_date <= dt)
-                    except Exception as e:
-                        logger.warning(f"Date filter error: {e}")
-                        if date_from:
-                            base_query = base_query.filter(TransactionRecord.created_date >= date_from)
-                        if date_to:
-                            base_query = base_query.filter(TransactionRecord.created_date <= date_to)
-
-            # This method returns pre-aggregated data that can be used directly
-            # Instead of loading all records into memory
-            return {
-                'success': True,
-                'use_aggregated': True,
-                'organization_id': organization_id,
-                'base_query': base_query  # Return query for further processing in handler
-            }
-
-        except Exception as e:
-            logger.error(f"Error in get_overview_aggregated: {str(e)}")
-            raise
 
     # ========== TRANSACTION RECORDS REPORTS ==========
 
@@ -122,12 +54,7 @@ class ReportsService:
             ).filter(
                 Transaction.organization_id == organization_id,
                 TransactionRecord.is_active == True,
-<<<<<<< HEAD
                 Transaction.status != TransactionStatus.rejected
-=======
-                Transaction.deleted_date.is_(None),
-                Transaction.is_active == True
->>>>>>> f746711b7caf8548fa3759e6399d25d790efadfa
             )
             
             # Apply additional filters if provided
@@ -180,25 +107,8 @@ class ReportsService:
                             except Exception:
                                 query = query.filter(TransactionRecord.transaction_date <= date_to)
             
-            # Execute query with optional limit for performance
-            # For overview reports with large date ranges, we should limit results
-            max_records = filters.get('max_records') if filters else None
-
-            # Apply automatic limit for overview/diversion reports to prevent timeouts
-            if report_type in ('overview', 'diversion') and not max_records:
-                max_records = 50000  # Hard limit for overview to prevent memory issues
-                logger.info(f"Auto-limiting {report_type} report to {max_records} records for performance")
-
-            if max_records:
-                # Order by created_date DESC to get most recent records first
-                query = query.order_by(TransactionRecord.created_date.desc()).limit(max_records)
-
+            # Execute query
             transaction_records = query.all()
-
-            # Log performance warning for large result sets
-            record_count = len(transaction_records)
-            if record_count > 10000:
-                logger.warning(f"Large result set: {record_count} transaction records loaded into memory for report_type={report_type}")
             
             # Preload transaction statuses for included records
             transaction_ids = {record.created_transaction_id for record in transaction_records}
@@ -322,15 +232,11 @@ class ReportsService:
             if filters and (filters.get('date_from') or filters.get('date_to')):
                 tr_query = self.db.query(Transaction.origin_id).join(
                     TransactionRecord,
-                    TransactionRecord.created_transaction_id == Transaction.id,
+                    TransactionRecord.created_transaction_id == Transaction.id
                 ).filter(
                     Transaction.organization_id == organization_id,
                     TransactionRecord.is_active == True,
-<<<<<<< HEAD
                     Transaction.status != TransactionStatus.rejected
-=======
-                    Transaction.deleted_date.is_(None)
->>>>>>> f746711b7caf8548fa3759e6399d25d790efadfa
                 )
                 # Clamp and apply date range
                 date_from = filters.get('date_from')
