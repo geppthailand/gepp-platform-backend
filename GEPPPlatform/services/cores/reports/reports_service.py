@@ -9,7 +9,7 @@ from GEPPPlatform.models.users.user_location import UserLocation
 from GEPPPlatform.models.subscriptions.organizations import OrganizationSetup
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import logging
 
 from ....models.transactions.transactions import Transaction, TransactionStatus
@@ -80,7 +80,7 @@ class ReportsService:
                     # Apply clamping (max 3 years, date_to <= today)
                     try:
                         MAX_DAYS = 365 * 3
-                        now = datetime.utcnow()
+                        now = datetime.now(timezone.utc)
                         end_of_today = now.replace(hour=23, minute=59, second=59, microsecond=999999)
                         df = datetime.fromisoformat(date_from) if isinstance(date_from, str) else date_from
                         dt = datetime.fromisoformat(date_to) if isinstance(date_to, str) else date_to
@@ -99,7 +99,7 @@ class ReportsService:
                         if date_to:
                             try:
                                 parsed = datetime.fromisoformat(date_to) if isinstance(date_to, str) else date_to
-                                now = datetime.utcnow()
+                                now = datetime.now(timezone.utc)
                                 end_of_today = now.replace(hour=23, minute=59, second=59, microsecond=999999)
                                 if parsed and parsed > end_of_today:
                                     parsed = end_of_today
@@ -243,7 +243,7 @@ class ReportsService:
                 date_to = filters.get('date_to')
                 try:
                     MAX_DAYS = 365 * 3
-                    now = datetime.utcnow()
+                    now = datetime.now(timezone.utc)
                     end_of_today = now.replace(hour=23, minute=59, second=59, microsecond=999999)
                     df = datetime.fromisoformat(date_from) if isinstance(date_from, str) else date_from
                     dt = datetime.fromisoformat(date_to) if isinstance(date_to, str) else date_to
@@ -261,7 +261,7 @@ class ReportsService:
                     if date_to:
                         try:
                             parsed = datetime.fromisoformat(date_to) if isinstance(date_to, str) else date_to
-                            now = datetime.utcnow()
+                            now = datetime.now(timezone.utc)
                             end_of_today = now.replace(hour=23, minute=59, second=59, microsecond=999999)
                             if parsed and parsed > end_of_today:
                                 parsed = end_of_today

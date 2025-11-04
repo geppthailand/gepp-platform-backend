@@ -7,7 +7,8 @@ from typing import Dict, Any, Optional, Tuple
 import csv
 import os
 import ast
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from .reports_service import ReportsService
 from ....exceptions import APIException, ValidationException, NotFoundException
@@ -25,7 +26,7 @@ def _validate_organization_id(current_user: Dict[str, Any]) -> int:
     return organization_id
 
 
-def _build_filters_from_query_params(query_params: Dict[str, Any]) -> Dict[str, Any]:
+def _build_filters_from_query_params(query_params: Dict[str, Any], timezone_name: Optional[str] = None) -> Dict[str, Any]:
     """
     Build filters dictionary from query parameters
     Supports comma-separated values for material_id and origin_id
@@ -36,6 +37,20 @@ def _build_filters_from_query_params(query_params: Dict[str, Any]) -> Dict[str, 
     - date_to: Set to 23:59:59.999999 of that day
     """
     filters = {}
+    # Determine client timezone
+    tz_param = query_params.get('tz') or query_params.get('timezone')
+    client_tz_name = (tz_param or timezone_name or 'Asia/Bangkok')
+    try:
+        client_tz = ZoneInfo(client_tz_name)
+    except Exception:
+        client_tz = ZoneInfo('UTC')
+        client_tz_name = 'UTC'
+
+    def to_utc_iso(dt: datetime) -> str:
+        # Attach client tz if naive, then convert to UTC and return ISO string
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=client_tz)
+        return dt.astimezone(timezone.utc).isoformat()
     
     # Handle material_id (comma-separated)
     if query_params.get('material_id'):
@@ -71,7 +86,8 @@ def _build_filters_from_query_params(query_params: Dict[str, Any]) -> Dict[str, 
                 dt = datetime.fromisoformat(date_from_str)
             
             # Set to start of day (00:00:00)
-            filters['date_from'] = dt.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+            start_local = dt.replace(hour=0, minute=0, second=0, microsecond=0)
+            filters['date_from'] = to_utc_iso(start_local)
         except Exception:
             # Fallback to original value if parsing fails
             filters['date_from'] = date_from_str
@@ -89,7 +105,8 @@ def _build_filters_from_query_params(query_params: Dict[str, Any]) -> Dict[str, 
                 dt = datetime.fromisoformat(date_to_str)
             
             # Set to end of day (23:59:59.999999)
-            filters['date_to'] = dt.replace(hour=23, minute=59, second=59, microsecond=999999).isoformat()
+            end_local = dt.replace(hour=23, minute=59, second=59, microsecond=999999)
+            filters['date_to'] = to_utc_iso(end_local)
         except Exception:
             # Fallback to original value if parsing fails
             filters['date_to'] = date_to_str
@@ -104,19 +121,19 @@ def _build_filters_from_query_params(query_params: Dict[str, Any]) -> Dict[str, 
     
     # Default YTD if no explicit dates provided (first day of current year -> end of today)
     if not filters.get('date_from') and not filters.get('date_to'):
-        now = datetime.utcnow()
-        start_of_year = datetime(now.year, 1, 1, 0, 0, 0, 0)
-        end_of_today = now.replace(hour=23, minute=59, second=59, microsecond=999999)
-        filters['date_from'] = start_of_year.isoformat()
-        filters['date_to'] = end_of_today.isoformat()
+        now_utc = datetime.now(timezone.utc)
+        start_of_year_local = datetime(now_utc.year, 1, 1, 0, 0, 0, 0, tzinfo=client_tz)
+        end_of_today_local = now_utc.astimezone(client_tz).replace(hour=23, minute=59, second=59, microsecond=999999)
+        filters['date_from'] = start_of_year_local.astimezone(timezone.utc).isoformat()
+        filters['date_to'] = end_of_today_local.astimezone(timezone.utc).isoformat()
 
     # Clamp date range constraints globally:
     # - date_to must not be in the future
     # - date range must not exceed 3 years (by day count)
     try:
         MAX_DAYS = 365 * 3
-        now = datetime.utcnow()
-        end_of_today = now.replace(hour=23, minute=59, second=59, microsecond=999999)
+        now_utc = datetime.now(timezone.utc)
+        end_of_today = now_utc.replace(hour=23, minute=59, second=59, microsecond=999999)
 
         dt_from = _parse_datetime(filters.get('date_from')) if filters.get('date_from') else None
         dt_to = _parse_datetime(filters.get('date_to')) if filters.get('date_to') else None
@@ -1437,20 +1454,23 @@ def handle_reports_routes(event: Dict[str, Any], **common_params) -> Dict[str, A
         organization_id = _validate_organization_id(current_user)
         
         # Route to appropriate handler
+        # Determine timezone from query or current user (fallback Asia/Bangkok)
+        tz_name = query_params.get('tz') or query_params.get('timezone') or current_user.get('timezone') or 'Asia/Bangkok'
+
         if path == '/api/reports/overview':
-            filters = _build_filters_from_query_params(query_params)
+            filters = _build_filters_from_query_params(query_params, timezone_name=tz_name)
             return _handle_overview_report(reports_service, organization_id, filters)
 
         elif path == '/api/reports/performance':
-            filters = _build_filters_from_query_params(query_params)
+            filters = _build_filters_from_query_params(query_params, timezone_name=tz_name)
             return _handle_performance_report(reports_service, organization_id, filters)
         
         elif path == '/api/reports/diversion':
-            filters = _build_filters_from_query_params(query_params)
+            filters = _build_filters_from_query_params(query_params, timezone_name=tz_name)
             return _handle_diversion_report(reports_service, organization_id, filters)
         
         elif path == '/api/reports/filter/origins':
-            filters = _build_filters_from_query_params(query_params)
+            filters = _build_filters_from_query_params(query_params, timezone_name=tz_name)
             # Remove origin filters - only use material filters for origins endpoint
             filters.pop('origin_ids', None)
             # Do not apply default YTD for filter endpoints; only use dates if explicitly provided
@@ -1461,7 +1481,7 @@ def handle_reports_routes(event: Dict[str, Any], **common_params) -> Dict[str, A
             return reports_service.get_origin_by_organization(organization_id=organization_id, filters=filters)
 
         elif path == '/api/reports/filter/materials':
-            filters = _build_filters_from_query_params(query_params)
+            filters = _build_filters_from_query_params(query_params, timezone_name=tz_name)
             # Remove material filters - only use origin filters for materials endpoint
             filters.pop('material_ids', None)
             # Do not apply default YTD for filter endpoints; only use dates if explicitly provided
@@ -1472,11 +1492,11 @@ def handle_reports_routes(event: Dict[str, Any], **common_params) -> Dict[str, A
             return reports_service.get_material_by_organization(organization_id=organization_id, filters=filters)
         
         elif path == '/api/reports/comparison':
-            filters = _build_filters_from_query_params(query_params)
+            filters = _build_filters_from_query_params(query_params, timezone_name=tz_name)
             return _handle_comparison_report(reports_service, organization_id, filters)
 
         elif path == '/api/reports/materials':
-            filters = _build_filters_from_query_params(query_params)
+            filters = _build_filters_from_query_params(query_params, timezone_name=tz_name)
             return _handle_materials_report(reports_service, organization_id, filters)
     
     except ValidationException as e:
