@@ -134,14 +134,6 @@ def main(event, context):
             elif path == "/health" or "/health" in path:
                 # Health check endpoint (no authorization required)
                 results = {"status": "healthy", "timestamp": datetime.now().isoformat(), "method": http_method}
-            
-            elif "/api/auth/iot-devices" in path:
-                # Handle all iot devices auth routes through iot devices module (no authorization required)
-                iot_devices_result = handle_auth_routes(path, data=body, **commonParams)
-                results = {
-                    "success": True,
-                    "data": iot_devices_result
-                }
 
             else:
                 # All other routes require authorization
@@ -206,6 +198,16 @@ def main(event, context):
                         results = {
                             "success": True,
                             "data": materials_result
+                        }
+
+                    elif "/api/locations" in path:
+                        # Handle all locations management routes
+                        from .services.cores.locations.locations_handlers import handle_locations_routes
+
+                        locations_result = handle_locations_routes(event, **commonParams)
+                        results = {
+                            "success": True,
+                            "data": locations_result
                         }
 
                     elif "/api/reports" in path:
@@ -298,7 +300,7 @@ def main(event, context):
 
                     else:
                         # Handle other future modules here
-                        available_routes = ["/api/auth/*", "/api/users/*", "/api/organizations/*", "/api/materials/*", "/api/reports/*", "/api/transactions/*", "/api/transaction_audit/*", "/api/audit/*", "/api/debug/*", "/api/integration/*", "/health"]
+                        available_routes = ["/api/auth/*", "/api/users/*", "/api/organizations/*", "/api/materials/*", "/api/locations/*", "/api/reports/*", "/api/transactions/*", "/api/transaction_audit/*", "/api/audit/*", "/api/debug/*", "/api/integration/*", "/health"]
                         return {
                             "statusCode": 404,
                             "headers": headers,

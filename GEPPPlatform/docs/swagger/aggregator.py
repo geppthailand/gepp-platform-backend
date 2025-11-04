@@ -9,6 +9,7 @@ import json
 from .base import get_base_swagger_config
 from .integration_bma import get_bma_integration_paths, get_bma_integration_schemas
 from .auth import get_auth_paths, get_auth_schemas
+from .iot_devices import get_iot_devices_paths, get_iot_devices_schemas
 
 
 def merge_deep(base: Dict, update: Dict) -> Dict:
@@ -67,6 +68,17 @@ def get_full_swagger_spec(deployment_state: str = "dev") -> Dict[str, Any]:
     spec["components"]["schemas"] = merge_deep(
         spec["components"]["schemas"],
         bma_schemas
+    )
+
+    # Add IoT Devices paths
+    iot_paths = get_iot_devices_paths()
+    spec["paths"] = merge_deep(spec["paths"], iot_paths)
+
+    # Add IoT Devices schemas
+    iot_schemas = get_iot_devices_schemas()
+    spec["components"]["schemas"] = merge_deep(
+        spec["components"]["schemas"],
+        iot_schemas
     )
 
     # TODO: Add other service specifications here

@@ -13,6 +13,41 @@ def get_auth_paths() -> Dict[str, Any]:
         Dictionary of path specifications
     """
     return {
+        "/api/auth/iot-devices/login": {
+            "post": {
+                "tags": ["IOT Devices"],
+                "summary": "IoT device login via QR token",
+                "description": "Authenticate an IoT user using a short-lived QR token that encodes email, password, and expiry. Returns a 15-minute auth token and a refresh token.",
+                "requestBody": {
+                    "required": True,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/IotDeviceLoginRequest"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Login successful",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/LoginResponse"
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "$ref": "#/components/responses/BadRequestError"
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/UnauthorizedError"
+                    }
+                }
+            }
+        },
         "/api/auth/login": {
             "post": {
                 "tags": ["Authentication"],
@@ -242,6 +277,17 @@ def get_auth_schemas() -> Dict[str, Any]:
         Dictionary of schema definitions
     """
     return {
+        "IotDeviceLoginRequest": {
+            "type": "object",
+            "required": ["token"],
+            "properties": {
+                "token": {
+                    "type": "string",
+                    "description": "HS256-signed QR login token containing email, password, and expiry",
+                    "example": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJlbWFpbCI6ImJpdGVjQGdlcHAubWUiLCJwYXNzd29yZCI6IkFiY2RlZmchMTIzIiwiZXhwaXJlZF9kYXRlIjoiMjAyNS0xMC0zMFQxMjozNTo1NloifQ.dyOO8uFApU_XuT0UhFWv096cQSGvcGZHfQ44f3iKXOY"
+                }
+            }
+        },
         "LoginRequest": {
             "type": "object",
             "required": ["email", "password"],

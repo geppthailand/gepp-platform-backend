@@ -567,6 +567,7 @@ class AuthHandlers:
             email = payload.get('email')
             password = payload.get('password')
             expired_date_value = payload.get("expired_date")
+            expired_date_value = datetime.fromisoformat(expired_date_value.replace("Z", "+00:00"))
             if expired_date_value is None:
                 raise BadRequestException("Invalid login token")
             if datetime.now(timezone.utc) > expired_date_value:
