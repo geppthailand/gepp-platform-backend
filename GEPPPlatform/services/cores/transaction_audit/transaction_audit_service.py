@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import tempfile
 from typing import List, Dict, Any, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from sqlalchemy.orm import Session
@@ -31,44 +32,111 @@ from ..transactions.presigned_url_service import TransactionPresignedUrlService
 
 logger = logging.getLogger(__name__)
 
-thinkingBudget = 1024
+# Constants for credential management
+SA_JSON_ENV_VAR = 'GCP_SERVICE_ACCOUNT_JSON'
+TEMP_FILE_NAME = 'temp_sa_key.json'
+
+def setup_credentials_from_env():
+    """
+    Read JSON Service Account Key from Environment Variable and create temporary file
+    to set GOOGLE_APPLICATION_CREDENTIALS pointing to that file
+    """
+
+    # 1. Read JSON String from Environment Variable
+    sa_json_string = os.getenv(SA_JSON_ENV_VAR)
+    if not sa_json_string:
+        logger.warning(f"Environment variable '{SA_JSON_ENV_VAR}' not found.")
+        logger.info("Client will attempt to use gcloud ADC default location.")
+        return None
+
+    try:
+        # 2. Create temporary file
+        temp_dir = tempfile.gettempdir()
+        temp_file_path = os.path.join(temp_dir, TEMP_FILE_NAME)
+
+        # Write JSON Key to temporary file
+        with open(temp_file_path, 'w') as f:
+            # Use json.loads to validate and handle escaping
+            sa_data = json.loads(sa_json_string)
+            json.dump(sa_data, f)
+
+        # 3. Set GOOGLE_APPLICATION_CREDENTIALS to point to temporary file
+        os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = temp_file_path
+        logger.info(f"Credentials saved to temporary file: {temp_file_path}")
+        return temp_file_path
+
+    except json.JSONDecodeError:
+        logger.error(f"Invalid JSON format in '{SA_JSON_ENV_VAR}'.")
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error setting up credentials: {e}")
+        return None
+
+def cleanup_credentials_file(file_path):
+    """Remove temporary file and delete environment variable."""
+    if file_path and os.path.exists(file_path):
+        try:
+            os.remove(file_path)
+            if 'GOOGLE_APPLICATION_CREDENTIALS' in os.environ:
+                del os.environ['GOOGLE_APPLICATION_CREDENTIALS']
+            logger.info(f"Cleaned up temporary file: {file_path}")
+        except Exception as e:
+            logger.warning(f"Failed to cleanup credentials file: {e}")
 
 class TransactionAuditService:
     """
-    Service for AI-powered transaction auditing using Google Gemini API
+    Service for AI-powered transaction auditing using Google Vertex AI
     Supports multi-threaded processing for efficient bulk analysis
     """
 
-    def __init__(self, gemini_api_key: str = None, response_language: str = 'thai'):
+    def __init__(self, gemini_api_key: str = None, response_language: str = 'thai',
+                 project_id: str = None, location: str = None):
         """
         Initialize the TransactionAuditService
 
         Args:
-            gemini_api_key: Google Gemini API key for AI audit integration
+            gemini_api_key: Google Gemini API key (deprecated, kept for backward compatibility)
             response_language: Language for AI responses (default: 'thai')
+            project_id: Google Cloud Project ID for Vertex AI
+            location: Google Cloud region/location (e.g., 'us-central1', 'asia-southeast1')
         """
-        # Get Gemini API key from environment or parameter
-        self.gemini_api_key = gemini_api_key or os.environ.get('GEMINI_API_KEY', '')
+        # Setup credentials from environment variable
+        self.temp_credentials_file = setup_credentials_from_env()
 
-        # Initialize Gemini client
-        if self.gemini_api_key and GENAI_AVAILABLE:
-            self.client = genai.Client(api_key=self.gemini_api_key)
-            logger.info("Gemini API client initialized successfully")
+        # Get configuration from environment or parameters
+        self.project_id = os.environ.get('VERTEX_AI_PROJECT_ID')
+        self.location = 'us-central1'
+
+        # Initialize Vertex AI client
+        if self.project_id and GENAI_AVAILABLE:
+            try:
+                self.client = genai.Client(
+                    vertexai=True,  # Force use of Vertex AI
+                    project=self.project_id,
+                    location=self.location
+                )
+                logger.info(f"Vertex AI client initialized successfully (Project: {self.project_id}, Location: {self.location})")
+            except Exception as e:
+                logger.error(f"Failed to initialize Vertex AI client: {str(e)}")
+                self.client = None
         else:
-            logger.warning("Gemini API key not found or genai library not available")
+            logger.warning("Vertex AI project ID not found or genai library not available")
             self.client = None
 
-        self.model_name = "gemini-2.5-flash"
-        self.max_concurrent_threads = 100
-        self.response_language = response_language.lower()  # Store language preference
-
+        # Load prompt configuration
+        self.prompts = self._load_prompt_config()
+        
         # Language name mapping for prompts
-        self.language_names = {
+        self.language_names = self.prompts.get('language_mapping', {
             'thai': 'Thai (ภาษาไทย)',
             'english': 'English',
             'en': 'English',
             'th': 'Thai (ภาษาไทย)'
-        }
+        })
+
+        self.model_name = self.prompts.get('api_settings', {}).get('model_name', 'gemini-2.5-flash')
+        self.max_concurrent_threads = 50
+        self.response_language = response_language.lower()  # Store language preference
 
         # Initialize presigned URL service for image access
         try:
@@ -77,6 +145,50 @@ class TransactionAuditService:
         except Exception as e:
             logger.warning(f"Failed to initialize presigned URL service: {str(e)}")
             self.presigned_url_service = None
+
+    def __del__(self):
+        """Cleanup credentials file when service is destroyed"""
+        if hasattr(self, 'temp_credentials_file') and self.temp_credentials_file:
+            cleanup_credentials_file(self.temp_credentials_file)
+
+    def _load_prompt_config(self) -> Dict[str, Any]:
+        """Load prompt configuration from JSON file"""
+        try:
+            # Get the directory of the current service file
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            prompt_config_path = os.path.join(current_dir, 'prompt_base.json')
+            
+            if os.path.exists(prompt_config_path):
+                with open(prompt_config_path, 'r', encoding='utf-8') as f:
+                    prompts = json.load(f)
+                logger.info(f"Loaded prompt configuration from {prompt_config_path}")
+                return prompts
+            else:
+                logger.warning(f"Prompt configuration file not found at {prompt_config_path}, using defaults")
+                return self._get_default_prompt_config()
+        except Exception as e:
+            logger.error(f"Error loading prompt configuration: {str(e)}, using defaults")
+            return self._get_default_prompt_config()
+
+    def _get_default_prompt_config(self) -> Dict[str, Any]:
+        """Get default prompt configuration if JSON file is not available"""
+        return {
+            "system_instructions": {
+                "structured_content": "You are a waste management auditor. Your job is to find ACTUAL ERRORS only.",
+                "text_only": "You are a professional waste management auditor with expertise in compliance and quality control."
+            },
+            "language_mapping": {
+                "thai": "Thai (ภาษาไทย)",
+                "english": "English",
+                "en": "English",
+                "th": "Thai (ภาษาไทย)"
+            },
+            "api_settings": {
+                "model_name": "gemini-2.5-flash",
+                "temperature": 0.0,
+                "thinking_budget": 512
+            }
+        }
 
     def sync_ai_audit(self, db: Session, organization_id: Optional[int] = None) -> Dict[str, Any]:
         """
@@ -493,43 +605,15 @@ class TransactionAuditService:
 
     def _get_example_messages(self, language_name: str) -> str:
         """Get example rejection messages in the specified language"""
+        example_messages = self.prompts.get('example_messages', {})
+        
         if 'Thai' in language_name or 'ไทย' in language_name:
-            return """- "Record 129: รูปภาพแสดงเศษอาหารเท่านั้น แต่ข้อมูลระบุเป็นขยะรีไซเคิล"
-- "Record 45: ไม่มีรูปภาพแนบมา"
-- "Record 67: น้ำหนักในรูปภาพ (50kg) ไม่ตรงกับข้อมูล (30kg)"
-- "Record 58042: รูปภาพแสดงขยะผสม (เศษอาหาร + แก้วกาแฟ + บรรจุภัณฑ์) แต่ข้อมูลระบุเป็นเศษอาหารและพืช ควรเป็นขยะทั่วไป"
-- "Record 78: รูปภาพแสดงเศษอาหารที่บรรจุในภาชนะพลาสติก แต่ข้อมูลระบุเป็นเศษอาหารและพืช ควรเป็นขยะทั่วไป"
-- "Record 91: รูปภาพแสดงแบตเตอรี่ แต่ข้อมูลระบุเป็นขยะทั่วไป ควรเป็นขยะอันตราย"
-- "Record 123: รูปภาพแสดงแบตเตอรี่และกระป๋องสเปรย์ (ขยะอันตราย) แต่ข้อมูลระบุเป็นเศษอาหารและพืช ประเภทไม่ตรงกันอย่างสิ้นเชิง"
-- "ธุรกรรมไม่มีรูปภาพแนบมา"
-- "ธุรกรรมมีเพียง 3 ประเภทขยะ ขาดประเภท: เศษอาหารและพืช"
-
-🚨 CRITICAL MISMATCHES THAT MUST BE FLAGGED:
-- Batteries/Spray cans → Food and Plant Waste (WRONG!)
-- Food scraps → Hazardous Waste (WRONG!)
-- Plastic bottles → Food and Plant Waste (WRONG!)
-
-IMPORTANT: Do NOT reject if image shows mixed waste and data says General Waste - this is CORRECT! """
+            return example_messages.get('thai', example_messages.get('english', ''))
         else:  # English
-            return """- "Record 129: Image shows pure organic waste only but data says Recyclable waste"
-- "Record 45: No image attached"
-- "Record 67: Weight in image (50kg) differs from data (30kg)"
-- "Record 58042: Image shows mixed waste (food + coffee cup + packaging) but data says Food and Plant Waste, should be General Waste"
-- "Record 78: Image shows food in plastic container but data says Food and Plant Waste, should be General Waste"
-- "Record 91: Image shows batteries but data says General Waste, should be Hazardous Waste"
-- "Record 123: Image shows batteries and spray cans (hazardous waste) but data says Food and Plant Waste, completely wrong category"
-- "Transaction has no images attached"
-- "Transaction has only 3 waste types, missing: Food and Plant Waste"
-
-🚨 CRITICAL MISMATCHES THAT MUST BE FLAGGED:
-- Batteries/Spray cans → Food and Plant Waste (WRONG!)
-- Food scraps → Hazardous Waste (WRONG!)
-- Plastic bottles → Food and Plant Waste (WRONG!)
-
-IMPORTANT: Do NOT reject if image shows mixed waste and data says General Waste - this is CORRECT! """
+            return example_messages.get('english', '')
 
     def _create_audit_prompt(self, transaction_data: Dict[str, Any], audit_rules: List[Dict[str, Any]]) -> str:
-        """Create an optimized prompt with ID-based rule references"""
+        """Create an optimized prompt using the JSON configuration template"""
 
         # Get language name for prompt
         language_name = self.language_names.get(self.response_language, 'Thai (ภาษาไทย)')
@@ -550,144 +634,55 @@ IMPORTANT: Do NOT reject if image shows mixed waste and data says General Waste 
         # Get unique material types count
         unique_types_count = len(set([r.get('material_type') for r in transaction_data.get('records', [])]))
         record_count = len(transaction_data.get('records', []))
+        material_types = [r.get('material_type') for r in transaction_data.get('records', [])]
 
-        prompt = f"""Audit waste transaction. Return JSON with violations array (errors only).
-
-TRANSACTION SUMMARY:
-- Records: {record_count}
-- Unique types: {unique_types_count}
-- Types: {[r.get('material_type') for r in transaction_data.get('records', [])]}
-
-QUICK CHECKS (if rules exist):
-1. Record count rule: Has {record_count} records (needs 4?) → If ≠4: ADD VIOLATION
-2. Type completeness: Has {unique_types_count} types (needs 4?) → If <4: ADD VIOLATION
-3. Image-material match: Check CAREFULLY!
-   - Cardboard/boxes → Hazardous? ❌ VIOLATION (should be Recyclables!)
-   - Light bulbs/fluorescent tubes → Food/Recyclables? ❌ VIOLATION (should be Hazardous!)
-   - Batteries/spray cans → Food/Recyclables? ❌ VIOLATION (should be Hazardous!)
-   - Food scraps → Hazardous/Recyclables? ❌ VIOLATION (should be Food or General!)
-   - Plastic bottles → Food/Hazardous? ❌ VIOLATION (should be Recyclables!)
-4. Bag visibility rule: Completely opaque/closed bag, cannot identify waste type at all? ADD VIOLATION
-
-RULES:
-{json.dumps(rules_compact, ensure_ascii=False)}
-
-TRANSACTION:
-{json.dumps(transaction_data, ensure_ascii=False)}
-
-WASTE CATEGORIES:
-1. General (ขยะทั่วไป): Mixed waste, contaminated items, food containers
-2. Food/Organic (เศษอาหารและพืช): PURE food/plant scraps ONLY + outer bag OK
-3. Recyclables (รีไซเคิล): Clean bottles, cans, paper, plastic
-4. Hazardous (ขยะอันตราย): Batteries, light bulbs, fluorescent tubes, spray cans, chemicals
-
-⚠️ CRITICAL: KNOW THE WASTE TYPES!
-
-HAZARDOUS (ขยะอันตราย) - ONLY these items:
-• Light bulbs, fluorescent tubes, batteries, spray cans, chemicals, e-waste
-• ❌ NOT cardboard, NOT paper, NOT boxes!
-
-RECYCLABLES (รีไซเคิล):
-• Cardboard boxes (กล่องกระดาษ), paper, plastic bottles, cans, glass
-• Clean and dry materials
-• ❌ NOT hazardous items!
-
-COMMON MISTAKES TO AVOID:
-✗ Cardboard → Hazardous (WRONG! Should be Recyclables)
-✗ Light bulbs → Food Waste (WRONG! Should be Hazardous)
-✗ Batteries → Recyclables (WRONG! Should be Hazardous)
-✗ Clean bottles → Hazardous (WRONG! Should be Recyclables)
-
-CRITICAL: OUTER BAG EXCEPTION FOR FOOD WASTE
-• Outer collection bag (ถุงใส่ขยะชั้นนอกสุด) = ALLOWED ✓
-  - Multiple layers of outer bags = OK (if all outer layer)
-  - Example: Food scraps in 2-3 outer trash bags = Still Food Waste ✓
-• Inner packaging/containers = NOT ALLOWED ❌
-  - Example: Food in bowls/cups/small bags inside = General Waste
-  - Example: Individual items wrapped in packaging = General Waste
-• Rule: Only outer collection bag(s) exempt, all other packaging counts as contamination
-
-BAG VISIBILITY RULES (ถุงดำ/ความชัดเจน):
-✓ ACCEPTABLE (DO NOT FLAG):
-  • Clear/transparent bag (opened or closed) - can see contents ✓
-  • Bag opened/untied - can see waste inside ✓
-  • Tied bag but can see contents fairly clearly through bag ✓
-  • Partial visibility - can identify waste type even if not 100% visible ✓
-  • Dark bag but material visible enough to identify category ✓
-
-✗ VIOLATION (FLAG ONLY IF):
-  • Completely opaque/black bag AND fully closed/tied ✗
-  • Cannot identify waste type AT ALL from image ✗
-  • Zero visibility into bag contents ✗
-
-Rule: Can you identify the waste category? YES=OK, NO=VIOLATION
-
-KEY RULES:
-• Mixed waste = General Waste ✓
-• Food + containers/packaging (not outer bag) = General Waste ✓
-• Food + only outer collection bag(s) = Food Waste ✓ ALLOWED
-• Bag visibility: If can identify waste type reasonably = OK ✓
-• Subcategories valid: aerosols→hazardous✓, bottles→recyclables✓
-• WRONG CATEGORY = VIOLATION:
-  - Cardboard/boxes → Hazardous ❌ WRONG! (should be Recyclables)
-  - Light bulbs → Food/Recyclables ❌ WRONG! (should be Hazardous)
-  - Batteries → Food/Recyclables ❌ WRONG! (should be Hazardous)
-  - Food scraps → Hazardous/Recyclables ❌ WRONG! (should be Food/General)
-  - Bottles/cans → Hazardous ❌ WRONG! (should be Recyclables)
-• "m" field MUST have message text - NEVER empty ""
-
-VIOLATION FORMAT (ALL 3 FIELDS REQUIRED):
-{{"id": <rule_id>, "m": "<detailed message in {language_name}>", "tr": <record_id or null>}}
-
-Examples:
-✓ {{"id": 41, "m": "Record 123: รูปแสดงหลอดไฟและหลอดฟลูออเรสเซนต์ (ขยะอันตราย) แต่ระบุเป็นเศษอาหารและพืช", "tr": 123}}
-✓ {{"id": 41, "m": "Record 456: รูปแสดงแบตเตอรี่ (ขยะอันตราย) แต่ระบุเป็นเศษอาหาร", "tr": 456}}
-✓ {{"id": 50, "m": "มี {unique_types_count} ประเภท ต้องมี 4 ประเภท", "tr": null}}
-✓ {{"id": 42, "m": "Record 789: ขยะในถุงดำปิดมิดชิด มองไม่เห็นเนื้อหา", "tr": 789}}
-✗ {{"id": 41, "m": "", "tr": 123}}  // WRONG - empty message!
-
-RESPOND:
-{{"tr_id": {transaction_data.get('transaction_id', 0)}, "violations": [/* errors only, empty if all correct */]}}"""
+        # Get prompt template from JSON configuration
+        prompt_template = self.prompts.get('audit_prompt', {}).get('template', '')
+        
+        # Format the template with variables
+        prompt = prompt_template.format(
+            record_count=record_count,
+            unique_types_count=unique_types_count,
+            material_types=material_types,
+            rules_json=json.dumps(rules_compact, ensure_ascii=False),
+            transaction_json=json.dumps(transaction_data, ensure_ascii=False),
+            language_name=language_name,
+            transaction_id=transaction_data.get('transaction_id', 0)
+        )
+        
         return prompt
 
     def _enhance_prompt_for_images(self, base_prompt: str, images: List[str], transaction_data: Dict[str, Any]) -> str:
-        """Enhance the audit prompt with compact image analysis instructions"""
-
-        image_instructions = """
-
-IMAGE ANALYSIS:
-- Extract text/numbers from documents (OCR)
-- Verify weights, quantities, dates, prices match reported data
-- Check material type consistency with images
-- Identify discrepancies or missing docs
-- CRITICAL: Each record's images apply ONLY to that record
-
-If images contradict data, flag violation with specific reason.
-"""
+        """Enhance the audit prompt with image analysis instructions from JSON configuration"""
+        
+        # Get image analysis instructions from JSON configuration
+        image_config = self.prompts.get('image_analysis_instructions', {})
+        image_instructions = image_config.get('template', '')
+        
+        # Check if image analysis is enabled
+        if not image_config.get('enabled', True):
+            return base_prompt
 
         enhanced_prompt = base_prompt + image_instructions
         return enhanced_prompt
 
     def _call_gemini_api_structured(self, content_parts: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
-        Call Gemini API with structured content parts (text + images)
+        Call Vertex AI API with structured content parts (text + images)
 
         Returns:
             Dict containing 'content' (response text) and 'usage' (token information)
         """
         try:
             if not GENAI_AVAILABLE or not self.client:
-                raise ImportError("Google GenAI package not installed or client not initialized. Install with: pip install google-genai")
+                raise ImportError("Google GenAI package not installed or Vertex AI client not initialized. "
+                                "Install with: pip install google-genai. "
+                                "Ensure VERTEX_AI_PROJECT_ID and VERTEX_AI_LOCATION are configured.")
 
             # Convert content_parts to Gemini format
             gemini_content = []
-            system_instruction = """You are a waste management auditor. Your job is to find ACTUAL ERRORS only.
-
-CRITICAL: The violations array is for ERRORS ONLY. If a classification is correct, do NOT add it to violations.
-Only flag TRUE MISMATCHES where image content contradicts the data category.
-If everything is correct, return empty violations array: {"violations": []}
-
-NEVER write "ถูกต้อง" or "correct" in a violation message - if something is correct, don't add it to violations!"""
+            system_instruction = self.prompts.get('system_instructions', {}).get('structured_content', 
+                'You are a waste management auditor. Your job is to find ACTUAL ERRORS only.')
 
             for part in content_parts:
                 if part['type'] == 'text':
@@ -709,14 +704,15 @@ NEVER write "ถูกต้อง" or "correct" in a violation message - if som
 
             # Generate response using the new SDK
             # print(gemini_content)
+            api_settings = self.prompts.get('api_settings', {})
             response = self.client.models.generate_content(
                 model=self.model_name,
                 contents=gemini_content,
                 config={
                     "system_instruction": system_instruction,
-                    "temperature": 0.,
+                    "temperature": api_settings.get('temperature', 0.0),
                     "thinkingConfig": {
-                        "thinkingBudget": thinkingBudget
+                        "thinkingBudget": api_settings.get('thinking_budget', 512)
                     }
                 }
             )
@@ -731,7 +727,7 @@ NEVER write "ถูกต้อง" or "correct" in a violation message - if som
                 'cached_tokens': getattr(usage_metadata, 'cached_content_token_count', 0) if usage_metadata else 0
             }
 
-            logger.info(f"Gemini API response - Tokens: {usage_info['total_tokens']} (reasoning: {usage_info['reasoning_tokens']})")
+            logger.info(f"Vertex AI API response - Tokens: {usage_info['total_tokens']} (reasoning: {usage_info['reasoning_tokens']})")
 
             return {
                 'content': response.text,
@@ -739,29 +735,27 @@ NEVER write "ถูกต้อง" or "correct" in a violation message - if som
             }
 
         except Exception as e:
-            logger.error(f"Gemini API call failed: {str(e)}")
+            logger.error(f"Vertex AI API call failed: {str(e)}")
             raise
 
     def _call_gemini_api(self, prompt: str, images: List[str] = None) -> Dict[str, Any]:
         """
-        Call Gemini API for audit analysis (text-only fallback)
+        Call Vertex AI API for audit analysis (text-only fallback)
 
         Returns:
             Dict containing 'content' (response text) and 'usage' (token information)
         """
         try:
             if not GENAI_AVAILABLE or not self.client:
-                raise ImportError("Google GenAI package not installed or client not initialized. Install with: pip install google-genai")
+                raise ImportError("Google GenAI package not installed or Vertex AI client not initialized. "
+                                "Install with: pip install google-genai. "
+                                "Ensure VERTEX_AI_PROJECT_ID and VERTEX_AI_LOCATION are configured.")
 
             # Prepare content
-            full_prompt = f"{prompt}\n\nRespond only with valid JSON format as specified above."
-            system_instruction = """You are a professional waste management auditor with expertise in compliance and quality control.
-
-CRITICAL: The violations array is for ERRORS ONLY. If a classification is correct, do NOT add it to violations.
-Only flag TRUE MISMATCHES where image content contradicts the data category.
-If everything is correct, return empty violations array: {"violations": []}
-
-NEVER write "ถูกต้อง" or "correct" in a violation message - if something is correct, don't add it to violations!"""
+            api_settings = self.prompts.get('api_settings', {})
+            full_prompt = f"{prompt}\n\n{api_settings.get('response_suffix', 'Respond only with valid JSON format as specified above.')}"
+            system_instruction = self.prompts.get('system_instructions', {}).get('text_only', 
+                'You are a professional waste management auditor with expertise in compliance and quality control.')
 
             # logger.info(full_prompt)
             # Generate response using the new SDK
@@ -770,9 +764,9 @@ NEVER write "ถูกต้อง" or "correct" in a violation message - if som
                 contents=full_prompt,
                 config={
                     "system_instruction": system_instruction,
-                    "temperature": 0.,
+                    "temperature": api_settings.get('temperature', 0.0),
                     "thinkingConfig": {
-                        "thinkingBudget": thinkingBudget 
+                        "thinkingBudget": api_settings.get('thinking_budget', 512) 
                     }
                 }
             )
@@ -787,7 +781,7 @@ NEVER write "ถูกต้อง" or "correct" in a violation message - if som
                 'cached_tokens': getattr(usage_metadata, 'cached_content_token_count', 0) if usage_metadata else 0
             }
 
-            # logger.info(f"Gemini API text-only response - Tokens: {usage_info['total_tokens']} (reasoning: {usage_info['reasoning_tokens']})")
+            # logger.info(f"Vertex AI API text-only response - Tokens: {usage_info['total_tokens']} (reasoning: {usage_info['reasoning_tokens']})")
 
             return {
                 'content': response.text,
@@ -795,7 +789,7 @@ NEVER write "ถูกต้อง" or "correct" in a violation message - if som
             }
 
         except Exception as e:
-            logger.error(f"Gemini API call failed: {str(e)}")
+            logger.error(f"Vertex AI API call failed: {str(e)}")
             raise
 
     def _parse_ai_response(self, ai_response: str, transaction_id: int, audit_rules: List[Dict[str, Any]]) -> Dict[str, Any]:

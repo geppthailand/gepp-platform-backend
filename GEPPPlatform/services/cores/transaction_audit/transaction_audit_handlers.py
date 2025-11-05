@@ -35,12 +35,17 @@ def handle_transaction_audit_routes(event: Dict[str, Any], data: Dict[str, Any],
     if not db_session:
         raise APIException('Database session not provided')
 
-    # Get Gemini API key from environment
-    gemini_api_key = os.getenv('GEMINI_API_KEY')
-    if not gemini_api_key:
-        raise APIException('Gemini API key not configured')
+    # Get Vertex AI configuration from environment
+    project_id = os.getenv('VERTEX_AI_PROJECT_ID') or os.getenv('GOOGLE_CLOUD_PROJECT')
+    location = os.getenv('VERTEX_AI_LOCATION', 'us-central1')
 
-    transaction_audit_service = TransactionAuditService(gemini_api_key)
+    if not project_id:
+        raise APIException('Vertex AI project ID not configured. Set VERTEX_AI_PROJECT_ID or GOOGLE_CLOUD_PROJECT environment variable.')
+
+    transaction_audit_service = TransactionAuditService(
+        project_id=project_id,
+        location=location
+    )
 
     # Extract current user info from JWT token (passed from app.py)
     current_user = params.get('current_user', {})
