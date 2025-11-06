@@ -1,15 +1,19 @@
 """
 Presigned URL Service for Transaction File Uploads
 Generates S3 presigned URLs for direct file uploads
+Creates file records in database for tracking
 """
 
 import boto3
 import os
 import uuid
 from datetime import datetime, timedelta
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from botocore.exceptions import ClientError
+from sqlalchemy.orm import Session
 import logging
+
+from ....models.cores.files import File, FileType, FileStatus
 
 logger = logging.getLogger(__name__)
 
@@ -46,19 +50,27 @@ class TransactionPresignedUrlService:
         file_names: List[str],
         organization_id: int,
         user_id: int,
+        db: Session = None,
+        file_type: str = 'transaction_image',
+        related_entity_type: Optional[str] = None,
+        related_entity_id: Optional[int] = None,
         expiration_seconds: int = 3600
     ) -> Dict[str, Any]:
         """
-        Generate presigned URLs for transaction file uploads
+        Generate presigned URLs for transaction file uploads and create file records
 
         Args:
             file_names: List of original file names
             organization_id: Organization ID for path structure
             user_id: User ID for audit trail
+            db: Database session for creating file records
+            file_type: Type of file (default: 'transaction_image')
+            related_entity_type: Optional entity type this file relates to
+            related_entity_id: Optional entity ID this file relates to
             expiration_seconds: URL expiration time (default: 1 hour)
 
         Returns:
-            Dict with presigned URLs and metadata
+            Dict with presigned URLs, file IDs, and metadata
         """
         try:
             # Check if using mock service
@@ -151,16 +163,63 @@ class TransactionPresignedUrlService:
                     'message': 'Failed to generate any presigned URLs'
                 }
 
+            # Create file records in database if db session provided
+            file_records_data = []
+            if db:
+                try:
+                    # Convert file_type string to FileType enum
+                    file_type_enum = FileType[file_type] if isinstance(file_type, str) else file_type
+
+                    for presigned_item in presigned_data:
+                        file_record = File(
+                            file_type=file_type_enum,
+                            status=FileStatus.pending,
+                            url=presigned_item['final_s3_url'],
+                            s3_key=presigned_item['s3_key'],
+                            s3_bucket=self.bucket_name,
+                            original_filename=presigned_item['original_filename'],
+                            mime_type=presigned_item['content_type'],
+                            organization_id=organization_id,
+                            uploader_id=user_id,
+                            related_entity_type=related_entity_type,
+                            related_entity_id=related_entity_id,
+                            file_metadata={
+                                'presigned_created_at': datetime.now().isoformat(),
+                                'expiration_seconds': expiration_seconds
+                            }
+                        )
+                        db.add(file_record)
+                        db.flush()  # Get the ID
+
+                        # Add file_id to presigned data
+                        presigned_item['file_id'] = file_record.id
+                        file_records_data.append({
+                            'file_id': file_record.id,
+                            'original_filename': presigned_item['original_filename'],
+                            's3_key': presigned_item['s3_key']
+                        })
+
+                    db.commit()
+                    logger.info(f"Created {len(file_records_data)} file records in database")
+                except Exception as db_error:
+                    logger.error(f"Error creating file records: {str(db_error)}")
+                    if db:
+                        db.rollback()
+                    # Continue without failing - files can still be uploaded
+
             logger.info(f"Successfully generated {len(presigned_data)} presigned URLs")
             return {
                 'success': True,
                 'message': f'Generated {len(presigned_data)} presigned URLs',
                 'presigned_urls': presigned_data,
+                'file_records': file_records_data,
                 'expires_in_seconds': expiration_seconds
             }
 
         except Exception as e:
             logger.error(f"Unexpected error in get_transaction_file_upload_presigned_urls: {str(e)}")
+            if db:
+                db.rollback()
             return {
                 'success': False,
                 'message': f'Failed to generate presigned URLs: {str(e)}'
@@ -201,6 +260,97 @@ class TransactionPresignedUrlService:
             name_part, ext_part = sanitized.rsplit('.', 1) if '.' in sanitized else (sanitized, '')
             sanitized = f"{name_part[:190]}.{ext_part}" if ext_part else name_part[:200]
         return sanitized
+
+    def get_transaction_file_view_presigned_urls_by_ids(
+        self,
+        file_ids: List[int],
+        db: Session,
+        organization_id: int,
+        user_id: int,
+        expiration_seconds: int = 3600
+    ) -> Dict[str, Any]:
+        """
+        Generate presigned URLs for viewing files by their database IDs
+
+        Args:
+            file_ids: List of file IDs from files table
+            db: Database session
+            organization_id: Organization ID for access control
+            user_id: User ID for audit trail
+            expiration_seconds: URL expiration time (default: 1 hour)
+
+        Returns:
+            Dict with presigned view URLs mapped by file ID
+        """
+        try:
+            if not file_ids:
+                return {
+                    'success': True,
+                    'message': 'No file IDs provided',
+                    'presigned_urls': {},
+                    'expires_in_seconds': expiration_seconds
+                }
+
+            # Fetch file records from database
+            file_records = db.query(File).filter(
+                File.id.in_(file_ids),
+                File.organization_id == organization_id,
+                File.is_active == True
+            ).all()
+
+            if not file_records:
+                return {
+                    'success': False,
+                    'message': 'No files found with provided IDs',
+                    'presigned_urls': {}
+                }
+
+            # Extract URLs from file records
+            file_urls = [file_record.url for file_record in file_records]
+            file_id_to_url = {file_record.id: file_record.url for file_record in file_records}
+
+            # Generate presigned URLs using existing method
+            result = self.get_transaction_file_view_presigned_urls(
+                file_urls=file_urls,
+                organization_id=organization_id,
+                user_id=user_id,
+                expiration_seconds=expiration_seconds
+            )
+
+            if not result.get('success'):
+                return result
+
+            # Map presigned URLs back to file IDs
+            presigned_by_id = {}
+            url_to_presigned = {
+                item['original_url']: item['view_url']
+                for item in result.get('presigned_urls', [])
+            }
+
+            for file_id, original_url in file_id_to_url.items():
+                if original_url in url_to_presigned:
+                    presigned_by_id[file_id] = {
+                        'file_id': file_id,
+                        'view_url': url_to_presigned[original_url],
+                        'expires_at': result.get('presigned_urls', [{}])[0].get('expires_at')
+                    }
+
+            logger.info(f"Generated {len(presigned_by_id)} presigned view URLs by file IDs")
+
+            return {
+                'success': True,
+                'message': f'Generated {len(presigned_by_id)} presigned view URLs',
+                'presigned_urls': presigned_by_id,
+                'expires_in_seconds': expiration_seconds
+            }
+
+        except Exception as e:
+            logger.error(f"Error generating presigned URLs by file IDs: {str(e)}")
+            return {
+                'success': False,
+                'message': f'Failed to generate presigned URLs: {str(e)}',
+                'presigned_urls': {}
+            }
 
     def get_transaction_file_view_presigned_urls(
         self,

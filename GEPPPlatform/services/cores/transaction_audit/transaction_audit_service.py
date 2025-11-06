@@ -301,7 +301,8 @@ class TransactionAuditService:
             # Process transactions with AI in multiple threads
             audit_results = self._process_transactions_with_ai(
                 transaction_audit_data,
-                audit_rules
+                audit_rules,
+                db
             )
 
             # print("---====-=-=", audit_results)
@@ -488,7 +489,7 @@ class TransactionAuditService:
             logger.error(f"Error preparing transaction data: {str(e)}")
             raise
 
-    def _process_transactions_with_ai(self, transactions_data: List[Dict[str, Any]], audit_rules: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _process_transactions_with_ai(self, transactions_data: List[Dict[str, Any]], audit_rules: List[Dict[str, Any]], db: Session = None) -> List[Dict[str, Any]]:
         """
         Process transactions with Gemini API using multi-threading
         Uses two-phase approach: extraction -> judgment
@@ -503,7 +504,7 @@ class TransactionAuditService:
             with ThreadPoolExecutor(max_workers=self.max_concurrent_threads) as executor:
                 # Submit all transactions for two-phase processing
                 future_to_transaction = {
-                    executor.submit(self._audit_single_transaction_two_phase, transaction_data, audit_rules): transaction_data
+                    executor.submit(self._audit_single_transaction_two_phase, transaction_data, audit_rules, db): transaction_data
                     for transaction_data in transactions_data
                 }
 
@@ -540,7 +541,7 @@ class TransactionAuditService:
             logger.error(f"Error in multi-threaded AI processing: {str(e)}")
             raise
 
-    def _extract_record_observations(self, record_data: Dict[str, Any], organization_id: int, user_id: int) -> Dict[str, Any]:
+    def _extract_record_observations(self, record_data: Dict[str, Any], organization_id: int, user_id: int, db: Session = None) -> Dict[str, Any]:
         """
         Phase 1: Extract factual observations from a single transaction record's images
         This reduces cognitive burden by separating observation from judgment
@@ -570,7 +571,8 @@ class TransactionAuditService:
             presigned_urls = self._generate_presigned_urls_for_images(
                 record_images,
                 organization_id,
-                user_id
+                user_id,
+                db
             )
 
             if not presigned_urls:
@@ -666,7 +668,7 @@ class TransactionAuditService:
                 'parse_error': str(e)
             }
 
-    def _extract_all_records_observations(self, transaction_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def _extract_all_records_observations(self, transaction_data: Dict[str, Any], db: Session = None) -> List[Dict[str, Any]]:
         """
         Extract observations from all records in a transaction using nested threading
         Phase 1 of the two-phase audit process
@@ -685,7 +687,7 @@ class TransactionAuditService:
             # Use ThreadPoolExecutor for parallel record processing
             with ThreadPoolExecutor(max_workers=min(len(records), 10)) as executor:
                 future_to_record = {
-                    executor.submit(self._extract_record_observations, record, organization_id, user_id): record
+                    executor.submit(self._extract_record_observations, record, organization_id, user_id, db): record
                     for record in records
                 }
 
@@ -785,7 +787,8 @@ class TransactionAuditService:
     def _audit_single_transaction_two_phase(
         self,
         transaction_data: Dict[str, Any],
-        audit_rules: List[Dict[str, Any]]
+        audit_rules: List[Dict[str, Any]],
+        db: Session = None
     ) -> Dict[str, Any]:
         """
         Two-phase audit process:
@@ -797,7 +800,7 @@ class TransactionAuditService:
             logger.info(f"Starting two-phase audit for transaction {transaction_id}")
 
             # Phase 1: Extract observations from all records (with nested threading)
-            extracted_observations = self._extract_all_records_observations(transaction_data)
+            extracted_observations = self._extract_all_records_observations(transaction_data, db)
 
             if not extracted_observations:
                 logger.warning(f"No observations extracted for transaction {transaction_id}")
@@ -926,34 +929,85 @@ class TransactionAuditService:
             logger.error(f"Error auditing transaction {transaction_data['transaction_id']}: {str(e)}")
             raise
 
-    def _generate_presigned_urls_for_images(self, image_urls: List[str], organization_id: int, user_id: int) -> List[str]:
-        """Generate presigned URLs for images to allow Gemini API access"""
+    def _generate_presigned_urls_for_images(self, image_identifiers: List, organization_id: int, user_id: int, db: Session = None) -> List[str]:
+        """
+        Generate presigned URLs for images to allow Gemini API access
+
+        Args:
+            image_identifiers: List of file IDs (int) or URLs (str) - auto-detects type
+            organization_id: Organization ID for access control
+            user_id: User ID for audit trail
+            db: Database session (required if using file IDs)
+
+        Returns:
+            List of presigned URLs for viewing
+        """
         try:
             if not self.presigned_url_service:
                 logger.warning("Presigned URL service not available")
                 return []
 
-            # Use the existing presigned URL service to generate view URLs
-            result = self.presigned_url_service.get_transaction_file_view_presigned_urls(
-                file_urls=image_urls,
-                organization_id=organization_id,
-                user_id=user_id,
-                expiration_seconds=7200  # 2 hours expiration for audit processing
-            )
-
-            if result.get('success'):
-                presigned_urls = []
-                for url_data in result.get('presigned_urls', []):
-                    presigned_url = url_data.get('view_url')
-                    if presigned_url:
-                        presigned_urls.append(presigned_url)
-                        logger.info(f"Generated presigned URL for {url_data.get('original_url')}")
-
-                logger.info(f"Successfully generated {len(presigned_urls)} presigned URLs")
-                return presigned_urls
-            else:
-                logger.error(f"Failed to generate presigned URLs: {result.get('message')}")
+            if not image_identifiers:
                 return []
+
+            # Detect if we're working with file IDs or URLs
+            first_item = image_identifiers[0]
+            using_file_ids = isinstance(first_item, int)
+
+            if using_file_ids:
+                # New approach: Use file IDs
+                if not db:
+                    logger.error("Database session required when using file IDs")
+                    return []
+
+                logger.info(f"Generating presigned URLs for {len(image_identifiers)} file IDs")
+                result = self.presigned_url_service.get_transaction_file_view_presigned_urls_by_ids(
+                    file_ids=image_identifiers,
+                    db=db,
+                    organization_id=organization_id,
+                    user_id=user_id,
+                    expiration_seconds=7200  # 2 hours expiration for audit processing
+                )
+
+                if result.get('success'):
+                    presigned_urls = []
+                    presigned_by_id = result.get('presigned_urls', {})
+                    for file_id in image_identifiers:
+                        if file_id in presigned_by_id:
+                            presigned_url = presigned_by_id[file_id].get('view_url')
+                            if presigned_url:
+                                presigned_urls.append(presigned_url)
+                                logger.info(f"Generated presigned URL for file ID {file_id}")
+
+                    logger.info(f"Successfully generated {len(presigned_urls)} presigned URLs from file IDs")
+                    return presigned_urls
+                else:
+                    logger.error(f"Failed to generate presigned URLs from file IDs: {result.get('message')}")
+                    return []
+
+            else:
+                # Legacy approach: Use file URLs
+                logger.info(f"Generating presigned URLs for {len(image_identifiers)} file URLs (legacy)")
+                result = self.presigned_url_service.get_transaction_file_view_presigned_urls(
+                    file_urls=image_identifiers,
+                    organization_id=organization_id,
+                    user_id=user_id,
+                    expiration_seconds=7200  # 2 hours expiration for audit processing
+                )
+
+                if result.get('success'):
+                    presigned_urls = []
+                    for url_data in result.get('presigned_urls', []):
+                        presigned_url = url_data.get('view_url')
+                        if presigned_url:
+                            presigned_urls.append(presigned_url)
+                            logger.info(f"Generated presigned URL for {url_data.get('original_url')}")
+
+                    logger.info(f"Successfully generated {len(presigned_urls)} presigned URLs from URLs")
+                    return presigned_urls
+                else:
+                    logger.error(f"Failed to generate presigned URLs from URLs: {result.get('message')}")
+                    return []
 
         except Exception as e:
             logger.error(f"Error generating presigned URLs: {str(e)}")
