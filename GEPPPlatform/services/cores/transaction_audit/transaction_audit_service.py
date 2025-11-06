@@ -90,7 +90,7 @@ class TransactionAuditService:
     """
 
     def __init__(self, gemini_api_key: str = None, response_language: str = 'thai',
-                 project_id: str = None, location: str = None):
+                 project_id: str = None, location: str = None, extraction_mode: str = 'detailed'):
         """
         Initialize the TransactionAuditService
 
@@ -99,9 +99,18 @@ class TransactionAuditService:
             response_language: Language for AI responses (default: 'thai')
             project_id: Google Cloud Project ID for Vertex AI
             location: Google Cloud region/location (e.g., 'us-central1', 'asia-southeast1')
+            extraction_mode: Extraction mode ('detailed' or 'minimal') - controls token usage
+                           'detailed': Full extraction with all categories (more accurate, more tokens)
+                           'minimal': Streamlined extraction focusing on critical items (faster, fewer tokens)
         """
         # Setup credentials from environment variable
         self.temp_credentials_file = setup_credentials_from_env()
+
+        # Set extraction mode
+        self.extraction_mode = extraction_mode.lower() if extraction_mode else 'detailed'
+        if self.extraction_mode not in ['detailed', 'minimal']:
+            logger.warning(f"Invalid extraction mode '{extraction_mode}', defaulting to 'detailed'")
+            self.extraction_mode = 'detailed'
 
         # Get configuration from environment or parameters
         self.project_id = os.environ.get('VERTEX_AI_PROJECT_ID')
@@ -138,9 +147,16 @@ class TransactionAuditService:
             'th': 'Thai (ภาษาไทย)'
         })
 
-        self.model_name = self.prompts.get('api_settings', {}).get('model_name', 'gemini-2.5-flash')
+        self.model_name = self.prompts.get('api_settings', {}).get('model_name', 'gemini-2.5-flash-lite')
         self.max_concurrent_threads = 50
         self.response_language = response_language.lower()  # Store language preference
+
+        # Log service configuration
+        logger.info(f"TransactionAuditService initialized:")
+        logger.info(f"  - Model: {self.model_name}")
+        logger.info(f"  - Extraction Mode: {self.extraction_mode.upper()}")
+        logger.info(f"  - Language: {self.response_language}")
+        logger.info(f"  - Max Threads: {self.max_concurrent_threads}")
 
         # Initialize presigned URL service for image access
         try:
@@ -161,7 +177,7 @@ class TransactionAuditService:
             # Get the directory of the current service file
             current_dir = os.path.dirname(os.path.abspath(__file__))
             prompt_config_path = os.path.join(current_dir, 'prompt_base.json')
-            
+
             if os.path.exists(prompt_config_path):
                 with open(prompt_config_path, 'r', encoding='utf-8') as f:
                     prompts = json.load(f)
@@ -173,6 +189,56 @@ class TransactionAuditService:
         except Exception as e:
             logger.error(f"Error loading prompt configuration: {str(e)}, using defaults")
             return self._get_default_prompt_config()
+
+    def _load_extraction_rules(self) -> Dict[str, Any]:
+        """Load image extraction rules from JSON file based on extraction mode"""
+        try:
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+
+            # Choose file based on extraction mode
+            if self.extraction_mode == 'minimal':
+                extraction_rules_path = os.path.join(current_dir, 'image_extraction_min_rules.json')
+                logger.info(f"Using MINIMAL extraction mode for token efficiency")
+            else:
+                extraction_rules_path = os.path.join(current_dir, 'image_extraction_rules.json')
+                logger.info(f"Using DETAILED extraction mode for maximum accuracy")
+
+            if os.path.exists(extraction_rules_path):
+                with open(extraction_rules_path, 'r', encoding='utf-8') as f:
+                    rules = json.load(f)
+                logger.info(f"Loaded extraction rules from {extraction_rules_path}")
+                return rules
+            else:
+                logger.warning(f"Extraction rules file not found at {extraction_rules_path}")
+                # Try to fall back to the other mode
+                fallback_file = 'image_extraction_rules.json' if self.extraction_mode == 'minimal' else 'image_extraction_min_rules.json'
+                fallback_path = os.path.join(current_dir, fallback_file)
+                if os.path.exists(fallback_path):
+                    logger.info(f"Falling back to {fallback_file}")
+                    with open(fallback_path, 'r', encoding='utf-8') as f:
+                        return json.load(f)
+                return {}
+        except Exception as e:
+            logger.error(f"Error loading extraction rules: {str(e)}")
+            return {}
+
+    def _load_judgment_prompt(self) -> Dict[str, Any]:
+        """Load transaction judgment prompt from JSON file"""
+        try:
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            judgment_prompt_path = os.path.join(current_dir, 'transaction_judgment_prompt.json')
+
+            if os.path.exists(judgment_prompt_path):
+                with open(judgment_prompt_path, 'r', encoding='utf-8') as f:
+                    prompt = json.load(f)
+                logger.info(f"Loaded judgment prompt from {judgment_prompt_path}")
+                return prompt
+            else:
+                logger.warning(f"Judgment prompt file not found at {judgment_prompt_path}")
+                return {}
+        except Exception as e:
+            logger.error(f"Error loading judgment prompt: {str(e)}")
+            return {}
 
     def _get_default_prompt_config(self) -> Dict[str, Any]:
         """Get default prompt configuration if JSON file is not available"""
@@ -188,7 +254,7 @@ class TransactionAuditService:
                 "th": "Thai (ภาษาไทย)"
             },
             "api_settings": {
-                "model_name": "gemini-2.5-flash",
+                "model_name": "gemini-2.5-flash-lite",
                 "temperature": 0.0,
                 "thinking_budget": 512
             }
@@ -423,16 +489,21 @@ class TransactionAuditService:
             raise
 
     def _process_transactions_with_ai(self, transactions_data: List[Dict[str, Any]], audit_rules: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Process transactions with Gemini API using multi-threading"""
+        """
+        Process transactions with Gemini API using multi-threading
+        Uses two-phase approach: extraction -> judgment
+        """
         try:
             audit_results = []
 
-            print("ID:", [t["transaction_id"] for t in transactions_data])
+            logger.info(f"Starting two-phase audit for {len(transactions_data)} transactions")
+            logger.info(f"Transaction IDs: {[t['transaction_id'] for t in transactions_data]}")
+
             # Process transactions in batches using thread pool
             with ThreadPoolExecutor(max_workers=self.max_concurrent_threads) as executor:
-                # Submit all transactions for processing
+                # Submit all transactions for two-phase processing
                 future_to_transaction = {
-                    executor.submit(self._audit_single_transaction, transaction_data, audit_rules): transaction_data
+                    executor.submit(self._audit_single_transaction_two_phase, transaction_data, audit_rules): transaction_data
                     for transaction_data in transactions_data
                 }
 
@@ -442,16 +513,17 @@ class TransactionAuditService:
                     try:
                         audit_result = future.result()
                         audit_results.append(audit_result)
-                        logger.info(f"Completed audit for transaction {transaction_data['transaction_id']}")
+                        logger.info(f"Completed two-phase audit for transaction {transaction_data['transaction_id']}")
                     except Exception as e:
-                        logger.error(f"Error auditing transaction {transaction_data['transaction_id']}: {str(e)}")
-                        # Add failed audit result
+                        logger.error(f"Error in two-phase audit for transaction {transaction_data['transaction_id']}: {str(e)}")
+                        # Add failed audit result with skip flag - transaction will remain pending
                         audit_results.append({
                             'transaction_id': transaction_data['transaction_id'],
                             'audit_status': 'failed',
                             'error': str(e),
-                            'violations': [],
-                            'recommendations': ['Manual review required due to AI audit failure'],
+                            'triggered_rules': [],
+                            'reject_messages': ['Manual review required due to AI audit failure'],
+                            'skip_status_update': True,  # Don't update status - leave as pending
                             'token_usage': {
                                 'input_tokens': 0,
                                 'output_tokens': 0,
@@ -461,12 +533,292 @@ class TransactionAuditService:
                             }
                         })
 
-            logger.info(f"Completed AI audit for {len(audit_results)} transactions")
+            logger.info(f"Completed two-phase AI audit for {len(audit_results)} transactions")
             return audit_results
 
         except Exception as e:
             logger.error(f"Error in multi-threaded AI processing: {str(e)}")
             raise
+
+    def _extract_record_observations(self, record_data: Dict[str, Any], organization_id: int, user_id: int) -> Dict[str, Any]:
+        """
+        Phase 1: Extract factual observations from a single transaction record's images
+        This reduces cognitive burden by separating observation from judgment
+        """
+        try:
+            record_id = record_data.get('record_id')
+
+            # Validate record_id exists
+            if record_id is None:
+                logger.error(f"Missing record_id in record_data: {record_data}")
+                raise ValueError("Record data missing required 'record_id' field")
+
+            record_images = record_data.get('images', [])
+
+            # If no images, return basic observation
+            if not record_images:
+                return {
+                    'record_id': record_id,
+                    'declared_material_type': record_data.get('material_type'),
+                    'has_images': False,
+                    'extraction_summary': 'No images provided for this record',
+                    'visibility_level': 'No images (0%)',
+                    'red_flags': ['No images attached to verify waste type']
+                }
+
+            # Generate presigned URLs for images
+            presigned_urls = self._generate_presigned_urls_for_images(
+                record_images,
+                organization_id,
+                user_id
+            )
+
+            if not presigned_urls:
+                return {
+                    'record_id': record_id,
+                    'declared_material_type': record_data.get('material_type'),
+                    'has_images': True,
+                    'extraction_summary': 'Failed to access images',
+                    'red_flags': ['Could not access images for verification']
+                }
+
+            # Load extraction rules
+            extraction_rules = self._load_extraction_rules()
+
+            # Get appropriate prompt template based on mode
+            if self.extraction_mode == 'minimal':
+                extraction_prompt_template = extraction_rules.get('extraction_prompt_template_minimal', '')
+            else:
+                extraction_prompt_template = extraction_rules.get('extraction_prompt_template', '')
+
+            # If template not found, try fallback
+            if not extraction_prompt_template:
+                extraction_prompt_template = extraction_rules.get('extraction_prompt_template',
+                    extraction_rules.get('extraction_prompt_template_minimal', ''))
+
+            # Prepare content for extraction
+            content_parts = []
+
+            # Add extraction prompt with mode indicator
+            mode_note = " [MINIMAL MODE: Focus on critical items only]" if self.extraction_mode == 'minimal' else " [DETAILED MODE: Comprehensive extraction]"
+            content_parts.append({
+                "type": "text",
+                "text": f"Record ID: {record_id}\nDeclared Material Type: {record_data.get('material_type')}{mode_note}\n\n{extraction_prompt_template}"
+            })
+
+            # Add images
+            for img_url in presigned_urls:
+                content_parts.append({
+                    "type": "image_url",
+                    "image_url": {"url": img_url, "detail": "high"}
+                })
+
+            # Call AI to extract observations
+            logger.info(f"Extracting observations from record {record_id} with {len(presigned_urls)} images")
+            api_response = self._call_gemini_api_structured(content_parts)
+
+            # Parse extraction response
+            response_content = api_response.get('content', '')
+            extracted_data = self._parse_extraction_response(response_content, record_id)
+
+            # Add declared type for comparison later
+            extracted_data['declared_material_type'] = record_data.get('material_type')
+            extracted_data['has_images'] = True
+
+            logger.info(f"Successfully extracted observations for record {record_id}")
+            return extracted_data
+
+        except Exception as e:
+            logger.error(f"Error extracting observations for record {record_data.get('record_id')}: {str(e)}")
+            return {
+                'record_id': record_data.get('record_id'),
+                'declared_material_type': record_data.get('material_type'),
+                'has_images': bool(record_data.get('images')),
+                'extraction_summary': f'Extraction failed: {str(e)}',
+                'error': str(e)
+            }
+
+    def _parse_extraction_response(self, response_content: str, record_id: int) -> Dict[str, Any]:
+        """Parse the AI extraction response into structured data"""
+        try:
+            # Clean markdown code blocks
+            cleaned_response = response_content.strip()
+            if cleaned_response.startswith('```'):
+                first_newline = cleaned_response.find('\n')
+                if first_newline != -1:
+                    cleaned_response = cleaned_response[first_newline + 1:]
+                if cleaned_response.endswith('```'):
+                    cleaned_response = cleaned_response[:-3]
+                cleaned_response = cleaned_response.strip()
+
+            # Try to parse JSON
+            extraction_data = json.loads(cleaned_response)
+            extraction_data['record_id'] = record_id
+            return extraction_data
+
+        except json.JSONDecodeError as e:
+            logger.warning(f"Failed to parse extraction JSON for record {record_id}, using text analysis")
+            # Fallback: extract key information from text
+            return {
+                'record_id': record_id,
+                'extraction_summary': response_content[:500],  # First 500 chars
+                'raw_response': response_content,
+                'parse_error': str(e)
+            }
+
+    def _extract_all_records_observations(self, transaction_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        Extract observations from all records in a transaction using nested threading
+        Phase 1 of the two-phase audit process
+        """
+        try:
+            records = transaction_data.get('records', [])
+            organization_id = transaction_data.get('organization_id')
+            user_id = transaction_data.get('user_id')
+
+            if not records:
+                logger.warning(f"No records found for transaction {transaction_data.get('transaction_id')}")
+                return []
+
+            extracted_observations = []
+
+            # Use ThreadPoolExecutor for parallel record processing
+            with ThreadPoolExecutor(max_workers=min(len(records), 10)) as executor:
+                future_to_record = {
+                    executor.submit(self._extract_record_observations, record, organization_id, user_id): record
+                    for record in records
+                }
+
+                for future in as_completed(future_to_record):
+                    record = future_to_record[future]
+                    try:
+                        observation = future.result()
+                        extracted_observations.append(observation)
+                        logger.info(f"Extracted observations for record {record.get('record_id')}")
+                    except Exception as e:
+                        logger.error(f"Failed to extract observations for record {record.get('record_id')}: {str(e)}")
+                        # Add error observation
+                        extracted_observations.append({
+                            'record_id': record.get('record_id'),
+                            'declared_material_type': record.get('material_type'),
+                            'error': str(e),
+                            'extraction_summary': 'Extraction failed'
+                        })
+
+            logger.info(f"Completed extraction for {len(extracted_observations)} records in transaction {transaction_data.get('transaction_id')}")
+            return extracted_observations
+
+        except Exception as e:
+            logger.error(f"Error in batch record extraction: {str(e)}")
+            return []
+
+    def _judge_transaction_with_observations(
+        self,
+        transaction_data: Dict[str, Any],
+        extracted_observations: List[Dict[str, Any]],
+        audit_rules: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """
+        Phase 2: Make audit judgment based on extracted observations
+        This is lighter weight than processing images directly
+        """
+        try:
+            transaction_id = transaction_data.get('transaction_id')
+
+            # Validate that all observations have record_id (defensive check)
+            for i, obs in enumerate(extracted_observations):
+                if 'record_id' not in obs or obs['record_id'] is None:
+                    logger.error(f"Observation {i} missing record_id: {obs}")
+                    raise ValueError(f"Extracted observation at index {i} missing required 'record_id' field")
+
+            # Load judgment prompt
+            judgment_config = self._load_judgment_prompt()
+            judgment_template = judgment_config.get('judgment_prompt_template', '')
+
+            # Get language name
+            language_name = self.language_names.get(self.response_language, 'Thai (ภาษาไทย)')
+
+            # Prepare judgment prompt
+            material_types = [r.get('material_type') for r in transaction_data.get('records', [])]
+            unique_types = list(set(material_types))
+
+            judgment_prompt = judgment_template.format(
+                transaction_id=transaction_id,
+                record_count=len(transaction_data.get('records', [])),
+                material_types=material_types,
+                unique_types_count=len(unique_types),
+                rules_json=json.dumps(audit_rules, ensure_ascii=False),
+                extracted_observations_json=json.dumps(extracted_observations, ensure_ascii=False),
+                language_name=language_name
+            )
+
+            # Call AI for judgment
+            logger.info(f"Making judgment for transaction {transaction_id} based on {len(extracted_observations)} observations")
+            api_response = self._call_gemini_api(judgment_prompt)
+
+            # Parse judgment response
+            response_content = api_response.get('content', '')
+            token_usage = api_response.get('usage', {})
+
+            audit_result = self._parse_ai_response(response_content, transaction_id, audit_rules)
+
+            # Add token usage
+            audit_result['token_usage'] = {
+                'input_tokens': token_usage.get('input_tokens', 0),
+                'output_tokens': token_usage.get('output_tokens', 0),
+                'total_tokens': token_usage.get('total_tokens', 0),
+                'reasoning_tokens': token_usage.get('reasoning_tokens', 0),
+                'cached_tokens': token_usage.get('cached_tokens', 0)
+            }
+
+            # Save judgment prompt for debugging
+            audit_result['judgment_prompt'] = judgment_prompt
+            audit_result['extracted_observations'] = extracted_observations
+
+            logger.info(f"Completed judgment for transaction {transaction_id}")
+            return audit_result
+
+        except Exception as e:
+            logger.error(f"Error judging transaction {transaction_data.get('transaction_id')}: {str(e)}")
+            raise
+
+    def _audit_single_transaction_two_phase(
+        self,
+        transaction_data: Dict[str, Any],
+        audit_rules: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """
+        Two-phase audit process:
+        Phase 1: Extract observations from each record (parallel, nested threading)
+        Phase 2: Judge transaction based on aggregated observations (single call)
+        """
+        try:
+            transaction_id = transaction_data.get('transaction_id')
+            logger.info(f"Starting two-phase audit for transaction {transaction_id}")
+
+            # Phase 1: Extract observations from all records (with nested threading)
+            extracted_observations = self._extract_all_records_observations(transaction_data)
+
+            if not extracted_observations:
+                logger.warning(f"No observations extracted for transaction {transaction_id}")
+                return self._create_default_audit_result(transaction_id, error="No observations could be extracted")
+
+            # Phase 2: Make judgment based on observations
+            audit_result = self._judge_transaction_with_observations(
+                transaction_data,
+                extracted_observations,
+                audit_rules
+            )
+
+            logger.info(f"Completed two-phase audit for transaction {transaction_id}")
+            return audit_result
+
+        except Exception as e:
+            logger.error(f"Error in two-phase audit for transaction {transaction_data.get('transaction_id')}: {str(e)}")
+            return self._create_default_audit_result(
+                transaction_data.get('transaction_id'),
+                error=f"Two-phase audit failed: {str(e)}"
+            )
 
     def _audit_single_transaction(self, transaction_data: Dict[str, Any], audit_rules: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Audit a single transaction using Gemini API with structured record-image grouping"""
@@ -902,6 +1254,11 @@ class TransactionAuditService:
             updated_count = 0
 
             for result in audit_results:
+                # Skip transactions that failed to audit (should remain pending)
+                if result.get('skip_status_update', False):
+                    logger.warning(f"Skipping status update for transaction {result['transaction_id']} due to audit failure: {result.get('error')}")
+                    continue
+
                 transaction_id = result['transaction_id']
                 audit_status = result['audit_status']
 
@@ -938,7 +1295,7 @@ class TransactionAuditService:
                     transaction.reject_triggers = reject_triggers
                     transaction.warning_triggers = []  # Reset warnings since we now only track rejections
 
-                    # Save ultra-compact audit response (only essential data)
+                    # Save comprehensive audit response including record-level extractions
                     compact_audit = {
                         's': audit_status,  # status
                         'v': [  # violations (rule_db_id, message, and transaction_record_id)
@@ -950,7 +1307,9 @@ class TransactionAuditService:
                             for tr in triggered_rules if tr.get('has_reject')
                         ],
                         't': result.get('token_usage', {}),  # token_usage
-                        'at': result.get('audited_at')  # audited_at
+                        'at': result.get('audited_at'),  # audited_at
+                        'obs': result.get('extracted_observations', []),  # record-level observations from Phase 1
+                        'jdg': result.get('judgment_prompt', '')[:500] if result.get('judgment_prompt') else ''  # judgment prompt (truncated)
                     }
 
                     transaction.ai_audit_note = json.dumps(compact_audit, ensure_ascii=False)
@@ -994,16 +1353,17 @@ class TransactionAuditService:
             return {}
 
     def _create_default_audit_result(self, transaction_id: int, error: str = None) -> Dict[str, Any]:
-        """Create a default audit result for error cases"""
+        """Create a default audit result for error cases - marks as failed to skip status update"""
         return {
             'transaction_id': transaction_id,
-            'audit_status': 'approved',  # Default to approved on error to avoid blocking
+            'audit_status': 'failed',  # Mark as failed - transaction will stay pending
             'triggered_rules': [],
             'reject_messages': [],
             'error': error,
             'audited_at': datetime.now(timezone.utc).isoformat(),
             'total_rules_evaluated': 0,
             'rules_triggered': 0,
+            'skip_status_update': True,  # Flag to skip updating transaction status
             'token_usage': {
                 'input_tokens': 0,
                 'output_tokens': 0,

@@ -32,7 +32,7 @@
   "api_settings": {
     "model_name": "gemini-2.5-flash-lite",
     "temperature": 0.0,
-    "thinking_budget": 2048,
+    "thinking_budget": 512,
     "response_suffix": "\n\n=== YOUR RESPONSE ===\nProvide ONLY the JSON response in this exact format:\n{\"tr_id\": <transaction_id>, \"violations\": [<array of violations or empty>]}\n\nDo not include any explanation or text outside the JSON."
   },
   "metadata": {

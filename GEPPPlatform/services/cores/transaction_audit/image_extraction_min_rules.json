@@ -1,0 +1,111 @@
+{
+  "metadata": {
+    "version": "1.0.0",
+    "description": "Minimized image extraction rules - optimized for token efficiency",
+    "purpose": "Extract only critical information to minimize token usage while maintaining accuracy",
+    "mode": "minimal",
+    "created_date": "2025-11-06",
+    "last_modified": "2025-11-06"
+  },
+  "extraction_instructions": {
+    "system_instruction": "Extract key waste observations. Focus on: 1) What items you see 2) Any contamination 3) Visibility. Be concise but thorough with small objects.",
+    "guidelines": [
+      "List all items including small objects (straws, batteries, caps)",
+      "Note contamination/mixing",
+      "Assess visibility %",
+      "Flag hazardous items immediately"
+    ]
+  },
+  "critical_checks": {
+    "priority_1_hazardous": {
+      "check": "Are batteries, bulbs, sprays, or electronics visible?",
+      "action": "If YES: Flag immediately as red flag. List specific items.",
+      "importance": "CRITICAL - Single battery in wrong category = violation"
+    },
+    "priority_2_contamination": {
+      "check": "Is waste pure or mixed? Any small contaminants (straws, containers)?",
+      "action": "Note all mixing and contamination",
+      "importance": "CRITICAL - Straws/containers in food waste = violation"
+    },
+    "priority_3_visibility": {
+      "check": "Can you identify waste type? (0-100%)",
+      "action": "Give visibility % and assessment",
+      "importance": "LOW - Only flag if completely opaque (0%)"
+    },
+    "priority_4_small_objects": {
+      "check": "Check corners, edges, between items for small objects",
+      "focus": "Batteries, bulbs, straws, utensils, caps, small containers",
+      "action": "List all small objects found",
+      "importance": "CRITICAL - Small objects often cause violations"
+    }
+  },
+  "extraction_prompt_template_minimal": "Analyze waste image. Extract:\n\n1. ITEMS (include ALL, especially small):\n   - Main waste items?\n   - Small objects (batteries, straws, utensils, caps)?\n   - Any hazardous (batteries/bulbs/sprays)?\n\n2. CONTAMINATION:\n   - Pure or mixed?\n   - Food + containers/packaging?\n   - Different waste types mixed?\n\n3. CONTAINER:\n   - Bag type/color?\n   - Open/closed?\n   - Layers?\n\n4. VISIBILITY:\n   - Can identify waste type? %?\n\n5. RED FLAGS:\n   - Hazardous in wrong category?\n   - Straws/utensils in food?\n   - Containers with food?\n   - Obvious mismatches?\n\nJSON format:\n{\n  \"record_id\": <id>,\n  \"items\": \"<list all including small objects>\",\n  \"hazardous\": \"<batteries/bulbs/sprays or None>\",\n  \"contamination\": \"<pure/mixed/contaminated>\",\n  \"container\": \"<type, color, open/closed>\",\n  \"visibility\": \"<% and can identify Y/N>\",\n  \"red_flags\": [\"<list or empty>\"]\n}",
+  "output_format": {
+    "structure": "Minimal JSON with only essential fields",
+    "template": {
+      "record_id": "<id>",
+      "items": "<comprehensive list including small objects>",
+      "hazardous": "<specific hazardous items or None>",
+      "contamination": "<pure/mixed/contaminated with details>",
+      "container": "<type, color, open/closed, layers>",
+      "visibility": "<percentage and assessment>",
+      "red_flags": ["<critical issues only>"]
+    },
+    "max_length": "Keep responses concise - 200-300 words max"
+  },
+  "small_object_focus": {
+    "critical_items": [
+      "Batteries (any size) - CRITICAL",
+      "Light bulbs/CFLs - CRITICAL",
+      "Spray cans/aerosols - CRITICAL",
+      "Plastic straws/utensils - CRITICAL for food waste",
+      "Bottle caps/lids",
+      "Small containers/packaging",
+      "Electronics parts",
+      "Wires/cables"
+    ],
+    "detection_note": "Check corners, edges, between items. One small battery = violation."
+  },
+  "contamination_patterns": {
+    "food_waste_violations": [
+      "Straws/utensils present",
+      "Food in containers (not just outer bag)",
+      "Inner packaging/bags",
+      "Non-compostable items"
+    ],
+    "hazardous_anywhere": [
+      "Batteries in non-hazardous = RED FLAG",
+      "Bulbs in non-hazardous = RED FLAG",
+      "Sprays in non-hazardous = RED FLAG"
+    ]
+  },
+  "response_examples": {
+    "clean_example": {
+      "record_id": 123,
+      "items": "Vegetable scraps, fruit peels, rice - all pure organic",
+      "hazardous": "None",
+      "contamination": "Pure, outer bag only",
+      "container": "Clear bag, open, 1 layer",
+      "visibility": "95% - clearly identifiable",
+      "red_flags": []
+    },
+    "violation_example": {
+      "record_id": 456,
+      "items": "Food scraps + 2 plastic straws + foam container",
+      "hazardous": "None",
+      "contamination": "Contaminated - straws & container mixed with food",
+      "container": "White bag, closed, 1 layer",
+      "visibility": "80% - can see contents",
+      "red_flags": ["Plastic straws in food waste", "Foam container present"]
+    },
+    "hazardous_violation_example": {
+      "record_id": 789,
+      "items": "Cardboard boxes BUT small AA battery in corner",
+      "hazardous": "1 AA battery visible",
+      "contamination": "Hazardous item in recyclables",
+      "container": "Box, no bag",
+      "visibility": "100% - all visible",
+      "red_flags": ["CRITICAL: Battery in recyclables - should be hazardous"]
+    }
+  }
+}

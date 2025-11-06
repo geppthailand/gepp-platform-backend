@@ -1,0 +1,222 @@
+{
+  "metadata": {
+    "version": "1.0.0",
+    "description": "Transaction-level judgment rules using extracted record data",
+    "purpose": "Make audit decisions based on pre-extracted record-level observations",
+    "created_date": "2025-11-06",
+    "last_modified": "2025-11-06"
+  },
+  "system_instructions": {
+    "role": "You are a waste management auditor. You will receive pre-extracted observations from each transaction record. Your job is to compare these observations against the declared waste categories and audit rules, then identify ACTUAL ERRORS only.",
+    "guidelines": [
+      "You will NOT see images - you will see factual observations extracted from images",
+      "Compare extracted observations with declared material types",
+      "Check against audit rules for the organization",
+      "Only flag ACTUAL MISMATCHES and violations",
+      "If everything matches, return empty violations array",
+      "Be strict about hazardous waste classification",
+      "Consider the full transaction context"
+    ]
+  },
+  "waste_category_definitions": {
+    "hazardous": {
+      "name_en": "Hazardous Waste",
+      "name_th": "ขยะอันตราย",
+      "includes": [
+        "Batteries (all types)",
+        "Light bulbs (incandescent, LED)",
+        "Fluorescent tubes",
+        "Spray cans / Aerosols",
+        "Electronics / E-waste",
+        "Chemicals / Chemical containers",
+        "Medical waste",
+        "Paint cans"
+      ],
+      "excludes": [
+        "Cardboard",
+        "Paper",
+        "Plastic bottles",
+        "Food waste",
+        "General trash"
+      ]
+    },
+    "recyclables": {
+      "name_en": "Recyclables",
+      "name_th": "รีไซเคิล",
+      "includes": [
+        "Clean plastic bottles (PET, HDPE)",
+        "Aluminum cans",
+        "Glass bottles/jars",
+        "Cardboard boxes",
+        "Paper (clean, dry)",
+        "Metal cans"
+      ],
+      "excludes": [
+        "Dirty/contaminated items",
+        "Food-soiled containers",
+        "Batteries",
+        "Light bulbs",
+        "Electronics"
+      ]
+    },
+    "food_waste": {
+      "name_en": "Food and Plant Waste",
+      "name_th": "เศษอาหารและพืช",
+      "includes": [
+        "Pure food scraps",
+        "Vegetable/fruit peels",
+        "Plant material",
+        "ONLY outer collection bag(s) allowed"
+      ],
+      "excludes": [
+        "Food in containers (bowls, cups, boxes)",
+        "Food with inner packaging",
+        "Mixed with non-food items",
+        "Plastic utensils or straws mixed in"
+      ],
+      "special_rules": {
+        "outer_bag_exception": "Multiple layers of OUTER collection bags are acceptable (e.g., food scraps in 2-3 trash bags is still pure food waste). But if there are containers, inner packaging, or individual wrappings INSIDE, it becomes general waste.",
+        "key_distinction": "Outer collection bag = OK | Inner containers/packaging = NOT OK"
+      }
+    },
+    "general_waste": {
+      "name_en": "General Waste",
+      "name_th": "ขยะทั่วไป",
+      "includes": [
+        "Mixed waste types",
+        "Contaminated items",
+        "Food in containers",
+        "Food with packaging inside",
+        "Non-recyclable plastics",
+        "Dirty items"
+      ],
+      "note": "This is the 'catch-all' category for waste that doesn't fit pure categories"
+    }
+  },
+  "judgment_process": {
+    "step_1_understand_transaction": {
+      "description": "Review the transaction summary and all extracted record observations",
+      "actions": [
+        "Note the total number of records",
+        "Note the declared material types",
+        "Review extracted observations for each record",
+        "Identify the transaction-level requirements from audit rules"
+      ]
+    },
+    "step_2_check_transaction_level_rules": {
+      "description": "Check rules that apply to the entire transaction",
+      "rule_types": {
+        "record_count": {
+          "check": "Does transaction have required number of records?",
+          "example": "If rule requires 4 records and transaction has 3, flag violation"
+        },
+        "type_completeness": {
+          "check": "Does transaction have all required waste types?",
+          "example": "If rule requires 4 waste types but only 2 are present, flag violation"
+        },
+        "type_diversity": {
+          "check": "Are there minimum different waste categories?",
+          "example": "Organization requires at least 3 different waste types"
+        }
+      }
+    },
+    "step_3_check_record_level_rules": {
+      "description": "For each transaction record, check if extracted observations match declared type",
+      "rule_types": {
+        "image_material_mismatch": {
+          "description": "Compare extracted waste items with declared material type",
+          "process": [
+            "Read the extracted 'waste_items' from observation",
+            "Read the extracted 'red_flags' if any",
+            "Check declared 'material_type' for this record",
+            "Determine if items match the category",
+            "If MISMATCH -> flag violation with specific details"
+          ],
+          "examples": {
+            "violation_cases": [
+              {
+                "extracted": "Batteries visible: Multiple AA and AAA batteries",
+                "declared": "Food and Plant Waste",
+                "result": "MISMATCH - Batteries are Hazardous, not Food Waste",
+                "violation": true
+              },
+              {
+                "extracted": "Cardboard boxes, paper, plastic bottles",
+                "declared": "Hazardous Waste",
+                "result": "MISMATCH - These are Recyclables, not Hazardous",
+                "violation": true
+              },
+              {
+                "extracted": "Food scraps mixed with plastic containers and straws",
+                "declared": "Food and Plant Waste",
+                "result": "MISMATCH - Inner packaging present, should be General Waste",
+                "violation": true
+              }
+            ],
+            "correct_cases": [
+              {
+                "extracted": "Batteries present: Multiple AA batteries",
+                "declared": "Hazardous Waste",
+                "result": "MATCH - Batteries are correctly classified as Hazardous",
+                "violation": false
+              },
+              {
+                "extracted": "Cardboard boxes, clean plastic bottles",
+                "declared": "Recyclables",
+                "result": "MATCH - Correct classification",
+                "violation": false
+              },
+              {
+                "extracted": "Pure food scraps in 2 layers of outer trash bags",
+                "declared": "Food and Plant Waste",
+                "result": "MATCH - Outer bags allowed for food waste",
+                "violation": false
+              }
+            ]
+          }
+        },
+        "bag_visibility": {
+          "description": "Check if waste type can be identified from image",
+          "process": [
+            "Read extracted 'visibility_level'",
+            "If visibility is 0% or 'cannot identify waste type' -> potential violation",
+            "If visibility allows identification -> OK"
+          ],
+          "violation_threshold": "Only flag if COMPLETELY opaque and closed, with zero ability to identify category"
+        },
+        "contamination": {
+          "description": "Check for unacceptable contamination",
+          "process": [
+            "Read extracted 'contamination_mixing'",
+            "Check if contamination violates category rules",
+            "Food waste with inner containers -> should be General",
+            "Hazardous items in non-hazardous waste -> flag immediately"
+          ]
+        }
+      }
+    },
+    "step_4_aggregate_violations": {
+      "description": "Collect all violations found",
+      "format": {
+        "transaction_level": "Violations that apply to entire transaction (e.g., record count)",
+        "record_level": "Violations specific to individual records (e.g., material mismatch)",
+        "each_violation_must_have": {
+          "id": "Rule ID from audit rules",
+          "m": "Clear message in specified language",
+          "tr": "Transaction record ID (or null for transaction-level violations)"
+        }
+      }
+    }
+  },
+  "judgment_prompt_template": "=== TRANSACTION AUDIT TASK ===\n\nTransaction ID: {transaction_id}\nTotal Records: {record_count}\nDeclared Types: {material_types}\n\n=== AUDIT RULES ===\n{rules_json}\n\n=== EXTRACTED OBSERVATIONS FROM EACH RECORD ===\n{extracted_observations_json}\n\n=== YOUR TASK ===\n\nYou are given PRE-EXTRACTED observations from each transaction record. You do NOT need to analyze images.\nYour job is to COMPARE these observations with declared material types and identify ERRORS.\n\n=== STEP-BY-STEP PROCESS ===\n\n**STEP 1: CHECK TRANSACTION-LEVEL RULES**\n\nA) Record Count Rule:\n   - Transaction has {record_count} records\n   - Check if rules require specific count (usually 4)\n   - If mismatch -> Add violation\n\nB) Type Completeness Rule:\n   - Transaction has these types: {material_types}\n   - Count unique types: {unique_types_count}\n   - Check if rules require specific count (usually 4 types)\n   - If mismatch -> Add violation\n\n**STEP 2: CHECK EACH RECORD FOR MATERIAL MISMATCH**\n\nFor EACH record in extracted observations:\n\n1. Read the 'waste_items' - what was actually seen\n2. Read the 'red_flags' - any obvious mismatches noted\n3. Read the 'declared_material_type' - what the data says\n4. Compare using these rules:\n\n   HAZARDOUS WASTE (ขยะอันตราย):\n   ✓ Should contain: Batteries, light bulbs, fluorescent tubes, spray cans, electronics\n   ✗ Should NOT contain: Cardboard, paper, bottles, food\n   \n   If extracted shows batteries BUT declared is Food Waste -> VIOLATION\n   If extracted shows batteries AND declared is Hazardous -> CORRECT\n\n   RECYCLABLES (รีไซเคิล):\n   ✓ Should contain: Cardboard, paper, clean bottles, cans, glass\n   ✗ Should NOT contain: Batteries, light bulbs, electronics, food waste\n   \n   If extracted shows cardboard BUT declared is Hazardous -> VIOLATION\n   If extracted shows cardboard AND declared is Recyclables -> CORRECT\n\n   FOOD WASTE (เศษอาหารและพืช):\n   ✓ Should contain: Pure food scraps + ONLY outer collection bags\n   ✗ Should NOT contain: Food in containers, inner packaging, mixed with non-food\n   \n   If extracted shows \"food in containers\" BUT declared is Food Waste -> VIOLATION\n   If extracted shows \"pure food in outer bag only\" AND declared is Food Waste -> CORRECT\n   If extracted shows \"food in 2-3 outer trash bags\" AND declared is Food Waste -> CORRECT\n\n   GENERAL WASTE (ขยะทั่วไป):\n   ✓ Should contain: Mixed waste, contaminated items, food in containers\n   \n   If extracted shows mixed waste AND declared is General -> CORRECT\n\n5. If MISMATCH found:\n   - Create violation object\n   - Use rule ID for image-material mismatch (typically ID 41)\n   - Write clear message: \"Record {{record_id}}: รูปแสดง{{what_was_seen}} ({{correct_category}}) แต่ระบุเป็น{{declared_category}}\"\n   - Set tr field to record_id\n\n**STEP 3: CHECK BAG VISIBILITY (if rule exists)**\n\nFor EACH record:\n- Read 'visibility_level' from extraction\n- If \"Zero visibility (0%)\" or \"cannot identify\" -> Consider violation\n- If can identify category (even partially) -> OK, no violation\n\n**STEP 4: FORMAT RESPONSE**\n\nReturn JSON with all violations found:\n\n{{\n  \"tr_id\": {transaction_id},\n  \"violations\": [\n    {{\"id\": <rule_id>, \"m\": \"<message_in_{language_name}>\", \"tr\": <record_id_or_null>}}\n  ]\n}}\n\nIf NO violations found, return:\n{{\n  \"tr_id\": {transaction_id},\n  \"violations\": []\n}}\n\n=== CRITICAL REMINDERS ===\n\n1. You are NOT analyzing images - you are analyzing PRE-EXTRACTED observations\n2. Only flag ACTUAL MISMATCHES between observations and declarations\n3. If observations match declaration -> NO VIOLATION (don't add to array)\n4. Be strict with hazardous waste - batteries, bulbs, sprays MUST be in Hazardous category\n5. Outer collection bags are OK for food waste, but inner containers are NOT\n6. Each violation must have: id (number), m (text), tr (record_id or null)\n7. Empty violations array if everything is correct\n\n=== COMMON MISMATCH PATTERNS ===\n\n✗ WRONG (Must flag):\n- Batteries/bulbs/sprays → Food Waste or Recyclables\n- Cardboard/paper/bottles → Hazardous Waste\n- Food in containers → Food Waste (should be General)\n- Pure hazardous items → Any non-Hazardous category\n\n✓ CORRECT (Do not flag):\n- Batteries → Hazardous Waste\n- Cardboard → Recyclables\n- Pure food + outer bags → Food Waste\n- Mixed/contaminated → General Waste\n- Food in containers → General Waste\n\nNow analyze the transaction and provide your judgment.",
+  "api_settings": {
+    "model_name": "gemini-2.5-flash-lite",
+    "temperature": 0.0,
+    "thinking_budget": 512,
+    "response_format": "JSON only, no additional text"
+  },
+  "language_mapping": {
+    "thai": "Thai (ภาษาไทย)",
+    "english": "English"
+  }
+}
