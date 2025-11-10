@@ -5,6 +5,7 @@ Users models package - User, location, and organizational hierarchy
 from .user_location import UserLocation, user_subusers
 from .user_related import UserBank, UserSubscription, UserInputChannel, UserRole, UserRoleEnum
 from .integration_tokens import IntegrationToken
+from .user_location_materials import UserLocationMaterial
 
 __all__ = [
     # Main user-location model
@@ -14,5 +15,8 @@ __all__ = [
     'UserBank', 'UserSubscription', 'UserInputChannel', 'UserRole', 'UserRoleEnum',
 
     # Integration tokens
-    'IntegrationToken'
+    'IntegrationToken',
+
+    # Associations
+    'UserLocationMaterial'
 ]

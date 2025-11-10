@@ -55,7 +55,7 @@ __all__ = [
     # Core models
     'LocationCountry', 'LocationRegion', 'LocationProvince',
     'LocationDistrict', 'LocationSubdistrict',
-    'Bank', 'Currency', 'Locale', 'Material', 'MainMaterial', 'MaterialCategory',
+    'Bank', 'Currency', 'Locale', 'Material', 'MainMaterial', 'MaterialCategory', 'IoTDevice',
     'MaterialTag', 'MaterialTagGroup',
     'Nationality', 'PhoneNumberCountryCode',
     'Permission', 'PermissionType',
@@ -67,7 +67,7 @@ __all__ = [
     
     # User models
     'UserLocation', 'user_subusers',
-    'UserBank', 'UserSubscription', 'UserInputChannel', 'IntegrationToken',
+    'UserBank', 'UserSubscription', 'UserInputChannel', 'IntegrationToken', 'UserLocationMaterial',
     
     # Transaction models
     'Transaction', 'TransactionStatus', 'TransactionPriority',

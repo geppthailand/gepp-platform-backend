@@ -12,6 +12,8 @@ from .user_crud import UserCRUD
 from .user_permissions import UserPermissionService
 from ....models.users.user_location import UserLocation
 from ....models.users.user_related import UserRoleEnum
+from ....models.users.user_location_materials import UserLocationMaterial
+from ....models.cores.references import Material
 
 
 class UserService:
@@ -703,83 +705,63 @@ class UserService:
             role=role,
             organization_id=organization_id
         )
+        # Build material list per location in one query
+        location_ids = [loc.id for loc in locations]
+        materials_map: Dict[int, List[Dict[str, Any]]] = {loc_id: [] for loc_id in location_ids}
 
-        # Serialize location data similar to get_locations
-        location_data: List[Dict[str, Any]] = []
+        if location_ids:
+            rows = (
+                self.db.query(
+                    UserLocationMaterial.location_id,
+                    Material.id,
+                    Material.name_en,
+                    Material.name_th,
+                    Material.category_id,
+                    Material.main_material_id,
+                    Material.unit_name_th,
+                    Material.unit_name_en,
+                    Material.unit_weight,
+                )
+                .join(Material, UserLocationMaterial.materials_id == Material.id)
+                .filter(
+                    UserLocationMaterial.location_id.in_(location_ids),
+                    UserLocationMaterial.deleted_date.is_(None)
+                )
+                .all()
+            )
+
+            for (
+                location_id,
+                material_id,
+                name_en,
+                name_th,
+                category_id,
+                main_material_id,
+                unit_name_th,
+                unit_name_en,
+                unit_weight,
+            ) in rows:
+                materials_map.setdefault(location_id, []).append({
+                    'material_id': material_id,
+                    'name_en': name_en,
+                    'name_th': name_th,
+                    'category_id': category_id,
+                    'main_material_id': main_material_id,
+                    'unit_name_th': unit_name_th,
+                    'unit_name_en': unit_name_en,
+                    'unit_weight': float(unit_weight) if unit_weight is not None else None,
+                })
+
+        # Reduced response: only id, display_name, materials
+        result: List[Dict[str, Any]] = []
         for location in locations:
-            location_dict = {
-                'id': location.id,
-                'is_active': location.is_active,
-                'created_date': location.created_date.isoformat() if location.created_date else None,
-                'updated_date': location.updated_date.isoformat() if location.updated_date else None,
-                'deleted_date': location.deleted_date.isoformat() if location.deleted_date else None,
-
-                'is_user': location.is_user,
-                'is_location': location.is_location,
-
-                'name_th': location.name_th,
-                'name_en': location.name_en,
+            result.append({
+                'origin_id': location.id,
                 'display_name': location.display_name,
+                'materials': materials_map.get(location.id, [])
+            })
 
-                'is_email_active': location.is_email_active,
-                'email_notification': location.email_notification,
-                'phone': location.phone,
-                'facebook_id': location.facebook_id,
-                'apple_id': location.apple_id,
-                'google_id_gmail': location.google_id_gmail,
-
-                'platform': location.platform.value if location.platform else None,
-                'organization_role_id': location.organization_role_id,
-
-                'coordinate': location.coordinate,
-                'address': location.address,
-                'postal_code': location.postal_code,
-                'country_id': location.country_id,
-                'province_id': location.province_id,
-                'district_id': location.district_id,
-                'subdistrict_id': location.subdistrict_id,
-
-                'business_type': location.business_type,
-                'business_industry': location.business_industry,
-                'business_sub_industry': location.business_sub_industry,
-                'company_name': location.company_name,
-                'company_phone': location.company_phone,
-                'company_email': location.company_email,
-                'tax_id': location.tax_id,
-
-                'functions': location.functions,
-                'type': location.type,
-                'hub_type': location.hub_type,
-                'population': location.population,
-                'material': location.material,
-
-                'profile_image_url': location.profile_image_url,
-                'national_id': location.national_id,
-                'national_card_image': location.national_card_image,
-                'business_registration_certificate': location.business_registration_certificate,
-
-                'organization_id': location.organization_id,
-                'parent_location_id': location.parent_location_id,
-                'created_by_id': location.created_by_id,
-                'auditor_id': location.auditor_id,
-
-                'parent_user_id': location.parent_user_id,
-                'organization_level': location.organization_level,
-                'organization_path': location.organization_path,
-
-                'sub_users': location.sub_users,
-                'members': location.members,
-                'locale': location.locale,
-                'nationality_id': location.nationality_id,
-                'currency_id': location.currency_id,
-                'phone_code_id': location.phone_code_id,
-                'note': location.note,
-                'expired_date': location.expired_date.isoformat() if location.expired_date else None,
-                'footprint': float(location.footprint) if location.footprint else None,
-            }
-            location_data.append(location_dict)
-
-        return location_data
+        return result
 
     def _get_setup_location_ids(self, organization_id: int) -> List[int]:
         """

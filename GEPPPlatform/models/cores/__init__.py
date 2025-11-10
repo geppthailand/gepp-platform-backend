@@ -11,6 +11,7 @@ from .references import (
     MaterialTag, MaterialTagGroup,
     Nationality, PhoneNumberCountryCode
 )
+from .iot_devices import IoTDevice
 from .permissions import Permission, PermissionType
 from .translations import Translation
 from .roles import SystemRole, SystemPermission
@@ -24,6 +25,7 @@ __all__ = [
     'Bank', 'Currency', 'Locale', 'Material', 'MainMaterial', 'MaterialCategory',
     'MaterialTag', 'MaterialTagGroup',
     'Nationality', 'PhoneNumberCountryCode',
+    'IoTDevice',
     
     # Permissions
     'Permission', 'PermissionType',

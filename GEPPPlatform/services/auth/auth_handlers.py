@@ -19,6 +19,7 @@ from GEPPPlatform.models.users.user_location import UserLocation
 from GEPPPlatform.models.users.integration_tokens import IntegrationToken
 from GEPPPlatform.models.subscriptions.organizations import Organization, OrganizationInfo
 from GEPPPlatform.models.subscriptions.subscription_models import SubscriptionPlan, Subscription
+from GEPPPlatform.models.cores.iot_devices import IoTDevice
 from ..cores.organizations.organization_role_presets import OrganizationRolePresets
 from ...exceptions import (
     APIException,
@@ -75,6 +76,34 @@ class AuthHandlers:
         auth_token = jwt.encode(auth_payload, self.jwt_secret, algorithm='HS256')
         refresh_token = jwt.encode(refresh_payload, self.jwt_secret, algorithm='HS256')
         
+        return {
+            'auth_token': auth_token,
+            'refresh_token': refresh_token
+        }
+
+    def generate_device_tokens(self, device_id: int, device_name: str) -> Dict[str, str]:
+        """Generate JWT auth_token and refresh_token for IoT devices"""
+        now = datetime.now(timezone.utc)
+
+        auth_payload = {
+            'device_id': device_id,
+            'device_name': device_name,
+            'type': 'device',
+            'exp': now + timedelta(minutes=15),
+            'iat': now
+        }
+
+        refresh_payload = {
+            'device_id': device_id,
+            'device_name': device_name,
+            'type': 'device_refresh',
+            'exp': now + timedelta(days=7),
+            'iat': now
+        }
+
+        auth_token = jwt.encode(auth_payload, self.jwt_secret, algorithm='HS256')
+        refresh_token = jwt.encode(refresh_payload, self.jwt_secret, algorithm='HS256')
+
         return {
             'auth_token': auth_token,
             'refresh_token': refresh_token
@@ -601,6 +630,59 @@ class AuthHandlers:
                     'email': email,
                     'displayName': user.display_name,
                     'organizationId': user.organization_id
+                }
+            }
+
+        except Exception as e:
+            raise APIException(str(e))
+
+    def login_iot_device(self, data: Dict[str, Any], **kwargs) -> Dict[str, Any]:
+        """Login an IoT device using device_name or MAC addresses and password"""
+        try:
+            device_name = data.get('device_name')
+            mac_bt = data.get('mac_address_bluetooth')
+            mac_tablet = data.get('mac_address_tablet')
+            password = data.get('password')
+
+            if not password or not (device_name or mac_bt or mac_tablet):
+                raise ValidationException('Provide password and one of device_name, mac_address_bluetooth, mac_address_tablet')
+
+            session = self.db_session
+
+            # Build base query
+            query = session.query(IoTDevice).filter(IoTDevice.is_active == True)
+
+            # Apply identifier filters (priority: device_name, mac bt, mac tablet)
+            if device_name:
+                query = query.filter(IoTDevice.device_name == device_name)
+            elif mac_bt:
+                query = query.filter(IoTDevice.mac_address_bluetooth == mac_bt)
+            else:
+                query = query.filter(IoTDevice.mac_address_tablet == mac_tablet)
+
+            device = query.first()
+
+            if not device:
+                raise UnauthorizedException('Invalid device credentials')
+
+            try:
+                if not device.password or not self.verify_password(password, device.password):
+                    raise UnauthorizedException('Invalid device credentials')
+            except Exception:
+                raise UnauthorizedException('Invalid device credentials')
+
+            tokens = self.generate_device_tokens(device.id, device.device_name)
+
+            return {
+                'success': True,
+                'auth_token': tokens['auth_token'],
+                'refresh_token': tokens['refresh_token'],
+                'token_type': 'Bearer',
+                'expires_in': 900,
+                'device': {
+                    'id': device.id,
+                    'device_name': device.device_name,
+                    'device_type': device.device_type
                 }
             }
 

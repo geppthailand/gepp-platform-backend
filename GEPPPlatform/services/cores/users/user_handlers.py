@@ -104,10 +104,6 @@ def handle_user_routes(event: Dict[str, Any], data: Dict[str, Any], **params) ->
         # Create new user
         return handle_create_user(user_service, data, current_user_id)
 
-    elif '/api/locations/my-memberships' in path and method == 'GET':
-        # Get locations where current user appears in members list (optionally by role)
-        return handle_get_locations_by_membership(user_service, query_params, current_user)
-
     elif '/api/locations' == path and method == 'GET':
         # Get user locations (is_location = True)
         return handle_get_locations(user_service, query_params, current_user, headers)
@@ -528,36 +524,6 @@ def handle_get_locations(user_service: UserService, query_params: Dict[str, Any]
 
     except Exception as e:
         raise APIException(f'Error fetching locations: {str(e)}')
-
-
-def handle_get_locations_by_membership(user_service: UserService, query_params: Dict[str, Any], current_user: Dict[str, Any]) -> Dict[str, Any]:
-    """Handle GET /api/locations/my-memberships - Get locations where current user is in members list (default role=dataInput)"""
-    try:
-        if not current_user or not current_user.get('user_id'):
-            raise UnauthorizedException('Unauthorized')
-
-        role = (query_params.get('role') or 'dataInput').strip()
-        organization_id = current_user.get('organization_id') if current_user else None
-
-        if not organization_id:
-            raise NotFoundException('User is not part of any organization')
-
-        locations = user_service.get_locations_by_member(
-            member_user_id=current_user['user_id'],
-            role=role,
-            organization_id=organization_id
-        )
-
-        return {
-            'success': True,
-            'data': locations,
-            'total': len(locations),
-            'organization_id': organization_id,
-            'role': role
-        }
-
-    except Exception as e:
-        raise APIException(f'Error fetching member locations: {str(e)}')
 
 def handle_get_user_profile(user_service: UserService, current_user_id: str) -> Dict[str, Any]:
     """Handle GET /api/users/profile - Get current user's profile"""

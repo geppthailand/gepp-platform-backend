@@ -1,6 +1,5 @@
--- Migration: Create scales table
--- Date: 2025-10-23
--- Version: 052
+-- Migration: Create iot_devices table
+-- Date: 2025-11-04
 
 -- Create iot_devices table
 CREATE TABLE IF NOT EXISTS iot_devices (

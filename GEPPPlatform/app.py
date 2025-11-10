@@ -134,7 +134,7 @@ def main(event, context):
             elif path == "/health" or "/health" in path:
                 # Health check endpoint (no authorization required)
                 results = {"status": "healthy", "timestamp": datetime.now().isoformat(), "method": http_method}
-
+                
             else:
                 # All other routes require authorization
                 auth_header = event.get('headers', {}).get('Authorization', '') or event.get('headers', {}).get('authorization', '')
@@ -150,7 +150,6 @@ def main(event, context):
                 # Create AuthHandlers instance for token verification
                 auth_handler = AuthHandlers(session)
                 token_data = auth_handler.verify_jwt_token(token, path)
-                print(token_data)
 
                 if token_data is None:
                     return {
@@ -158,19 +157,53 @@ def main(event, context):
                         "headers": headers,
                         "body": json.dumps({'success': False, 'message': 'Invalid token or insufficient permissions'})
                     }
+                if '/api/iot-devices' in path:
+                    current_device = {
+                        'device_id': token_data['device_id'],
+                        'token_data': token_data  # Include full token data for future use
+                    }
+                    commonParams['current_device'] = current_device
+                    # Optionally also decode a user token provided in the request body
+                    try:
+                        if isinstance(body, dict):
+                            user_token = body.get('user_token') or body.get('userToken') or body.get('token')
+                        else:
+                            user_token = None
+                    except Exception:
+                        user_token = None
 
+                    if user_token:
+                        user_token_data = auth_handler.verify_jwt_token(user_token, path)
+                        if user_token_data and user_token_data.get('user_id'):
+                            current_user = {
+                                'user_id': user_token_data['user_id'],
+                                'organization_id': user_token_data.get('organization_id'),
+                                'email': user_token_data.get('email'),
+                                'token_data': user_token_data
+                            }
+                            commonParams['current_user'] = current_user
+                else:
                 # Extract full user info from JWT token and add to commonParams
-                current_user = {
-                    'user_id': token_data['user_id'],
-                    'organization_id': token_data.get('organization_id'),
-                    'email': token_data.get('email'),
-                    'token_data': token_data  # Include full token data for future use
-                }
-                commonParams['current_user'] = current_user
+                    current_user = {
+                        'user_id': token_data['user_id'],
+                        'organization_id': token_data.get('organization_id'),
+                        'email': token_data.get('email'),
+                        'token_data': token_data  # Include full token data for future use
+                    }
+                    commonParams['current_user'] = current_user
 
                 # Route to appropriate handler (all handlers can assume user is authenticated)
                 try:
-                    if "/api/users" in path or "/api/locations" in path:
+                    if "/api/iot-devices" in path:
+                        # Handle all IoT devices management routes
+                        from GEPPPlatform.services.cores.iot_devices.iot_devices_handlers import handle_iot_devices_routes
+
+                        iot_devices_result = handle_iot_devices_routes(event, data=body, **commonParams)
+                        results = {
+                            "success": True,
+                            "data": iot_devices_result
+                        }
+                    elif "/api/users" in path or "/api/locations" in path:
                         # Handle all user management routes
                         from GEPPPlatform.services.cores.users.user_handlers import handle_user_routes
 
@@ -198,16 +231,6 @@ def main(event, context):
                         results = {
                             "success": True,
                             "data": materials_result
-                        }
-
-                    elif "/api/locations" in path:
-                        # Handle all locations management routes
-                        from .services.cores.locations.locations_handlers import handle_locations_routes
-
-                        locations_result = handle_locations_routes(event, **commonParams)
-                        results = {
-                            "success": True,
-                            "data": locations_result
                         }
 
                     elif "/api/reports" in path:
