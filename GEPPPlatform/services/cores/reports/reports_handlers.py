@@ -7,6 +7,7 @@ from typing import Dict, Any, Optional, Tuple
 import csv
 import os
 import ast
+import math
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -1287,16 +1288,67 @@ def _handle_comparison_report(
     variables = _build_variables(left_grouped.get('material'), right_grouped.get('material'))
     score_rows = _load_scores_csv()
     computed_scores: list[Dict[str, Any]] = []
-    # Normalization helpers: map raw [0..1000] to [0..10], clamp outside, lower is worse
-    def _normalize_score_to_ten(raw_value: float, expected_min: float = 0.0, expected_max: float = 1000.0) -> float:
-        if expected_max <= expected_min:
-            return 0.0
-        normalized = (float(raw_value) - expected_min) / (expected_max - expected_min)
-        if normalized < 0.0:
-            normalized = 0.0
-        elif normalized > 1.0:
-            normalized = 1.0
-        return round(normalized * 10.0, 2)
+    raw_computations: list[Dict[str, Any]] = []
+
+    # Evaluate all formulas first so we can normalize using dataset-aware scaling.
+    for r in score_rows:
+        try:
+            score_id = int(r.get('id') or 0)
+        except Exception:
+            score_id = 0
+        score_name = (r.get('score_name') or '').strip()
+        description = (r.get('description') or '').strip()
+        reason = (r.get('reason') or '').strip()
+        formula = (r.get('formula') or '').strip()
+        value = _safe_eval_formula(formula, variables)
+        try:
+            raw_value = float(value)
+        except Exception:
+            raw_value = 0.0
+        raw_computations.append({
+            'id': score_id,
+            'score_name': score_name,
+            'description': description,
+            'formula': formula,
+            'raw_value': raw_value,
+            'reason': reason
+        })
+
+    finite_raw_values = [v['raw_value'] for v in raw_computations if math.isfinite(v['raw_value'])]
+    min_raw_value = min(finite_raw_values) if finite_raw_values else 0.0
+    max_raw_value = max(finite_raw_values) if finite_raw_values else 0.0
+
+    # Hyperbolic/Logistic normalization with range awareness mapping to [0..10]
+    def _normalize_score_to_ten(
+        raw_value: float,
+        min_value: float,
+        max_value: float,
+        *,
+        method: str = 'tanh',
+        steepness: float = 3.0
+    ) -> float:
+        if not math.isfinite(raw_value):
+            return 5.0
+        if not math.isfinite(min_value):
+            min_value = raw_value
+        if not math.isfinite(max_value):
+            max_value = raw_value
+        if max_value <= min_value:
+            return 5.0
+
+        span = max_value - min_value
+        scaled = (raw_value - min_value) / span  # may exceed 0..1 if value is outside observed range
+        centered = (scaled - 0.5) * 2.0
+        factor = max(min(steepness * centered, 60.0), -60.0)
+
+        if method == 'sigmoid':
+            transformed = 1.0 / (1.0 + math.exp(-factor))
+            normalized = transformed * 10.0
+        else:
+            transformed = math.tanh(factor)
+            normalized = (transformed + 1.0) * 5.0
+
+        return round(normalized, 2)
 
     def _classify_score_quality(score_0_to_10: float) -> str:
         # Simple, explainable bands; adjust if product needs different semantics
@@ -1311,31 +1363,23 @@ def _handle_comparison_report(
             return 'good'
         return 'excellent'
 
-    for r in score_rows:
-        try:
-            score_id = int(r.get('id') or 0)
-        except Exception:
-            score_id = 0
-        score_name = (r.get('score_name') or '').strip()
-        description = (r.get('description') or '').strip()
-        reason = (r.get('reason') or '').strip()
-        formula = (r.get('formula') or '').strip()
-        value = _safe_eval_formula(formula, variables)
-        normalized_value = _normalize_score_to_ten(value, expected_min=0.0, expected_max=1000.0)
+    for entry in raw_computations:
+        raw_value = entry['raw_value']
+        normalized_value = _normalize_score_to_ten(raw_value, min_raw_value, max_raw_value)
         rating = _classify_score_quality(normalized_value)
         is_good = normalized_value >= 6.0
         computed_scores.append({
-            'id': score_id,
-            'score_name': score_name,
-            'description': description,
-            'formula': formula,
+            'id': entry['id'],
+            'score_name': entry['score_name'],
+            'description': entry['description'],
+            'formula': entry['formula'],
             # Use normalized 0..10 scale for 'value' (lower is worse)
             'value': normalized_value,
             # Preserve raw value for debugging/analytics
-            'raw_value': round(float(value), 2),
+            'raw_value': round(float(raw_value), 2) if math.isfinite(raw_value) else 0.0,
             'rating': rating,
             'is_good': is_good,
-            'reason': reason
+            'reason': entry['reason']
         })
 
     # Prepare score values for recommendation evaluation
