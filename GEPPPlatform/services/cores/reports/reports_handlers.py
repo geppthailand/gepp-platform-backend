@@ -1287,6 +1287,30 @@ def _handle_comparison_report(
     variables = _build_variables(left_grouped.get('material'), right_grouped.get('material'))
     score_rows = _load_scores_csv()
     computed_scores: list[Dict[str, Any]] = []
+    # Normalization helpers: map raw [0..1000] to [0..10], clamp outside, lower is worse
+    def _normalize_score_to_ten(raw_value: float, expected_min: float = 0.0, expected_max: float = 1000.0) -> float:
+        if expected_max <= expected_min:
+            return 0.0
+        normalized = (float(raw_value) - expected_min) / (expected_max - expected_min)
+        if normalized < 0.0:
+            normalized = 0.0
+        elif normalized > 1.0:
+            normalized = 1.0
+        return round(normalized * 10.0, 2)
+
+    def _classify_score_quality(score_0_to_10: float) -> str:
+        # Simple, explainable bands; adjust if product needs different semantics
+        s = float(score_0_to_10)
+        if s < 2.0:
+            return 'very_poor'
+        if s < 4.0:
+            return 'poor'
+        if s < 6.0:
+            return 'fair'
+        if s < 8.0:
+            return 'good'
+        return 'excellent'
+
     for r in score_rows:
         try:
             score_id = int(r.get('id') or 0)
@@ -1297,17 +1321,26 @@ def _handle_comparison_report(
         reason = (r.get('reason') or '').strip()
         formula = (r.get('formula') or '').strip()
         value = _safe_eval_formula(formula, variables)
+        normalized_value = _normalize_score_to_ten(value, expected_min=0.0, expected_max=1000.0)
+        rating = _classify_score_quality(normalized_value)
+        is_good = normalized_value >= 6.0
         computed_scores.append({
             'id': score_id,
             'score_name': score_name,
             'description': description,
             'formula': formula,
-            'value': round(value, 2),
+            # Use normalized 0..10 scale for 'value' (lower is worse)
+            'value': normalized_value,
+            # Preserve raw value for debugging/analytics
+            'raw_value': round(float(value), 2),
+            'rating': rating,
+            'is_good': is_good,
             'reason': reason
         })
 
     # Prepare score values for recommendation evaluation
-    score_values: Dict[str, float] = { (s.get('score_name') or '').strip(): float(s.get('value') or 0.0) for s in computed_scores }
+    # Use RAW values (0..1000) for conditions in recommendation CSVs
+    score_values: Dict[str, float] = { (s.get('score_name') or '').strip(): float(s.get('raw_value') or 0.0) for s in computed_scores }
 
     # Evaluate recommendations from CSVs (opportunity, quickwin, riskAssessment)
     def _safe_eval_condition(expr: str, values: Dict[str, float]) -> bool:
@@ -1365,6 +1398,97 @@ def _handle_comparison_report(
         return rows
 
     def _evaluate_recommendations(rows: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
+        # Compute a numeric urgency score for matched conditions, based on how far
+        # actual values exceed their threshold(s) within the condition expression.
+        # Higher score = more urgent.
+        def _eval_numeric_node(node: ast.AST, values: Dict[str, float]) -> float:
+            if isinstance(node, (ast.Num, ast.Constant)):
+                try:
+                    return float(getattr(node, 'n', getattr(node, 'value', 0.0)) or 0.0)
+                except Exception:
+                    return 0.0
+            if isinstance(node, ast.Name):
+                try:
+                    return float(values.get(node.id, 0.0))
+                except Exception:
+                    return 0.0
+            if isinstance(node, ast.UnaryOp):
+                operand_val = _eval_numeric_node(node.operand, values)
+                if isinstance(node.op, ast.USub):
+                    return -operand_val
+                if isinstance(node.op, ast.UAdd):
+                    return +operand_val
+                return 0.0
+            if isinstance(node, ast.BinOp):
+                left_val = _eval_numeric_node(node.left, values)
+                right_val = _eval_numeric_node(node.right, values)
+                if isinstance(node.op, ast.Add):
+                    return left_val + right_val
+                if isinstance(node.op, ast.Sub):
+                    return left_val - right_val
+                if isinstance(node.op, ast.Mult):
+                    return left_val * right_val
+                if isinstance(node.op, ast.Div):
+                    try:
+                        return left_val / right_val if right_val != 0 else 0.0
+                    except Exception:
+                        return 0.0
+                return 0.0
+            return 0.0
+
+        def _compare_severity(left_val: float, op: ast.AST, right_val: float) -> float:
+            # Distance beyond threshold when the comparison is true
+            try:
+                if isinstance(op, ast.Gt):
+                    return max(0.0, left_val - right_val)
+                if isinstance(op, ast.GtE):
+                    return max(0.0, left_val - right_val)
+                if isinstance(op, ast.Lt):
+                    return max(0.0, right_val - left_val)
+                if isinstance(op, ast.LtE):
+                    return max(0.0, right_val - left_val)
+                if isinstance(op, ast.Eq):
+                    # Exact match implies no urgency
+                    return 0.0
+                if isinstance(op, ast.NotEq):
+                    # Not equal matched; minimal urgency unit
+                    return 1.0
+            except Exception:
+                return 0.0
+            return 0.0
+
+        def _severity_from_ast(node: ast.AST, values: Dict[str, float]) -> float:
+            # AND: sum severities; OR: max severities
+            if isinstance(node, ast.BoolOp):
+                child_severities = [_severity_from_ast(v, values) for v in node.values]
+                if isinstance(node.op, ast.And):
+                    return sum(child_severities)
+                if isinstance(node.op, ast.Or):
+                    return max(child_severities) if child_severities else 0.0
+                return 0.0
+            if isinstance(node, ast.Compare):
+                # Handle chained comparisons: a < b < c
+                total = 0.0
+                left_val = _eval_numeric_node(node.left, values)
+                for op, comp in zip(node.ops, node.comparators):
+                    right_val = _eval_numeric_node(comp, values)
+                    total += _compare_severity(left_val, op, right_val)
+                    left_val = right_val
+                return total
+            # Allow nested expressions
+            if isinstance(node, (ast.BinOp, ast.UnaryOp, ast.Name, ast.Num, ast.Constant)):
+                # Not a comparison by itself -> severity 0
+                return 0.0
+            return 0.0
+
+        def _compute_condition_severity(expr: str, values: Dict[str, float]) -> float:
+            try:
+                normalized = (expr or '').replace('AND', 'and').replace('OR', 'or')
+                tree = ast.parse(normalized, mode='eval')
+                return float(_severity_from_ast(tree.body, values))
+            except Exception:
+                return 0.0
+
         results: list[Dict[str, Any]] = []
         for r in rows:
             criterior = (r.get('criterior') or '').strip()
@@ -1382,6 +1506,7 @@ def _handle_comparison_report(
 
             var_values: Dict[str, float] = {name: float(score_values.get(name, 0.0)) for name in used_vars}
             matched = _safe_eval_condition(criterior, score_values)
+            urgency_score = _compute_condition_severity(criterior, score_values) if matched else 0.0
             try:
                 rid = int(r.get('id') or 0)
             except Exception:
@@ -1391,10 +1516,13 @@ def _handle_comparison_report(
                 'condition_name': (r.get('condition_name') or '').strip(),
                 'criterior': criterior,
                 'matched': bool(matched),
+                'urgency_score': round(float(urgency_score), 2),
                 'variables': var_values,
                 'risk_problems': (r.get('risk_problems') or '').strip(),
                 'recommendation': (r.get('recommendation') or '').strip()
             })
+        # Sort: matched first, then by urgency_score desc, stable otherwise
+        results.sort(key=lambda x: (not x.get('matched', False), -float(x.get('urgency_score', 0.0))))
         return results
 
     opportunity_rows = _load_recommendations_csv('opportunity.csv')
@@ -1404,6 +1532,55 @@ def _handle_comparison_report(
     opportunities = _evaluate_recommendations(opportunity_rows)
     quickwins = _evaluate_recommendations(quickwin_rows)
     risks = _evaluate_recommendations(risk_rows)
+
+    # Normalize urgency across categories so they are directly comparable
+    def _normalize_global_urgency() -> None:
+        # Optional category weights if needed in future customizations
+        category_weights: Dict[str, float] = {
+            'opportunities': 1.0,
+            'quickwins': 1.0,
+            'risks': 1.0
+        }
+        grouped = [
+            ('opportunities', opportunities),
+            ('quickwins', quickwins),
+            ('risks', risks)
+        ]
+        # Compute weighted urgency (currently equal weights)
+        for cat_name, items in grouped:
+            weight = float(category_weights.get(cat_name, 1.0))
+            for it in items:
+                base = float(it.get('urgency_score', 0.0))
+                it['weighted_urgency'] = base * weight if it.get('matched') else 0.0
+        # Find global max among matched items for normalization
+        try:
+            global_max = max(
+                (float(it.get('weighted_urgency', 0.0)) for cat, items in grouped for it in items if it.get('matched')),
+                default=0.0
+            )
+        except Exception:
+            global_max = 0.0
+        # Assign normalized urgency [0..100] and priority bands
+        for _, items in grouped:
+            for it in items:
+                wu = float(it.get('weighted_urgency', 0.0))
+                norm = (wu / global_max * 100.0) if global_max > 0 else 0.0
+                it['urgency_normalized'] = round(norm, 2)
+                s = it['urgency_normalized']
+                if s >= 80.0:
+                    priority = 'high'
+                elif s >= 50.0:
+                    priority = 'medium'
+                elif s >= 20.0:
+                    priority = 'low'
+                else:
+                    priority = 'info'
+                it['priority'] = priority
+        # Re-sort each list by matched first, then normalized urgency desc
+        for _, items in grouped:
+            items.sort(key=lambda x: (not x.get('matched', False), -float(x.get('urgency_normalized', 0.0))))
+
+    _normalize_global_urgency()
 
     return {
         'success': True,
