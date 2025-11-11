@@ -14,7 +14,7 @@ from .references import (
 from .permissions import Permission, PermissionType
 from .translations import Translation
 from .roles import SystemRole, SystemPermission
-from .files import File, FileType, FileStatus
+from .files import File, FileType, FileStatus, FileSource
 
 __all__ = [
     # Locations
@@ -36,5 +36,5 @@ __all__ = [
     'Translation',
 
     # Files
-    'File', 'FileType', 'FileStatus'
+    'File', 'FileType', 'FileStatus', 'FileSource'
 ]

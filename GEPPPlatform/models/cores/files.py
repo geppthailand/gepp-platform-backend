@@ -29,6 +29,12 @@ class FileStatus(enum.Enum):
     deleted = 'deleted'  # File marked for deletion
 
 
+class FileSource(enum.Enum):
+    """File source type"""
+    s3 = 's3'  # S3-stored file requiring presigned URLs
+    ext = 'ext'  # External URL that can be used directly
+
+
 class File(Base, BaseModel):
     """
     Centralized file storage table
@@ -39,6 +45,7 @@ class File(Base, BaseModel):
     # File identification
     file_type = Column(Enum(FileType), nullable=False, default=FileType.other)
     status = Column(Enum(FileStatus), nullable=False, default=FileStatus.pending)
+    source = Column(Enum(FileSource), nullable=False, default=FileSource.s3)
 
     # S3 storage information
     url = Column(Text, nullable=False)  # Full S3 URL
@@ -61,6 +68,9 @@ class File(Base, BaseModel):
     # Additional metadata (JSONB for flexibility)
     # Note: Using 'file_metadata' as attribute name because 'metadata' is reserved by SQLAlchemy
     file_metadata = Column('metadata', JSONB, nullable=False, default={})  # Store extra info like dimensions, duration, etc.
+
+    # AI-extracted observations from image analysis
+    observation = Column(JSONB, nullable=True)  # Stores AI-extracted observations and descriptions
 
     # Processing information
     processing_error = Column(Text, nullable=True)  # Error message if processing failed
@@ -102,6 +112,7 @@ class File(Base, BaseModel):
             'id': self.id,
             'file_type': self.file_type.value,
             'status': self.status.value,
+            'source': self.source.value,
             'url': self.url,
             's3_key': self.s3_key,
             's3_bucket': self.s3_bucket,
@@ -113,6 +124,7 @@ class File(Base, BaseModel):
             'related_entity_type': self.related_entity_type,
             'related_entity_id': self.related_entity_id,
             'metadata': self.file_metadata,
+            'observation': self.observation,
             'is_active': self.is_active,
             'created_date': self.created_date.isoformat() if self.created_date else None,
             'updated_date': self.updated_date.isoformat() if self.updated_date else None,

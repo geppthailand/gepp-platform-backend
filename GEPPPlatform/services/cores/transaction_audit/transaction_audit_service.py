@@ -24,6 +24,7 @@ except ImportError:
 
 from ....models.transactions.transactions import Transaction, TransactionStatus, AIAuditStatus
 from ....models.transactions.transaction_records import TransactionRecord
+from ....models.transactions.transaction_audits import TransactionAudit
 from ....models.audit_rules import AuditRule
 from ....models.cores.references import MainMaterial
 from ....models.subscriptions.organizations import Organization
@@ -205,8 +206,28 @@ class TransactionAuditService:
 
             if os.path.exists(extraction_rules_path):
                 with open(extraction_rules_path, 'r', encoding='utf-8') as f:
-                    rules = json.load(f)
+                    file_content = f.read()
+                    rules = json.loads(file_content)
+
+                # Log file details for debugging
+                file_size = len(file_content)
+                metadata = rules.get('metadata', {})
+                version = metadata.get('version', 'unknown')
+                mode = metadata.get('mode', 'unknown')
+                output_format = metadata.get('output_format', 'unknown')
+
                 logger.info(f"Loaded extraction rules from {extraction_rules_path}")
+                logger.info(f"  File size: {file_size} bytes")
+                logger.info(f"  Version: {version}, Mode: {mode}, Output format: {output_format}")
+
+                # Verify the prompt template
+                template = rules.get('extraction_prompt_template_minimal', rules.get('extraction_prompt_template', ''))
+                logger.info(f"  Template length: {len(template)} characters")
+                logger.info(f"  Template contains 'file_id': {'file_id' in template}")
+                logger.info(f"  Template contains 'materials': {'materials' in template}")
+                logger.info(f"  Template contains 'overview': {'overview' in template}")
+                logger.info(f"  Template first 200 chars: {template[:200]}")
+
                 return rules
             else:
                 logger.warning(f"Extraction rules file not found at {extraction_rules_path}")
@@ -220,6 +241,8 @@ class TransactionAuditService:
                 return {}
         except Exception as e:
             logger.error(f"Error loading extraction rules: {str(e)}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return {}
 
     def _load_judgment_prompt(self) -> Dict[str, Any]:
@@ -297,15 +320,12 @@ class TransactionAuditService:
             # Prepare transaction data with records and images
             transaction_audit_data = self._prepare_transaction_data(db, pending_transactions)
 
-            # print(";;;=====")
             # Process transactions with AI in multiple threads
             audit_results = self._process_transactions_with_ai(
                 transaction_audit_data,
                 audit_rules,
                 db
             )
-
-            # print("---====-=-=", audit_results)
 
             # Check organization's AI audit permission
             allow_ai_audit = False
@@ -556,15 +576,13 @@ class TransactionAuditService:
 
             record_images = record_data.get('images', [])
 
-            # If no images, return basic observation
+            # If no images, return empty observations array
             if not record_images:
                 return {
                     'record_id': record_id,
                     'declared_material_type': record_data.get('material_type'),
                     'has_images': False,
-                    'extraction_summary': 'No images provided for this record',
-                    'visibility_level': 'No images (0%)',
-                    'red_flags': ['No images attached to verify waste type']
+                    'image_observations': []  # Empty array - no images to observe
                 }
 
             # Generate presigned URLs for images
@@ -576,16 +594,27 @@ class TransactionAuditService:
             )
 
             if not presigned_urls:
+                # Return per-image observations with error for each image
+                error_observations = [
+                    {
+                        'file_id': img_id,
+                        'materials': {},
+                        'overview': 'Failed to access image - presigned URL generation failed'
+                    }
+                    for img_id in record_images
+                ]
                 return {
                     'record_id': record_id,
                     'declared_material_type': record_data.get('material_type'),
                     'has_images': True,
-                    'extraction_summary': 'Failed to access images',
-                    'red_flags': ['Could not access images for verification']
+                    'image_observations': error_observations
                 }
 
             # Load extraction rules
             extraction_rules = self._load_extraction_rules()
+
+            # Log extraction mode
+            logger.info(f"Record {record_id}: Using extraction mode '{self.extraction_mode}'")
 
             # Get appropriate prompt template based on mode
             if self.extraction_mode == 'minimal':
@@ -597,51 +626,115 @@ class TransactionAuditService:
             if not extraction_prompt_template:
                 extraction_prompt_template = extraction_rules.get('extraction_prompt_template',
                     extraction_rules.get('extraction_prompt_template_minimal', ''))
+                logger.warning(f"Record {record_id}: Extraction prompt template not found for mode '{self.extraction_mode}', using fallback")
+
+            # Verify the prompt contains the new format instructions
+            if 'file_id' not in extraction_prompt_template or 'materials' not in extraction_prompt_template:
+                logger.error(f"Record {record_id}: Extraction prompt template does NOT contain new format! Template length: {len(extraction_prompt_template)}")
+            else:
+                logger.info(f"Record {record_id}: Extraction prompt template verified (contains file_id and materials instructions)")
 
             # Prepare content for extraction
             content_parts = []
 
-            # Add extraction prompt with mode indicator
+            # Build file_id list string for the prompt
+            file_ids_str = ', '.join(str(fid) for fid in record_images)
+
+            # Add extraction prompt with mode indicator and file IDs
             mode_note = " [MINIMAL MODE: Focus on critical items only]" if self.extraction_mode == 'minimal' else " [DETAILED MODE: Comprehensive extraction]"
+
+            full_prompt = f"Record ID: {record_id}\nDeclared Material Type: {record_data.get('material_type')}\nFile IDs (in order): [{file_ids_str}]{mode_note}\n\n{extraction_prompt_template}"
+
+            # Log the prompt to verify it's correct
+            logger.info(f"Record {record_id} extraction prompt (first 300 chars): {full_prompt[:300]}")
+
             content_parts.append({
                 "type": "text",
-                "text": f"Record ID: {record_id}\nDeclared Material Type: {record_data.get('material_type')}{mode_note}\n\n{extraction_prompt_template}"
+                "text": full_prompt
             })
 
-            # Add images
-            for img_url in presigned_urls:
+            # Add images with their file IDs
+            for img_file_id, img_url in zip(record_images, presigned_urls):
+                content_parts.append({
+                    "type": "text",
+                    "text": f"\n--- IMAGE {img_file_id} ---"
+                })
                 content_parts.append({
                     "type": "image_url",
                     "image_url": {"url": img_url, "detail": "high"}
                 })
 
-            # Call AI to extract observations
+            # Call AI to extract observations with timing
+            import time
             logger.info(f"Extracting observations from record {record_id} with {len(presigned_urls)} images")
+            extraction_start = time.time()
             api_response = self._call_gemini_api_structured(content_parts)
+            extraction_duration = time.time() - extraction_start
 
-            # Parse extraction response
+            # Parse extraction response (now returns array of per-image observations)
             response_content = api_response.get('content', '')
+            token_usage = api_response.get('usage', {})
+
+            logger.info(f"Record {record_id} extraction took {extraction_duration:.2f} seconds")
+
+            # Log first 500 chars of response for debugging
+            logger.info(f"Record {record_id} extraction response preview: {response_content[:500]}")
+
             extracted_data = self._parse_extraction_response(response_content, record_id)
 
-            # Add declared type for comparison later
+            # Add metadata
+            extracted_data['record_id'] = record_id
             extracted_data['declared_material_type'] = record_data.get('material_type')
             extracted_data['has_images'] = True
 
-            logger.info(f"Successfully extracted observations for record {record_id}")
+            # Add token usage and duration from this extraction call
+            extracted_data['token_usage'] = {
+                'input_tokens': token_usage.get('input_tokens', 0),
+                'output_tokens': token_usage.get('output_tokens', 0),
+                'total_tokens': token_usage.get('total_tokens', 0),
+                'reasoning_tokens': token_usage.get('reasoning_tokens', 0),
+                'cached_tokens': token_usage.get('cached_tokens', 0)
+            }
+            extracted_data['extraction_duration_secs'] = round(extraction_duration, 2)  # Duration in seconds
+
+            # Log the extracted data keys to help debug
+            if 'image_observations' in extracted_data:
+                logger.info(f"Successfully extracted {len(extracted_data['image_observations'])} image observations for record {record_id}")
+            else:
+                logger.info(f"Successfully extracted observations for record {record_id}. Keys: {list(extracted_data.keys())}")
+
             return extracted_data
 
         except Exception as e:
             logger.error(f"Error extracting observations for record {record_data.get('record_id')}: {str(e)}")
+            # Return per-image error observations
+            record_images = record_data.get('images', [])
+            error_observations = [
+                {
+                    'file_id': img_id,
+                    'materials': {},
+                    'overview': f'Extraction error: {str(e)[:100]}'
+                }
+                for img_id in record_images
+            ] if record_images else []
+
             return {
                 'record_id': record_data.get('record_id'),
                 'declared_material_type': record_data.get('material_type'),
-                'has_images': bool(record_data.get('images')),
-                'extraction_summary': f'Extraction failed: {str(e)}',
+                'has_images': bool(record_images),
+                'image_observations': error_observations,
                 'error': str(e)
             }
 
     def _parse_extraction_response(self, response_content: str, record_id: int) -> Dict[str, Any]:
-        """Parse the AI extraction response into structured data"""
+        """Parse the AI extraction response into structured data
+
+        New format expects an array of per-image observations:
+        [
+          {file_id: 123, materials: {...}, overview: "..."},
+          {file_id: 124, materials: {...}, overview: "..."}
+        ]
+        """
         try:
             # Clean markdown code blocks
             cleaned_response = response_content.strip()
@@ -655,17 +748,49 @@ class TransactionAuditService:
 
             # Try to parse JSON
             extraction_data = json.loads(cleaned_response)
-            extraction_data['record_id'] = record_id
-            return extraction_data
+
+            # Check if it's the new array format (array of image observations)
+            if isinstance(extraction_data, list):
+                # New format: array of per-image observations
+                return {
+                    'record_id': record_id,
+                    'image_observations': extraction_data  # Array of {file_id, materials, overview}
+                }
+            elif isinstance(extraction_data, dict):
+                # Check if it's a single image observation (dict with file_id, materials, overview)
+                if 'file_id' in extraction_data and 'materials' in extraction_data:
+                    return {
+                        'record_id': record_id,
+                        'image_observations': [extraction_data]  # Wrap in array
+                    }
+                else:
+                    # Legacy format - return as is
+                    extraction_data['record_id'] = record_id
+                    return extraction_data
+            else:
+                # Unknown format
+                return {
+                    'record_id': record_id,
+                    'extraction_summary': str(extraction_data),
+                    'parse_warning': 'Unknown format type'
+                }
 
         except json.JSONDecodeError as e:
-            logger.warning(f"Failed to parse extraction JSON for record {record_id}, using text analysis")
-            # Fallback: extract key information from text
+            logger.error(f"Failed to parse extraction JSON for record {record_id}: {str(e)}")
+            logger.error(f"Response content (first 1000 chars): {response_content[:1000]}")
+            # Return error with raw text as overview
+            # The AI returned text but it wasn't valid JSON - save the text anyway
             return {
                 'record_id': record_id,
-                'extraction_summary': response_content[:500],  # First 500 chars
-                'raw_response': response_content,
-                'parse_error': str(e)
+                'error': f'JSON parsing failed: {str(e)}',
+                'raw_text_overview': response_content.strip(),  # Save full raw response as text
+                'extraction_summary': response_content[:500]  # First 500 chars for debugging
+            }
+        except Exception as e:
+            logger.error(f"Unexpected error parsing extraction for record {record_id}: {str(e)}")
+            return {
+                'record_id': record_id,
+                'error': f'Parse error: {str(e)}'
             }
 
     def _extract_all_records_observations(self, transaction_data: Dict[str, Any], db: Session = None) -> List[Dict[str, Any]]:
@@ -699,13 +824,26 @@ class TransactionAuditService:
                         logger.info(f"Extracted observations for record {record.get('record_id')}")
                     except Exception as e:
                         logger.error(f"Failed to extract observations for record {record.get('record_id')}: {str(e)}")
-                        # Add error observation
-                        extracted_observations.append({
-                            'record_id': record.get('record_id'),
-                            'declared_material_type': record.get('material_type'),
-                            'error': str(e),
-                            'extraction_summary': 'Extraction failed'
-                        })
+                        # Add error observation with new format
+                        record_images = record.get('images', [])
+                        error_observations = [
+                            {
+                                'file_id': img_id,
+                                'materials': {},
+                                'overview': f'Extraction exception: {str(e)[:100]}'
+                            }
+                            for img_id in record_images
+                        ] if record_images else []
+
+                        extracted_observations.append(error_observations)
+
+                        # extracted_observations.append({
+                        #     'record_id': record.get('record_id'),
+                        #     'declared_material_type': record.get('material_type'),
+                        #     'has_images': bool(record_images),
+                        #     'image_observations': error_observations,
+                        #     'error': str(e)
+                        # })
 
             logger.info(f"Completed extraction for {len(extracted_observations)} records in transaction {transaction_data.get('transaction_id')}")
             return extracted_observations
@@ -754,24 +892,83 @@ class TransactionAuditService:
                 language_name=language_name
             )
 
-            # Call AI for judgment
+            # Call AI for judgment with timing
+            import time
             logger.info(f"Making judgment for transaction {transaction_id} based on {len(extracted_observations)} observations")
+            judgment_start = time.time()
             api_response = self._call_gemini_api(judgment_prompt)
+            judgment_duration = time.time() - judgment_start
 
             # Parse judgment response
             response_content = api_response.get('content', '')
             token_usage = api_response.get('usage', {})
 
+            logger.info(f"Transaction {transaction_id} judgment took {judgment_duration:.2f} seconds")
+
             audit_result = self._parse_ai_response(response_content, transaction_id, audit_rules)
 
-            # Add token usage
-            audit_result['token_usage'] = {
-                'input_tokens': token_usage.get('input_tokens', 0),
-                'output_tokens': token_usage.get('output_tokens', 0),
-                'total_tokens': token_usage.get('total_tokens', 0),
-                'reasoning_tokens': token_usage.get('reasoning_tokens', 0),
-                'cached_tokens': token_usage.get('cached_tokens', 0)
+            # Sum up token usage from judgment phase + all extraction phases
+            judgment_tokens = {
+                'input_tokens': token_usage.get('input_tokens', 0) or 0,
+                'output_tokens': token_usage.get('output_tokens', 0) or 0,
+                'total_tokens': token_usage.get('total_tokens', 0) or 0,
+                'reasoning_tokens': token_usage.get('reasoning_tokens', 0) or 0,
+                'cached_tokens': token_usage.get('cached_tokens', 0) or 0
             }
+
+            # Sum tokens and durations from all extraction phases
+            extraction_tokens = {
+                'input_tokens': 0,
+                'output_tokens': 0,
+                'total_tokens': 0,
+                'reasoning_tokens': 0,
+                'cached_tokens': 0
+            }
+
+            # Collect per-record durations for observations
+            # Structure: {record_id: duration_secs}
+            observation_durations = {}
+
+            for obs in extracted_observations:
+                obs_tokens = obs.get('token_usage', {})
+                if obs_tokens:  # Only add if token_usage exists and is not None
+                    extraction_tokens['input_tokens'] += obs_tokens.get('input_tokens', 0) or 0
+                    extraction_tokens['output_tokens'] += obs_tokens.get('output_tokens', 0) or 0
+                    extraction_tokens['total_tokens'] += obs_tokens.get('total_tokens', 0) or 0
+                    extraction_tokens['reasoning_tokens'] += obs_tokens.get('reasoning_tokens', 0) or 0
+                    extraction_tokens['cached_tokens'] += obs_tokens.get('cached_tokens', 0) or 0
+
+                # Collect duration for this record's observation
+                record_id = obs.get('record_id')
+                duration = obs.get('extraction_duration_secs', 0)
+                if record_id and duration:
+                    observation_durations[record_id] = duration
+
+            # Total tokens = extraction + judgment
+            audit_result['token_usage'] = {
+                'input_tokens': judgment_tokens['input_tokens'] + extraction_tokens['input_tokens'],
+                'output_tokens': judgment_tokens['output_tokens'] + extraction_tokens['output_tokens'],
+                'total_tokens': judgment_tokens['total_tokens'] + extraction_tokens['total_tokens'],
+                'reasoning_tokens': judgment_tokens['reasoning_tokens'] + extraction_tokens['reasoning_tokens'],
+                'cached_tokens': judgment_tokens['cached_tokens'] + extraction_tokens['cached_tokens']
+            }
+
+            # Store breakdown with durations
+            audit_result['token_breakdown'] = {
+                'judgment': judgment_tokens,
+                'extraction': extraction_tokens
+            }
+
+            # Store duration breakdown
+            audit_result['duration_breakdown'] = {
+                'judgment_secs': round(judgment_duration, 2),
+                'observations': observation_durations  # {record_id: secs}
+            }
+
+            logger.info(f"Token usage for transaction {transaction_id}: "
+                       f"Extraction={extraction_tokens['total_tokens']}, "
+                       f"Judgment={judgment_tokens['total_tokens']}, "
+                       f"Total={audit_result['token_usage']['total_tokens']}")
 
             # Save judgment prompt for debugging
             audit_result['judgment_prompt'] = judgment_prompt
@@ -801,6 +998,13 @@ class TransactionAuditService:
 
             # Phase 1: Extract observations from all records (with nested threading)
             extracted_observations = self._extract_all_records_observations(transaction_data, db)
+
+            # Log extracted observations structure for debugging
+            logger.info(f"Transaction {transaction_id}: Extracted {len(extracted_observations)} observations")
+            for obs in extracted_observations:
+                record_id = obs.get('record_id')
+                has_image_obs = 'image_observations' in obs
+                logger.info(f"  Record {record_id}: has_image_observations={has_image_obs}, keys={list(obs.keys())}")
 
             if not extracted_observations:
                 logger.warning(f"No observations extracted for transaction {transaction_id}")
@@ -992,7 +1196,8 @@ class TransactionAuditService:
                     file_urls=image_identifiers,
                     organization_id=organization_id,
                     user_id=user_id,
-                    expiration_seconds=7200  # 2 hours expiration for audit processing
+                    expiration_seconds=7200,  # 2 hours expiration for audit processing
+                    db=db  # Pass db session to check file sources
                 )
 
                 if result.get('success'):
@@ -1123,7 +1328,8 @@ class TransactionAuditService:
                     "temperature": api_settings.get('temperature', 0.0),
                     "thinkingConfig": {
                         "thinkingBudget": api_settings.get('thinking_budget', 512)
-                    }
+                    },
+                    "max_output_tokens": 2048  # Limit output to prevent hallucination
                 }
             )
 
@@ -1176,8 +1382,9 @@ class TransactionAuditService:
                     "system_instruction": system_instruction,
                     "temperature": api_settings.get('temperature', 0.0),
                     "thinkingConfig": {
-                        "thinkingBudget": api_settings.get('thinking_budget', 512) 
-                    }
+                        "thinkingBudget": api_settings.get('thinking_budget', 512)
+                    },
+                    "max_output_tokens": 1024  # Limit judgment output (smaller than extraction)
                 }
             )
 
@@ -1349,24 +1556,257 @@ class TransactionAuditService:
                     transaction.reject_triggers = reject_triggers
                     transaction.warning_triggers = []  # Reset warnings since we now only track rejections
 
-                    # Save comprehensive audit response including record-level extractions
-                    compact_audit = {
-                        's': audit_status,  # status
-                        'v': [  # violations (rule_db_id, message, and transaction_record_id)
-                            {
-                                'id': tr.get('rule_db_id'),
-                                'm': tr.get('message'),
-                                'tr': tr.get('transaction_record_id')  # transaction_record_id
-                            }
-                            for tr in triggered_rules if tr.get('has_reject')
-                        ],
-                        't': result.get('token_usage', {}),  # token_usage
-                        'at': result.get('audited_at'),  # audited_at
-                        'obs': result.get('extracted_observations', []),  # record-level observations from Phase 1
-                        'jdg': result.get('judgment_prompt', '')[:500] if result.get('judgment_prompt') else ''  # judgment prompt (truncated)
+                    # Extract observations and build audits structure
+                    extracted_observations = result.get('extracted_observations', [])
+
+                    # Debug logging
+                    logger.info(f"Transaction {transaction_id}: Found {len(extracted_observations)} extracted observations in result")
+                    if not extracted_observations:
+                        logger.warning(f"Transaction {transaction_id}: No extracted_observations in audit result! Keys: {list(result.keys())}")
+
+                    audits_by_record = {}
+
+                    # Get transaction records from database to access image file IDs
+                    transaction_records = db.query(TransactionRecord).filter(
+                        TransactionRecord.created_transaction_id == transaction_id,
+                        TransactionRecord.is_active == True
+                    ).all()
+
+                    # Create a map of record_id to image file IDs
+                    record_images_map = {
+                        record.id: record.images or []
+                        for record in transaction_records
                     }
 
-                    transaction.ai_audit_note = json.dumps(compact_audit, ensure_ascii=False)
+                    for obs in extracted_observations:
+                        record_id = obs.get('record_id')
+                        if record_id:
+                            # Get image file IDs for this record
+                            image_file_ids = record_images_map.get(record_id, [])
+                            record_images = []
+
+                            # Check if we have new per-image observations format
+                            if 'image_observations' in obs:
+                                # New format: array of {file_id, materials, overview}
+                                image_observations = obs['image_observations']
+
+                                # Create a map of file_id to observation for quick lookup
+                                obs_by_file_id = {img_obs['file_id']: img_obs for img_obs in image_observations if 'file_id' in img_obs}
+
+                                # Process each file_id in the record
+                                for file_id in image_file_ids:
+                                    if file_id in obs_by_file_id:
+                                        img_obs = obs_by_file_id[file_id]
+                                        # Store full structured observation
+                                        record_images.append({
+                                            'id': file_id,
+                                            'obs': img_obs  # Full dict with file_id, materials, overview
+                                        })
+
+                                        # Also save to file.observation in database
+                                        try:
+                                            from ....models.cores.files import File
+                                            file_record = db.query(File).filter(File.id == file_id).first()
+                                            if file_record:
+                                                file_record.observation = img_obs  # Save {file_id, materials, overview}
+                                                logger.info(f"Saved observation to file {file_id}: {len(img_obs.get('materials', {}))} materials")
+                                        except Exception as file_err:
+                                            logger.error(f"Failed to save observation to file {file_id}: {str(file_err)}")
+                                    else:
+                                        # File ID not in observations (shouldn't happen)
+                                        logger.warning(f"No observation found for file {file_id} in record {record_id}")
+                                        record_images.append({
+                                            'id': file_id,
+                                            'obs': {'error': 'No observation extracted for this image'}
+                                        })
+
+                                logger.info(f"Transaction {transaction_id}, Record {record_id}: Processed {len(image_observations)} image observations")
+
+                            else:
+                                # Legacy format or error case - handle gracefully
+                                logger.warning(f"Transaction {transaction_id}, Record {record_id}: No image_observations in extraction result. Keys: {list(obs.keys())}")
+
+                                # Check if there's an error field
+                                if 'error' in obs:
+                                    error_msg = obs.get('error', 'Unknown extraction error')
+                                    # Check if we have raw text from failed JSON parsing
+                                    raw_text = obs.get('raw_text_overview', '')
+
+                                    logger.error(f"Transaction {transaction_id}, Record {record_id}: Extraction error: {error_msg}")
+
+                                    # If we have raw text, use it as overview; otherwise use error message
+                                    if raw_text:
+                                        logger.info(f"Transaction {transaction_id}, Record {record_id}: Using raw text response ({len(raw_text)} chars)")
+                                        overview_text = raw_text
+                                    else:
+                                        overview_text = f'Extraction failed: {error_msg}'
+
+                                    # Create observations for each image with error flag
+                                    for file_id in image_file_ids:
+                                        observation_data = {
+                                            'file_id': file_id,
+                                            'materials': {},
+                                            'overview': overview_text,
+                                            'error': error_msg  # Add error key
+                                        }
+                                        record_images.append({
+                                            'id': file_id,
+                                            'obs': observation_data
+                                        })
+
+                                        # Store in database
+                                        try:
+                                            from ....models.cores.files import File
+                                            file_record = db.query(File).filter(File.id == file_id).first()
+                                            if file_record:
+                                                file_record.observation = observation_data
+                                        except Exception as file_err:
+                                            logger.error(f"Failed to save observation to file {file_id}: {str(file_err)}")
+                                else:
+                                    # Try to build observation from legacy fields
+                                    observation_text = None
+
+                                    if 'extraction_summary' in obs:
+                                        observation_text = obs.get('extraction_summary', '')
+                                    elif any(key in obs for key in ['items', 'hazardous', 'contamination', 'container', 'visibility']):
+                                        obs_parts = []
+                                        if obs.get('items'):
+                                            obs_parts.append(f"Items: {obs['items']}")
+                                        if obs.get('hazardous') and obs['hazardous'] != 'None':
+                                            obs_parts.append(f"Hazardous: {obs['hazardous']}")
+                                        if obs.get('contamination'):
+                                            obs_parts.append(f"Contamination: {obs['contamination']}")
+                                        if obs.get('container'):
+                                            obs_parts.append(f"Container: {obs['container']}")
+                                        if obs.get('visibility'):
+                                            obs_parts.append(f"Visibility: {obs['visibility']}")
+                                        if obs.get('red_flags') and len(obs['red_flags']) > 0:
+                                            obs_parts.append(f"Red Flags: {', '.join(obs['red_flags'])}")
+                                        observation_text = '; '.join(obs_parts) if obs_parts else None
+
+                                    if not observation_text:
+                                        skip_keys = {'record_id', 'declared_material_type', 'has_images', 'error', 'violations', 'token_usage'}
+                                        text_parts = []
+                                        for key, value in obs.items():
+                                            if key not in skip_keys and value:
+                                                if isinstance(value, str):
+                                                    text_parts.append(f"{key}: {value}")
+                                                elif isinstance(value, list) and len(value) > 0:
+                                                    text_parts.append(f"{key}: {', '.join(str(v) for v in value)}")
+                                                elif isinstance(value, dict) and len(value) > 0:
+                                                    text_parts.append(f"{key}: {json.dumps(value, ensure_ascii=False)}")
+                                        observation_text = '; '.join(text_parts) if text_parts else 'Extraction returned empty response - no data extracted'
+
+                                    logger.info(f"Transaction {transaction_id}, Record {record_id}: Created legacy observation text ({len(observation_text)} chars)")
+
+                                    # Apply same observation to all images in record (legacy behavior)
+                                    for file_id in image_file_ids:
+                                        record_images.append({
+                                            'id': file_id,
+                                            'obs': observation_text
+                                        })
+
+                            audits_by_record[record_id] = {
+                                'images': record_images
+                            }
+
+                    # Build violations list with transaction_record_id
+                    # Format: {"tr": <record_id>, "id": <rule_id>, "m": <message>}
+                    # "tr" is optional - only included for transaction_record level violations
+                    violations = []
+                    for tr in triggered_rules:
+                        if tr.get('has_reject'):
+                            violation = {
+                                'id': tr.get('rule_db_id'),  # triggered rule ID
+                                'm': tr.get('message')  # message
+                            }
+                            # Only add 'tr' if it's a transaction_record level violation
+                            if tr.get('transaction_record_id'):
+                                violation['tr'] = tr.get('transaction_record_id')
+                            violations.append(violation)
+
+                    # Separate token usage from audit notes
+                    # Format for ai_audit_note: {status, audits: {record_id: {images: [{id, obs}]}}, v: [violations]}
+                    # Format for audit_tokens: {t: {input, output, thinking}, tr: {input, output, thinking}}
+                    token_usage = result.get('token_usage', {})
+
+                    # Create audit notes WITHOUT token data (moved to separate column)
+                    audit_notes = {
+                        'status': audit_status,  # approved | rejected | pending
+                        'audits': audits_by_record,  # {record_id: {images: [{id, obs}]}}
+                        'v': violations  # [{tr?, id, m}] - violations with optional tr for record-level
+                    }
+
+                    # Create token data for separate column with breakdown
+                    # Extract token breakdown if available
+                    token_breakdown = result.get('token_breakdown', {})
+                    judgment_tokens = token_breakdown.get('judgment', {})
+                    extraction_tokens = token_breakdown.get('extraction', {})
+
+                    # Extract duration breakdown if available
+                    duration_breakdown = result.get('duration_breakdown', {})
+
+                    token_data = {
+                        't': {  # Transaction judgment tokens
+                            'input': judgment_tokens.get('input_tokens', 0),
+                            'output': judgment_tokens.get('output_tokens', 0),
+                            'thinking': judgment_tokens.get('reasoning_tokens', 0)
+                        },
+                        'tr': {  # Transaction record observation tokens (sum of all extractions)
+                            'input': extraction_tokens.get('input_tokens', 0),
+                            'output': extraction_tokens.get('output_tokens', 0),
+                            'thinking': extraction_tokens.get('reasoning_tokens', 0)
+                        },
+                        'durations': {  # Time spent in seconds
+                            'jud': duration_breakdown.get('judgment_secs', 0),  # Judgment phase
+                            'obs': duration_breakdown.get('observations', {})  # Observation phase per record {record_id: secs}
+                        }
+                    }
+
+                    # Note: violations are stored in THREE places:
+                    # 1. transaction.ai_audit_note['v'] - detailed format with optional 'tr'
+                    # 2. transaction.reject_triggers - array of rule_db_ids
+                    # 3. transaction_audit.audit_notes['v'] - same as ai_audit_note['v']
+
+                    # TransactionAudit table format (matches transaction.ai_audit_note format)
+                    legacy_audit_notes = {
+                        'status': audit_status,  # status (full word for clarity)
+                        'audits': audits_by_record,  # {record_id: {images: [{id, obs}]}}
+                        'v': violations  # [{tr?, id, m}] - same format as ai_audit_note
+                    }
+
+                    # Save to THREE places:
+                    # 1. Save to transaction.ai_audit_note (audit observations and status)
+                    transaction.ai_audit_note = audit_notes
+
+                    # 2. Save to transaction.audit_tokens (token usage data)
+                    transaction.audit_tokens = token_data
+
+                    # Mark the JSONB fields as modified for SQLAlchemy to detect changes
+                    from sqlalchemy.orm.attributes import flag_modified
+                    flag_modified(transaction, 'ai_audit_note')
+                    flag_modified(transaction, 'audit_tokens')
+
+                    logger.info(f"Setting ai_audit_note for transaction {transaction_id}: {len(extracted_observations)} observations, {len(violations)} violations")
+                    logger.info(f"Setting audit_tokens for transaction {transaction_id}: "
+                               f"t(judgment)={{input={token_data['t']['input']}, output={token_data['t']['output']}, thinking={token_data['t']['thinking']}}}, "
+                               f"tr(observation)={{input={token_data['tr']['input']}, output={token_data['tr']['output']}, thinking={token_data['tr']['thinking']}}}")
+
+                    # 3. Create TransactionAudit record (legacy format for audit history table)
+                    transaction_audit = TransactionAudit(
+                        transaction_id=transaction_id,
+                        audit_notes=legacy_audit_notes,  # Use legacy format here
+                        by_human=False,  # AI audit
+                        auditor_id=None,  # AI has no user ID
+                        organization_id=transaction.organization_id,
+                        audit_type='ai_sync',
+                        processing_time_ms=result.get('processing_time_ms'),
+                        token_usage=result.get('token_usage', {}),
+                        model_version=result.get('model_version', 'gemini-1.5-pro'),
+                        created_date=int(datetime.now(timezone.utc).timestamp() * 1000),
+                        created_by_id=None  # System-generated
+                    )
+                    db.add(transaction_audit)
 
                     # Save audit prompt to notes for debugging
                     audit_prompt = result.get('audit_prompt', '')
@@ -1383,6 +1823,18 @@ class TransactionAuditService:
 
             db.commit()
             logger.info(f"Updated {updated_count} transactions. AI audit enabled: {allow_ai_audit}")
+
+            # Verify the data was saved by re-querying
+            for result in audit_results:
+                if not result.get('skip_status_update', False):
+                    transaction_id = result['transaction_id']
+                    verification_txn = db.query(Transaction).filter(Transaction.id == transaction_id).first()
+                    if verification_txn:
+                        if verification_txn.ai_audit_note:
+                            logger.info(f"✓ Transaction {transaction_id}: ai_audit_note saved successfully with keys: {list(verification_txn.ai_audit_note.keys())}")
+                        else:
+                            logger.error(f"✗ Transaction {transaction_id}: ai_audit_note is NULL after commit!")
+
             return updated_count
 
         except Exception as e:

@@ -1,11 +1,12 @@
 {
   "metadata": {
-    "version": "1.0.0",
-    "description": "Minimized image extraction rules - optimized for token efficiency",
-    "purpose": "Extract only critical information to minimize token usage while maintaining accuracy",
-    "mode": "minimal",
+    "version": "2.0.0",
+    "description": "Per-image extraction rules - returns array with file_id, materials dict, and overview",
+    "purpose": "Extract observations for each image individually with structured format for materials",
+    "mode": "per_image",
+    "output_format": "JSON array with {file_id, materials, overview} per image",
     "created_date": "2025-11-06",
-    "last_modified": "2025-11-06"
+    "last_modified": "2025-11-10"
   },
   "extraction_instructions": {
     "system_instruction": "Extract key waste observations. Focus on: 1) What items you see 2) Any contamination 3) Visibility. Be concise but thorough with small objects.",
@@ -39,19 +40,18 @@
       "importance": "CRITICAL - Small objects often cause violations"
     }
   },
-  "extraction_prompt_template_minimal": "Analyze waste image. Extract:\n\n1. ITEMS (include ALL, especially small):\n   - Main waste items?\n   - Small objects (batteries, straws, utensils, caps)?\n   - Any hazardous (batteries/bulbs/sprays)?\n\n2. CONTAMINATION:\n   - Pure or mixed?\n   - Food + containers/packaging?\n   - Different waste types mixed?\n\n3. CONTAINER:\n   - Bag type/color?\n   - Open/closed?\n   - Layers?\n\n4. VISIBILITY:\n   - Can identify waste type? %?\n\n5. RED FLAGS:\n   - Hazardous in wrong category?\n   - Straws/utensils in food?\n   - Containers with food?\n   - Obvious mismatches?\n\nJSON format:\n{\n  \"record_id\": <id>,\n  \"items\": \"<list all including small objects>\",\n  \"hazardous\": \"<batteries/bulbs/sprays or None>\",\n  \"contamination\": \"<pure/mixed/contaminated>\",\n  \"container\": \"<type, color, open/closed>\",\n  \"visibility\": \"<% and can identify Y/N>\",\n  \"red_flags\": [\"<list or empty>\"]\n}",
+  "extraction_prompt_template_minimal": "วิเคราะห์ภาพขยะแต่ละภาพและส่งกลับเป็น JSON ARRAY เท่านั้น\n\n# โครงสร้าง Output (ต้องเป็น ARRAY):\n[\n  {\"file_id\": <ตัวเลข>, \"materials\": {\"<ชื่อวัสดุ>\": \"<สภาพ>\"}, \"overview\": \"<ข้อความสั้นๆ>\"}\n]\n\n# กฎสำคัญ:\n1. ส่งกลับเฉพาะ JSON ARRAY - ห้ามส่งข้อความอื่น\n2. 1 ภาพ = 1 object ใน array\n3. มี 3 fields เท่านั้น: file_id, materials, overview\n4. materials: สูงสุด 5-8 รายการ (รายการหลัก + ของปนเล็กๆ)\n5. overview: สูงสุด 1-2 ประโยค\n6. ห้ามส่งค่าอื่น: ห้าม record_id, items, red_flags, hazardous, etc.\n\n# ต้องตรวจ:\n- แบตเตอรี่/หลอดไฟ (ของเล็กในมุม, ซอกต่างๆ) → ต้องระบุ\n- หลอด/ช้อน/กล่อง/ฝาพลาสติก ปนในเศษอาหาร → ต้องระบุ\n- ของปนเปื้อน/ของปนกัน → ระบุชัดเจน\n\n# ตัวอย่าง:\n[\n  {\"file_id\": 123, \"materials\": {\"เศษอาหาร\": \"เปลือกผักผลไม้\", \"หลอดพลาสติก\": \"หลอดแดงปนอยู่\", \"กล่องโฟม\": \"กล่องขาวเปื้อนอาหาร\"}, \"overview\": \"ถุงใสมีเศษอาหารปนหลอดและกล่อง ถุงเปิดมองเห็นได้ชัด\"},\n  {\"file_id\": 124, \"materials\": {\"กล่องกระดาษ\": \"แบนเรียบร้อย\", \"กระดาษ\": \"กระดาษสะอาด\"}, \"overview\": \"กล่องกระดาษใส่กระดาษรีไซเคิล ไม่มีของปน\"}\n]\n\n# ข้อห้าม:\n❌ ห้ามคิดมาก - ส่งแค่ JSON ARRAY\n❌ ห้ามอธิบายเพิ่ม - ส่งแค่ที่กำหนด\n❌ ห้าม field อื่น - มี 3 fields เท่านั้น\n❌ ห้ามนับรายการเกิน 8 ต่อภาพ - เลือกของสำคัญ\n\nเริ่มวิเคราะห์และส่ง JSON ARRAY:",
   "output_format": {
-    "structure": "Minimal JSON with only essential fields",
-    "template": {
-      "record_id": "<id>",
-      "items": "<comprehensive list including small objects>",
-      "hazardous": "<specific hazardous items or None>",
-      "contamination": "<pure/mixed/contaminated with details>",
-      "container": "<type, color, open/closed, layers>",
-      "visibility": "<percentage and assessment>",
-      "red_flags": ["<critical issues only>"]
-    },
-    "max_length": "Keep responses concise - 200-300 words max"
+    "structure": "JSON array with one object per image containing: file_id (number), materials (dict), overview (string)",
+    "critical_rules": [
+      "MUST return a JSON array, not an object",
+      "Each array element = one image observation",
+      "ONLY three fields allowed: file_id, materials, overview",
+      "file_id must be a number matching the image file ID",
+      "materials must be a dict/object with material names as keys and condition descriptions as values",
+      "overview must be a string describing the overall image"
+    ],
+    "max_length": "Keep material descriptions and overview concise but thorough"
   },
   "small_object_focus": {
     "critical_items": [
@@ -80,32 +80,56 @@
     ]
   },
   "response_examples": {
-    "clean_example": {
-      "record_id": 123,
-      "items": "Vegetable scraps, fruit peels, rice - all pure organic",
-      "hazardous": "None",
-      "contamination": "Pure, outer bag only",
-      "container": "Clear bag, open, 1 layer",
-      "visibility": "95% - clearly identifiable",
-      "red_flags": []
-    },
-    "violation_example": {
-      "record_id": 456,
-      "items": "Food scraps + 2 plastic straws + foam container",
-      "hazardous": "None",
-      "contamination": "Contaminated - straws & container mixed with food",
-      "container": "White bag, closed, 1 layer",
-      "visibility": "80% - can see contents",
-      "red_flags": ["Plastic straws in food waste", "Foam container present"]
-    },
-    "hazardous_violation_example": {
-      "record_id": 789,
-      "items": "Cardboard boxes BUT small AA battery in corner",
-      "hazardous": "1 AA battery visible",
-      "contamination": "Hazardous item in recyclables",
-      "container": "Box, no bag",
-      "visibility": "100% - all visible",
-      "red_flags": ["CRITICAL: Battery in recyclables - should be hazardous"]
-    }
+    "clean_food_waste_example": [
+      {
+        "file_id": 101,
+        "materials": {
+          "vegetable scraps": "fresh peels and trimmings",
+          "fruit peels": "banana and orange peels",
+          "cooked rice": "small amount of leftover rice"
+        },
+        "overview": "Clear plastic bag, open, containing pure organic food waste. No contamination visible. All items are compostable."
+      }
+    ],
+    "contaminated_food_waste_example": [
+      {
+        "file_id": 201,
+        "materials": {
+          "food scraps": "mixed vegetable and fruit waste",
+          "plastic straw": "red plastic straw mixed in the waste",
+          "foam container": "white foam container with food residue attached"
+        },
+        "overview": "White plastic bag, closed, containing food waste contaminated with plastic straw and foam container. Contamination clearly visible."
+      }
+    ],
+    "hazardous_contamination_example": [
+      {
+        "file_id": 301,
+        "materials": {
+          "cardboard boxes": "clean flattened boxes",
+          "paper": "mixed office paper",
+          "AA battery": "small battery visible in corner between cardboard pieces"
+        },
+        "overview": "Cardboard box containing recyclable paper and cardboard BUT contaminated with small AA battery in bottom corner. Battery clearly visible."
+      }
+    ],
+    "multiple_images_example": [
+      {
+        "file_id": 401,
+        "materials": {
+          "plastic bottles": "clear PET bottles, crushed",
+          "aluminum cans": "various beverage cans, some crushed"
+        },
+        "overview": "Clear bag containing clean recyclables. Bottles and cans properly separated and prepared."
+      },
+      {
+        "file_id": 402,
+        "materials": {
+          "glass bottles": "brown and clear glass bottles",
+          "plastic cap": "one bottle still has plastic cap attached"
+        },
+        "overview": "Box containing glass bottles. One bottle has plastic cap that should be removed."
+      }
+    ]
   }
 }
