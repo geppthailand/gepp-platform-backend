@@ -40,11 +40,40 @@ def get_iot_devices_paths() -> Dict[str, Any]:
                 }
             }
         },
-        "/api/auth/qr-login": {
+        "/api/iot-devices/manual-login": {
+            "post": {
+                "tags": ["IOT Devices"],
+                "summary": "Manual login (user credentials via device)",
+                "description": "Authenticate a user using email and password from an IoT device. Requires Bearer device token. Returns auth and refresh tokens like normal user login.",
+                "security": [{"BearerAuth": []}],
+                "requestBody": {
+                    "required": True,
+                    "content": {
+                        "application/json": {
+                            "schema": {"$ref": "#/components/schemas/LoginRequest"}
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Login successful",
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/LoginResponse"}
+                            }
+                        }
+                    },
+                    "400": {"$ref": "#/components/responses/BadRequestError"},
+                    "401": {"$ref": "#/components/responses/UnauthorizedError"}
+                }
+            }
+        },
+        "/api/iot-devices/qr-login": {
             "post": {
                 "tags": ["IOT Devices"],
                 "summary": "QR login (user via QR token)",
                 "description": "Authenticate a user using a short-lived QR token (email, password, expiry). Returns auth and refresh tokens like normal user login.",
+                "security": [{"BearerAuth": []}],
                 "requestBody": {
                     "required": True,
                     "content": {
