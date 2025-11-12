@@ -525,7 +525,6 @@ def handle_get_locations(user_service: UserService, query_params: Dict[str, Any]
     except Exception as e:
         raise APIException(f'Error fetching locations: {str(e)}')
 
-
 def handle_get_user_profile(user_service: UserService, current_user_id: str) -> Dict[str, Any]:
     """Handle GET /api/users/profile - Get current user's profile"""
     try:
@@ -578,3 +577,4 @@ def handle_get_profile_upload_presigned_url(
 
     except Exception as e:
         raise APIException(f'Failed to get presigned URL: {str(e)}')
+

@@ -9,8 +9,7 @@ from GEPPPlatform.models.users.user_location import UserLocation
 from GEPPPlatform.models.subscriptions.organizations import OrganizationSetup
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy import func, case, extract, and_
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import logging
 
 from ....models.transactions.transactions import Transaction, TransactionStatus
@@ -27,73 +26,6 @@ class ReportsService:
 
     def __init__(self, db: Session):
         self.db = db
-
-    # ========== OPTIMIZED OVERVIEW REPORT ==========
-
-    def get_overview_aggregated(
-        self,
-        organization_id: int,
-        filters: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
-        """
-        Get aggregated overview data using SQL aggregation for better performance
-
-        Args:
-            organization_id: The organization ID to filter by
-            filters: Optional filters (e.g., date range, material type)
-
-        Returns:
-            Dict with aggregated overview data
-        """
-        try:
-            # Build base query with filters
-            base_query = self.db.query(TransactionRecord).join(
-                Transaction,
-                TransactionRecord.created_transaction_id == Transaction.id
-            ).filter(
-                Transaction.organization_id == organization_id,
-                TransactionRecord.is_active == True,
-                Transaction.status != TransactionStatus.rejected  # Exclude rejected
-            )
-
-            # Apply date filters
-            if filters:
-                date_from = filters.get('date_from')
-                date_to = filters.get('date_to')
-                if date_from or date_to:
-                    try:
-                        MAX_DAYS = 365 * 3
-                        now = datetime.utcnow()
-                        end_of_today = now.replace(hour=23, minute=59, second=59, microsecond=999999)
-                        df = datetime.fromisoformat(date_from) if isinstance(date_from, str) else date_from
-                        dt = datetime.fromisoformat(date_to) if isinstance(date_to, str) else date_to
-                        if dt and dt > end_of_today:
-                            dt = end_of_today
-                        if df and dt and (dt - df).days > MAX_DAYS:
-                            df = dt - timedelta(days=MAX_DAYS)
-                        if df:
-                            base_query = base_query.filter(TransactionRecord.created_date >= df)
-                        if dt:
-                            base_query = base_query.filter(TransactionRecord.created_date <= dt)
-                    except Exception as e:
-                        logger.warning(f"Date filter error: {e}")
-                        if date_from:
-                            base_query = base_query.filter(TransactionRecord.created_date >= date_from)
-                        if date_to:
-                            base_query = base_query.filter(TransactionRecord.created_date <= date_to)
-
-            # This method returns pre-aggregated data that can be used directly
-            # Instead of loading all records into memory
-            return {
-                'success': True,
-                'use_aggregated': True,
-                'organization_id': organization_id,
-                'base_query': base_query  # Return query for further processing in handler
-            }
-
-        except Exception as e:
-            logger.error(f"Error in get_overview_aggregated: {str(e)}")
-            raise
 
     # ========== TRANSACTION RECORDS REPORTS ==========
 
@@ -122,8 +54,7 @@ class ReportsService:
             ).filter(
                 Transaction.organization_id == organization_id,
                 TransactionRecord.is_active == True,
-                Transaction.deleted_date.is_(None),
-                Transaction.is_active == True
+                Transaction.status != TransactionStatus.rejected
             )
             
             # Apply additional filters if provided
@@ -142,14 +73,14 @@ class ReportsService:
                 if report_type == 'comparison':
                     # For comparison, use provided range as-is, no clamping
                     if date_from:
-                        query = query.filter(TransactionRecord.created_date >= date_from)
+                        query = query.filter(TransactionRecord.transaction_date >= date_from)
                     if date_to:
-                        query = query.filter(TransactionRecord.created_date <= date_to)
+                        query = query.filter(TransactionRecord.transaction_date <= date_to)
                 else:
                     # Apply clamping (max 3 years, date_to <= today)
                     try:
                         MAX_DAYS = 365 * 3
-                        now = datetime.utcnow()
+                        now = datetime.now(timezone.utc)
                         end_of_today = now.replace(hour=23, minute=59, second=59, microsecond=999999)
                         df = datetime.fromisoformat(date_from) if isinstance(date_from, str) else date_from
                         dt = datetime.fromisoformat(date_to) if isinstance(date_to, str) else date_to
@@ -158,43 +89,26 @@ class ReportsService:
                         if df and dt and (dt - df).days > MAX_DAYS:
                             df = dt - timedelta(days=MAX_DAYS)
                         if df:
-                            query = query.filter(TransactionRecord.created_date >= df.isoformat() if isinstance(date_from, str) else df)
+                            query = query.filter(TransactionRecord.transaction_date >= df.isoformat() if isinstance(date_from, str) else df)
                         if dt:
-                            query = query.filter(TransactionRecord.created_date <= dt.isoformat() if isinstance(date_to, str) else dt)
+                            query = query.filter(TransactionRecord.transaction_date <= dt.isoformat() if isinstance(date_to, str) else dt)
                     except Exception:
                         # If parsing fails, fall back to original filters
                         if date_from:
-                            query = query.filter(TransactionRecord.created_date >= date_from)
+                            query = query.filter(TransactionRecord.transaction_date >= date_from)
                         if date_to:
                             try:
                                 parsed = datetime.fromisoformat(date_to) if isinstance(date_to, str) else date_to
-                                now = datetime.utcnow()
+                                now = datetime.now(timezone.utc)
                                 end_of_today = now.replace(hour=23, minute=59, second=59, microsecond=999999)
                                 if parsed and parsed > end_of_today:
                                     parsed = end_of_today
-                                query = query.filter(TransactionRecord.created_date <= parsed.isoformat() if isinstance(date_to, str) else parsed)
+                                query = query.filter(TransactionRecord.transaction_date <= parsed.isoformat() if isinstance(date_to, str) else parsed)
                             except Exception:
-                                query = query.filter(TransactionRecord.created_date <= date_to)
+                                query = query.filter(TransactionRecord.transaction_date <= date_to)
             
-            # Execute query with optional limit for performance
-            # For overview reports with large date ranges, we should limit results
-            max_records = filters.get('max_records') if filters else None
-
-            # Apply automatic limit for overview/diversion reports to prevent timeouts
-            if report_type in ('overview', 'diversion') and not max_records:
-                max_records = 50000  # Hard limit for overview to prevent memory issues
-                logger.info(f"Auto-limiting {report_type} report to {max_records} records for performance")
-
-            if max_records:
-                # Order by created_date DESC to get most recent records first
-                query = query.order_by(TransactionRecord.created_date.desc()).limit(max_records)
-
+            # Execute query
             transaction_records = query.all()
-
-            # Log performance warning for large result sets
-            record_count = len(transaction_records)
-            if record_count > 10000:
-                logger.warning(f"Large result set: {record_count} transaction records loaded into memory for report_type={report_type}")
             
             # Preload transaction statuses for included records
             transaction_ids = {record.created_transaction_id for record in transaction_records}
@@ -261,22 +175,16 @@ class ReportsService:
             records_data = []
             for record in transaction_records:
                 record_dict = self._transaction_record_to_dict(record)
-
+                
                 # Add material data if report_type needs it
                 if report_type in ('overview', 'diversion', 'performance', 'materials', 'comparison') and record.material_id:
                     record_dict['material'] = materials_map.get(record.material_id)
-
-                # Include origin_id and transaction_date from the created transaction for downstream aggregations
+                
+                # Include origin_id from the created transaction for downstream aggregations
                 try:
-                    if record.created_transaction:
-                        record_dict['origin_id'] = record.created_transaction.origin_id
-                        record_dict['transaction_date'] = record.created_transaction.transaction_date.isoformat() if record.created_transaction.transaction_date else None
-                    else:
-                        record_dict['origin_id'] = None
-                        record_dict['transaction_date'] = None
+                    record_dict['origin_id'] = record.created_transaction.origin_id if record.created_transaction else None
                 except Exception:
                     record_dict['origin_id'] = None
-                    record_dict['transaction_date'] = None
 
                 # Mark rejection status for downstream filtering
                 try:
@@ -284,7 +192,7 @@ class ReportsService:
                     record_dict['is_rejected'] = (tx_status == TransactionStatus.rejected)
                 except Exception:
                     record_dict['is_rejected'] = False
-
+                
                 records_data.append(record_dict)
             
             return {
@@ -324,18 +232,18 @@ class ReportsService:
             if filters and (filters.get('date_from') or filters.get('date_to')):
                 tr_query = self.db.query(Transaction.origin_id).join(
                     TransactionRecord,
-                    TransactionRecord.created_transaction_id == Transaction.id,
+                    TransactionRecord.created_transaction_id == Transaction.id
                 ).filter(
                     Transaction.organization_id == organization_id,
                     TransactionRecord.is_active == True,
-                    Transaction.deleted_date.is_(None)
+                    Transaction.status != TransactionStatus.rejected
                 )
                 # Clamp and apply date range
                 date_from = filters.get('date_from')
                 date_to = filters.get('date_to')
                 try:
                     MAX_DAYS = 365 * 3
-                    now = datetime.utcnow()
+                    now = datetime.now(timezone.utc)
                     end_of_today = now.replace(hour=23, minute=59, second=59, microsecond=999999)
                     df = datetime.fromisoformat(date_from) if isinstance(date_from, str) else date_from
                     dt = datetime.fromisoformat(date_to) if isinstance(date_to, str) else date_to
@@ -344,22 +252,22 @@ class ReportsService:
                     if df and dt and (dt - df).days > MAX_DAYS:
                         df = dt - timedelta(days=MAX_DAYS)
                     if df:
-                        tr_query = tr_query.filter(TransactionRecord.created_date >= df.isoformat() if isinstance(date_from, str) else df)
+                        tr_query = tr_query.filter(TransactionRecord.transaction_date >= df.isoformat() if isinstance(date_from, str) else df)
                     if dt:
-                        tr_query = tr_query.filter(TransactionRecord.created_date <= dt.isoformat() if isinstance(date_to, str) else dt)
+                        tr_query = tr_query.filter(TransactionRecord.transaction_date <= dt.isoformat() if isinstance(date_to, str) else dt)
                 except Exception:
                     if date_from:
-                        tr_query = tr_query.filter(TransactionRecord.created_date >= date_from)
+                        tr_query = tr_query.filter(TransactionRecord.transaction_date >= date_from)
                     if date_to:
                         try:
                             parsed = datetime.fromisoformat(date_to) if isinstance(date_to, str) else date_to
-                            now = datetime.utcnow()
+                            now = datetime.now(timezone.utc)
                             end_of_today = now.replace(hour=23, minute=59, second=59, microsecond=999999)
                             if parsed and parsed > end_of_today:
                                 parsed = end_of_today
-                            tr_query = tr_query.filter(TransactionRecord.created_date <= parsed.isoformat() if isinstance(date_to, str) else parsed)
+                            tr_query = tr_query.filter(TransactionRecord.transaction_date <= parsed.isoformat() if isinstance(date_to, str) else parsed)
                         except Exception:
-                            tr_query = tr_query.filter(TransactionRecord.created_date <= date_to)
+                            tr_query = tr_query.filter(TransactionRecord.transaction_date <= date_to)
                 rows = tr_query.distinct().all()
                 origin_ids_in_range = {row[0] for row in rows if row and row[0] is not None}
 
@@ -419,7 +327,8 @@ class ReportsService:
                 TransactionRecord.created_transaction_id == Transaction.id
             ).filter(
                 Transaction.organization_id == organization_id,
-                TransactionRecord.is_active == True
+                TransactionRecord.is_active == True,
+                Transaction.status != TransactionStatus.rejected
             )
             # Apply optional date range filter (clamped)
             if filters:
@@ -436,12 +345,12 @@ class ReportsService:
                     if df and dt and (dt - df).days > MAX_DAYS:
                         df = dt - timedelta(days=MAX_DAYS)
                     if df:
-                        transaction_records_query = transaction_records_query.filter(TransactionRecord.created_date >= df.isoformat() if isinstance(date_from, str) else df)
+                        transaction_records_query = transaction_records_query.filter(TransactionRecord.transaction_date >= df.isoformat() if isinstance(date_from, str) else df)
                     if dt:
-                        transaction_records_query = transaction_records_query.filter(TransactionRecord.created_date <= dt.isoformat() if isinstance(date_to, str) else dt)
+                        transaction_records_query = transaction_records_query.filter(TransactionRecord.transaction_date <= dt.isoformat() if isinstance(date_to, str) else dt)
                 except Exception:
                     if date_from:
-                        transaction_records_query = transaction_records_query.filter(TransactionRecord.created_date >= date_from)
+                        transaction_records_query = transaction_records_query.filter(TransactionRecord.transaction_date >= date_from)
                     if date_to:
                         try:
                             parsed = datetime.fromisoformat(date_to) if isinstance(date_to, str) else date_to
@@ -449,9 +358,9 @@ class ReportsService:
                             end_of_today = now.replace(hour=23, minute=59, second=59, microsecond=999999)
                             if parsed and parsed > end_of_today:
                                 parsed = end_of_today
-                            transaction_records_query = transaction_records_query.filter(TransactionRecord.created_date <= parsed.isoformat() if isinstance(date_to, str) else parsed)
+                            transaction_records_query = transaction_records_query.filter(TransactionRecord.transaction_date <= parsed.isoformat() if isinstance(date_to, str) else parsed)
                         except Exception:
-                            transaction_records_query = transaction_records_query.filter(TransactionRecord.created_date <= date_to)
+                            transaction_records_query = transaction_records_query.filter(TransactionRecord.transaction_date <= date_to)
             
             transaction_records = transaction_records_query.all()
             
@@ -577,7 +486,7 @@ class ReportsService:
             'created_by_id': record.created_by_id,
             'approved_by_id': record.approved_by_id,
             'completed_date': record.completed_date.isoformat() if record.completed_date else None,
-            'created_date': record.created_date.isoformat() if record.created_date else None,
+            'transaction_date': record.transaction_date.isoformat() if record.transaction_date else None,
             'updated_date': record.updated_date.isoformat() if record.updated_date else None,
             'is_active': record.is_active,
             'traceability': record.traceability

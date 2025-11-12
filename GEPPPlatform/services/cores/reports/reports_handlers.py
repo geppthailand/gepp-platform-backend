@@ -4,7 +4,11 @@ Handles all /api/reports/* routes
 """
 
 from typing import Dict, Any, Optional, Tuple
-from datetime import datetime, timedelta
+import csv
+import os
+import ast
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from .reports_service import ReportsService
 from ....exceptions import APIException, ValidationException, NotFoundException
@@ -22,7 +26,7 @@ def _validate_organization_id(current_user: Dict[str, Any]) -> int:
     return organization_id
 
 
-def _build_filters_from_query_params(query_params: Dict[str, Any]) -> Dict[str, Any]:
+def _build_filters_from_query_params(query_params: Dict[str, Any], timezone_name: Optional[str] = None) -> Dict[str, Any]:
     """
     Build filters dictionary from query parameters
     Supports comma-separated values for material_id and origin_id
@@ -33,6 +37,20 @@ def _build_filters_from_query_params(query_params: Dict[str, Any]) -> Dict[str, 
     - date_to: Set to 23:59:59.999999 of that day
     """
     filters = {}
+    # Determine client timezone
+    tz_param = query_params.get('tz') or query_params.get('timezone')
+    client_tz_name = (tz_param or timezone_name or 'Asia/Bangkok')
+    try:
+        client_tz = ZoneInfo(client_tz_name)
+    except Exception:
+        client_tz = ZoneInfo('UTC')
+        client_tz_name = 'UTC'
+
+    def to_utc_iso(dt: datetime) -> str:
+        # Attach client tz if naive, then convert to UTC and return ISO string
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=client_tz)
+        return dt.astimezone(timezone.utc).isoformat()
     
     # Handle material_id (comma-separated)
     if query_params.get('material_id'):
@@ -68,7 +86,8 @@ def _build_filters_from_query_params(query_params: Dict[str, Any]) -> Dict[str, 
                 dt = datetime.fromisoformat(date_from_str)
             
             # Set to start of day (00:00:00)
-            filters['date_from'] = dt.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+            start_local = dt.replace(hour=0, minute=0, second=0, microsecond=0)
+            filters['date_from'] = to_utc_iso(start_local)
         except Exception:
             # Fallback to original value if parsing fails
             filters['date_from'] = date_from_str
@@ -86,7 +105,8 @@ def _build_filters_from_query_params(query_params: Dict[str, Any]) -> Dict[str, 
                 dt = datetime.fromisoformat(date_to_str)
             
             # Set to end of day (23:59:59.999999)
-            filters['date_to'] = dt.replace(hour=23, minute=59, second=59, microsecond=999999).isoformat()
+            end_local = dt.replace(hour=23, minute=59, second=59, microsecond=999999)
+            filters['date_to'] = to_utc_iso(end_local)
         except Exception:
             # Fallback to original value if parsing fails
             filters['date_to'] = date_to_str
@@ -101,19 +121,19 @@ def _build_filters_from_query_params(query_params: Dict[str, Any]) -> Dict[str, 
     
     # Default YTD if no explicit dates provided (first day of current year -> end of today)
     if not filters.get('date_from') and not filters.get('date_to'):
-        now = datetime.utcnow()
-        start_of_year = datetime(now.year, 1, 1, 0, 0, 0, 0)
-        end_of_today = now.replace(hour=23, minute=59, second=59, microsecond=999999)
-        filters['date_from'] = start_of_year.isoformat()
-        filters['date_to'] = end_of_today.isoformat()
+        now_utc = datetime.now(timezone.utc)
+        start_of_year_local = datetime(now_utc.year, 1, 1, 0, 0, 0, 0, tzinfo=client_tz)
+        end_of_today_local = now_utc.astimezone(client_tz).replace(hour=23, minute=59, second=59, microsecond=999999)
+        filters['date_from'] = start_of_year_local.astimezone(timezone.utc).isoformat()
+        filters['date_to'] = end_of_today_local.astimezone(timezone.utc).isoformat()
 
     # Clamp date range constraints globally:
     # - date_to must not be in the future
     # - date range must not exceed 3 years (by day count)
     try:
         MAX_DAYS = 365 * 3
-        now = datetime.utcnow()
-        end_of_today = now.replace(hour=23, minute=59, second=59, microsecond=999999)
+        now_utc = datetime.now(timezone.utc)
+        end_of_today = now_utc.replace(hour=23, minute=59, second=59, microsecond=999999)
 
         dt_from = _parse_datetime(filters.get('date_from')) if filters.get('date_from') else None
         dt_to = _parse_datetime(filters.get('date_to')) if filters.get('date_to') else None
@@ -358,10 +378,8 @@ def _handle_overview_report(
         total_waste += weight
         ghg_reduction += record_ghg
         
-        # Aggregate by month for chart_data (use transaction_date, not created_date)
-        # First try transaction_date from the record, fallback to created_date
-        transaction_date = record.get('transaction_date') or record.get('created_date')
-        dt = _parse_datetime(transaction_date)
+        # Aggregate by month for chart_data
+        dt = _parse_datetime(record.get('transaction_date'))
         if dt:
             y = dt.year
             m = dt.month
@@ -369,8 +387,17 @@ def _handle_overview_report(
                 month_totals_by_year[y] = {}
             month_totals_by_year[y][m] = month_totals_by_year[y].get(m, 0.0) + weight
         
-        # Plastic saved calculation
-        if material.get('is_plastic'):
+        # Plastic saved calculation - materials with main_material_id = 1 and category_id = 1
+        main_material_id = material.get('main_material_id')
+        category_id = material.get('category_id') if material else record.get('category_id')
+        try:
+            main_material_id_int = int(main_material_id) if main_material_id is not None else None
+            category_id_int = int(category_id) if category_id is not None else None
+        except Exception:
+            main_material_id_int = None
+            category_id_int = None
+        
+        if main_material_id_int == 1 and category_id_int == 1:
             plastic_saved += weight
         
         # Recyclable waste (category_id in {1, 3})
@@ -668,7 +695,7 @@ def _handle_diversion_report(
             material_entry = material_table_map[main_material_id]
             
             # Aggregate by month
-            dt = _parse_datetime(record.get('created_date'))
+            dt = _parse_datetime(record.get('transaction_date'))
             if dt:
                 month = dt.month
                 material_entry['monthly_data'][month] = material_entry['monthly_data'].get(month, 0.0) + weight
@@ -1106,7 +1133,7 @@ def _handle_comparison_report(
                 continue
             material_name = category_names.get(cat_id_int, f"Category {cat_id_int}")
             weight = _calculate_weight(record, material)
-            dt = _parse_datetime(record.get('created_date'))
+            dt = _parse_datetime(record.get('transaction_date'))
             if not dt:
                 continue
             month_label = datetime(2000, dt.month, 1).strftime('%b')
@@ -1151,10 +1178,243 @@ def _handle_comparison_report(
     left_grouped = build_grouped(left_result, left_from, left_to, reports_service)
     right_grouped = build_grouped(right_result, right_from, right_to, reports_service)
 
+    # === Compute comparison scores from CSV (c = current/right, l = last/left) ===
+    def _sum_categories(material_map: Dict[str, float], patterns: list[str]) -> float:
+        if not material_map:
+            return 0.0
+        total = 0.0
+        for name, val in material_map.items():
+            n = (name or "").lower()
+            for p in patterns:
+                if p in n:
+                    total += float(val or 0)
+                    break
+        return total
+
+    def _build_variables(left_map: Dict[str, float], right_map: Dict[str, float]) -> Dict[str, float]:
+        # Define category match patterns (case-insensitive substrings)
+        patterns = {
+            'recyclable': ['recycl'],
+            'general': ['general'],
+            'hazardous': ['hazardous'],
+            'bio_hazardous': ['bio-hazard', 'biohazard', 'bio_hazard'],
+            'organic': ['organic'],
+            'waste_to_energy': ['waste to energy', 'waste-to-energy', 'waste_to_energy'],
+            'construction': ['construction'],
+            'electronic': ['electronic', 'e-waste', 'ewaste']
+        }
+        # Ensure hazardous doesn't double-count bio-hazardous
+        # We will subtract bio-hazardous portion from hazardous if both match
+        def compute_side(side_map: Dict[str, float]) -> Dict[str, float]:
+            vals: Dict[str, float] = {}
+            for key, pats in patterns.items():
+                vals[key] = _sum_categories(side_map, pats)
+            # Adjust hazardous to exclude bio_hazardous if both were matched
+            if vals['hazardous'] and vals['bio_hazardous']:
+                # Try to exclude if names overlap; conservative approach keeps as-is to avoid over-subtraction
+                pass
+            return vals
+
+        l_vals = compute_side(left_map or {})
+        c_vals = compute_side(right_map or {})
+
+        variables: Dict[str, float] = {}
+        for k, v in l_vals.items():
+            variables[f'l_{k}'] = float(v or 0)
+        for k, v in c_vals.items():
+            variables[f'c_{k}'] = float(v or 0)
+        return variables
+
+    def _safe_eval_formula(formula: str, variables: Dict[str, float]) -> float:
+        # Allow only names, numbers, + - * / ( ) and unary +/-
+        allowed_nodes = (
+            ast.Expression, ast.BinOp, ast.UnaryOp, ast.Num, ast.Constant, ast.Name,
+            ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow, ast.USub, ast.UAdd, ast.Load,
+            ast.Call  # disallow; we'll block below
+        )
+
+        class SafeVisitor(ast.NodeVisitor):
+            def visit(self, node):
+                if not isinstance(node, allowed_nodes):
+                    raise ValueError('Disallowed expression in formula')
+                # Disallow any function calls explicitly
+                if isinstance(node, ast.Call):
+                    raise ValueError('Function calls are not allowed in formula')
+                # Only permit variable names present in variables map
+                if isinstance(node, ast.Name) and node.id not in variables:
+                    # Treat unknown names as zero to make formulas resilient
+                    # Alternatively, raise ValueError
+                    pass
+                self.generic_visit(node)
+
+        try:
+            tree = ast.parse(formula, mode='eval')
+            SafeVisitor().visit(tree)
+            code = compile(tree, '<formula>', 'eval')
+            # Unknown names default to 0 via dict subclass
+            class ZeroDict(dict):
+                def __missing__(self, key):
+                    return 0.0
+            return float(eval(code, {"__builtins__": {}}, ZeroDict(variables)))
+        except Exception:
+            return 0.0
+
+    def _load_scores_csv() -> list[Dict[str, Any]]:
+        # Resolve CSV path relative to project root
+        base_dir = os.path.dirname(__file__)  # .../GEPPPlatform/services/cores/reports
+        csv_candidates = [
+            os.path.normpath(os.path.join(base_dir, '../../../../GEPPCriteria/compairingScore.csv')),
+            os.path.normpath(os.path.join(base_dir, '../../../GEPPCriteria/compairingScore.csv')),
+            'GEPPCriteria/compairingScore.csv'
+        ]
+        path = None
+        for p in csv_candidates:
+            if os.path.exists(p):
+                path = p
+                break
+        rows: list[Dict[str, Any]] = []
+        if not path:
+            return rows
+        try:
+            with open(path, newline='', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for r in reader:
+                    rows.append(r)
+        except Exception:
+            return []
+        return rows
+
+    variables = _build_variables(left_grouped.get('material'), right_grouped.get('material'))
+    score_rows = _load_scores_csv()
+    computed_scores: list[Dict[str, Any]] = []
+    for r in score_rows:
+        try:
+            score_id = int(r.get('id') or 0)
+        except Exception:
+            score_id = 0
+        score_name = (r.get('score_name') or '').strip()
+        description = (r.get('description') or '').strip()
+        reason = (r.get('reason') or '').strip()
+        formula = (r.get('formula') or '').strip()
+        value = _safe_eval_formula(formula, variables)
+        computed_scores.append({
+            'id': score_id,
+            'score_name': score_name,
+            'description': description,
+            'formula': formula,
+            'value': round(value, 2),
+            'reason': reason
+        })
+
+    # Prepare score values for recommendation evaluation
+    score_values: Dict[str, float] = { (s.get('score_name') or '').strip(): float(s.get('value') or 0.0) for s in computed_scores }
+
+    # Evaluate recommendations from CSVs (opportunity, quickwin, riskAssessment)
+    def _safe_eval_condition(expr: str, values: Dict[str, float]) -> bool:
+        normalized = (expr or '').replace('AND', 'and').replace('OR', 'or')
+        allowed_nodes = (
+            ast.Expression, ast.BoolOp, ast.BinOp, ast.UnaryOp, ast.Compare,
+            ast.Name, ast.Load, ast.Constant, ast.Num,
+            ast.And, ast.Or,
+            ast.Add, ast.Sub, ast.Mult, ast.Div, ast.USub, ast.UAdd,
+            ast.Gt, ast.Lt, ast.GtE, ast.LtE, ast.Eq, ast.NotEq
+        )
+
+        class SafeVisitor(ast.NodeVisitor):
+            def visit(self, node):
+                if not isinstance(node, allowed_nodes):
+                    raise ValueError('Disallowed expression in condition')
+                if isinstance(node, ast.Name) and node.id not in values:
+                    # Unknown names default to 0 at eval-time
+                    pass
+                self.generic_visit(node)
+
+        try:
+            tree = ast.parse(normalized, mode='eval')
+            SafeVisitor().visit(tree)
+            code = compile(tree, '<condition>', 'eval')
+            class ZeroDict(dict):
+                def __missing__(self, key):
+                    return 0.0
+            return bool(eval(code, {"__builtins__": {}}, ZeroDict(values)))
+        except Exception:
+            return False
+
+    def _load_recommendations_csv(file_name: str) -> list[Dict[str, Any]]:
+        base_dir = os.path.dirname(__file__)
+        candidates = [
+            os.path.normpath(os.path.join(base_dir, '../../../../GEPPCriteria/recommendations/' + file_name)),
+            os.path.normpath(os.path.join(base_dir, '../../../GEPPCriteria/recommendations/' + file_name)),
+            'GEPPCriteria/recommendations/' + file_name
+        ]
+        path = None
+        for p in candidates:
+            if os.path.exists(p):
+                path = p
+                break
+        rows: list[Dict[str, Any]] = []
+        if not path:
+            return rows
+        try:
+            with open(path, newline='', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for r in reader:
+                    rows.append(r)
+        except Exception:
+            return []
+        return rows
+
+    def _evaluate_recommendations(rows: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
+        results: list[Dict[str, Any]] = []
+        for r in rows:
+            criterior = (r.get('criterior') or '').strip()
+            if not criterior:
+                continue
+            # Collect variables used in the criterior for transparency
+            used_vars: set[str] = set()
+            try:
+                expr_tree = ast.parse(criterior.replace('AND', 'and').replace('OR', 'or'), mode='eval')
+                for node in ast.walk(expr_tree):
+                    if isinstance(node, ast.Name):
+                        used_vars.add(node.id)
+            except Exception:
+                used_vars = set()
+
+            var_values: Dict[str, float] = {name: float(score_values.get(name, 0.0)) for name in used_vars}
+            matched = _safe_eval_condition(criterior, score_values)
+            try:
+                rid = int(r.get('id') or 0)
+            except Exception:
+                rid = 0
+            results.append({
+                'id': rid,
+                'condition_name': (r.get('condition_name') or '').strip(),
+                'criterior': criterior,
+                'matched': bool(matched),
+                'variables': var_values,
+                'risk_problems': (r.get('risk_problems') or '').strip(),
+                'recommendation': (r.get('recommendation') or '').strip()
+            })
+        return results
+
+    opportunity_rows = _load_recommendations_csv('opportunity.csv')
+    quickwin_rows = _load_recommendations_csv('quickwin.csv')
+    risk_rows = _load_recommendations_csv('riskAssessment.csv')
+
+    opportunities = _evaluate_recommendations(opportunity_rows)
+    quickwins = _evaluate_recommendations(quickwin_rows)
+    risks = _evaluate_recommendations(risk_rows)
+
     return {
         'success': True,
         'left': left_grouped,
         'right': right_grouped,
+        'scores': {
+            'metrics': computed_scores,
+            'opportunities': opportunities,
+            'quickwins': quickwins,
+            'risks': risks
+        },
         'message': 'Comparison report generated successfully'
     }
 
@@ -1194,20 +1454,23 @@ def handle_reports_routes(event: Dict[str, Any], **common_params) -> Dict[str, A
         organization_id = _validate_organization_id(current_user)
         
         # Route to appropriate handler
+        # Determine timezone from query or current user (fallback Asia/Bangkok)
+        tz_name = query_params.get('tz') or query_params.get('timezone') or current_user.get('timezone') or 'Asia/Bangkok'
+
         if path == '/api/reports/overview':
-            filters = _build_filters_from_query_params(query_params)
+            filters = _build_filters_from_query_params(query_params, timezone_name=tz_name)
             return _handle_overview_report(reports_service, organization_id, filters)
 
         elif path == '/api/reports/performance':
-            filters = _build_filters_from_query_params(query_params)
+            filters = _build_filters_from_query_params(query_params, timezone_name=tz_name)
             return _handle_performance_report(reports_service, organization_id, filters)
         
         elif path == '/api/reports/diversion':
-            filters = _build_filters_from_query_params(query_params)
+            filters = _build_filters_from_query_params(query_params, timezone_name=tz_name)
             return _handle_diversion_report(reports_service, organization_id, filters)
         
         elif path == '/api/reports/filter/origins':
-            filters = _build_filters_from_query_params(query_params)
+            filters = _build_filters_from_query_params(query_params, timezone_name=tz_name)
             # Remove origin filters - only use material filters for origins endpoint
             filters.pop('origin_ids', None)
             # Do not apply default YTD for filter endpoints; only use dates if explicitly provided
@@ -1218,7 +1481,7 @@ def handle_reports_routes(event: Dict[str, Any], **common_params) -> Dict[str, A
             return reports_service.get_origin_by_organization(organization_id=organization_id, filters=filters)
 
         elif path == '/api/reports/filter/materials':
-            filters = _build_filters_from_query_params(query_params)
+            filters = _build_filters_from_query_params(query_params, timezone_name=tz_name)
             # Remove material filters - only use origin filters for materials endpoint
             filters.pop('material_ids', None)
             # Do not apply default YTD for filter endpoints; only use dates if explicitly provided
@@ -1229,11 +1492,11 @@ def handle_reports_routes(event: Dict[str, Any], **common_params) -> Dict[str, A
             return reports_service.get_material_by_organization(organization_id=organization_id, filters=filters)
         
         elif path == '/api/reports/comparison':
-            filters = _build_filters_from_query_params(query_params)
+            filters = _build_filters_from_query_params(query_params, timezone_name=tz_name)
             return _handle_comparison_report(reports_service, organization_id, filters)
 
         elif path == '/api/reports/materials':
-            filters = _build_filters_from_query_params(query_params)
+            filters = _build_filters_from_query_params(query_params, timezone_name=tz_name)
             return _handle_materials_report(reports_service, organization_id, filters)
     
     except ValidationException as e:
