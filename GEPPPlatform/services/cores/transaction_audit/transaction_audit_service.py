@@ -1069,15 +1069,107 @@ class TransactionAuditService:
             material_types = [r.get('material_type') for r in transaction_data.get('records', [])]
             unique_types = list(set(material_types))
 
-            judgment_prompt = judgment_template.format(
-                transaction_id=transaction_id,
-                record_count=len(transaction_data.get('records', [])),
-                material_types=material_types,
-                unique_types_count=len(unique_types),
-                rules_json=json.dumps(audit_rules, ensure_ascii=False),
-                extracted_observations_json=json.dumps(extracted_observations, ensure_ascii=False),
-                language_name=language_name
-            )
+            # judgment_prompt = judgment_template.format(
+            #     transaction_id=transaction_id,
+            #     record_count=len(transaction_data.get('records', [])),
+            #     material_types=material_types,
+            #     unique_types_count=len(unique_types),
+            #     rules_json=json.dumps(audit_rules, ensure_ascii=False),
+            #     extracted_observations_json=json.dumps(extracted_observations, ensure_ascii=False),
+            #     language_name=language_name
+            # )
+
+#             ```json
+# {{
+#   "tr_id": {transaction_id},
+#   "violations": [
+#     {{"id": <rule_id>, "m": "<ข้อความ violation>", "tr": <record_id หรือ null>}}
+#   ]
+# }}
+# ```
+
+# **หากไม่มีข้อผิดพลาด:**
+# ```json
+# {{
+#   "tr_id": {transaction_id},
+#   "violations": []
+# }}
+# ```
+
+# **กฎสำคัญ:**
+# - ส่งเฉพาะ violations ที่เป็นข้อผิดพลาดจริงๆ
+# - ถ้าประเภทตรงกัน (ตามการจับคู่ข้างบน) → อย่า flag
+# - ตัดสินจาก observation เท่านั้น ห้ามคาดเดา
+# - อย่าใส่ข้อความอื่นนอกจาก JSON
+
+            rules_json = json.dumps(audit_rules, ensure_ascii=False)
+            # return_json_format = json.dumps({
+            #     "status": "approved"
+            # })
+
+            print(extracted_observations)
+
+            judgment_prompt = f"""
+            from the following rules:
+            {rules_json}
+
+            and the following observations:
+            {json.dumps(extracted_observations, ensure_ascii=False)}
+
+            make a judgment based on the rules and observations.
+            return the result in json format.
+
+            if the observations of each transaction_record is not follow 
+            the rule, that means has violations so return the list 
+            of transaction_id with rule_id and violation message.
+            
+            if the violation is transaction level such as:
+                the transaction must has k images then
+                do not add the 'tr' in the violation.
+
+            ```json
+            {{
+              "violations": [
+                {{"id": <rule_id>, "m": "<violation message>"}}
+              ]
+            }}
+            ```
+            
+            if the violation is record level such as:
+                the transaction record say the material type is A but 
+                the observation say the material type is B then add the 'tr'.
+            
+            ```json
+            {{
+              "violations": [
+                {{"id": <rule_id>, "m": "<specific violation message>", "tr": <record_id>}}
+              ]
+            }}
+            ```
+
+            the violation message must be specific to the observation situation.
+            ex: จากภาพมีกล่องกระดาษและหลอดอยู่ด้วยจึงไม่ตรงกับประเภทที่ระบุเป็น Food/Plant Waste
+            
+
+            **กฎสำคัญ:**
+            - ส่งเฉพาะ violations ที่เป็นข้อผิดพลาดจริงๆ
+            - ถ้าประเภทตรงกัน (ตามการจับคู่ข้างบน) → อย่า flag
+            - ห้ามระบุแบบกว้างๆ เช่น ประเภท Material ไม่ตรงกับรูปภาพ
+            - ตัดสินจาก observation เท่านั้น ห้ามคาดเดา
+            - ห้ามใช้ข้อความจาก Rule ในการตอบ violations อย่างเดียวต้องเป็นข้อความที่สอดคล้องกับ observation material ด้วย
+            - "Non-Specific {{material_type}}" หมายถึง ชนิด material นั้นๆแบบทั่วไป สามารถใช้แทน material_type นั้นๆได้
+
+            **หลักการจำแนกประเภท**
+            - ขยะทั่วไป General – ขยะที่รีไซเคิลไม่ได้ เช่น ถุงพลาสติก ฟิล์มอาหาร
+            - ขยะรีไซเคิล (Non-Specific) Recyclable – วัสดุที่นำกลับมาใช้ใหม่ได้ เช่น ขวดพลาสติก กระดาษ โลหะ
+            - ขยะอันตราย (Non-Specific) Hazardous – ของเสียมีสารพิษหรืออันตราย เช่น ถ่านไฟฉาย หลอดไฟ สเปรย์
+            - ขยะเศษอาหาร Food/Plant Waste – ของเหลือจากการกินหรือย่อยสลายได้ เช่น เศษอาหาร เปลือกผลไม้
+            - หากขยะรีไซเคิลรวมอยู่กับเศษอาหารหรือขยะทั่วไปให้จัดอยู่ในหมวดขยะทั่วไป
+            - ขยะอันตรายไม่สามารถรวมกับขยะรีไซเคิล,เศษอาหารหรือขยะทั่วไปได้
+
+            """
+
+            print(judgment_prompt)
 
             # Call AI for judgment with timing
             import time
@@ -1648,6 +1740,7 @@ class TransactionAuditService:
                 else:
                     raise parse_err
 
+            print("<<<<<<<", ai_data)
             violations = ai_data.get('violations', [])
 
             # Build audit rules map by database ID for lookup
@@ -1826,7 +1919,7 @@ class TransactionAuditService:
                                             file_record = db.query(File).filter(File.id == file_id).first()
                                             if file_record:
                                                 file_record.observation = img_obs  # Save {file_id, materials, overview}
-                                                logger.info(f"Saved observation to file {file_id}: {len(img_obs.get('materials', {}))} materials")
+                                                # logger.info(f"Saved observation to file {file_id}: {len(img_obs.get('materials', {}))} materials")
                                         except Exception as file_err:
                                             logger.error(f"Failed to save observation to file {file_id}: {str(file_err)}")
                                     else:
@@ -1991,6 +2084,8 @@ class TransactionAuditService:
                         'audits': audits_by_record,  # {record_id: {images: [{id, obs}]}}
                         'v': violations  # [{tr?, id, m}] - same format as ai_audit_note
                     }
+
+                    print("-=-=-=-==-=--=-=", audit_notes)
 
                     # Save to THREE places:
                     # 1. Save to transaction.ai_audit_note (audit observations and status)
