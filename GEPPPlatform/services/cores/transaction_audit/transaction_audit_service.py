@@ -149,7 +149,7 @@ class TransactionAuditService:
         })
 
         self.model_name = self.prompts.get('api_settings', {}).get('model_name', 'gemini-2.5-flash-lite')
-        self.max_concurrent_threads = 50
+        self.max_concurrent_threads = 100
         self.response_language = response_language.lower()  # Store language preference
 
         # Log service configuration
@@ -246,21 +246,148 @@ class TransactionAuditService:
             return {}
 
     def _load_judgment_prompt(self) -> Dict[str, Any]:
-        """Load transaction judgment prompt from JSON file"""
+        """Create judgment prompt in-code (no longer using JSON file)"""
         try:
-            current_dir = os.path.dirname(os.path.abspath(__file__))
-            judgment_prompt_path = os.path.join(current_dir, 'transaction_judgment_prompt.json')
+            # Simple, direct prompt structure
+            judgment_template = """# ภารกิจ: ตรวจสอบขยะและรายงานเฉพาะข้อผิดพลาดที่แท้จริง
 
-            if os.path.exists(judgment_prompt_path):
-                with open(judgment_prompt_path, 'r', encoding='utf-8') as f:
-                    prompt = json.load(f)
-                logger.info(f"Loaded judgment prompt from {judgment_prompt_path}")
-                return prompt
-            else:
-                logger.warning(f"Judgment prompt file not found at {judgment_prompt_path}")
-                return {}
+## ข้อมูลที่ได้รับ
+- Transaction ID: {transaction_id}
+- จำนวน Records: {record_count}
+- ประเภทขยะที่แจ้ง: {material_types}
+
+## กฎที่ต้องตรวจสอบ
+{rules_json}
+
+## Observations ที่สกัดจากรูปภาพ
+{extracted_observations_json}
+
+---
+
+## วิธีตรวจสอบ (ทำตามลำดับ)
+
+### ขั้นที่ 1: เข้าใจหมวดหมู่ขยะ
+
+**การจับคู่ชื่อประเภท:**
+- ชื่อที่มี "General" หรือ "Non-Specific General" → หมวด **General Waste** ✅
+- ชื่อที่มี "Food" หรือ "Plant" หรือ "Non-Specific Food" → หมวด **Food/Plant** ✅
+- ชื่อที่มี "Recycl" หรือ "Plastic" หรือ "Paper" หรือ "Metal" หรือ "Glass" → หมวด **Recyclables** ✅
+- ชื่อที่มี "Hazard" หรือ "Batteries" หรือ "Bulbs" → หมวด **Hazardous** ✅
+
+**หมวดหมู่ขยะ:**
+1. **Hazardous (ขยะอันตราย)**: แบตเตอรี่, หลอดไฟ, กระป๋องสเปรย์, อุปกรณ์อิเล็กทรอนิกส์
+2. **Recyclables (รีไซเคิล)**: กล่องกระดาษ, กระดาษสะอาด, ขวดพลาสติก, กระป๋อง, แก้ว
+3. **Food/Plant (เศษอาหาร)**: เศษอาหาร + ถุงชั้นนอก เท่านั้น (อนุโลมภาชนะใสชั้นนอกที่มองเห็นภายใน)
+4. **General (ขยะทั่วไป)**: ขยะปนกัน, ขยะเปื้อน, อาหารในภาชนะ
+
+### ขั้นที่ 2: ตรวจแต่ละ Record
+
+สำหรับแต่ละ record ใน observations:
+
+**A) ดูว่าแจ้งประเภทอะไร (declared_material_type)**
+- ตัวอย่าง: "Non-Specific Recyclables" → หมวด Recyclables
+- ตัวอย่าง: "Food and Plant Waste" → หมวด Food/Plant
+- ตัวอย่าง: "General Waste" → หมวด General
+
+**B) ดู overview และ materials ใน observations**
+- อ่านว่าเห็นวัสดุอะไรในรูป
+- **สำคัญ**: ตัดสินจาก observation เท่านั้น ห้ามคาดเดาสิ่งที่ไม่ได้เขียนไว้
+- อนุโลม: "ผง", "เศษเล็กๆ", "วัสดุสีดำ (ผงหรือเศษเล็ก)" → ไม่ต้องตรวจ
+- อนุโลม: "ถุงพลาสติกใส", "ภาชนะพลาสติกใส" ชั้นนอก (มองเห็นภายใน) → ไม่ต้องตรวจ
+
+**C) ตัดสิน: วัสดุที่เห็นตรงกับหมวดที่แจ้งหรือไม่?**
+
+ตัวอย่างที่ **ถูกต้อง** (ห้าม flag):
+- เห็น "กล่องกระดาษ" → แจ้ง "Non-Specific Recyclables" ✅ ถูก (Recyclables)
+- เห็น "แบตเตอรี่" → แจ้ง "Non-Specific Hazardous Waste" ✅ ถูก (Hazardous)
+- เห็น "เศษอาหาร" → แจ้ง "Food and Plant Waste" ✅ ถูก (Food/Plant)
+- เห็น "กล่องพิซซ่า+ถุงขนม" → แจ้ง "General Waste" ✅ ถูก (ปนกัน = General)
+- เห็น "ภาชนะพลาสติกใสใส่ก๋วยเตี๋ยว" → แจ้ง "Food and Plant Waste" ✅ ถูก (อนุโลมภาชนะนอก)
+
+ตัวอย่างที่ **ผิด** (ต้อง flag):
+- เห็น "แบตเตอรี่" → แจ้ง "Food Waste" ❌ ผิด! (Hazardous ≠ Food)
+- เห็น "กล่องกระดาษ" → แจ้ง "Hazardous Waste" ❌ ผิด! (Recyclables ≠ Hazardous)
+- เห็น "เศษอาหารปนหลอดพลาสติก" → แจ้ง "Food Waste" ❌ ผิด! (ปน = General)
+
+**D) ถ้าผิด: สร้าง violation**
+
+**รูปแบบข้อความ (บังคับ):**
+```
+"Record <record_id>: พบ<วัสดุ1, วัสดุ2, วัสดุ3> (ต้องเป็น <หมวดที่ถูก>) แต่ระบุเป็น <หมวดที่แจ้ง>"
+```
+
+**ห้ามใช้ข้อความทั่วไป:**
+❌ "ประเภท Material ไม่ตรง"
+❌ "รูปภาพไม่ตรงกับข้อมูล"
+❌ "พบความผิดปกติ"
+❌ "ข้อมูลไม่ถูกต้อง"
+
+**ต้องระบุ:**
+1. Record ID เสมอ
+2. วัสดุที่เห็นจริงๆ (จาก observations - ระบุชื่อวัสดุเฉพาะเจาะจง)
+3. หมวดที่ควรเป็น
+4. หมวดที่แจ้งมา
+
+**ตัวอย่างที่ถูกต้อง:**
+- ✅ "Record 62712: พบแบตเตอรี่, หลอดไฟ (ต้องเป็น Hazardous) แต่ระบุเป็น Food and Plant Waste"
+- ✅ "Record 62713: พบกล่องกระดาษ, ขวดพลาสติก (ต้องเป็น Recyclables) แต่ระบุเป็น General Waste"
+- ✅ "Record 62714: พบเศษอาหารปนหลอดพลาสติก, ช้อนพลาสติก, กล่องโฟม (ต้องเป็น General) แต่ระบุเป็น Food and Plant Waste"
+
+**กรณีกฎจำนวน/ประเภท (ไม่มี record_id, ใช้ tr: null):**
+- ✅ "มี 3 records ต้องมี 4 records"
+- ✅ "มี 2 ประเภทขยะ ต้องมี 4 ประเภท"
+
+### ขั้นที่ 3: ตรวจกฎอื่นๆ
+
+**กฎจำนวน Record:**
+- ถ้ากฎบอกต้อง 4 records แต่มี {record_count} records → flag ถ้าไม่ตรง
+
+**กฎประเภทขยะครบ:**
+- ถ้ากฎบอกต้อง 4 ประเภท แต่มี {unique_types_count} ประเภท → flag ถ้าไม่ครบ
+
+---
+
+## Output Format
+
+ส่งกลับ JSON เท่านั้น:
+
+```json
+{{
+  "tr_id": {transaction_id},
+  "violations": [
+    {{"id": <rule_id>, "m": "<ข้อความ violation>", "tr": <record_id หรือ null>}}
+  ]
+}}
+```
+
+**หากไม่มีข้อผิดพลาด:**
+```json
+{{
+  "tr_id": {transaction_id},
+  "violations": []
+}}
+```
+
+**กฎสำคัญ:**
+- ส่งเฉพาะ violations ที่เป็นข้อผิดพลาดจริงๆ
+- ถ้าประเภทตรงกัน (ตามการจับคู่ข้างบน) → อย่า flag
+- ตัดสินจาก observation เท่านั้น ห้ามคาดเดา
+- อย่าใส่ข้อความอื่นนอกจาก JSON
+
+**การเขียนข้อความ violation (สำคัญมาก!):**
+- ✅ ต้องระบุ Record ID และวัสดุเฉพาะเจาะจง: "Record 123: พบแบตเตอรี่, หลอดไฟ (ต้องเป็น Hazardous) แต่ระบุเป็น Food Waste"
+- ❌ ห้ามใช้ข้อความทั่วไป: "ประเภท Material ไม่ตรง"
+- ❌ ห้ามใช้: "รูปภาพไม่ตรงกับข้อมูล"
+- ข้อความต้องบอกให้รู้ว่า: พบวัสดุอะไร ควรเป็นหมวดไหน แต่แจ้งเป็นหมวดไหน
+
+เริ่มวิเคราะห์:"""
+
+            return {
+                'judgment_prompt_template': judgment_template
+            }
+
         except Exception as e:
-            logger.error(f"Error loading judgment prompt: {str(e)}")
+            logger.error(f"Error creating judgment prompt: {str(e)}")
             return {}
 
     def _get_default_prompt_config(self) -> Dict[str, Any]:
@@ -598,8 +725,8 @@ class TransactionAuditService:
                 error_observations = [
                     {
                         'file_id': img_id,
-                        'materials': {},
-                        'overview': 'Failed to access image - presigned URL generation failed'
+                        'overview': 'Failed to access image - presigned URL generation failed',
+                        'image_quality_score': 0
                     }
                     for img_id in record_images
                 ]
@@ -611,99 +738,149 @@ class TransactionAuditService:
                 }
 
             # Load extraction rules
-            extraction_rules = self._load_extraction_rules()
+            # extraction_rules = self._load_extraction_rules()
+            # extraction_prompt_template = extraction_rules.get('extraction_prompt_template_minimal', '')
 
-            # Log extraction mode
-            logger.info(f"Record {record_id}: Using extraction mode '{self.extraction_mode}'")
+            # if not extraction_prompt_template:
+            #     logger.error(f"Record {record_id}: Extraction prompt template not found!")
+            #     error_observations = [
+            #         {
+            #             'file_id': img_id,
+            #             'overview': 'Extraction prompt template not configured',
+            #             'image_quality_score': 0
+            #         }
+            #         for img_id in record_images
+            #     ]
+            #     return {
+            #         'record_id': record_id,
+            #         'declared_material_type': record_data.get('material_type'),
+            #         'has_images': True,
+            #         'image_observations': error_observations
+            #     }
 
-            # Get appropriate prompt template based on mode
-            if self.extraction_mode == 'minimal':
-                extraction_prompt_template = extraction_rules.get('extraction_prompt_template_minimal', '')
-            else:
-                extraction_prompt_template = extraction_rules.get('extraction_prompt_template', '')
-
-            # If template not found, try fallback
-            if not extraction_prompt_template:
-                extraction_prompt_template = extraction_rules.get('extraction_prompt_template',
-                    extraction_rules.get('extraction_prompt_template_minimal', ''))
-                logger.warning(f"Record {record_id}: Extraction prompt template not found for mode '{self.extraction_mode}', using fallback")
-
-            # Verify the prompt contains the new format instructions
-            if 'file_id' not in extraction_prompt_template or 'materials' not in extraction_prompt_template:
-                logger.error(f"Record {record_id}: Extraction prompt template does NOT contain new format! Template length: {len(extraction_prompt_template)}")
-            else:
-                logger.info(f"Record {record_id}: Extraction prompt template verified (contains file_id and materials instructions)")
-
-            # Prepare content for extraction
-            content_parts = []
-
-            # Build file_id list string for the prompt
-            file_ids_str = ', '.join(str(fid) for fid in record_images)
-
-            # Add extraction prompt with mode indicator and file IDs
-            mode_note = " [MINIMAL MODE: Focus on critical items only]" if self.extraction_mode == 'minimal' else " [DETAILED MODE: Comprehensive extraction]"
-
-            full_prompt = f"Record ID: {record_id}\nDeclared Material Type: {record_data.get('material_type')}\nFile IDs (in order): [{file_ids_str}]{mode_note}\n\n{extraction_prompt_template}"
-
-            # Log the prompt to verify it's correct
-            logger.info(f"Record {record_id} extraction prompt (first 300 chars): {full_prompt[:300]}")
-
-            content_parts.append({
-                "type": "text",
-                "text": full_prompt
+            json_extract = json.dumps({
+                "overview": "<brief overview of transaction materials details of the waste>",
+                "image_quality_score": "<image_quality_score between 0 and 10 evaluate for resolution, see clearly, clarity, and overall quality>"
             })
 
-            # Add images with their file IDs
-            for img_file_id, img_url in zip(record_images, presigned_urls):
-                content_parts.append({
-                    "type": "text",
-                    "text": f"\n--- IMAGE {img_file_id} ---"
-                })
-                content_parts.append({
-                    "type": "image_url",
-                    "image_url": {"url": img_url, "detail": "high"}
-                })
+            extraction_prompt_template = f"""extract the following information from the image:
+            {json_extract}
+            """
 
-            # Call AI to extract observations with timing
+            # Process each image individually with threading
             import time
-            logger.info(f"Extracting observations from record {record_id} with {len(presigned_urls)} images")
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            def extract_single_image(img_file_id, img_url):
+                """Extract observation from a single image"""
+                try:
+                    content_parts = []
+
+                    # Add extraction prompt
+                    content_parts.append({
+                        "type": "text",
+                        "text": extraction_prompt_template
+                    })
+
+                    # Add the single image
+                    content_parts.append({
+                        "type": "image_url",
+                        "image_url": {"url": img_url, "detail": "high"}
+                    })
+
+                    # Call AI for this single image
+                    img_start = time.time()
+                    api_response = self._call_gemini_api_structured(content_parts)
+                    img_duration = time.time() - img_start
+
+                    # Parse response
+                    response_content = api_response.get('content', '') or ''
+                    token_usage = api_response.get('usage', {}) or {}
+
+                    # Parse extraction (should return array with one element)
+                    parsed = self._parse_extraction_response(response_content, record_id, [img_file_id])
+
+                    # Get the observation for this image
+                    if 'image_observations' in parsed and len(parsed['image_observations']) > 0:
+                        observation = parsed['image_observations'][0]
+                    else:
+                        observation = {
+                            'file_id': img_file_id,
+                            'overview': 'Failed to parse extraction response',
+                            'image_quality_score': 0
+                        }
+
+                    # Ensure file_id is set correctly
+                    observation['file_id'] = img_file_id
+
+                    return {
+                        'observation': observation,
+                        'token_usage': token_usage,
+                        'duration': img_duration
+                    }
+
+                except Exception as e:
+                    import traceback
+                    logger.error(f"Error in extract_single_image for image {img_file_id}: {str(e)}")
+                    logger.error(f"Traceback: {traceback.format_exc()}")
+                    return {
+                        'observation': {
+                            'file_id': img_file_id,
+                            'overview': f'Extraction error: {str(e)[:100]}',
+                            'image_quality_score': 0
+                        },
+                        'token_usage': {},
+                        'duration': 0
+                    }
+
+            # Process all images in parallel
+            logger.info(f"Extracting observations from record {record_id} with {len(presigned_urls)} images (parallel processing)")
             extraction_start = time.time()
-            api_response = self._call_gemini_api_structured(content_parts)
+
+            image_observations = []
+            total_tokens = {'input_tokens': 0, 'output_tokens': 0, 'total_tokens': 0, 'reasoning_tokens': 0, 'cached_tokens': 0}
+
+            with ThreadPoolExecutor(max_workers=min(len(presigned_urls), 5)) as executor:
+                future_to_image = {
+                    executor.submit(extract_single_image, img_id, img_url): img_id
+                    for img_id, img_url in zip(record_images, presigned_urls)
+                }
+
+                for future in as_completed(future_to_image):
+                    img_id = future_to_image[future]
+                    try:
+                        result = future.result()
+                        image_observations.append(result['observation'])
+
+                        # Accumulate token usage (handle None values)
+                        for key in total_tokens:
+                            token_value = result['token_usage'].get(key, 0)
+                            if token_value is not None:
+                                total_tokens[key] += token_value
+
+                        logger.info(f"Image {img_id}: Extracted in {result['duration']:.2f}s, quality score: {result['observation'].get('image_quality_score', 'N/A')}")
+                    except Exception as e:
+                        import traceback
+                        logger.error(f"Failed to process image {img_id} in extract_single_image: {str(e)}")
+                        logger.error(f"Traceback: {traceback.format_exc()}")
+                        image_observations.append({
+                            'file_id': img_id,
+                            'overview': f'Processing error: {str(e)[:100]}',
+                            'image_quality_score': 0
+                        })
+
             extraction_duration = time.time() - extraction_start
+            logger.info(f"Record {record_id} extraction completed in {extraction_duration:.2f} seconds ({len(image_observations)} images)")
 
-            # Parse extraction response (now returns array of per-image observations)
-            response_content = api_response.get('content', '')
-            token_usage = api_response.get('usage', {})
-
-            logger.info(f"Record {record_id} extraction took {extraction_duration:.2f} seconds")
-
-            # Log first 500 chars of response for debugging
-            logger.info(f"Record {record_id} extraction response preview: {response_content[:500]}")
-
-            extracted_data = self._parse_extraction_response(response_content, record_id)
-
-            # Add metadata
-            extracted_data['record_id'] = record_id
-            extracted_data['declared_material_type'] = record_data.get('material_type')
-            extracted_data['has_images'] = True
-
-            # Add token usage and duration from this extraction call
-            extracted_data['token_usage'] = {
-                'input_tokens': token_usage.get('input_tokens', 0),
-                'output_tokens': token_usage.get('output_tokens', 0),
-                'total_tokens': token_usage.get('total_tokens', 0),
-                'reasoning_tokens': token_usage.get('reasoning_tokens', 0),
-                'cached_tokens': token_usage.get('cached_tokens', 0)
+            # Return extracted data
+            return {
+                'record_id': record_id,
+                'declared_material_type': record_data.get('material_type'),
+                'has_images': True,
+                'image_observations': image_observations,
+                'token_usage': total_tokens,
+                'extraction_duration_secs': round(extraction_duration, 2)
             }
-            extracted_data['extraction_duration_secs'] = round(extraction_duration, 2)  # Duration in seconds
-
-            # Log the extracted data keys to help debug
-            if 'image_observations' in extracted_data:
-                logger.info(f"Successfully extracted {len(extracted_data['image_observations'])} image observations for record {record_id}")
-            else:
-                logger.info(f"Successfully extracted observations for record {record_id}. Keys: {list(extracted_data.keys())}")
-
-            return extracted_data
 
         except Exception as e:
             logger.error(f"Error extracting observations for record {record_data.get('record_id')}: {str(e)}")
@@ -712,8 +889,8 @@ class TransactionAuditService:
             error_observations = [
                 {
                     'file_id': img_id,
-                    'materials': {},
-                    'overview': f'Extraction error: {str(e)[:100]}'
+                    'overview': f'Extraction error: {str(e)[:100]}',
+                    'image_quality_score': 0
                 }
                 for img_id in record_images
             ] if record_images else []
@@ -726,7 +903,7 @@ class TransactionAuditService:
                 'error': str(e)
             }
 
-    def _parse_extraction_response(self, response_content: str, record_id: int) -> Dict[str, Any]:
+    def _parse_extraction_response(self, response_content: str, record_id: int, images: List = None) -> Dict[str, Any]:
         """Parse the AI extraction response into structured data
 
         New format expects an array of per-image observations:
@@ -736,6 +913,16 @@ class TransactionAuditService:
         ]
         """
         try:
+            # Handle None or empty response
+            if not response_content:
+                # Return error dict without image_observations
+                # The caller will create error observations for all images
+                return {
+                    'record_id': record_id,
+                    'error': 'Empty or null response from AI',
+                    'raw_text_overview': ''
+                }
+
             # Clean markdown code blocks
             cleaned_response = response_content.strip()
             if cleaned_response.startswith('```'):
@@ -1384,7 +1571,7 @@ class TransactionAuditService:
                     "thinkingConfig": {
                         "thinkingBudget": api_settings.get('thinking_budget', 512)
                     },
-                    "max_output_tokens": 1024  # Limit judgment output (smaller than extraction)
+                    "max_output_tokens": 2048  # Increased from 1024 to prevent truncation
                 }
             )
 
@@ -1429,7 +1616,37 @@ class TransactionAuditService:
                 cleaned_response = cleaned_response.strip()
 
             # Try to parse JSON response
-            ai_data = json.loads(cleaned_response)
+            try:
+                ai_data = json.loads(cleaned_response)
+            except json.JSONDecodeError as parse_err:
+                # Try to fix common JSON issues
+                logger.warning(f"Initial JSON parse failed: {str(parse_err)}, attempting to fix")
+
+                # If response is truncated mid-string, try to close it
+                if "Unterminated string" in str(parse_err):
+                    # Try adding closing quotes and brackets
+                    fixed_response = cleaned_response
+
+                    # Count open brackets/braces
+                    open_braces = fixed_response.count('{') - fixed_response.count('}')
+                    open_brackets = fixed_response.count('[') - fixed_response.count(']')
+
+                    # If there's an unterminated string, add quote
+                    if not fixed_response.rstrip().endswith(('"', '}', ']')):
+                        fixed_response += '"'
+
+                    # Close any open arrays/objects
+                    fixed_response += ']' * open_brackets
+                    fixed_response += '}' * open_braces
+
+                    try:
+                        ai_data = json.loads(fixed_response)
+                        logger.info(f"Successfully fixed truncated JSON for transaction {transaction_id}")
+                    except:
+                        # If fix didn't work, raise original error
+                        raise parse_err
+                else:
+                    raise parse_err
 
             violations = ai_data.get('violations', [])
 

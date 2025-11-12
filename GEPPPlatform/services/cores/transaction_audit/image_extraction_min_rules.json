@@ -40,18 +40,19 @@
       "importance": "CRITICAL - Small objects often cause violations"
     }
   },
-  "extraction_prompt_template_minimal": "วิเคราะห์ภาพขยะแต่ละภาพและส่งกลับเป็น JSON ARRAY เท่านั้น\n\n# โครงสร้าง Output (ต้องเป็น ARRAY):\n[\n  {\"file_id\": <ตัวเลข>, \"materials\": {\"<ชื่อวัสดุ>\": \"<สภาพ>\"}, \"overview\": \"<ข้อความสั้นๆ>\"}\n]\n\n# กฎสำคัญ:\n1. ส่งกลับเฉพาะ JSON ARRAY - ห้ามส่งข้อความอื่น\n2. 1 ภาพ = 1 object ใน array\n3. มี 3 fields เท่านั้น: file_id, materials, overview\n4. materials: สูงสุด 5-8 รายการ (รายการหลัก + ของปนเล็กๆ)\n5. overview: สูงสุด 1-2 ประโยค\n6. ห้ามส่งค่าอื่น: ห้าม record_id, items, red_flags, hazardous, etc.\n\n# ต้องตรวจ:\n- แบตเตอรี่/หลอดไฟ (ของเล็กในมุม, ซอกต่างๆ) → ต้องระบุ\n- หลอด/ช้อน/กล่อง/ฝาพลาสติก ปนในเศษอาหาร → ต้องระบุ\n- ของปนเปื้อน/ของปนกัน → ระบุชัดเจน\n\n# ตัวอย่าง:\n[\n  {\"file_id\": 123, \"materials\": {\"เศษอาหาร\": \"เปลือกผักผลไม้\", \"หลอดพลาสติก\": \"หลอดแดงปนอยู่\", \"กล่องโฟม\": \"กล่องขาวเปื้อนอาหาร\"}, \"overview\": \"ถุงใสมีเศษอาหารปนหลอดและกล่อง ถุงเปิดมองเห็นได้ชัด\"},\n  {\"file_id\": 124, \"materials\": {\"กล่องกระดาษ\": \"แบนเรียบร้อย\", \"กระดาษ\": \"กระดาษสะอาด\"}, \"overview\": \"กล่องกระดาษใส่กระดาษรีไซเคิล ไม่มีของปน\"}\n]\n\n# ข้อห้าม:\n❌ ห้ามคิดมาก - ส่งแค่ JSON ARRAY\n❌ ห้ามอธิบายเพิ่ม - ส่งแค่ที่กำหนด\n❌ ห้าม field อื่น - มี 3 fields เท่านั้น\n❌ ห้ามนับรายการเกิน 8 ต่อภาพ - เลือกของสำคัญ\n\nเริ่มวิเคราะห์และส่ง JSON ARRAY:",
+  "extraction_prompt_template_minimal": "วิเคราะห์ภาพขยะแต่ละภาพและส่งกลับเป็น JSON ARRAY เท่านั้น\n\n# โครงสร้าง Output (ต้องเป็น ARRAY):\n[\n  {\"file_id\": <ตัวเลข>, \"overview\": \"<ข้อความสั้นๆ>\", \"image_quality_score\": <0-10>}\n]\n\n# กฎสำคัญ:\n1. ส่งกลับเฉพาะ JSON ARRAY - ห้ามส่งข้อความอื่น\n2. 1 ภาพ = 1 object ใน array\n3. มี 3 fields เท่านั้น: file_id, overview, image_quality_score\n4. overview: 1-3 ประโยคสั้นๆ อธิบายสิ่งที่เห็น\n5. image_quality_score: คะแนน 0-10 (ความละเอียด, แสงสว่าง, มองเห็นชัด)\n\n# หลักการวิเคราะห์แบบ Optimistic:\n\n**กรณีมองเห็นชัดเจน (quality 7-10):**\n- ระบุวัสดุที่เห็นตามจริง แม่นยำ\n- ถ้าเห็นแบตเตอรี่/หลอดไฟ → ระบุเฉพาะเจาะจง (CRITICAL)\n- ถ้าเห็นหลอด/ช้อนพลาสติก → ระบุชัดเจน\n\n**กรณีมองไม่ชัด (quality 3-6):**\n- ให้ประโยชน์ของข้อสงสัย (benefit of doubt)\n- ถ้าธีมหลักคือ Food Waste → ตีความวัตถุที่ไม่ชัดว่าเป็น organic/เศษอาหาร\n- อย่าสรุปว่ามี \"หลอด\" หรือ \"ช้อน\" ถ้ามองไม่ชัด\n- ใช้คำว่า \"วัสดุคล้าย...\" \"อาจเป็น...\" แทนการระบุตายตัว\n\n**กรณีมองไม่เห็นเลย (quality 0-2):**\n- อธิบายเฉพาะสิ่งที่แน่ใจ (เช่น ถุงสีดำ, ปิดมิดชิด)\n- อย่าคาดเดาเนื้อหาภายใน\n\n# คะแนนคุณภาพภาพ (image_quality_score):\n\n**9-10**: ความละเอียดสูง, แสงดีมาก, มองเห็นทุกรายละเอียดชัดเจน\n**7-8**: ความละเอียดดี, แสงพอใช้, มองเห็นวัสดุหลักได้ชัด\n**5-6**: ความละเอียดปานกลาง, แสงน้อย/มาก, มองเห็นบางส่วน\n**3-4**: ความละเอียดต่ำ, แสงไม่ดี, มองเห็นเบลอ\n**1-2**: ความละเอียดต่ำมาก, มืด/สว่างจัด, แทบมองไม่เห็น\n**0**: ไม่สามารถระบุอะไรได้เลย\n\n# ตัวอย่าง:\n\n**ภาพชัด (quality 8):**\n[\n  {\"file_id\": 123, \"overview\": \"ถุงใสมีเศษอาหาร เปลือกผัก ข้าว มองเห็นชัดเจนว่าเป็นเศษอาหารล้วน\", \"image_quality_score\": 8}\n]\n\n**ภาพไม่ชัด (quality 4) - Optimistic:**\n[\n  {\"file_id\": 124, \"overview\": \"ถุงพลาสติกมีวัสดุสีน้ำตาล คล้ายเศษอาหาร/วัสดุอินทรีย์ แสงน้อยมองไม่ชัดนัก\", \"image_quality_score\": 4}\n]\n\n**ภาพมีแบตเตอรี่ชัด (quality 7):**\n[\n  {\"file_id\": 125, \"overview\": \"กล่องกระดาษใส่เศษกระดาษ มีแบตเตอรี่ AA 1 ก้อนในมุมล่างซ้าย\", \"image_quality_score\": 7}\n]\n\n# ข้อห้าม:\n❌ ห้ามคิดมาก - ส่งแค่ JSON ARRAY\n❌ ห้ามระบุวัสดุที่ไม่แน่ใจในภาพไม่ชัด\n❌ ห้าม field อื่น - มี 3 fields เท่านั้น (file_id, overview, image_quality_score)\n❌ ห้ามให้คะแนนสูงเกินจริง - ประเมินตามความจริง\n\nเริ่มวิเคราะห์และส่ง JSON ARRAY:",
   "output_format": {
-    "structure": "JSON array with one object per image containing: file_id (number), materials (dict), overview (string)",
+    "structure": "JSON array with one object per image containing: file_id (number), overview (string), image_quality_score (number 0-10)",
     "critical_rules": [
       "MUST return a JSON array, not an object",
       "Each array element = one image observation",
-      "ONLY three fields allowed: file_id, materials, overview",
+      "ONLY three fields allowed: file_id, overview, image_quality_score",
       "file_id must be a number matching the image file ID",
-      "materials must be a dict/object with material names as keys and condition descriptions as values",
-      "overview must be a string describing the overall image"
+      "overview must be a concise string (1-3 sentences) describing what you see",
+      "image_quality_score must be a number 0-10 based on resolution, clarity, lighting, and visibility"
     ],
-    "max_length": "Keep material descriptions and overview concise but thorough"
+    "max_length": "Keep overview concise (1-3 sentences)",
+    "optimistic_approach": "When image quality is poor (score 3-6), give benefit of doubt. If main theme is food waste and object is unclear, interpret as organic/food waste. Only flag clear violations."
   },
   "small_object_focus": {
     "critical_items": [
@@ -80,55 +81,46 @@
     ]
   },
   "response_examples": {
-    "clean_food_waste_example": [
+    "clean_food_waste_clear_image": [
       {
         "file_id": 101,
-        "materials": {
-          "vegetable scraps": "fresh peels and trimmings",
-          "fruit peels": "banana and orange peels",
-          "cooked rice": "small amount of leftover rice"
-        },
-        "overview": "Clear plastic bag, open, containing pure organic food waste. No contamination visible. All items are compostable."
+        "overview": "ถุงใสมีเศษอาหาร เปลือกผัก เปลือกผลไม้ ข้าวสวย มองเห็นชัดเจนว่าเป็นเศษอาหารล้วน ไม่มีของปน",
+        "image_quality_score": 8
       }
     ],
-    "contaminated_food_waste_example": [
+    "food_waste_unclear_image_optimistic": [
       {
         "file_id": 201,
-        "materials": {
-          "food scraps": "mixed vegetable and fruit waste",
-          "plastic straw": "red plastic straw mixed in the waste",
-          "foam container": "white foam container with food residue attached"
-        },
-        "overview": "White plastic bag, closed, containing food waste contaminated with plastic straw and foam container. Contamination clearly visible."
+        "overview": "ถุงพลาสติกมีวัสดุสีน้ำตาล คล้ายเศษอาหาร/วัสดุอินทรีย์ แสงน้อยมองไม่ชัดนัก แต่ไม่เห็นวัสดุที่ชัดเจนว่าเป็นพลาสติกหรือวัสดุอื่นปน",
+        "image_quality_score": 4
       }
     ],
-    "hazardous_contamination_example": [
+    "hazardous_clear_contamination": [
       {
         "file_id": 301,
-        "materials": {
-          "cardboard boxes": "clean flattened boxes",
-          "paper": "mixed office paper",
-          "AA battery": "small battery visible in corner between cardboard pieces"
-        },
-        "overview": "Cardboard box containing recyclable paper and cardboard BUT contaminated with small AA battery in bottom corner. Battery clearly visible."
+        "overview": "กล่องกระดาษใส่เศษกระดาษรีไซเคิล มีแบตเตอรี่ AA 1 ก้อนมองเห็นชัดในมุมล่างซ้าย",
+        "image_quality_score": 7
       }
     ],
-    "multiple_images_example": [
+    "recyclables_clean": [
       {
         "file_id": 401,
-        "materials": {
-          "plastic bottles": "clear PET bottles, crushed",
-          "aluminum cans": "various beverage cans, some crushed"
-        },
-        "overview": "Clear bag containing clean recyclables. Bottles and cans properly separated and prepared."
-      },
+        "overview": "ถุงใสมีขวดพลาสติก กระป๋องอลูมิเนียม บีบแบนเรียบร้อย สะอาด มองเห็นชัด",
+        "image_quality_score": 9
+      }
+    ],
+    "general_waste_mixed": [
       {
-        "file_id": 402,
-        "materials": {
-          "glass bottles": "brown and clear glass bottles",
-          "plastic cap": "one bottle still has plastic cap attached"
-        },
-        "overview": "Box containing glass bottles. One bottle has plastic cap that should be removed."
+        "file_id": 501,
+        "overview": "ถุงขยะมีวัสดุปนกัน เห็นกล่องพิซซ่า ถุงขนม ขวดพลาสติกเปื้อน เป็นขยะผสม",
+        "image_quality_score": 6
+      }
+    ],
+    "very_poor_quality_no_details": [
+      {
+        "file_id": 601,
+        "overview": "ถุงขยะสีดำปิดมิดชิด ความละเอียดต่ำมาก มืด ไม่สามารถระบุเนื้อหาภายในได้",
+        "image_quality_score": 1
       }
     ]
   }
