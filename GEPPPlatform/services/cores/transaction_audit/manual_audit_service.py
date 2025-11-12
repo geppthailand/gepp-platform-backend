@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 
 from ....models.transactions.transactions import Transaction, TransactionStatus
 from ....models.transactions.transaction_records import TransactionRecord
+from ....models.transactions.transaction_audits import TransactionAudit
 from ....models.cores.references import MainMaterial
 from ....models.users.user_location import UserLocation
 from ....models.subscriptions.organizations import Organization
@@ -223,6 +224,32 @@ class ManualAuditService:
             else:
                 transaction.notes = audit_note
 
+            # Create audit_notes in standard format
+            audit_notes = {
+                's': 'approved',  # status
+                'v': []  # No violations for manual approval
+            }
+
+            # Save to BOTH places:
+            # 1. Existing field (backward compatibility)
+            transaction.ai_audit_notes = audit_notes
+
+            # 2. New audit history table
+            transaction_audit = TransactionAudit(
+                transaction_id=transaction_id,
+                audit_notes=audit_notes,
+                by_human=True,  # Manual audit
+                auditor_id=auditor_user_id,
+                organization_id=transaction.organization_id,
+                audit_type='manual',
+                processing_time_ms=None,
+                token_usage=None,
+                model_version=None,
+                created_date=int(datetime.now(timezone.utc).timestamp() * 1000),
+                created_by_id=auditor_user_id
+            )
+            db.add(transaction_audit)
+
             # Commit changes
             db.commit()
 
@@ -305,6 +332,37 @@ class ManualAuditService:
                 transaction.notes += f"\n\n{rejection_note}"
             else:
                 transaction.notes = rejection_note
+
+            # Create audit_notes in standard format
+            audit_notes = {
+                's': 'rejected',  # status
+                'v': [  # violations
+                    {
+                        'id': None,  # No rule ID for manual rejection
+                        'm': rejection_reason if rejection_reason else 'Manually rejected by auditor'
+                    }
+                ]
+            }
+
+            # Save to BOTH places:
+            # 1. Existing field (backward compatibility)
+            transaction.ai_audit_notes = audit_notes
+
+            # 2. New audit history table
+            transaction_audit = TransactionAudit(
+                transaction_id=transaction_id,
+                audit_notes=audit_notes,
+                by_human=True,  # Manual audit
+                auditor_id=auditor_user_id,
+                organization_id=transaction.organization_id,
+                audit_type='manual',
+                processing_time_ms=None,
+                token_usage=None,
+                model_version=None,
+                created_date=int(datetime.now(timezone.utc).timestamp() * 1000),
+                created_by_id=auditor_user_id
+            )
+            db.add(transaction_audit)
 
             # Commit changes
             db.commit()

@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from time import time
 from urllib.parse import urlencode
 from urllib.request import urlopen, Request
@@ -72,8 +72,8 @@ def cron_process_audits(event, context):
             'error': 'Gemini API key not configured'
         }
 
-    # Initialize audit service
-    audit_service = TransactionAuditService(gemini_api_key)
+    # Initialize audit service with minimal extraction mode for token efficiency
+    audit_service = TransactionAuditService(gemini_api_key, extraction_mode='minimal')
 
     # Track overall statistics
     overall_total_processed = 0
@@ -201,7 +201,8 @@ def cron_process_audits(event, context):
                         # Process with AI using threading
                         audit_results = audit_service._process_transactions_with_ai(
                             transaction_audit_data,
-                            audit_rules
+                            audit_rules,
+                            db=db  # Pass db session for file source checking
                         )
 
                         # Update ai_audit_status (NOT transaction.status)
@@ -227,6 +228,35 @@ def cron_process_audits(event, context):
 
                         if failed_audits:
                             logger.warning(f"Batch {batch_count}: {len(failed_audits)} audits failed and will not count toward quota. Errors: {[r.get('error')[:100] for r in failed_audits[:3]]}")
+
+                            # Mark failed audits with status 'failed' and store error in ai_audit_note
+                            # Use same structure as successful audits: {status, audits, v}
+                            for failed_result in failed_audits:
+                                transaction_id = failed_result.get('transaction_id')
+                                error_message = failed_result.get('error', 'Unknown error')
+
+                                if transaction_id:
+                                    failed_transaction = db.query(Transaction).filter(Transaction.id == transaction_id).first()
+                                    if failed_transaction:
+                                        failed_transaction.ai_audit_status = AIAuditStatus.failed
+
+                                        # Use consistent structure with successful audits
+                                        failed_transaction.ai_audit_note = {
+                                            'status': 'failed',
+                                            'audits': {},  # No audit observations for failed audits
+                                            'v': [{  # Store error as a violation-like entry
+                                                'id': 0,  # System error (no rule ID)
+                                                'm': f"AI Audit Error: {error_message}"
+                                            }]
+                                        }
+                                        failed_transaction.ai_audit_date = datetime.now(timezone.utc)
+
+                                        from sqlalchemy.orm.attributes import flag_modified
+                                        flag_modified(failed_transaction, 'ai_audit_note')
+
+                                        logger.info(f"Marked transaction {transaction_id} as failed with error: {error_message[:100]}")
+
+                            db.commit()
 
                         subscription.ai_audit_usage += len(successful_audits)
                         db.commit()

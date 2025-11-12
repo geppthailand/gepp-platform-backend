@@ -1,0 +1,127 @@
+{
+  "metadata": {
+    "version": "2.0.0",
+    "description": "Per-image extraction rules - returns array with file_id, materials dict, and overview",
+    "purpose": "Extract observations for each image individually with structured format for materials",
+    "mode": "per_image",
+    "output_format": "JSON array with {file_id, materials, overview} per image",
+    "created_date": "2025-11-06",
+    "last_modified": "2025-11-10"
+  },
+  "extraction_instructions": {
+    "system_instruction": "Extract key waste observations. Focus on: 1) What items you see 2) Any contamination 3) Visibility. Be concise but thorough with small objects.",
+    "guidelines": [
+      "List all items including small objects (straws, batteries, caps)",
+      "Note contamination/mixing",
+      "Assess visibility %",
+      "Flag hazardous items immediately"
+    ]
+  },
+  "critical_checks": {
+    "priority_1_hazardous": {
+      "check": "Are batteries, bulbs, sprays, or electronics visible?",
+      "action": "If YES: Flag immediately as red flag. List specific items.",
+      "importance": "CRITICAL - Single battery in wrong category = violation"
+    },
+    "priority_2_contamination": {
+      "check": "Is waste pure or mixed? Any small contaminants (straws, containers)?",
+      "action": "Note all mixing and contamination",
+      "importance": "CRITICAL - Straws/containers in food waste = violation"
+    },
+    "priority_3_visibility": {
+      "check": "Can you identify waste type? (0-100%)",
+      "action": "Give visibility % and assessment",
+      "importance": "LOW - Only flag if completely opaque (0%)"
+    },
+    "priority_4_small_objects": {
+      "check": "Check corners, edges, between items for small objects",
+      "focus": "Batteries, bulbs, straws, utensils, caps, small containers",
+      "action": "List all small objects found",
+      "importance": "CRITICAL - Small objects often cause violations"
+    }
+  },
+  "extraction_prompt_template_minimal": "วิเคราะห์ภาพขยะแต่ละภาพและส่งกลับเป็น JSON ARRAY เท่านั้น\n\n# โครงสร้าง Output (ต้องเป็น ARRAY):\n[\n  {\"file_id\": <ตัวเลข>, \"overview\": \"<ข้อความสั้นๆ>\", \"image_quality_score\": <0-10>}\n]\n\n# กฎสำคัญ:\n1. ส่งกลับเฉพาะ JSON ARRAY - ห้ามส่งข้อความอื่น\n2. 1 ภาพ = 1 object ใน array\n3. มี 3 fields เท่านั้น: file_id, overview, image_quality_score\n4. overview: 1-3 ประโยคสั้นๆ อธิบายสิ่งที่เห็น\n5. image_quality_score: คะแนน 0-10 (ความละเอียด, แสงสว่าง, มองเห็นชัด)\n\n# หลักการวิเคราะห์แบบ Optimistic:\n\n**กรณีมองเห็นชัดเจน (quality 7-10):**\n- ระบุวัสดุที่เห็นตามจริง แม่นยำ\n- ถ้าเห็นแบตเตอรี่/หลอดไฟ → ระบุเฉพาะเจาะจง (CRITICAL)\n- ถ้าเห็นหลอด/ช้อนพลาสติก → ระบุชัดเจน\n\n**กรณีมองไม่ชัด (quality 3-6):**\n- ให้ประโยชน์ของข้อสงสัย (benefit of doubt)\n- ถ้าธีมหลักคือ Food Waste → ตีความวัตถุที่ไม่ชัดว่าเป็น organic/เศษอาหาร\n- อย่าสรุปว่ามี \"หลอด\" หรือ \"ช้อน\" ถ้ามองไม่ชัด\n- ใช้คำว่า \"วัสดุคล้าย...\" \"อาจเป็น...\" แทนการระบุตายตัว\n\n**กรณีมองไม่เห็นเลย (quality 0-2):**\n- อธิบายเฉพาะสิ่งที่แน่ใจ (เช่น ถุงสีดำ, ปิดมิดชิด)\n- อย่าคาดเดาเนื้อหาภายใน\n\n# คะแนนคุณภาพภาพ (image_quality_score):\n\n**9-10**: ความละเอียดสูง, แสงดีมาก, มองเห็นทุกรายละเอียดชัดเจน\n**7-8**: ความละเอียดดี, แสงพอใช้, มองเห็นวัสดุหลักได้ชัด\n**5-6**: ความละเอียดปานกลาง, แสงน้อย/มาก, มองเห็นบางส่วน\n**3-4**: ความละเอียดต่ำ, แสงไม่ดี, มองเห็นเบลอ\n**1-2**: ความละเอียดต่ำมาก, มืด/สว่างจัด, แทบมองไม่เห็น\n**0**: ไม่สามารถระบุอะไรได้เลย\n\n# ตัวอย่าง:\n\n**ภาพชัด (quality 8):**\n[\n  {\"file_id\": 123, \"overview\": \"ถุงใสมีเศษอาหาร เปลือกผัก ข้าว มองเห็นชัดเจนว่าเป็นเศษอาหารล้วน\", \"image_quality_score\": 8}\n]\n\n**ภาพไม่ชัด (quality 4) - Optimistic:**\n[\n  {\"file_id\": 124, \"overview\": \"ถุงพลาสติกมีวัสดุสีน้ำตาล คล้ายเศษอาหาร/วัสดุอินทรีย์ แสงน้อยมองไม่ชัดนัก\", \"image_quality_score\": 4}\n]\n\n**ภาพมีแบตเตอรี่ชัด (quality 7):**\n[\n  {\"file_id\": 125, \"overview\": \"กล่องกระดาษใส่เศษกระดาษ มีแบตเตอรี่ AA 1 ก้อนในมุมล่างซ้าย\", \"image_quality_score\": 7}\n]\n\n# ข้อห้าม:\n❌ ห้ามคิดมาก - ส่งแค่ JSON ARRAY\n❌ ห้ามระบุวัสดุที่ไม่แน่ใจในภาพไม่ชัด\n❌ ห้าม field อื่น - มี 3 fields เท่านั้น (file_id, overview, image_quality_score)\n❌ ห้ามให้คะแนนสูงเกินจริง - ประเมินตามความจริง\n\nเริ่มวิเคราะห์และส่ง JSON ARRAY:",
+  "output_format": {
+    "structure": "JSON array with one object per image containing: file_id (number), overview (string), image_quality_score (number 0-10)",
+    "critical_rules": [
+      "MUST return a JSON array, not an object",
+      "Each array element = one image observation",
+      "ONLY three fields allowed: file_id, overview, image_quality_score",
+      "file_id must be a number matching the image file ID",
+      "overview must be a concise string (1-3 sentences) describing what you see",
+      "image_quality_score must be a number 0-10 based on resolution, clarity, lighting, and visibility"
+    ],
+    "max_length": "Keep overview concise (1-3 sentences)",
+    "optimistic_approach": "When image quality is poor (score 3-6), give benefit of doubt. If main theme is food waste and object is unclear, interpret as organic/food waste. Only flag clear violations."
+  },
+  "small_object_focus": {
+    "critical_items": [
+      "Batteries (any size) - CRITICAL",
+      "Light bulbs/CFLs - CRITICAL",
+      "Spray cans/aerosols - CRITICAL",
+      "Plastic straws/utensils - CRITICAL for food waste",
+      "Bottle caps/lids",
+      "Small containers/packaging",
+      "Electronics parts",
+      "Wires/cables"
+    ],
+    "detection_note": "Check corners, edges, between items. One small battery = violation."
+  },
+  "contamination_patterns": {
+    "food_waste_violations": [
+      "Straws/utensils present",
+      "Food in containers (not just outer bag)",
+      "Inner packaging/bags",
+      "Non-compostable items"
+    ],
+    "hazardous_anywhere": [
+      "Batteries in non-hazardous = RED FLAG",
+      "Bulbs in non-hazardous = RED FLAG",
+      "Sprays in non-hazardous = RED FLAG"
+    ]
+  },
+  "response_examples": {
+    "clean_food_waste_clear_image": [
+      {
+        "file_id": 101,
+        "overview": "ถุงใสมีเศษอาหาร เปลือกผัก เปลือกผลไม้ ข้าวสวย มองเห็นชัดเจนว่าเป็นเศษอาหารล้วน ไม่มีของปน",
+        "image_quality_score": 8
+      }
+    ],
+    "food_waste_unclear_image_optimistic": [
+      {
+        "file_id": 201,
+        "overview": "ถุงพลาสติกมีวัสดุสีน้ำตาล คล้ายเศษอาหาร/วัสดุอินทรีย์ แสงน้อยมองไม่ชัดนัก แต่ไม่เห็นวัสดุที่ชัดเจนว่าเป็นพลาสติกหรือวัสดุอื่นปน",
+        "image_quality_score": 4
+      }
+    ],
+    "hazardous_clear_contamination": [
+      {
+        "file_id": 301,
+        "overview": "กล่องกระดาษใส่เศษกระดาษรีไซเคิล มีแบตเตอรี่ AA 1 ก้อนมองเห็นชัดในมุมล่างซ้าย",
+        "image_quality_score": 7
+      }
+    ],
+    "recyclables_clean": [
+      {
+        "file_id": 401,
+        "overview": "ถุงใสมีขวดพลาสติก กระป๋องอลูมิเนียม บีบแบนเรียบร้อย สะอาด มองเห็นชัด",
+        "image_quality_score": 9
+      }
+    ],
+    "general_waste_mixed": [
+      {
+        "file_id": 501,
+        "overview": "ถุงขยะมีวัสดุปนกัน เห็นกล่องพิซซ่า ถุงขนม ขวดพลาสติกเปื้อน เป็นขยะผสม",
+        "image_quality_score": 6
+      }
+    ],
+    "very_poor_quality_no_details": [
+      {
+        "file_id": 601,
+        "overview": "ถุงขยะสีดำปิดมิดชิด ความละเอียดต่ำมาก มืด ไม่สามารถระบุเนื้อหาภายในได้",
+        "image_quality_score": 1
+      }
+    ]
+  }
+}

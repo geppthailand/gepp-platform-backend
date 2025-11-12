@@ -105,7 +105,8 @@ def handle_transaction_routes(event: Dict[str, Any], data: Dict[str, Any], **par
             return handle_get_presigned_urls(
                 data,
                 current_user_id,
-                current_user_organization_id
+                current_user_organization_id,
+                db_session
             )
 
         elif path == '/api/transactions/get_view_presigned' and method == 'POST':
@@ -113,7 +114,8 @@ def handle_transaction_routes(event: Dict[str, Any], data: Dict[str, Any], **par
             return handle_get_view_presigned_urls(
                 data,
                 current_user_id,
-                current_user_organization_id
+                current_user_organization_id,
+                db_session
             )
 
         else:
@@ -458,10 +460,12 @@ def handle_upload_transaction_images(
 def handle_get_presigned_urls(
     data: Dict[str, Any],
     current_user_id: str,
-    current_user_organization_id: int
+    current_user_organization_id: int,
+    db_session
 ) -> Dict[str, Any]:
     """
     Handle POST /api/transactions/presigneds - Get presigned URLs for file uploads
+    Creates file records in database and returns file IDs with presigned URLs
     """
     try:
         # Validate request data
@@ -480,11 +484,15 @@ def handle_get_presigned_urls(
         # Create presigned URL service
         presigned_service = TransactionPresignedUrlService()
 
-        # Generate presigned URLs
+        # Generate presigned URLs with file record creation
         result = presigned_service.get_transaction_file_upload_presigned_urls(
             file_names=file_names,
             organization_id=current_user_organization_id,
             user_id=int(current_user_id),
+            db=db_session,
+            file_type=data.get('file_type', 'transaction_image'),
+            related_entity_type=data.get('related_entity_type'),
+            related_entity_id=data.get('related_entity_id'),
             expiration_seconds=data.get('expiration_seconds', 3600)
         )
 
@@ -493,6 +501,7 @@ def handle_get_presigned_urls(
                 'success': True,
                 'message': result['message'],
                 'presigned_urls': result['presigned_urls'],
+                'file_records': result.get('file_records', []),  # Include file records with IDs
                 'expires_in_seconds': result.get('expires_in_seconds', 3600)
             }
         else:
@@ -508,35 +517,82 @@ def handle_get_presigned_urls(
 def handle_get_view_presigned_urls(
     data: Dict[str, Any],
     current_user_id: str,
-    current_user_organization_id: int
+    current_user_organization_id: int,
+    db_session
 ) -> Dict[str, Any]:
     """
     Handle POST /api/transactions/get_view_presigned - Get presigned URLs for viewing files
+    Accepts either file_ids (preferred) or file_urls (legacy) for backward compatibility
+
+    Note: file_urls parameter now accepts both file IDs (integers) and URLs (strings) for flexibility
     """
     try:
-        # Validate request data
-        if not data or not data.get('file_urls'):
-            raise BadRequestException('file_urls is required')
-
-        file_urls = data.get('file_urls', [])
-        if not isinstance(file_urls, list) or not file_urls:
-            raise BadRequestException('file_urls must be a non-empty list')
-
-        # Validate file URLs
-        for file_url in file_urls:
-            if not isinstance(file_url, str) or not file_url.strip():
-                raise BadRequestException('All file URLs must be non-empty strings')
-
         # Create presigned URL service
         presigned_service = TransactionPresignedUrlService()
 
-        # Generate view presigned URLs
-        result = presigned_service.get_transaction_file_view_presigned_urls(
-            file_urls=file_urls,
-            organization_id=current_user_organization_id,
-            user_id=int(current_user_id),
-            expiration_seconds=data.get('expiration_seconds', 3600)
-        )
+        # Check if using file_ids (new approach) or file_urls (legacy)
+        if data.get('file_ids'):
+            # New approach: Use file IDs
+            file_ids = data.get('file_ids', [])
+            if not isinstance(file_ids, list) or not file_ids:
+                raise BadRequestException('file_ids must be a non-empty list')
+
+            # Validate file IDs
+            for file_id in file_ids:
+                if not isinstance(file_id, int):
+                    raise BadRequestException('All file IDs must be integers')
+
+            # Generate view presigned URLs by file IDs
+            result = presigned_service.get_transaction_file_view_presigned_urls_by_ids(
+                file_ids=file_ids,
+                db=db_session,
+                organization_id=current_user_organization_id,
+                user_id=int(current_user_id),
+                expiration_seconds=data.get('expiration_seconds', 3600)
+            )
+
+        elif data.get('file_urls'):
+            # Legacy approach: Use file URLs (now supports both IDs and URLs)
+            file_urls = data.get('file_urls', [])
+            if not isinstance(file_urls, list) or not file_urls:
+                raise BadRequestException('file_urls must be a non-empty list')
+
+            # Check if array contains integers (file IDs) or strings (URLs)
+            if file_urls and isinstance(file_urls[0], int):
+                # Array contains file IDs - convert to file_ids approach
+                file_ids = file_urls
+
+                # Validate all items are integers
+                for file_id in file_ids:
+                    if not isinstance(file_id, int):
+                        raise BadRequestException('All items in file_urls must be of the same type (all integers or all strings)')
+
+                # Generate view presigned URLs by file IDs
+                result = presigned_service.get_transaction_file_view_presigned_urls_by_ids(
+                    file_ids=file_ids,
+                    db=db_session,
+                    organization_id=current_user_organization_id,
+                    user_id=int(current_user_id),
+                    expiration_seconds=data.get('expiration_seconds', 3600)
+                )
+            else:
+                # Array contains URL strings - use legacy approach
+                # Validate file URLs
+                for file_url in file_urls:
+                    if not isinstance(file_url, str) or not file_url.strip():
+                        raise BadRequestException('All file URLs must be non-empty strings')
+
+                # Generate view presigned URLs by file URLs
+                result = presigned_service.get_transaction_file_view_presigned_urls(
+                    file_urls=file_urls,
+                    organization_id=current_user_organization_id,
+                    user_id=int(current_user_id),
+                    expiration_seconds=data.get('expiration_seconds', 3600),
+                    db=db_session  # Pass db session to check file sources
+                )
+
+        else:
+            raise BadRequestException('Either file_ids or file_urls is required')
 
         if result['success']:
             response = {
