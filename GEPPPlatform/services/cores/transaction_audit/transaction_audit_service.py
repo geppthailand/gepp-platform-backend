@@ -1606,7 +1606,8 @@ class TransactionAuditService:
                     "system_instruction": system_instruction,
                     "temperature": api_settings.get('temperature', 0.0),
                     "thinkingConfig": {
-                        "thinkingBudget": api_settings.get('thinking_budget', 512)
+                        # "thinkingBudget": api_settings.get('thinking_budget', 512)
+                        "thinkingBudget": 0
                     },
                     "max_output_tokens": 2048  # Limit output to prevent hallucination
                 }
@@ -2114,7 +2115,7 @@ class TransactionAuditService:
                         audit_type='ai_sync',
                         processing_time_ms=result.get('processing_time_ms'),
                         token_usage=result.get('token_usage', {}),
-                        model_version=result.get('model_version', 'gemini-1.5-pro'),
+                        model_version=result.get('model_version', 'gemini-2.5-flash-lite'),
                         created_date=int(datetime.now(timezone.utc).timestamp() * 1000),
                         created_by_id=None  # System-generated
                     )
