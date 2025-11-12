@@ -38,8 +38,6 @@ def handle_auth_routes(path: str, data: dict, **commonParams):
             return auth_handler.validate_token(data, **commonParams)
         elif internal_path == "/refresh":
             return auth_handler.refresh_token(data, **commonParams)
-        elif internal_path == "/qr-login":
-            return auth_handler.login_iot_user(data, **commonParams)
         elif internal_path == "/iot-devices/login":
             return auth_handler.login_iot_device(data, **commonParams)
         else:

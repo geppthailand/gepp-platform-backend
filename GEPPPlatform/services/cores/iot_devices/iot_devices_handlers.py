@@ -1,20 +1,20 @@
 """
-Reports HTTP handlers
-Handles all /api/reports/* routes
+IoT Devices HTTP handlers
+Handles all /api/iot-devices/* routes
 """
 
 from typing import Dict, Any
 
 from GEPPPlatform.services.cores.transactions.transaction_handlers import handle_create_transaction
+from GEPPPlatform.services.auth.auth_handlers import AuthHandlers
 from GEPPPlatform.services.cores.transactions.transaction_service import TransactionService
 from GEPPPlatform.services.cores.users.user_service import UserService
 
-from .iot_devices_service import IotDevicesService
 from ....exceptions import APIException, UnauthorizedException, ValidationException, NotFoundException
 
 
 def handle_get_locations_by_membership(user_service: UserService, query_params: Dict[str, Any], current_user: Dict[str, Any]) -> Dict[str, Any]:
-    """Handle POST /api/locations/my-memberships - Get locations where current user is in members list (default role=dataInput)"""
+    """Handle POST /api/iot-devices/my-memberships - Get locations where current user is in members list (default role=dataInput)"""
     try:
         if not current_user or not current_user.get('user_id'):
             raise UnauthorizedException('Unauthorized')
@@ -43,7 +43,7 @@ def handle_get_locations_by_membership(user_service: UserService, query_params: 
 
 def handle_iot_devices_routes(event: Dict[str, Any], data: Dict[str, Any], **common_params) -> Dict[str, Any]:
     """
-    Route handler for all reports-related endpoints
+    Route handler for all IoT devices-related endpoints
     """
     db_session = common_params.get('db_session')
     method = common_params.get('method', '')
@@ -51,11 +51,10 @@ def handle_iot_devices_routes(event: Dict[str, Any], data: Dict[str, Any], **com
     current_device = common_params.get('current_device', {})
     current_user = common_params.get('current_user', {})
     path = event.get('rawPath', '')
+    if not current_device or not current_device.get('device_id'):
+        raise UnauthorizedException('Unauthorized device')
     
     try:
-        # Initialize service
-        iot_devices_service = IotDevicesService(db_session)
-        
         if method == '':
             raise APIException(
                 f"Method is invalid",
@@ -80,9 +79,19 @@ def handle_iot_devices_routes(event: Dict[str, Any], data: Dict[str, Any], **com
                 current_user_id,
                 current_user_organization_id
             )
+        if path == '/api/iot-devices/qr-login':
+            auth_handler = AuthHandlers(db_session)
+            return auth_handler.login_iot_user(data, **common_params)
+        if path == '/api/iot-devices/manual-login':
+            auth_handler = AuthHandlers(db_session)
+            return auth_handler.login(data, **common_params)
+        # Unknown route under /api/iot-devices
+        raise NotFoundException('Endpoint not found')
 
     except ValidationException as e:
         raise APIException(str(e), status_code=400, error_code="VALIDATION_ERROR")
+    except UnauthorizedException as e:
+        raise APIException(str(e), status_code=401, error_code="UNAUTHORIZED")
     except NotFoundException as e:
         raise APIException(str(e), status_code=404, error_code="NOT_FOUND")
     except Exception as e:

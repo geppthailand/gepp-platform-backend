@@ -40,11 +40,40 @@ def get_iot_devices_paths() -> Dict[str, Any]:
                 }
             }
         },
-        "/api/auth/qr-login": {
+        "/api/iot-devices/manual-login": {
+            "post": {
+                "tags": ["IOT Devices"],
+                "summary": "Manual login (user credentials via device)",
+                "description": "Authenticate a user using email and password from an IoT device. Requires Bearer device token. Returns auth and refresh tokens like normal user login.",
+                "security": [{"BearerAuth": []}],
+                "requestBody": {
+                    "required": True,
+                    "content": {
+                        "application/json": {
+                            "schema": {"$ref": "#/components/schemas/LoginRequest"}
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Login successful",
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/LoginResponse"}
+                            }
+                        }
+                    },
+                    "400": {"$ref": "#/components/responses/BadRequestError"},
+                    "401": {"$ref": "#/components/responses/UnauthorizedError"}
+                }
+            }
+        },
+        "/api/iot-devices/qr-login": {
             "post": {
                 "tags": ["IOT Devices"],
                 "summary": "QR login (user via QR token)",
                 "description": "Authenticate a user using a short-lived QR token (email, password, expiry). Returns auth and refresh tokens like normal user login.",
+                "security": [{"BearerAuth": []}],
                 "requestBody": {
                     "required": True,
                     "content": {
@@ -71,7 +100,7 @@ def get_iot_devices_paths() -> Dict[str, Any]:
             "post": {
                 "tags": ["IOT Devices"],
                 "summary": "List locations where current user is a dataInput member",
-                "description": "Requires Bearer device token. Provide user JWT token in body to resolve memberships. Returns reduced location objects: id, display_name, materials.",
+                "description": "Requires Bearer device token. Provide user JWT token in body via `user_token` to resolve memberships. Returns reduced location objects: id, display_name, materials.",
                 "security": [{"BearerAuth": []}],
                 "parameters": [
                     {
@@ -111,7 +140,7 @@ def get_iot_devices_paths() -> Dict[str, Any]:
             "post": {
                 "tags": ["IOT Devices"],
                 "summary": "Create transaction record from IoT device",
-                "description": "Requires Bearer device token in Authorization header. Optionally include a user_token in the request body to attribute the record to a user.",
+                "description": "Requires Bearer device token in Authorization header. Optionally include a `user_token` in the request body to attribute the record to a user.",
                 "security": [{"BearerAuth": []}],
                 "requestBody": {
                     "required": True,
@@ -166,9 +195,9 @@ def get_iot_devices_schemas() -> Dict[str, Any]:
         },
         "IotDeviceQRLoginRequest": {
             "type": "object",
-            "required": ["token"],
+            "required": ["login-token"],
             "properties": {
-                "token": {"type": "string", "description": "HS256-signed QR login token containing email, password, and expiry"}
+                "login-token": {"type": "string", "description": "HS256-signed QR login token containing email, password, and expiry"}
             }
         },
         "DeviceInfo": {
@@ -307,7 +336,7 @@ def get_iot_devices_schemas() -> Dict[str, Any]:
             "type": "object",
             "required": ["data"],
             "properties": {
-                "token": {
+                "user_token": {
                     "type": "string",
                     "example": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
                 },
@@ -316,9 +345,9 @@ def get_iot_devices_schemas() -> Dict[str, Any]:
         },
         "IotDeviceUserTokenRequest": {
             "type": "object",
-            "required": ["token"],
+            "required": ["user_token"],
             "properties": {
-                "token": {
+                "user_token": {
                     "type": "string",
                     "description": "User JWT token (HS256) to perform membership lookup",
                     "example": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."

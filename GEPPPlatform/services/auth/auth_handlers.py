@@ -588,9 +588,9 @@ class AuthHandlers:
         raise APIException('Logout endpoint not implemented')
 
     def login_iot_user(self, data: Dict[str, Any], **kwargs) -> Dict[str, Any]:
-        """Login user with QRCode containing obj of username and password using SQLAlchemy"""
+        """Login user with QRCode d obj of username and password using SQLAlchemy"""
         try:
-            payload = jwt.decode(data["token"], self.jwt_secret, algorithms=['HS256'])
+            payload = jwt.decode(data["login_token"], self.jwt_secret, algorithms=['HS256'])
             if payload is None:
                 raise BadRequestException("Invalid login token")
             email = payload.get('email')
