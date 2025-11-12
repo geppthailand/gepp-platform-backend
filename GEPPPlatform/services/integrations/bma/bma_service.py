@@ -15,6 +15,7 @@ from ....models.transactions.transaction_records import TransactionRecord
 from ....models.subscriptions.organizations import Organization
 from ....models.subscriptions.subscription_models import Subscription
 from ....models.users.integration_tokens import IntegrationToken
+from ....models.cores.files import File, FileType, FileStatus, FileSource
 from ....exceptions import BadRequestException, ValidationException
 
 logger = logging.getLogger(__name__)
@@ -55,6 +56,113 @@ class BMAIntegrationService:
 
     def __init__(self, db: Session):
         self.db = db
+
+    def _create_file_from_url(
+        self,
+        image_url: str,
+        organization_id: int,
+        uploader_id: int,
+        related_entity_type: str = 'transaction_record',
+        related_entity_id: Optional[int] = None
+    ) -> Optional[int]:
+        """
+        Create a File record from an external image URL and return the file ID.
+
+        Args:
+            image_url: External image URL (S3 or other)
+            organization_id: Organization ID
+            uploader_id: User ID who uploaded (BMA integration uses organization owner)
+            related_entity_type: Type of related entity
+            related_entity_id: ID of related entity
+
+        Returns:
+            File ID if successful, None otherwise
+        """
+        if not image_url:
+            return None
+
+        try:
+            # Check if file already exists for this URL
+            existing_file = self.db.query(File).filter(
+                File.url == image_url,
+                File.organization_id == organization_id,
+                File.is_active == True
+            ).first()
+
+            if existing_file:
+                logger.debug(f"File already exists for URL {image_url}: file_id={existing_file.id}")
+                return existing_file.id
+
+            # BMA integration URLs are external (publicly accessible S3 URLs)
+            # They should be marked as 'ext' source, not 's3'
+            # 's3' source is for our internal S3 files that require presigned URLs
+            source = FileSource.ext
+
+            # Extract filename from URL
+            original_filename = image_url.split('/')[-1].split('?')[0] or 'bma_image.jpg'
+
+            # Extract S3 bucket and key from URL if it's an S3 URL
+            s3_bucket = None
+            s3_key = None
+
+            # Parse S3 URL formats:
+            # Virtual-hosted-style: https://bucket.s3.region.amazonaws.com/path/to/file.jpg
+            # Path-style: https://s3.region.amazonaws.com/bucket/path/to/file.jpg
+            if 's3.amazonaws.com' in image_url or 's3' in image_url.lower():
+                parts = image_url.split('amazonaws.com/')
+                if len(parts) > 1:
+                    path_part = parts[1].split('?')[0]  # Remove query params
+
+                    # Check if this is path-style or virtual-hosted-style
+                    url_start = parts[0]
+                    if '://' in url_start:
+                        domain = url_start.split('://')[1]
+
+                        # Path-style URL: https://s3.region.amazonaws.com/bucket/key
+                        if domain.startswith('s3.') or domain == 's3':
+                            # First part of path is bucket, rest is key
+                            path_parts = path_part.split('/', 1)
+                            if len(path_parts) == 2:
+                                s3_bucket = path_parts[0]
+                                s3_key = path_parts[1]
+                            else:
+                                s3_bucket = path_parts[0]
+                                s3_key = ''
+                        # Virtual-hosted-style URL: https://bucket.s3.region.amazonaws.com/key
+                        elif '.s3' in domain:
+                            s3_bucket = domain.split('.s3')[0]
+                            s3_key = path_part
+
+            # Create File record
+            file_record = File(
+                file_type=FileType.transaction_record_image,
+                status=FileStatus.uploaded,  # External URLs are already uploaded
+                source=source,  # Always 'ext' for BMA integration
+                url=image_url,
+                s3_key=s3_key,
+                s3_bucket=s3_bucket,
+                original_filename=original_filename,
+                file_size=None,  # Unknown for external URLs
+                mime_type='image/jpeg',  # Assume JPEG for BMA images
+                organization_id=organization_id,
+                uploader_id=uploader_id,
+                related_entity_type=related_entity_type,
+                related_entity_id=related_entity_id,
+                observation=None,  # Will be filled by AI audit later
+                # created_by_id=uploader_id
+            )
+
+            self.db.add(file_record)
+            self.db.flush()  # Flush to get the ID without committing
+
+            logger.info(f"Created file record for URL {image_url}: file_id={file_record.id}")
+            return file_record.id
+
+        except Exception as e:
+            logger.error(f"Error creating file record from URL {image_url}: {str(e)}", exc_info=True)
+            # Don't rollback here as it would undo parent transaction operations
+            # Just return None and let the caller decide what to do
+            return None
 
     def process_bma_transaction_batch(
         self,
@@ -265,7 +373,8 @@ class BMAIntegrationService:
             Transaction.ext_id_1 == transaction_version,
             Transaction.ext_id_2 == house_id,
             Transaction.organization_id == organization_id,
-            Transaction.is_active == True
+            Transaction.deleted_date.is_(None),
+            # Transaction.is_active == True
         ).first()
 
         materials_data = house_data.get('material', {})
@@ -329,19 +438,22 @@ class BMAIntegrationService:
         transaction_record_ids = []
         all_images = []
         for material_type, material_info in materials_data.items():
+            # print("--=-=-=-=-====-=", materials_data)
             if material_type in BMA_MATERIAL_MAPPING:
                 record = self._create_material_record(
                     transaction_id=transaction.id,
                     material_type=material_type,
                     material_info=material_info,
                     transaction_date=transaction_date,
-                    created_by_id=created_by_id
+                    created_by_id=created_by_id,
+                    organization_id=organization_id
                 )
                 if record:
                     transaction_record_ids.append(record.id)
                     # Collect images from record
                     if record.images:
-                        all_images.extend(record.images)
+                        # materials_data
+                        all_images.extend([materials_data['image_url']])
 
         # Update transaction with record IDs and collected images
         transaction.transaction_records = transaction_record_ids
@@ -393,6 +505,8 @@ class BMAIntegrationService:
             material_id = material_config['material_id']
             image_url = material_info.get('image_url')
 
+            print("***************", material_id, image_url, created_by_id, transaction.organization_id)
+
             if material_id in existing_records_map:
                 # Update existing record
                 record = existing_records_map[material_id]
@@ -400,9 +514,19 @@ class BMAIntegrationService:
                 # Update transaction date
                 record.transaction_date = transaction_date
 
-                # Update image URL if provided - replace with new data
+                # Update image - convert URL to file ID if provided
                 if image_url:
-                    record.images = [image_url]
+                    file_id = self._create_file_from_url(
+                        image_url=image_url,
+                        organization_id=transaction.organization_id,
+                        uploader_id=created_by_id,
+                        related_entity_type='transaction_record',
+                        related_entity_id=record.id
+                    )
+
+                    print(file_id)
+                    if file_id:
+                        record.images = [file_id]  # Replace with new file ID
 
                 records_updated += 1
             else:
@@ -412,7 +536,8 @@ class BMAIntegrationService:
                     material_type=material_type,
                     material_info=material_info,
                     transaction_date=transaction_date,
-                    created_by_id=created_by_id
+                    created_by_id=created_by_id,
+                    organization_id=transaction.organization_id
                 )
                 if record:
                     # Add to transaction records array
@@ -451,13 +576,27 @@ class BMAIntegrationService:
         material_type: str,
         material_info: Dict[str, Any],
         transaction_date: datetime,
-        created_by_id: int
+        created_by_id: int,
+        organization_id: int
     ) -> Optional[TransactionRecord]:
         """
         Create a transaction record for a material
         """
         material_config = BMA_MATERIAL_MAPPING[material_type]
         image_url = material_info.get('image_url')
+
+        # Convert image URL to file ID
+        image_ids = []
+        if image_url:
+            file_id = self._create_file_from_url(
+                image_url=image_url,
+                organization_id=organization_id,
+                uploader_id=created_by_id,
+                related_entity_type='transaction_record',
+                related_entity_id=None  # Will be updated after record is created
+            )
+            if file_id:
+                image_ids.append(file_id)
 
         record = TransactionRecord(
             # Required fields
@@ -475,7 +614,7 @@ class BMAIntegrationService:
 
             # Optional fields
             transaction_date=transaction_date,
-            images=[image_url] if image_url else [],
+            images=image_ids,  # Use file IDs instead of URLs
             status='pending',
             tags=[],
             hazardous_level=0
@@ -791,10 +930,17 @@ class BMAIntegrationService:
                     # Get violations for this specific record
                     record_violations = violations_by_record.get(record.id, [])
 
-                    # Get first image from images array
+                    # Get first image URL from images array (images array contains file IDs)
                     image_url = None
                     if record.images and isinstance(record.images, list) and len(record.images) > 0:
-                        image_url = record.images[0]
+                        file_id = record.images[0]
+                        # Look up the file URL from the files table
+                        file_record = self.db.query(File).filter(
+                            File.id == file_id,
+                            File.is_active == True
+                        ).first()
+                        if file_record:
+                            image_url = file_record.url
 
                     materials[material_type] = {
                         "image_url": image_url,
@@ -944,10 +1090,17 @@ class BMAIntegrationService:
                 # Get violations for this specific record
                 record_violations = violations_by_record.get(record.id, [])
 
-                # Get first image from images array
+                # Get first image URL from images array (images array contains file IDs)
                 image_url = None
                 if record.images and isinstance(record.images, list) and len(record.images) > 0:
-                    image_url = record.images[0]
+                    file_id = record.images[0]
+                    # Look up the file URL from the files table
+                    file_record = self.db.query(File).filter(
+                        File.id == file_id,
+                        File.is_active == True
+                    ).first()
+                    if file_record:
+                        image_url = file_record.url
 
                 materials[material_type] = {
                     "image_url": image_url,

@@ -258,7 +258,7 @@ class TransactionService:
 
             # Test basic query first
             logger.info(f"Starting transaction query with org_id={organization_id}, status={status}")
-            query = self.db.query(Transaction).filter(Transaction.is_active == True)
+            query = self.db.query(Transaction).filter(Transaction.deleted_date.is_(None))
 
             # Apply filters
             if organization_id:

@@ -1,0 +1,289 @@
+{
+  "metadata": {
+    "version": "1.0.0",
+    "description": "Image extraction rules for transaction record level analysis",
+    "purpose": "Extract key information from waste images to reduce AI cognitive burden",
+    "created_date": "2025-11-06",
+    "last_modified": "2025-11-06"
+  },
+  "extraction_instructions": {
+    "system_instruction": "You are a waste analysis assistant. Your job is to extract factual observations from waste images. Be specific and objective. Do NOT make judgments or classifications - only describe what you see. PAY SPECIAL ATTENTION to small objects and unusual items that may violate waste category rules.",
+    "guidelines": [
+      "Describe ALL waste items visible in the image, including small objects",
+      "Note the container type (bag, bin, box, etc.) and its characteristics",
+      "Identify any visible contamination or mixing",
+      "Describe bag transparency and visibility level",
+      "Note any visible text, labels, or documentation",
+      "Describe quantity/volume indicators if visible",
+      "Be objective - describe what you SEE, not what you THINK it should be",
+      "CRITICAL: Look carefully for small hazardous items (batteries, bulbs, caps, small electronics)",
+      "CRITICAL: Spot check for unusual items that don't belong in the declared category",
+      "CRITICAL: Note any plastic straws, utensils, packaging, or containers mixed with waste",
+      "CRITICAL: Identify inner packaging layers or containers within the waste"
+    ],
+    "small_object_detection": {
+      "importance": "Small objects often determine rule violations - a single battery in food waste makes it hazardous contamination",
+      "focus_areas": [
+        "Bottle caps and lids (may be different material than bottles)",
+        "Plastic straws, coffee stirrers, utensils (contaminate food waste)",
+        "Small batteries (AAA, AA, button cells) - critical hazardous items",
+        "Light bulb pieces, broken glass, small electronics parts",
+        "Spray can caps, aerosol nozzles, pump dispensers",
+        "Small metal items (staples, paper clips, bottle caps)",
+        "Rubber bands, twist ties, small plastic items",
+        "Medicine containers, pill packaging, syringes",
+        "Small containers (sauce cups, condiment packets)",
+        "Cable ties, small wires, electronic components",
+        "Cigarette butts, lighters, matches",
+        "Small cosmetic containers, makeup applicators"
+      ],
+      "detection_tips": [
+        "Zoom in mentally on corners and edges of bags/containers",
+        "Look for items partially hidden under larger waste",
+        "Check for small items stuck to bag walls or between larger items",
+        "Note any shiny, metallic, or unusual colored small objects",
+        "Look for items that seem out of place with the main waste type"
+      ]
+    },
+    "contamination_detection": {
+      "importance": "Even small contamination can violate waste purity rules",
+      "common_contaminants": {
+        "in_food_waste": [
+          "Plastic utensils or straws (even 1-2 items)",
+          "Food containers (bowls, cups, takeout boxes)",
+          "Individual packaging (sauce packets, chip bags)",
+          "Non-compostable items mixed with food",
+          "Plastic bags inside the outer collection bag",
+          "Napkins or tissues with plastic coating"
+        ],
+        "in_recyclables": [
+          "Food-soiled items (pizza boxes with grease)",
+          "Non-recyclable plastics (plastic bags, wrappers)",
+          "Hazardous items (batteries, light bulbs)",
+          "Wet or decomposing organic matter",
+          "Composite materials (mixed plastic-metal items)"
+        ],
+        "hazardous_items_anywhere": [
+          "Batteries of any size (immediate red flag if not in hazardous category)",
+          "Light bulbs, CFLs, fluorescent tubes",
+          "Spray cans, aerosols, pressurized containers",
+          "Electronics, circuit boards, wires",
+          "Chemical containers, cleaning product bottles",
+          "Sharp medical waste, syringes, needles"
+        ]
+      }
+    }
+  },
+  "extraction_categories": {
+    "1_waste_items": {
+      "priority": 1,
+      "description": "Identify and list ALL specific waste items visible in the image, including small objects",
+      "extraction_prompts": [
+        "What specific waste items can you see? List EVERYTHING, including small objects",
+        "Look carefully for small items: batteries, straws, utensils, bottle caps, small containers",
+        "Are there any hazardous items (batteries, bulbs, sprays) visible?",
+        "Are the items primarily of one type or mixed?",
+        "Do you see any unusual or unexpected items for this waste category?"
+      ],
+      "output_format": "Comprehensive list of all visible items, noting both large and small objects",
+      "examples": [
+        "Plastic bottles (clear PET type), aluminum cans, cardboard boxes",
+        "Vegetable scraps (lettuce, carrots), fruit peels (banana, orange), rice remnants - all in outer bag only",
+        "Food scraps BUT ALSO: 2 plastic straws, 1 plastic spoon, foam food container (CONTAMINATION)",
+        "Used batteries (AA and AAA types), fluorescent light tubes, spray paint cans",
+        "Mixed items: food containers with leftover food, plastic utensils, paper napkins",
+        "Cardboard boxes with small battery (AA) visible in corner - HAZARDOUS CONTAMINATION",
+        "Pure food waste with 1 plastic bottle cap mixed in - CONTAMINATION",
+        "Recyclable bottles BUT includes: light bulb (small CFL) - HAZARDOUS in wrong category"
+      ],
+      "critical_notes": [
+        "Even ONE small hazardous item (battery, bulb) in non-hazardous waste = violation",
+        "Plastic straws/utensils in food waste = contamination violation",
+        "Inner food containers = not pure food waste",
+        "Always note small objects separately if they seem out of place"
+      ]
+    },
+    "2_container_type": {
+      "priority": 2,
+      "description": "Describe the container holding the waste",
+      "extraction_prompts": [
+        "What type of container is the waste in? (plastic bag, trash bin, cardboard box, no container)",
+        "What color is the container/bag?",
+        "Is the container/bag opened or closed?",
+        "How many layers of bags are visible?"
+      ],
+      "output_format": "Container description",
+      "examples": [
+        "Clear plastic bag, opened and untied, single layer",
+        "Black plastic bag, tied closed, appears to be 2 layers",
+        "Green trash bin, lid open, no bag visible inside",
+        "Cardboard box, no bag, waste directly in box",
+        "White plastic bag, partially open, can see contents through opening"
+      ]
+    },
+    "3_visibility_level": {
+      "priority": 3,
+      "description": "Assess how well the waste contents can be identified",
+      "extraction_prompts": [
+        "Can you clearly identify the waste type from the image?",
+        "What percentage of the waste is visible? (0-25%, 25-50%, 50-75%, 75-100%)",
+        "Are there any obstructions blocking the view?",
+        "If in a bag, can you see through it?"
+      ],
+      "output_format": "Visibility assessment with percentage and reasoning",
+      "examples": [
+        "High visibility (90%): Clear bag fully opened, all contents easily identifiable",
+        "Medium visibility (60%): Dark bag but partially open, can identify most items",
+        "Low visibility (20%): Opaque black bag tied closed, can only see shape/outline",
+        "Zero visibility (0%): Completely sealed opaque bag, cannot identify any contents",
+        "Partial visibility (40%): Bag is translucent, can make out general categories but not specific items"
+      ]
+    },
+    "4_contamination_mixing": {
+      "priority": 4,
+      "description": "Identify any mixing of different waste types or contamination",
+      "extraction_prompts": [
+        "Are different types of waste mixed together?",
+        "Is there food waste mixed with non-food items?",
+        "Are there containers/packaging mixed with the waste?",
+        "Is the waste pure (single category) or contaminated?"
+      ],
+      "output_format": "Contamination/mixing description",
+      "examples": [
+        "Pure food waste: Only vegetable and fruit scraps visible, outer bag only",
+        "Contaminated food waste: Food scraps mixed with plastic containers, foam boxes, and straws",
+        "Mixed recyclables: Plastic bottles, aluminum cans, and cardboard all together - acceptable mixing",
+        "Severely mixed: Food waste, plastic bags, cardboard, and glass bottles all combined",
+        "Food in packaging: Rice in styrofoam container, vegetables in plastic bags (inner packaging present)"
+      ]
+    },
+    "5_hazardous_indicators": {
+      "priority": 5,
+      "description": "Identify any items that indicate hazardous waste",
+      "extraction_prompts": [
+        "Are there any batteries visible?",
+        "Do you see any light bulbs or fluorescent tubes?",
+        "Are there spray cans or aerosol containers?",
+        "Do you see any electronics or electronic components?",
+        "Are there any chemical containers or medical waste?"
+      ],
+      "output_format": "List of hazardous indicators or 'None'",
+      "examples": [
+        "Batteries present: Multiple AA and AAA batteries, one 9V battery",
+        "Fluorescent tubes: 3 long fluorescent light tubes, intact",
+        "Spray cans: 2 aerosol spray paint cans, 1 insecticide spray",
+        "Electronics: Old mobile phone, broken charger cables",
+        "None: No hazardous materials visible",
+        "Mixed hazardous: Batteries and light bulbs together with spray cans"
+      ]
+    },
+    "6_packaging_layers": {
+      "priority": 6,
+      "description": "Identify packaging layers and how waste is contained",
+      "extraction_prompts": [
+        "How many packaging layers are visible?",
+        "Is the waste in individual packaging or loose?",
+        "Are there containers (bowls, cups, boxes) within the waste?",
+        "Is there only an outer collection bag or multiple layers?"
+      ],
+      "output_format": "Packaging layer description",
+      "examples": [
+        "Single outer bag: Food scraps loose in one trash bag (acceptable for food waste)",
+        "Multiple outer bags: Food scraps in 2 layers of trash bags, no inner containers (acceptable)",
+        "Inner packaging present: Food items in individual plastic bags inside outer bag",
+        "Containerized waste: Food in styrofoam containers, plastic bowls, and cups",
+        "Mixed layers: Some items in outer bag, some in containers, some in individual wrappers"
+      ]
+    },
+    "7_quantity_volume": {
+      "priority": 7,
+      "description": "Estimate quantity and volume of waste",
+      "extraction_prompts": [
+        "Approximately how full is the container? (empty, 1/4, 1/2, 3/4, full, overflowing)",
+        "Is this a small, medium, or large amount of waste?",
+        "Can you estimate the weight from visual cues?"
+      ],
+      "output_format": "Quantity/volume estimate",
+      "examples": [
+        "Container 3/4 full, medium volume, appears heavy (dense items)",
+        "Small amount, bag approximately 1/4 full, lightweight appearance",
+        "Large volume, overflowing bin, mixed density items",
+        "Full bag, tightly packed, appears to be 10-15kg based on bag size"
+      ]
+    },
+    "8_document_text_ocr": {
+      "priority": 8,
+      "description": "Extract any visible text, labels, or documentation",
+      "extraction_prompts": [
+        "Is there any visible documentation or paperwork?",
+        "Can you read any labels on containers or bags?",
+        "Are there any weight measurements visible?",
+        "Is there any handwritten or printed text?"
+      ],
+      "output_format": "Extracted text or 'None visible'",
+      "examples": [
+        "Weight label visible: 15.5 kg written on bag",
+        "Receipt attached: Date 2025-11-06, Total weight 23kg",
+        "Label on container: 'Recyclable Plastics Only'",
+        "None visible: No text or documentation in image",
+        "Partial text: Can see '...kg' but number is obscured"
+      ]
+    },
+    "9_waste_condition": {
+      "priority": 9,
+      "description": "Assess the condition and state of the waste",
+      "extraction_prompts": [
+        "Is the waste fresh or decomposed?",
+        "Are items clean or dirty/contaminated?",
+        "Is there visible liquid or moisture?",
+        "Is the waste properly sorted or jumbled?"
+      ],
+      "output_format": "Condition description",
+      "examples": [
+        "Fresh food waste: Recently discarded, no decomposition visible",
+        "Clean recyclables: Bottles and cans appear rinsed and clean",
+        "Dirty/contaminated: Items covered in food residue and liquid",
+        "Mixed condition: Some clean items mixed with dirty/wet waste",
+        "Decomposing: Food waste showing signs of decay, liquid present"
+      ]
+    },
+    "10_red_flags": {
+      "priority": 10,
+      "description": "Identify obvious misclassification indicators",
+      "extraction_prompts": [
+        "Are there obvious items that don't belong in this waste category?",
+        "Do you see hazardous items in non-hazardous waste?",
+        "Is there non-food waste mixed with food waste?",
+        "Are there non-recyclable items in recyclables?"
+      ],
+      "output_format": "List of red flags or 'None'",
+      "examples": [
+        "RED FLAG: Batteries visible in bag labeled as food waste",
+        "RED FLAG: Cardboard boxes in bag marked as hazardous waste",
+        "RED FLAG: Food in containers marked as pure food waste",
+        "RED FLAG: Light bulbs mixed with recyclable plastics",
+        "None: All visible items appear consistent with declared category"
+      ]
+    }
+  },
+  "output_format": {
+    "structure": "JSON object with extraction results",
+    "template": {
+      "record_id": "<transaction_record_id>",
+      "extraction_summary": "<brief_1_sentence_summary>",
+      "waste_items": "<list_of_items>",
+      "container_type": "<container_description>",
+      "visibility_level": "<visibility_percentage_and_assessment>",
+      "contamination_mixing": "<contamination_description>",
+      "hazardous_indicators": "<list_or_none>",
+      "packaging_layers": "<packaging_description>",
+      "quantity_volume": "<quantity_estimate>",
+      "document_text_ocr": "<extracted_text_or_none>",
+      "waste_condition": "<condition_description>",
+      "red_flags": "<list_of_red_flags_or_none>",
+      "extraction_confidence": "<high|medium|low>",
+      "notes": "<any_additional_observations>"
+    }
+  },
+  "extraction_prompt_template": "Analyze this waste image and extract factual observations. Focus on what you can SEE, not on classifications or judgments.\n\n=== EXTRACTION CHECKLIST ===\n\n1. WASTE ITEMS (Priority 1):\n   - What specific items do you see?\n   - List all identifiable waste items\n\n2. CONTAINER (Priority 2):\n   - What type of container? (bag/bin/box/none)\n   - What color?\n   - Open or closed?\n   - How many layers?\n\n3. VISIBILITY (Priority 3):\n   - Can you identify the waste type?\n   - What % is visible? (0-100%)\n   - Any obstructions?\n\n4. MIXING/CONTAMINATION (Priority 4):\n   - Pure or mixed waste types?\n   - Food + non-food items?\n   - Containers/packaging present?\n\n5. HAZARDOUS ITEMS (Priority 5):\n   - Batteries?\n   - Light bulbs/fluorescent tubes?\n   - Spray cans?\n   - Electronics?\n   - Chemicals?\n\n6. PACKAGING LAYERS (Priority 6):\n   - Just outer bag or multiple layers?\n   - Inner containers present?\n   - Individual packaging?\n\n7. QUANTITY (Priority 7):\n   - How full? (1/4, 1/2, 3/4, full)\n   - Small/medium/large volume?\n\n8. TEXT/LABELS (Priority 8):\n   - Any visible text or labels?\n   - Weight measurements?\n   - Documentation?\n\n9. CONDITION (Priority 9):\n   - Fresh or decomposed?\n   - Clean or dirty?\n   - Liquid/moisture present?\n\n10. RED FLAGS (Priority 10):\n    - Obvious mismatches?\n    - Items that clearly don't belong?\n\n=== OUTPUT FORMAT ===\nProvide a JSON object with all extraction results. Be specific and factual.\n\nREMEMBER:\n- Describe what you SEE\n- Don't make classifications\n- Be specific about items\n- Note any red flags\n- Assess visibility honestly"
+}
