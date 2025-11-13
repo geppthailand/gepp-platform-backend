@@ -7,6 +7,7 @@ from typing import List, Optional, Dict, Any, Tuple
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.exc import SQLAlchemyError
 from datetime import datetime
+from decimal import Decimal
 import logging
 
 from ....models.transactions.transactions import Transaction, TransactionStatus, TransactionRecordStatus
@@ -72,8 +73,8 @@ class TransactionService:
                 treatment_method=transaction_data.get('treatment_method'),
                 disposal_method=transaction_data.get('disposal_method'),
                 created_by_id=transaction_data.get('created_by_id'),
-                weight_kg=0,  # Will be calculated from transaction records
-                total_amount=0  # Will be calculated from transaction records
+                weight_kg=Decimal('0'),  # Will be calculated from transaction records
+                total_amount=Decimal('0')  # Will be calculated from transaction records
             )
 
             self.db.add(transaction)
@@ -606,10 +607,10 @@ class TransactionService:
                 category_id=record_data.get('category_id'),
                 tags=record_data.get('tags', []),
                 unit=record_data.get('unit'),
-                origin_quantity=record_data.get('origin_quantity', 0),
-                origin_weight_kg=record_data.get('origin_weight_kg', 0),
-                origin_price_per_unit=record_data.get('origin_price_per_unit', 0),
-                total_amount=record_data.get('total_amount', 0),
+                origin_quantity=Decimal(str(record_data.get('origin_quantity', 0))),
+                origin_weight_kg=Decimal(str(record_data.get('origin_weight_kg', 0))),
+                origin_price_per_unit=Decimal(str(record_data.get('origin_price_per_unit', 0))),
+                total_amount=Decimal(str(record_data.get('total_amount', 0))),
                 currency_id=record_data.get('currency_id'),
                 notes=record_data.get('notes'),
                 images=record_data.get('images', []),
@@ -782,8 +783,8 @@ class TransactionService:
                 TransactionRecord.is_active == True
             ).all()
 
-            total_weight = sum(record.origin_weight_kg or 0 for record in records)
-            total_amount = sum(record.total_amount or 0 for record in records)
+            total_weight = sum((record.origin_weight_kg or Decimal('0') for record in records), Decimal('0'))
+            total_amount = sum((record.total_amount or Decimal('0') for record in records), Decimal('0'))
 
             transaction.weight_kg = total_weight
             transaction.total_amount = total_amount

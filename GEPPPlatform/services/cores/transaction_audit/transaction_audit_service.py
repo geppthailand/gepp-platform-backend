@@ -765,6 +765,11 @@ class TransactionAuditService:
 
             extraction_prompt_template = f"""extract the following information from the image:
             {json_extract}
+
+            ***
+            ห้ามตอบแบบอื่นนอกจาก json
+            ตอบข้อมูลเฉพาะ overview และ image_quality_score เท่านั้น ไม่ต้องมี materials
+            ***
             """
 
             # Process each image individually with threading
@@ -804,6 +809,7 @@ class TransactionAuditService:
                     if 'image_observations' in parsed and len(parsed['image_observations']) > 0:
                         observation = parsed['image_observations'][0]
                     else:
+                        # print("TTTTTTTTTTT", response_content)
                         observation = {
                             'file_id': img_file_id,
                             'overview': 'Failed to parse extraction response',
@@ -936,24 +942,19 @@ class TransactionAuditService:
             # Try to parse JSON
             extraction_data = json.loads(cleaned_response)
 
-            # Check if it's the new array format (array of image observations)
-            if isinstance(extraction_data, list):
-                # New format: array of per-image observations
+            if isinstance(extraction_data, dict):
+                # Check if it's a single image observation (dict with file_id, materials, overview)
+                extraction_data['file_id'] = images[0]
                 return {
                     'record_id': record_id,
-                    'image_observations': extraction_data  # Array of {file_id, materials, overview}
+                    'image_observations': [extraction_data]  # Wrap in array
                 }
-            elif isinstance(extraction_data, dict):
-                # Check if it's a single image observation (dict with file_id, materials, overview)
-                if 'file_id' in extraction_data and 'materials' in extraction_data:
-                    return {
-                        'record_id': record_id,
-                        'image_observations': [extraction_data]  # Wrap in array
-                    }
-                else:
-                    # Legacy format - return as is
-                    extraction_data['record_id'] = record_id
-                    return extraction_data
+                # if 'file_id' in extraction_data:
+                    
+                # else:
+                #     # Legacy format - return as is
+                #     extraction_data['record_id'] = record_id
+                #     return extraction_data
             else:
                 # Unknown format
                 return {
@@ -1110,12 +1111,6 @@ class TransactionAuditService:
             print(extracted_observations)
 
             judgment_prompt = f"""
-            from the following rules:
-            {rules_json}
-
-            and the following observations:
-            {json.dumps(extracted_observations, ensure_ascii=False)}
-
             make a judgment based on the rules and observations.
             return the result in json format.
 
@@ -1159,13 +1154,26 @@ class TransactionAuditService:
             - ห้ามใช้ข้อความจาก Rule ในการตอบ violations อย่างเดียวต้องเป็นข้อความที่สอดคล้องกับ observation material ด้วย
             - "Non-Specific {{material_type}}" หมายถึง ชนิด material นั้นๆแบบทั่วไป สามารถใช้แทน material_type นั้นๆได้
 
+            ให้ตัดสินว่าประเภท Material ของ Transaction Record ตรงกับสิ่งที่เห็นในรูปหรือไม่  
             **หลักการจำแนกประเภท**
             - ขยะทั่วไป General – ขยะที่รีไซเคิลไม่ได้ เช่น ถุงพลาสติก ฟิล์มอาหาร
-            - ขยะรีไซเคิล (Non-Specific) Recyclable – วัสดุที่นำกลับมาใช้ใหม่ได้ เช่น ขวดพลาสติก กระดาษ โลหะ
-            - ขยะอันตราย (Non-Specific) Hazardous – ของเสียมีสารพิษหรืออันตราย เช่น ถ่านไฟฉาย หลอดไฟ สเปรย์
+            - ขยะรีไซเคิล Non-Specific Recyclable – วัสดุที่นำกลับมาใช้ใหม่ได้ เช่น ขวดพลาสติก กระดาษ โลหะ
+            - ขยะอันตราย Non-Specific Hazardous – ของเสียมีสารพิษหรืออันตราย เช่น ถ่านไฟฉาย หลอดไฟ สเปรย์
             - ขยะเศษอาหาร Food/Plant Waste – ของเหลือจากการกินหรือย่อยสลายได้ เช่น เศษอาหาร เปลือกผลไม้
-            - หากขยะรีไซเคิลรวมอยู่กับเศษอาหารหรือขยะทั่วไปให้จัดอยู่ในหมวดขยะทั่วไป
-            - ขยะอันตรายไม่สามารถรวมกับขยะรีไซเคิล,เศษอาหารหรือขยะทั่วไปได้
+            - ถ้ามี Non-Specific อยู่ในประเภท Material ไม่ต้องสนใจ ให้ถือว่าเป็น Material ประเภทนั้น เช่น "Non-Specific Hazardous" = "Hazardous"
+            - ถ้า Material นั้นอยู่ในหมวดเดียวกันกับประเภทที่ระบุให้ถือว่าผ่าน เช่น
+                - Non-Specific Recyclable: Plastic bottles, Paper bags, Cardboard boxes, ...
+                - Non-Specific Hazardous: Batteries, Light bulbs, Medicines, ...
+                - Non-Specific General: Plastic bags, Paper towels, ...
+                - Non-Specific Food/Plant Waste: Food waste, ...
+            - ถ้ารีไซเคิลปะปนกับอาหารหรือขยะทั่วไป ให้จัดเป็น General Waste  
+            - ถ้ามีขยะอันตรายปะปนกับอย่างอื่น ให้ถือว่าผิด (Hazardous ห้ามปะปน)  
+            - ถ้ารูปมองไม่เห็นขยะ หรืออ่านไม่ออก ให้ถือว่า “ภาพไม่ใช้ได้” 
+
+            case ที่ไม่ควรเกิด
+            - "ประเภทวัสดุที่ระบุเป็น General Waste แต่ภาพแสดงถึงเศษอาหารและบรรจุภัณฑ์พลาสติก ซึ่งเศษอาหารควรจัดเป็น Food and Plant Waste และบรรจุภัณฑ์พลาสติกควรจัดเป็น Recyclables หรือ General Waste หากไม่สามารถรีไซเคิลได้"
+              เป็นการ audit ที่ผิด เนื่องจาก Recyclables + Food and Plant Waste = General Waste ตามกฎด้านบน
+            
 
             """
 
@@ -1603,7 +1611,7 @@ class TransactionAuditService:
                 model=self.model_name,
                 contents=gemini_content,
                 config={
-                    "system_instruction": system_instruction,
+                    # "system_instruction": system_instruction,
                     "temperature": api_settings.get('temperature', 0.0),
                     "thinkingConfig": {
                         # "thinkingBudget": api_settings.get('thinking_budget', 512)
@@ -1656,13 +1664,13 @@ class TransactionAuditService:
             # logger.info(full_prompt)
             # Generate response using the new SDK
             response = self.client.models.generate_content(
-                model=self.model_name,
+                model='gemini-2.5-flash',
                 contents=full_prompt,
                 config={
                     "system_instruction": system_instruction,
                     "temperature": api_settings.get('temperature', 0.0),
                     "thinkingConfig": {
-                        "thinkingBudget": api_settings.get('thinking_budget', 512)
+                        "thinkingBudget": 0
                     },
                     "max_output_tokens": 2048  # Increased from 1024 to prevent truncation
                 }

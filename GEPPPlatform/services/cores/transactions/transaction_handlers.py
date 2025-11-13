@@ -126,11 +126,14 @@ def handle_transaction_routes(event: Dict[str, Any], data: Dict[str, Any], **par
             }
 
     except ValidationException as e:
-        return {
+        response = {
             'success': False,
             'message': str(e),
             'error_code': 'VALIDATION_ERROR'
         }
+        if hasattr(e, 'errors') and e.errors:
+            response['errors'] = e.errors
+        return response
     except NotFoundException as e:
         return {
             'success': False,
@@ -206,7 +209,10 @@ def handle_create_transaction(
                 'transaction_records_count': result.get('transaction_records_count', 0)
             }
         else:
-            raise ValidationException(result['message'])
+            raise ValidationException(
+                result['message'],
+                errors=result.get('errors', [])
+            )
 
     except Exception as e:
         if isinstance(e, (ValidationException, BadRequestException)):
@@ -345,7 +351,10 @@ def handle_update_transaction(
                 'transaction': result['transaction']
             }
         else:
-            raise ValidationException(result['message'])
+            raise ValidationException(
+                result['message'],
+                errors=result.get('errors', [])
+            )
 
     except Exception as e:
         if isinstance(e, (NotFoundException, UnauthorizedException, ValidationException, BadRequestException)):
