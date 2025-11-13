@@ -1290,6 +1290,29 @@ def _handle_comparison_report(
     computed_scores: list[Dict[str, Any]] = []
     raw_computations: list[Dict[str, Any]] = []
 
+    # Build a lookup from score_name -> set of material categories referenced in its formula
+    def _extract_categories_from_formula(formula: str) -> set[str]:
+        try:
+            tree = ast.parse(formula or '0', mode='eval')
+        except Exception:
+            return set()
+        categories: set[str] = set()
+        allowed_keys = {
+            'recyclable', 'general', 'hazardous', 'bio_hazardous',
+            'organic', 'waste_to_energy', 'construction', 'electronic'
+        }
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name):
+                name = node.id or ''
+                # Expect variables like l_recyclable, c_general, etc.
+                if name.startswith('l_') or name.startswith('c_'):
+                    base = name.split('_', 1)[1] if '_' in name else ''
+                    if base in allowed_keys:
+                        categories.add(base)
+        return categories
+
+    score_to_categories: Dict[str, set[str]] = {}
+
     # Evaluate all formulas first so we can normalize using dataset-aware scaling.
     for r in score_rows:
         try:
@@ -1313,6 +1336,8 @@ def _handle_comparison_report(
             'raw_value': raw_value,
             'reason': reason
         })
+        if score_name:
+            score_to_categories[score_name] = _extract_categories_from_formula(formula)
 
     finite_raw_values = [v['raw_value'] for v in raw_computations if math.isfinite(v['raw_value'])]
     min_raw_value = min(finite_raw_values) if finite_raw_values else 0.0
@@ -1555,6 +1580,12 @@ def _handle_comparison_report(
                 rid = int(r.get('id') or 0)
             except Exception:
                 rid = 0
+            # Determine which material categories are involved based on referenced scores in the criterior
+            materials_used: list[str] = sorted({
+                cat
+                for var in used_vars
+                for cat in (score_to_categories.get(var) or set())
+            })
             results.append({
                 'id': rid,
                 'condition_name': (r.get('condition_name') or '').strip(),
@@ -1562,6 +1593,7 @@ def _handle_comparison_report(
                 'matched': bool(matched),
                 'urgency_score': round(float(urgency_score), 2),
                 'variables': var_values,
+                'materials_used': materials_used,
                 'risk_problems': (r.get('risk_problems') or '').strip(),
                 'recommendation': (r.get('recommendation') or '').strip()
             })
@@ -1623,6 +1655,8 @@ def _handle_comparison_report(
         # Re-sort each list by matched first, then normalized urgency desc
         for _, items in grouped:
             items.sort(key=lambda x: (not x.get('matched', False), -float(x.get('urgency_normalized', 0.0))))
+            # Return only the top 2 items by urgency_normalized
+            items[:] = items[:2]
 
     _normalize_global_urgency()
 
