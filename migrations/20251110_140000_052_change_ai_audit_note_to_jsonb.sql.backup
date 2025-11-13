@@ -1,0 +1,31 @@
+-- Migration: Change ai_audit_note column from TEXT to JSONB
+-- Date: 2025-11-10
+-- Description: Change ai_audit_note column type from TEXT to JSONB to properly store structured audit data
+
+BEGIN;
+
+-- Step 1: Check if column exists and is TEXT type
+DO $$
+BEGIN
+    -- Change ai_audit_note from TEXT to JSONB
+    -- First, convert any existing TEXT data to JSONB (if any exists)
+    ALTER TABLE transactions
+    ALTER COLUMN ai_audit_note TYPE JSONB USING
+        CASE
+            WHEN ai_audit_note IS NULL THEN NULL
+            WHEN ai_audit_note = '' THEN NULL
+            ELSE ai_audit_note::JSONB
+        END;
+
+    RAISE NOTICE 'Successfully changed ai_audit_note column to JSONB type';
+
+EXCEPTION
+    WHEN OTHERS THEN
+        RAISE NOTICE 'Error changing ai_audit_note column: %', SQLERRM;
+        RAISE;
+END $$;
+
+-- Step 2: Add a comment to document the change
+COMMENT ON COLUMN transactions.ai_audit_note IS 'Stores full AI audit response as JSONB with structure: {status, token: {input, output, thinking}, audits: {record_id: {images: [{id, obs}]}, violations: [{tr, m, rule}]}}';
+
+COMMIT;

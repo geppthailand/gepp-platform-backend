@@ -43,6 +43,7 @@ class AIAuditStatus(enum.Enum):
     approved = 'approved'
     rejected = 'rejected'
     no_action = 'no_action'
+    failed = 'failed'  # Audit process failed with error
 
 class Transaction(Base, BaseModel):
     """
@@ -62,8 +63,9 @@ class Transaction(Base, BaseModel):
 
     # AI Audit Status - separate from actual status
     ai_audit_status = Column(Enum(AIAuditStatus), nullable=False, default=AIAuditStatus.null)
-    ai_audit_note = Column(Text, nullable=True)  # Stores full audit response JSONB as text
+    ai_audit_note = Column(JSONB, nullable=True)  # Stores audit observations and violations {status, audits, violations}
     ai_audit_date = Column(DateTime, nullable=True)  # Timestamp when AI audit was performed
+    audit_tokens = Column(JSONB, nullable=True)  # Token usage data {input, output, thinking}
     reject_triggers = Column(JSONB, nullable=False, default=[])  # Array of rule_ids that triggered rejection
     warning_triggers = Column(JSONB, nullable=False, default=[])  # Array of rule_ids that triggered warnings
 
@@ -128,6 +130,7 @@ class Transaction(Base, BaseModel):
     updated_by = relationship("UserLocation", foreign_keys=[updated_by_id])
     approved_by = relationship("UserLocation", foreign_keys=[approved_by_id])
     integration_token = relationship("IntegrationToken", foreign_keys=[integration_id])
+    audits = relationship("TransactionAudit", back_populates="transaction", cascade="all, delete-orphan")
     # Note: Using JSONB fields for images instead of relationships to avoid table dependencies
     
     def calculate_totals(self):
