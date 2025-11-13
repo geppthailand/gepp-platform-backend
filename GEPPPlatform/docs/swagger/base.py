@@ -247,6 +247,10 @@ Access the API at: `/{deployment_state}/api/*`
             {
                 "name": "BMA Integration",
                 "description": "Bangkok Metropolitan Administration integration"
+            },
+            {
+                "name": "IOT Devices",
+                "description": "IoT device management and telemetry"
             }
         ],
         "paths": {}

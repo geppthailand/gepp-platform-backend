@@ -12,6 +12,8 @@ from .user_crud import UserCRUD
 from .user_permissions import UserPermissionService
 from ....models.users.user_location import UserLocation
 from ....models.users.user_related import UserRoleEnum
+from ....models.users.user_location_materials import UserLocationMaterial
+from ....models.cores.references import Material
 
 
 class UserService:
@@ -686,6 +688,80 @@ class UserService:
             location_data.append(location_dict)
 
         return location_data
+
+    def get_locations_by_member(
+        self,
+        member_user_id: int,
+        role: Optional[str] = None,
+        organization_id: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Get locations where the specified user is listed in members, optionally filtered by role.
+
+        Intended for returning locations where the current user is a member with role like 'dataInput'.
+        """
+        locations = self.crud.get_locations_by_member(
+            member_user_id=member_user_id,
+            role=role,
+            organization_id=organization_id
+        )
+        # Build material list per location in one query
+        location_ids = [loc.id for loc in locations]
+        materials_map: Dict[int, List[Dict[str, Any]]] = {loc_id: [] for loc_id in location_ids}
+
+        if location_ids:
+            rows = (
+                self.db.query(
+                    UserLocationMaterial.location_id,
+                    Material.id,
+                    Material.name_en,
+                    Material.name_th,
+                    Material.category_id,
+                    Material.main_material_id,
+                    Material.unit_name_th,
+                    Material.unit_name_en,
+                    Material.unit_weight,
+                )
+                .join(Material, UserLocationMaterial.materials_id == Material.id)
+                .filter(
+                    UserLocationMaterial.location_id.in_(location_ids),
+                    UserLocationMaterial.deleted_date.is_(None)
+                )
+                .all()
+            )
+
+            for (
+                location_id,
+                material_id,
+                name_en,
+                name_th,
+                category_id,
+                main_material_id,
+                unit_name_th,
+                unit_name_en,
+                unit_weight,
+            ) in rows:
+                materials_map.setdefault(location_id, []).append({
+                    'material_id': material_id,
+                    'name_en': name_en,
+                    'name_th': name_th,
+                    'category_id': category_id,
+                    'main_material_id': main_material_id,
+                    'unit_name_th': unit_name_th,
+                    'unit_name_en': unit_name_en,
+                    'unit_weight': float(unit_weight) if unit_weight is not None else None,
+                })
+
+        # Reduced response: only id, display_name, materials
+        result: List[Dict[str, Any]] = []
+        for location in locations:
+            result.append({
+                'origin_id': location.id,
+                'display_name': location.display_name,
+                'materials': materials_map.get(location.id, [])
+            })
+
+        return result
 
     def _get_setup_location_ids(self, organization_id: int) -> List[int]:
         """

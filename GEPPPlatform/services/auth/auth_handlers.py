@@ -19,6 +19,7 @@ from GEPPPlatform.models.users.user_location import UserLocation
 from GEPPPlatform.models.users.integration_tokens import IntegrationToken
 from GEPPPlatform.models.subscriptions.organizations import Organization, OrganizationInfo
 from GEPPPlatform.models.subscriptions.subscription_models import SubscriptionPlan, Subscription
+from GEPPPlatform.models.cores.iot_devices import IoTDevice
 from ..cores.organizations.organization_role_presets import OrganizationRolePresets
 from ...exceptions import (
     APIException,
@@ -75,6 +76,34 @@ class AuthHandlers:
         auth_token = jwt.encode(auth_payload, self.jwt_secret, algorithm='HS256')
         refresh_token = jwt.encode(refresh_payload, self.jwt_secret, algorithm='HS256')
         
+        return {
+            'auth_token': auth_token,
+            'refresh_token': refresh_token
+        }
+
+    def generate_device_tokens(self, device_id: int, device_name: str) -> Dict[str, str]:
+        """Generate JWT auth_token and refresh_token for IoT devices"""
+        now = datetime.now(timezone.utc)
+
+        auth_payload = {
+            'device_id': device_id,
+            'device_name': device_name,
+            'type': 'device',
+            'exp': now + timedelta(minutes=15),
+            'iat': now
+        }
+
+        refresh_payload = {
+            'device_id': device_id,
+            'device_name': device_name,
+            'type': 'device_refresh',
+            'exp': now + timedelta(days=7),
+            'iat': now
+        }
+
+        auth_token = jwt.encode(auth_payload, self.jwt_secret, algorithm='HS256')
+        refresh_token = jwt.encode(refresh_payload, self.jwt_secret, algorithm='HS256')
+
         return {
             'auth_token': auth_token,
             'refresh_token': refresh_token
@@ -557,3 +586,106 @@ class AuthHandlers:
         """Logout user"""
         # TODO: Implement logout logic (invalidate token)
         raise APIException('Logout endpoint not implemented')
+
+    def login_iot_user(self, data: Dict[str, Any], **kwargs) -> Dict[str, Any]:
+        """Login user with QRCode d obj of username and password using SQLAlchemy"""
+        try:
+            payload = jwt.decode(data["login_token"], self.jwt_secret, algorithms=['HS256'])
+            if payload is None:
+                raise BadRequestException("Invalid login token")
+            email = payload.get('email')
+            password = payload.get('password')
+            expired_date_value = payload.get("expired_date")
+            expired_date_value = datetime.fromisoformat(expired_date_value.replace("Z", "+00:00"))
+            if expired_date_value is None:
+                raise BadRequestException("Invalid login token")
+            if datetime.now(timezone.utc) > expired_date_value:
+                raise UnauthorizedException("Expired login token")
+
+            session = self.db_session
+            # Get user by email
+            user = session.query(UserLocation).filter_by(
+                email=email,
+                is_active=True
+            ).first()
+
+            if not user:
+                raise NotFoundException('User not found')
+
+            # Verify password
+            if not self.verify_password(password, user.password):
+                raise UnauthorizedException('Invalid email or password')
+
+            # Generate JWT auth and refresh tokens
+            tokens = self.generate_jwt_tokens(user.id, user.organization_id, email)
+
+            return {
+                'success': True,
+                'auth_token': tokens['auth_token'],
+                'refresh_token': tokens['refresh_token'],
+                'token_type': 'Bearer',
+                'expires_in': 900,  # 15 minutes in seconds
+                'user': {
+                    'id': user.id,
+                    'email': email,
+                    'displayName': user.display_name,
+                    'organizationId': user.organization_id
+                }
+            }
+
+        except Exception as e:
+            raise APIException(str(e))
+
+    def login_iot_device(self, data: Dict[str, Any], **kwargs) -> Dict[str, Any]:
+        """Login an IoT device using device_name or MAC addresses and password"""
+        try:
+            device_name = data.get('device_name')
+            mac_bt = data.get('mac_address_bluetooth')
+            mac_tablet = data.get('mac_address_tablet')
+            password = data.get('password')
+
+            if not password or not (device_name or mac_bt or mac_tablet):
+                raise ValidationException('Provide password and one of device_name, mac_address_bluetooth, mac_address_tablet')
+
+            session = self.db_session
+
+            # Build base query
+            query = session.query(IoTDevice).filter(IoTDevice.is_active == True)
+
+            # Apply identifier filters (priority: device_name, mac bt, mac tablet)
+            if device_name:
+                query = query.filter(IoTDevice.device_name == device_name)
+            elif mac_bt:
+                query = query.filter(IoTDevice.mac_address_bluetooth == mac_bt)
+            else:
+                query = query.filter(IoTDevice.mac_address_tablet == mac_tablet)
+
+            device = query.first()
+
+            if not device:
+                raise UnauthorizedException('Invalid device credentials')
+
+            try:
+                if not device.password or not self.verify_password(password, device.password):
+                    raise UnauthorizedException('Invalid device credentials')
+            except Exception:
+                raise UnauthorizedException('Invalid device credentials')
+
+            tokens = self.generate_device_tokens(device.id, device.device_name)
+
+            return {
+                'success': True,
+                'auth_token': tokens['auth_token'],
+                'refresh_token': tokens['refresh_token'],
+                'token_type': 'Bearer',
+                'expires_in': 900,
+                'device': {
+                    'id': device.id,
+                    'device_name': device.device_name,
+                    'device_type': device.device_type
+                }
+            }
+
+        except Exception as e:
+            raise APIException(str(e))
+                

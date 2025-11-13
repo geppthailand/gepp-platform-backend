@@ -4,7 +4,7 @@ User CRUD operations with advanced features
 
 from typing import List, Optional, Dict, Any, Tuple
 from sqlalchemy.orm import Session, joinedload, selectinload
-from sqlalchemy import and_, or_, func, text, desc, asc
+from sqlalchemy import and_, or_, func, text, desc, asc, literal
 from datetime import datetime, timedelta
 import uuid
 import hashlib
@@ -724,4 +724,54 @@ class UserCRUD:
         # Order by created_date descending
         query = query.order_by(desc(UserLocation.created_date))
 
+        return query.all()
+
+    def get_locations_by_member(
+        self,
+        member_user_id: int,
+        role: Optional[str] = None,
+        organization_id: Optional[int] = None
+    ) -> List[UserLocation]:
+        """
+        Get locations where the given user is present in members JSONB array.
+
+        Uses JSONB containment (@>) to match elements. Handles user_id stored as number or string.
+        """
+        query = self.db.query(UserLocation).filter(
+            and_(
+                UserLocation.is_location == True,
+                UserLocation.is_active == True
+            )
+        )
+
+        # Scope to organization if provided
+        if organization_id:
+            query = query.filter(UserLocation.organization_id == organization_id)
+
+        # Ensure members is not null
+        query = query.filter(UserLocation.members.isnot(None))
+
+        # Build JSONB patterns using positional key/value pairs
+        # Numeric user_id variant
+        if role:
+            pattern_num = func.jsonb_build_array(
+                func.jsonb_build_object('user_id', int(member_user_id), 'role', role)
+            )
+            pattern_str = func.jsonb_build_array(
+                func.jsonb_build_object('user_id', str(member_user_id), 'role', role)
+            )
+        else:
+            pattern_num = func.jsonb_build_array(
+                func.jsonb_build_object('user_id', int(member_user_id))
+            )
+            pattern_str = func.jsonb_build_array(
+                func.jsonb_build_object('user_id', str(member_user_id))
+            )
+
+        cond_num = UserLocation.members.op('@>')(pattern_num)
+        cond_str = UserLocation.members.op('@>')(pattern_str)
+        query = query.filter(or_(cond_num, cond_str))
+
+        # Order by newest first for consistency
+        query = query.order_by(desc(UserLocation.created_date))
         return query.all()
