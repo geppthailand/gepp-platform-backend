@@ -1375,24 +1375,9 @@ def _handle_comparison_report(
 
         return round(normalized, 2)
 
-    def _classify_score_quality(score_0_to_10: float) -> str:
-        # Simple, explainable bands; adjust if product needs different semantics
-        s = float(score_0_to_10)
-        if s < 2.0:
-            return 'very_poor'
-        if s < 4.0:
-            return 'poor'
-        if s < 6.0:
-            return 'fair'
-        if s < 8.0:
-            return 'good'
-        return 'excellent'
-
     for entry in raw_computations:
         raw_value = entry['raw_value']
         normalized_value = _normalize_score_to_ten(raw_value, min_raw_value, max_raw_value)
-        rating = _classify_score_quality(normalized_value)
-        is_good = normalized_value >= 6.0
         computed_scores.append({
             'id': entry['id'],
             'score_name': entry['score_name'],
@@ -1402,8 +1387,6 @@ def _handle_comparison_report(
             'value': normalized_value,
             # Preserve raw value for debugging/analytics
             'raw_value': round(float(raw_value), 2) if math.isfinite(raw_value) else 0.0,
-            'rating': rating,
-            'is_good': is_good,
             'reason': entry['reason']
         })
 
