@@ -7,315 +7,27 @@ from reportlab.lib import colors
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfbase.pdfmetrics import stringWidth
-
-
-PAGE_WIDTH_IN = 11.69
-PAGE_HEIGHT_IN = 8.27
-PRIMARY = colors.HexColor("#95c9c4")
-TEXT = colors.HexColor("#5b6e8c")
-CARD = colors.HexColor("#f6f8fb")
-STROKE = colors.HexColor("#e6edf4")
-BAR = colors.HexColor("#a9d5d0")
-WHITE = colors.white
-BLACK = colors.black
-BAR2 = colors.HexColor("#77b9d8")
-BAR3 = colors.HexColor("#c8ced4")
-BAR4 = colors.HexColor("#8fcfc6")
-SERIES_COLORS = [BAR, BAR2, BAR4, BAR3, TEXT]
-
-def _header(pdf, page_width_points: float, page_height_points: float, data: dict) -> None:
-    text = data["users"]
-    font_name = "Poppins-Regular"
-    font_size = 12
-    padding = 0.78 * inch  # whatever padding you want from right edge
-
-    # 🧮 measure how wide the text is
-    text_width = stringWidth(text, font_name, font_size)
-
-    # 💡 calculate x-position = total width - text width - padding
-    x = page_width_points - text_width - padding
-    y = page_height_points - (0.7 * inch)  # your vertical position
-
-    pdf.setFillColor(TEXT)
-    pdf.setFont(font_name, font_size)
-    pdf.drawString(x, y, text)
-
-def _sub_header(pdf, page_width_points: float, page_height_points: float, data: dict, header_text: str) -> None:
-    padding = 0.78 * inch
-    location_data = data.get("location", [])
-    if isinstance(location_data, list):
-        location_text = ", ".join(map(str, location_data))
-    else:
-        location_text = str(location_data)
-    
-    pdf.setFillColor(PRIMARY)
-    pdf.setFont("Poppins-Bold", 48)
-    pdf.drawString(padding, page_height_points - (1.38 * inch), header_text)
-    pdf.setFillColor(TEXT)
-    pdf.setFont("Poppins-Regular", 12)
-    pdf.drawString(padding, page_height_points - (1.75 * inch), f"Location: {location_text}")
-    pdf.drawString(padding, page_height_points - (1.96 * inch), f"Date: {data['date_from']} - {data['date_to']}")
-
-
-def _format_number(value) -> str:
-    try:
-        if isinstance(value, (int,)) or abs(value - int(value)) < 1e-9:
-            return f"{value:,.0f}"
-        return f"{value:,.2f}"
-    except Exception:
-        return str(value)
-
-def _rounded_card(pdf, x, y, w, h, radius=8, fill=CARD, stroke=STROKE):
-    pdf.setFillColor(fill)
-    pdf.setStrokeColor(stroke)
-    pdf.roundRect(x, y, w, h, radius, stroke=1, fill=1)
-
-def _stat_chip(pdf, x, y, w, h, title, value, variant="gray"):
-    fill_color = WHITE if variant == "white" else CARD
-    _rounded_card(pdf, x, y, w, h, radius=8, fill=fill_color)
-    pad_x = 12 if variant == "white" else 20
-    pdf.setFillColor(TEXT)
-    pdf.setFont("Poppins-Regular", 8)
-    pdf.drawString(x + pad_x, y + h - 18, title)
-    pdf.setFont("Poppins-Regular", 12)
-    pdf.drawString(x + pad_x, y + h - 32, _format_number(value))
-
-def _progress_bar(pdf, x, y, w, h, ratio, bar_color=PRIMARY, back_color=STROKE):
-    ratio = max(0.0, min(1.0, float(ratio or 0)))
-    radius = h / 2
-
-    # background
-    pdf.setFillColor(back_color)
-    pdf.roundRect(x, y, w, h, radius, stroke=0, fill=1)
-
-    # foreground
-    pdf.setFillColor(bar_color)
-    bar_width = max(h, w * ratio)  # prevent ugly cut for small ratio
-    pdf.roundRect(x, y, bar_width, h, radius, stroke=0, fill=1)
-
-
-def _label_progress(pdf, x, y, w, label, value_text, ratio, bar_color, back_color):
-    pdf.setFillColor(TEXT)
-    pdf.setFont("Poppins-Regular", 10)
-    pdf.drawString(x, y + 16, label)
-    pdf.setFillColor(TEXT)
-    pdf.setFont("Poppins-Regular", 10)
-    txt_w = stringWidth(value_text, "Poppins-Regular", 10)
-    pdf.drawString(x + w - txt_w, y + 16, value_text)
-    _progress_bar(pdf, x, y, w, 8, ratio, bar_color, back_color)
-
-def _simple_bar_chart(pdf, x, y, w, h, chart_series):
-    left_pad, bottom_pad, right_pad, top_pad = 32, 36, 24, 20
-    gx = x + left_pad
-    gy = y + bottom_pad
-    gw = w - left_pad - right_pad
-    gh = h - bottom_pad - top_pad
-
-    # axes
-    pdf.setStrokeColor(STROKE)
-    pdf.line(gx, gy, gx, gy + gh)
-    pdf.line(gx, gy, gx + gw, gy)
-
-    # bars (grouped by month across all series)
-    if not chart_series:
-        return
-    months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
-    # Determine up to 3 series (prefer most recent numeric years if possible)
-    try:
-        sorted_years = sorted([int(k) for k in chart_series.keys()])
-        series_keys = [str(y) for y in sorted_years[-3:]]
-    except Exception:
-        # Fallback: preserve insertion order, take last 3
-        series_keys = list(chart_series.keys())[-3:]
-    values_by_series = {}
-    for key in series_keys:
-        arr = [0.0] * 12
-        for pt in chart_series.get(key, []):
-            m = str(pt.get("month", ""))
-            if m in months:
-                idx = months.index(m)
-                try:
-                    arr[idx] = float(pt.get("value", 0) or 0.0)
-                except Exception:
-                    arr[idx] = 0.0
-        values_by_series[key] = arr
-
-    vmax = 0.0
-    for arr in values_by_series.values():
-        vmax = max(vmax, max(arr) if arr else 0.0)
-    if vmax <= 0:
-        vmax = 1.0
-
-    n_months = 12
-    gap = 10
-    slot_w = (gw - (n_months + 1) * gap) / max(1, n_months)
-    group_scale = 0.86
-    group_w = slot_w * group_scale
-    s_count = max(1, len(series_keys))
-    inner_gap_ratio = 0.06
-    total_inner_gap = (s_count - 1) * group_w * inner_gap_ratio
-    bar_w = (group_w - total_inner_gap) / s_count
-
-    for mi in range(n_months):
-        slot_x = gx + gap + mi * (slot_w + gap)
-        group_x = slot_x + (slot_w - group_w) / 2
-        for si, key in enumerate(series_keys):
-            color = SERIES_COLORS[si % len(SERIES_COLORS)]
-            pdf.setFillColor(color)
-            v = values_by_series[key][mi]
-            bh = (v / vmax) * (gh - 10)
-            bx = group_x + si * (bar_w + group_w * inner_gap_ratio)
-            pdf.rect(bx, gy, bar_w, bh, stroke=0, fill=1)
-        # month label centered in slot
-        lbl = months[mi]
-        pdf.setFillColor(TEXT)
-        pdf.setFont("Poppins-Regular", 8)
-        lw = stringWidth(lbl, "Poppins-Regular", 8)
-        pdf.drawString(slot_x + (slot_w - lw) / 2, gy - 14, lbl)
-
-    # y-axis unit
-    pdf.setFillColor(TEXT)
-    pdf.setFont("Poppins-Regular", 9)
-    pdf.drawString(gx - 18, gy + gh + 6, "kg")
-
-    # legend for each series (years), right-aligned
-    if series_keys:
-        sq = 8
-        cur_x = x + w - 10
-        pdf.setFont("Poppins-Regular", 9)
-        for si in reversed(range(len(series_keys))):
-            label = str(series_keys[si])
-            lw = stringWidth(label, "Poppins-Regular", 9)
-            entry_w = sq + 6 + lw + 12
-            cur_x -= entry_w
-            pdf.setFillColor(SERIES_COLORS[si % len(SERIES_COLORS)])
-            pdf.rect(cur_x, y + h - 18, sq, sq, stroke=0, fill=1)
-            pdf.setFillColor(TEXT)
-            pdf.drawString(cur_x + sq + 6, y + h - 18, label)
-
-def _footer(pdf, page_width_points: float):
-    text = "Copyright © 2018–2023 GEPP Sa-Ard Co., Ltd. ALL RIGHTS RESERVED"
-    pdf.setFillColor(TEXT)
-    pdf.setFont("Poppins-Regular", 9)
-    tw = stringWidth(text, "Poppins-Regular", 9)
-    pdf.drawString((page_width_points - tw) / 2, 0.5 * inch, text)
-
-def draw_cover(pdf, page_width_points: float, page_height_points: float, data: dict) -> None:
-    _header(pdf, page_width_points, page_height_points, data)
-    middle = page_height_points / 2
-    pdf.setFillColor(PRIMARY)  # set text color
-    pdf.setFont("Poppins-Bold", 100) # set font and size
-    pdf.drawString(0.63 * inch, middle + 20, "2025") 
-    pdf.setFillColor(TEXT)
-    pdf.setFont("Poppins-Regular", 38.5)
-    pdf.drawString(0.63 * inch, middle - 20, "GEPP REPORT")
-    pdf.setFont("Poppins-Regular", 16.5)
-    pdf.drawString(0.63 * inch, middle - 40, "Data-Driven Transaformation")
-
-    # 💡 Accent rectangle at the bottom
-    pdf.setFillColor(PRIMARY)
-    pdf.rect(4.54 * inch, middle - 45, page_width_points - (4.54 * inch), 2.07 * inch, fill=1, stroke=0)
-
-def draw_overview(pdf, page_width_points: float, page_height_points: float, data: dict) -> None:
-    pdf.showPage() # New page
-    _header(pdf, page_width_points, page_height_points, data)
-    _sub_header(pdf, page_width_points, page_height_points, data, "Overview")
-    # layout measurements
-    margin = 0.78 * inch
-    content_top = page_height_points - (2.2 * inch)
-    col_gap = 0.3 * inch
-    left_col_w = 3.7 * inch
-    right_col_w = page_width_points - margin - margin - left_col_w - col_gap
-
-    # small stat chips (top-left row)
-    chip_w = 1.78 * inch
-    chip_h = 0.60 * inch
-    chip_y = content_top - chip_h
-    _stat_chip(pdf, margin, chip_y, chip_w, chip_h, "Total Transactions", data["data"]["transactions_total"])
-    _stat_chip(pdf, margin + chip_w + 12, chip_y, chip_w, chip_h, "Total Approved", data["data"]["transactions_approved"])
-
-    # left column cards
-    # Key Indicators
-    ki_h = 2.2 * inch
-    ki_y = chip_y - 16 - ki_h
-    _rounded_card(pdf, margin, ki_y, left_col_w, ki_h, radius=8)
-    pad = 20
-    pdf.setFillColor(TEXT)
-    pdf.setFont("Poppins-Medium", 12)
-    pdf.drawString(margin + pad, page_height_points - (3.42 * inch), "Key Indicators")
-
-    ki = data["data"]["key_indicators"]
-    tw = float(ki.get("total_waste", 0) or 0)
-    rr = float(ki.get("recycle_rate", 0) or 0)
-    ghg = float(ki.get("ghg_reduction", 0) or 0)
-    # normalize non-percentage bars against max of tw & ghg
-    norm_base = max(tw, ghg, 1.0)
-    row_w = left_col_w - 2 * pad
-    row_x = margin + pad
-    row_y = ki_y + ki_h - 50
-    _label_progress(pdf, row_x, row_y - 24, row_w, "Total Waste (kg)", _format_number(tw), tw / norm_base, colors.HexColor("#b7c6cc"), colors.HexColor("#e1e7ef"))
-    _label_progress(pdf, row_x, row_y - 58, row_w, "Recycle rate (%)", f"{rr:,.2f}", rr / 100.0, colors.HexColor("#8fcfc6"), colors.HexColor("#e1e7ef"))
-    _label_progress(pdf, row_x, row_y - 92, row_w, "GHG Reduction (kgCO2e)", _format_number(ghg), ghg / norm_base, colors.HexColor("#77b9d8"), colors.HexColor("#e1e7ef"))
-
-    # Top Recyclables
-    tr_h = 2.15 * inch
-    tr_y = ki_y - 18 - tr_h
-    _rounded_card(pdf, margin, tr_y, left_col_w, tr_h, radius=8)
-
-    pdf.setFillColor(TEXT)
-    pdf.setFont("Poppins-Medium", 12)
-    pdf.drawString(margin + pad, tr_y + tr_h - 30, "Top Recyclables")
-    items = data["data"].get("top_recyclables", [])[:3]
-    if items:
-        max_val = max(float(it.get("total_waste", 0) or 0) for it in items) or 1.0
-        y_ptr = tr_y + tr_h - 72
-        for it in items:
-            name = str(it.get("origin_name", ""))
-            val = float(it.get("total_waste", 0) or 0)
-            ratio = val / max_val
-            _label_progress(pdf, margin + pad, y_ptr, left_col_w - 2 * pad, name, _format_number(val), ratio, colors.HexColor("#c8ced4"), colors.HexColor("#e1e7ef"))
-            y_ptr -= 32
-
-    # Right column: Overall card with small stats and chart
-    overall_x = margin + left_col_w + col_gap
-    overall_y = tr_y
-    overall_h = (chip_y - overall_y) + chip_h  # span to top row baseline
-    _rounded_card(pdf, overall_x, overall_y, right_col_w, overall_h, radius=8, fill=WHITE)
-    pdf.setFillColor(TEXT)
-    pdf.setFont("Poppins-Medium", 12)
-    pdf.drawString(overall_x + 16, overall_y + overall_h - 30, "Overall")
-
-    # top stat chips in overall card
-    stats = data["data"]["overall_charts"]["chart_stat_data"]
-    sw = 1.78 * inch
-    sh = 0.60 * inch
-    sy = overall_y + overall_h - 26 - 16 - sh
-    for i, st in enumerate(stats[:3]):
-        sx = overall_x + 16 + i * (sw + 8)
-        _stat_chip(pdf, sx, sy, sw, sh, st["title"], st["value"], "white")
-
-    # bar chart (supports multiple years)
-    chart_data = data["data"]["overall_charts"]["chart_data"]
-    cy = overall_y + 16
-    ch = sy - cy - 16
-    _simple_bar_chart(pdf, overall_x + 12, cy, right_col_w - 24, ch, chart_data)
-
-    _footer(pdf, page_width_points)
-
-def main() -> None:
-    width_points = PAGE_WIDTH_IN * inch
-    height_points = PAGE_HEIGHT_IN * inch
-    pdfmetrics.registerFont(TTFont('Poppins-Bold', 'scripts/Poppins-Bold.ttf'))
-    pdfmetrics.registerFont(TTFont('Poppins-Regular', 'scripts/Poppins-Regular.ttf'))
-    pdfmetrics.registerFont(TTFont('Poppins-Medium', 'scripts/Poppins-Medium.ttf'))
-
-    data = {
+from reportlab.graphics.shapes import Drawing
+from reportlab.graphics.charts.piecharts import Pie
+from reportlab.graphics import renderPDF
+MATERIAL_COLORS = {
+    "Recyclable Waste": colors.HexColor("#fff8c8"),
+    "Organic Waste": colors.HexColor("#b0dad6"),
+    "Electronic Waste": colors.HexColor("#e8e5ef"),
+    "Bio-Hazardous Waste": colors.HexColor("#e6b8af"),
+    "Hazardous Waste": colors.HexColor("#f4cccc"),
+    "Waste To Energy": colors.HexColor("#fce5cd"),
+    "General Waste": colors.HexColor("#cfe2f3"),
+    "Construction Waste": colors.HexColor("#e8e5ef"),
+    "Electronic Waste": colors.HexColor("#d9d9d9"),
+}
+data = {
         "users" : "John Doe",
         "profile_img" : "https://placehold.co/600x400",
         "location" : ["Bangkok", "Nonthaburi"],
         "date_from" : "01 Jan 2025",
         "date_to" : "31 Dec 2025",
-        "data" : {
+        "overview_data" : {
     "transactions_total": 88,
     "transactions_approved": 35,
     "key_indicators": {
@@ -561,8 +273,912 @@ def main() -> None:
         }
     ],
     "material_summary": []
-}
+    },
+    "performance_data" : [
+    {
+        "id": "2277",
+        "totalWasteKg": 5339,
+        "metrics": {
+            "Recyclable Waste": 572,
+            "Organic Waste": 437,
+            "Electronic Waste": 1052,
+            "Bio-Hazardous Waste": 776,
+            "Hazardous Waste": 746,
+            "Waste To Energy": 703,
+            "General Waste": 1053
+        },
+        "recyclingRatePercent": 18.9,
+        "recyclable_weight": 1009,
+        "general_weight": 1053,
+        "branchName": "Branch 1",
+        "buildings": [
+            {
+                "id": "2278",
+                "totalWasteKg": 2103,
+                "metrics": {
+                    "Organic Waste": 181,
+                    "Electronic Waste": 408,
+                    "Bio-Hazardous Waste": 459,
+                    "Recyclable Waste": 197,
+                    "Hazardous Waste": 398,
+                    "Waste To Energy": 287,
+                    "General Waste": 173
+                },
+                "buildingName": "Building 1",
+                "floors": [
+                    {
+                        "id": "2279",
+                        "totalWasteKg": 1159,
+                        "metrics": {
+                            "Organic Waste": 48,
+                            "Electronic Waste": 255,
+                            "Bio-Hazardous Waste": 312,
+                            "Recyclable Waste": 134,
+                            "Hazardous Waste": 162,
+                            "Waste To Energy": 123,
+                            "General Waste": 125
+                        },
+                        "floorName": "Floor 1",
+                        "rooms": [
+                            {
+                                "id": "2280",
+                                "totalWasteKg": 1159,
+                                "metrics": {
+                                    "Organic Waste": 48,
+                                    "Electronic Waste": 255,
+                                    "Bio-Hazardous Waste": 312,
+                                    "Recyclable Waste": 134,
+                                    "Hazardous Waste": 162,
+                                    "Waste To Energy": 123,
+                                    "General Waste": 125
+                                },
+                                "roomName": "Room 1"
+                            }
+                        ]
+                    },
+                    {
+                        "id": "2282",
+                        "totalWasteKg": 944,
+                        "metrics": {
+                            "Hazardous Waste": 236,
+                            "Waste To Energy": 164,
+                            "Recyclable Waste": 63,
+                            "Electronic Waste": 153,
+                            "Organic Waste": 133,
+                            "General Waste": 48,
+                            "Bio-Hazardous Waste": 147
+                        },
+                        "floorName": "Floor 2",
+                        "rooms": [
+                            {
+                                "id": "2284",
+                                "totalWasteKg": 944,
+                                "metrics": {
+                                    "Hazardous Waste": 236,
+                                    "Waste To Energy": 164,
+                                    "Recyclable Waste": 63,
+                                    "Electronic Waste": 153,
+                                    "Organic Waste": 133,
+                                    "General Waste": 48,
+                                    "Bio-Hazardous Waste": 147
+                                },
+                                "roomName": "Room 2"
+                            }
+                        ]
+                    }
+                ]
+            },
+            {
+                "id": "2285",
+                "totalWasteKg": 3076,
+                "metrics": {
+                    "Waste To Energy": 416,
+                    "Electronic Waste": 644,
+                    "Organic Waste": 256,
+                    "Recyclable Waste": 215,
+                    "General Waste": 880,
+                    "Hazardous Waste": 348,
+                    "Bio-Hazardous Waste": 317
+                },
+                "buildingName": "Building 2",
+                "floors": [
+                    {
+                        "id": "2286",
+                        "totalWasteKg": 2313,
+                        "metrics": {
+                            "Waste To Energy": 416,
+                            "Electronic Waste": 644,
+                            "Organic Waste": 234,
+                            "Recyclable Waste": 215,
+                            "General Waste": 262,
+                            "Hazardous Waste": 348,
+                            "Bio-Hazardous Waste": 194
+                        },
+                        "floorName": "Floor 1",
+                        "rooms": [
+                            {
+                                "id": "2288",
+                                "totalWasteKg": 2313,
+                                "metrics": {
+                                    "Waste To Energy": 416,
+                                    "Electronic Waste": 644,
+                                    "Organic Waste": 234,
+                                    "Recyclable Waste": 215,
+                                    "General Waste": 262,
+                                    "Hazardous Waste": 348,
+                                    "Bio-Hazardous Waste": 194
+                                },
+                                "roomName": "Room 2"
+                            }
+                        ]
+                    },
+                    {
+                        "id": "2289",
+                        "totalWasteKg": 763,
+                        "metrics": {
+                            "Bio-Hazardous Waste": 123,
+                            "Organic Waste": 22,
+                            "General Waste": 618
+                        },
+                        "floorName": "Floor 2",
+                        "rooms": [
+                            {
+                                "id": "2291",
+                                "totalWasteKg": 763,
+                                "metrics": {
+                                    "Bio-Hazardous Waste": 123,
+                                    "Organic Waste": 22,
+                                    "General Waste": 618
+                                },
+                                "roomName": "Room 2"
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    },
+    {
+        "id": "2307",
+        "totalWasteKg": 2001,
+        "metrics": {
+            "General Waste": 817,
+            "Hazardous Waste": 199,
+            "Bio-Hazardous Waste": 158,
+            "Waste To Energy": 293,
+            "Recyclable Waste": 175,
+            "Electronic Waste": 261,
+            "Organic Waste": 98
+        },
+        "recyclingRatePercent": 13.64,
+        "recyclable_weight": 273,
+        "general_weight": 817,
+        "branchName": "Branch 3",
+        "buildings": [
+            {
+                "id": "2308",
+                "totalWasteKg": 930,
+                "metrics": {
+                    "General Waste": 565,
+                    "Hazardous Waste": 76,
+                    "Bio-Hazardous Waste": 42,
+                    "Waste To Energy": 51,
+                    "Recyclable Waste": 61,
+                    "Electronic Waste": 123,
+                    "Organic Waste": 12
+                },
+                "buildingName": "Building 1",
+                "floors": [
+                    {
+                        "id": "2309",
+                        "totalWasteKg": 930,
+                        "metrics": {
+                            "General Waste": 565,
+                            "Hazardous Waste": 76,
+                            "Bio-Hazardous Waste": 42,
+                            "Waste To Energy": 51,
+                            "Recyclable Waste": 61,
+                            "Electronic Waste": 123,
+                            "Organic Waste": 12
+                        },
+                        "floorName": "Floor 1",
+                        "rooms": [
+                            {
+                                "id": "2310",
+                                "totalWasteKg": 930,
+                                "metrics": {
+                                    "General Waste": 565,
+                                    "Hazardous Waste": 76,
+                                    "Bio-Hazardous Waste": 42,
+                                    "Waste To Energy": 51,
+                                    "Recyclable Waste": 61,
+                                    "Electronic Waste": 123,
+                                    "Organic Waste": 12
+                                },
+                                "roomName": "Room 1"
+                            }
+                        ]
+                    }
+                ]
+            },
+            {
+                "id": "2315",
+                "totalWasteKg": 1071,
+                "metrics": {
+                    "Hazardous Waste": 123,
+                    "Bio-Hazardous Waste": 116,
+                    "Waste To Energy": 242,
+                    "Electronic Waste": 138,
+                    "Recyclable Waste": 114,
+                    "Organic Waste": 86,
+                    "General Waste": 252
+                },
+                "buildingName": "Building 2",
+                "floors": [
+                    {
+                        "id": "2316",
+                        "totalWasteKg": 1071,
+                        "metrics": {
+                            "Hazardous Waste": 123,
+                            "Bio-Hazardous Waste": 116,
+                            "Waste To Energy": 242,
+                            "Electronic Waste": 138,
+                            "Recyclable Waste": 114,
+                            "Organic Waste": 86,
+                            "General Waste": 252
+                        },
+                        "floorName": "Floor 1",
+                        "rooms": [
+                            {
+                                "id": "2317",
+                                "totalWasteKg": 596,
+                                "metrics": {
+                                    "Hazardous Waste": 123,
+                                    "Bio-Hazardous Waste": 116,
+                                    "Waste To Energy": 242,
+                                    "Electronic Waste": 63,
+                                    "Recyclable Waste": 52
+                                },
+                                "roomName": "Room 1"
+                            },
+                            {
+                                "id": "2318",
+                                "totalWasteKg": 475,
+                                "metrics": {
+                                    "Recyclable Waste": 62,
+                                    "Electronic Waste": 75,
+                                    "Organic Waste": 86,
+                                    "General Waste": 252
+                                },
+                                "roomName": "Room 2"
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    },
+    {
+        "id": "2322",
+        "totalWasteKg": 2703,
+        "metrics": {
+            "Bio-Hazardous Waste": 560,
+            "Waste To Energy": 194,
+            "Recyclable Waste": 322,
+            "Electronic Waste": 116,
+            "Organic Waste": 738,
+            "General Waste": 298,
+            "Hazardous Waste": 475
+        },
+        "recyclingRatePercent": 39.22,
+        "recyclable_weight": 1060,
+        "general_weight": 298,
+        "branchName": "Branch 4",
+        "buildings": [
+            {
+                "id": "2323",
+                "totalWasteKg": 1273,
+                "metrics": {
+                    "Bio-Hazardous Waste": 101,
+                    "Waste To Energy": 96,
+                    "Recyclable Waste": 175,
+                    "Electronic Waste": 41,
+                    "Organic Waste": 515,
+                    "General Waste": 123,
+                    "Hazardous Waste": 222
+                },
+                "buildingName": "Building 1",
+                "floors": [
+                    {
+                        "id": "2327",
+                        "totalWasteKg": 1273,
+                        "metrics": {
+                            "Bio-Hazardous Waste": 101,
+                            "Waste To Energy": 96,
+                            "Recyclable Waste": 175,
+                            "Electronic Waste": 41,
+                            "Organic Waste": 515,
+                            "General Waste": 123,
+                            "Hazardous Waste": 222
+                        },
+                        "floorName": "Floor 2",
+                        "rooms": [
+                            {
+                                "id": "2329",
+                                "totalWasteKg": 1273,
+                                "metrics": {
+                                    "Bio-Hazardous Waste": 101,
+                                    "Waste To Energy": 96,
+                                    "Recyclable Waste": 175,
+                                    "Electronic Waste": 41,
+                                    "Organic Waste": 515,
+                                    "General Waste": 123,
+                                    "Hazardous Waste": 222
+                                },
+                                "roomName": "Room 2"
+                            }
+                        ]
+                    }
+                ]
+            },
+            {
+                "id": "2330",
+                "totalWasteKg": 1430,
+                "metrics": {
+                    "Hazardous Waste": 253,
+                    "Bio-Hazardous Waste": 459,
+                    "Recyclable Waste": 147,
+                    "Electronic Waste": 75,
+                    "Organic Waste": 223,
+                    "General Waste": 175,
+                    "Waste To Energy": 98
+                },
+                "buildingName": "Building 2",
+                "floors": [
+                    {
+                        "id": "2331",
+                        "totalWasteKg": 882,
+                        "metrics": {
+                            "Hazardous Waste": 130,
+                            "Bio-Hazardous Waste": 407,
+                            "Recyclable Waste": 54,
+                            "Electronic Waste": 23,
+                            "Organic Waste": 123,
+                            "General Waste": 111,
+                            "Waste To Energy": 34
+                        },
+                        "floorName": "Floor 1",
+                        "rooms": [
+                            {
+                                "id": "2333",
+                                "totalWasteKg": 882,
+                                "metrics": {
+                                    "Hazardous Waste": 130,
+                                    "Bio-Hazardous Waste": 407,
+                                    "Recyclable Waste": 54,
+                                    "Electronic Waste": 23,
+                                    "Organic Waste": 123,
+                                    "General Waste": 111,
+                                    "Waste To Energy": 34
+                                },
+                                "roomName": "Room 2"
+                            }
+                        ]
+                    },
+                    {
+                        "id": "2334",
+                        "totalWasteKg": 548,
+                        "metrics": {
+                            "General Waste": 64,
+                            "Hazardous Waste": 123,
+                            "Bio-Hazardous Waste": 52,
+                            "Waste To Energy": 64,
+                            "Recyclable Waste": 93,
+                            "Electronic Waste": 52,
+                            "Organic Waste": 100
+                        },
+                        "floorName": "Floor 2",
+                        "rooms": [
+                            {
+                                "id": "2335",
+                                "totalWasteKg": 548,
+                                "metrics": {
+                                    "General Waste": 64,
+                                    "Hazardous Waste": 123,
+                                    "Bio-Hazardous Waste": 52,
+                                    "Waste To Energy": 64,
+                                    "Recyclable Waste": 93,
+                                    "Electronic Waste": 52,
+                                    "Organic Waste": 100
+                                },
+                                "roomName": "Room 1"
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
     }
+]
+}
+
+PAGE_WIDTH_IN = 11.69
+PAGE_HEIGHT_IN = 8.27
+PRIMARY = colors.HexColor("#95c9c4")
+TEXT = colors.HexColor("#5b6e8c")
+CARD = colors.HexColor("#f6f8fb")
+STROKE = colors.HexColor("#e6edf4")
+BAR = colors.HexColor("#a9d5d0")
+WHITE = colors.white
+BLACK = colors.black
+BAR2 = colors.HexColor("#77b9d8")
+BAR3 = colors.HexColor("#c8ced4")
+BAR4 = colors.HexColor("#8fcfc6")
+SERIES_COLORS = [BAR, BAR2, BAR4, BAR3, TEXT]
+
+def _header(pdf, page_width_points: float, page_height_points: float, data: dict) -> None:
+    text = data["users"]
+    font_name = "Poppins-Regular"
+    font_size = 12
+    padding = 0.78 * inch  # whatever padding you want from right edge
+
+    # 🧮 measure how wide the text is
+    text_width = stringWidth(text, font_name, font_size)
+
+    # 💡 calculate x-position = total width - text width - padding
+    x = page_width_points - text_width - padding
+    y = page_height_points - (0.7 * inch)  # your vertical position
+
+    pdf.setFillColor(TEXT)
+    pdf.setFont(font_name, font_size)
+    pdf.drawString(x, y, text)
+
+def _sub_header(pdf, page_width_points: float, page_height_points: float, data: dict, header_text: str) -> None:
+    padding = 0.78 * inch
+    location_data = data.get("location", [])
+    if isinstance(location_data, list):
+        location_text = ", ".join(map(str, location_data))
+    else:
+        location_text = str(location_data)
+    
+    pdf.setFillColor(PRIMARY)
+    pdf.setFont("Poppins-Bold", 48)
+    pdf.drawString(padding, page_height_points - (1.38 * inch), header_text)
+    pdf.setFillColor(TEXT)
+    pdf.setFont("Poppins-Regular", 12)
+    pdf.drawString(padding, page_height_points - (1.75 * inch), f"Location: {location_text}")
+    pdf.drawString(padding, page_height_points - (1.96 * inch), f"Date: {data['date_from']} - {data['date_to']}")
+
+
+def _format_number(value) -> str:
+    try:
+        if isinstance(value, (int,)) or abs(value - int(value)) < 1e-9:
+            return f"{value:,.0f}"
+        return f"{value:,.2f}"
+    except Exception:
+        return str(value)
+
+def _rounded_card(pdf, x, y, w, h, radius=8, fill=CARD, stroke=STROKE):
+    pdf.setFillColor(fill)
+    pdf.setStrokeColor(stroke)
+    pdf.roundRect(x, y, w, h, radius, stroke=1, fill=1)
+
+def _stat_chip(pdf, x, y, w, h, title, value, variant="gray"):
+    fill_color = WHITE if variant == "white" else CARD
+    _rounded_card(pdf, x, y, w, h, radius=8, fill=fill_color)
+    pad_x = 12 if variant == "white" else 20
+    pdf.setFillColor(TEXT)
+    pdf.setFont("Poppins-Regular", 8)
+    pdf.drawString(x + pad_x, y + h - 18, title)
+    pdf.setFont("Poppins-Regular", 12)
+    pdf.drawString(x + pad_x, y + h - 32, _format_number(value))
+
+def _progress_bar(pdf, x, y, w, h, ratio, bar_color=PRIMARY, back_color=STROKE):
+    ratio = max(0.0, min(1.0, float(ratio or 0)))
+    radius = h / 2
+
+    # background
+    pdf.setFillColor(back_color)
+    pdf.roundRect(x, y, w, h, radius, stroke=0, fill=1)
+
+    # foreground
+    pdf.setFillColor(bar_color)
+    bar_width = max(h, w * ratio)  # prevent ugly cut for small ratio
+    pdf.roundRect(x, y, bar_width, h, radius, stroke=0, fill=1)
+
+
+def _label_progress(pdf, x, y, w, label, value_text, ratio, bar_color, back_color):
+    pdf.setFillColor(TEXT)
+    pdf.setFont("Poppins-Regular", 10)
+    pdf.drawString(x, y + 16, label)
+    pdf.setFillColor(TEXT)
+    pdf.setFont("Poppins-Regular", 10)
+    txt_w = stringWidth(value_text, "Poppins-Regular", 10)
+    pdf.drawString(x + w - txt_w, y + 16, value_text)
+    _progress_bar(pdf, x, y, w, 8, ratio, bar_color, back_color)
+
+def _simple_bar_chart(pdf, x, y, w, h, chart_series):
+    left_pad, bottom_pad, right_pad, top_pad = 32, 36, 24, 20
+    gx = x + left_pad
+    gy = y + bottom_pad
+    gw = w - left_pad - right_pad
+    gh = h - bottom_pad - top_pad
+
+    # axes
+    pdf.setStrokeColor(STROKE)
+    pdf.line(gx, gy, gx, gy + gh)
+    pdf.line(gx, gy, gx + gw, gy)
+
+    # bars (grouped by month across all series)
+    if not chart_series:
+        return
+    months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+    # Determine up to 3 series (prefer most recent numeric years if possible)
+    try:
+        sorted_years = sorted([int(k) for k in chart_series.keys()])
+        series_keys = [str(y) for y in sorted_years[-3:]]
+    except Exception:
+        # Fallback: preserve insertion order, take last 3
+        series_keys = list(chart_series.keys())[-3:]
+    values_by_series = {}
+    for key in series_keys:
+        arr = [0.0] * 12
+        for pt in chart_series.get(key, []):
+            m = str(pt.get("month", ""))
+            if m in months:
+                idx = months.index(m)
+                try:
+                    arr[idx] = float(pt.get("value", 0) or 0.0)
+                except Exception:
+                    arr[idx] = 0.0
+        values_by_series[key] = arr
+
+    vmax = 0.0
+    for arr in values_by_series.values():
+        vmax = max(vmax, max(arr) if arr else 0.0)
+    if vmax <= 0:
+        vmax = 1.0
+
+    n_months = 12
+    gap = 10
+    slot_w = (gw - (n_months + 1) * gap) / max(1, n_months)
+    group_scale = 0.86
+    group_w = slot_w * group_scale
+    s_count = max(1, len(series_keys))
+    inner_gap_ratio = 0.06
+    total_inner_gap = (s_count - 1) * group_w * inner_gap_ratio
+    bar_w = (group_w - total_inner_gap) / s_count
+
+    for mi in range(n_months):
+        slot_x = gx + gap + mi * (slot_w + gap)
+        group_x = slot_x + (slot_w - group_w) / 2
+        for si, key in enumerate(series_keys):
+            color = SERIES_COLORS[si % len(SERIES_COLORS)]
+            pdf.setFillColor(color)
+            v = values_by_series[key][mi]
+            bh = (v / vmax) * (gh - 10)
+            bx = group_x + si * (bar_w + group_w * inner_gap_ratio)
+            pdf.rect(bx, gy, bar_w, bh, stroke=0, fill=1)
+        # month label centered in slot
+        lbl = months[mi]
+        pdf.setFillColor(TEXT)
+        pdf.setFont("Poppins-Regular", 8)
+        lw = stringWidth(lbl, "Poppins-Regular", 8)
+        pdf.drawString(slot_x + (slot_w - lw) / 2, gy - 14, lbl)
+
+    # y-axis unit
+    pdf.setFillColor(TEXT)
+    pdf.setFont("Poppins-Regular", 9)
+    pdf.drawString(gx - 18, gy + gh + 6, "kg")
+
+    # legend for each series (years), right-aligned
+    if series_keys:
+        sq = 8
+        cur_x = x + w - 10
+        pdf.setFont("Poppins-Regular", 9)
+        for si in reversed(range(len(series_keys))):
+            label = str(series_keys[si])
+            lw = stringWidth(label, "Poppins-Regular", 9)
+            entry_w = sq + 6 + lw + 12
+            cur_x -= entry_w
+            pdf.setFillColor(SERIES_COLORS[si % len(SERIES_COLORS)])
+            pdf.rect(cur_x, y + h - 18, sq, sq, stroke=0, fill=1)
+            pdf.setFillColor(TEXT)
+            pdf.drawString(cur_x + sq + 6, y + h - 18, label)
+
+def _footer(pdf, page_width_points: float):
+    text = "Copyright © 2018–2023 GEPP Sa-Ard Co., Ltd. ALL RIGHTS RESERVED"
+    pdf.setFillColor(TEXT)
+    pdf.setFont("Poppins-Regular", 9)
+    tw = stringWidth(text, "Poppins-Regular", 9)
+    pdf.drawString((page_width_points - tw) / 2, 0.25 * inch, text)
+
+def _simple_pie_chart(pdf, x, y, size, values, colors_list, gap_width=2, gap_color=colors.white):
+    # guard
+    try:
+        vals = [max(0.0, float(v or 0)) for v in values]
+    except Exception:
+        vals = [1.0]
+    if not vals or sum(vals) <= 0:
+        vals = [1.0]
+    d = Drawing(size, size)
+    pie = Pie()
+    pie.x = 0
+    pie.y = 0
+    pie.width = size
+    pie.height = size
+    pie.data = vals
+    pie.labels = None
+    # remove outer border and add gaps between slices
+    pie.strokeWidth = 0
+    pie.slices.strokeWidth = max(0, int(gap_width))
+    pie.slices.strokeColor = gap_color
+    for i in range(len(vals)):
+        pie.slices[i].fillColor = colors_list[i % len(colors_list)]
+    d.add(pie)
+    renderPDF.draw(d, pdf, x, y)
+
+def draw_table(pdf, x, y, w, h, r=6, type="Header"):
+    """
+    Draw different styles of rectangles:
+      - Header: rounded TOP corners only
+      - Body:   normal sharp rectangle
+      - Footer: rounded BOTTOM corners only
+    """
+
+    # === BODY (normal rectangle) ==========================================
+    if type == "Body":
+        pdf.rect(x, y, w, h, stroke=0, fill=1)
+        return
+
+    p = pdf.beginPath()
+
+    # === HEADER (rounded top only) ========================================
+    if type == "Header":
+        # bottom-left
+        p.moveTo(x, y)
+        # bottom-right
+        p.lineTo(x + w, y)
+        # right side up
+        p.lineTo(x + w, y + h - r)
+        # top-right corner
+        p.arcTo(x + w - 2*r, y + h - 2*r, x + w, y + h, startAng=0, extent=90)
+        # top edge
+        p.lineTo(x + r, y + h)
+        # top-left corner
+        p.arcTo(x, y + h - 2*r, x + 2*r, y + h, startAng=90, extent=90)
+        # left side down
+        p.lineTo(x, y)
+
+    # === FOOTER (rounded bottom only) =====================================
+    elif type == "Footer":
+        # start top-left
+        p.moveTo(x, y + h)
+        # top-right
+        p.lineTo(x + w, y + h)
+        # right side down
+        p.lineTo(x + w, y + r)
+        # bottom-right rounded
+        p.arcTo(x + w - 2*r, y, x + w, y + 2*r, startAng=0, extent=-90)
+        # bottom-left rounded
+        p.lineTo(x + r, y)
+        p.arcTo(x, y, x + 2*r, y + 2*r, startAng=-90, extent=-90)
+        # left side up
+        p.lineTo(x, y + h)
+
+    pdf.drawPath(p, stroke=0, fill=1)
+
+def draw_cover(pdf, page_width_points: float, page_height_points: float, data: dict) -> None:
+    _header(pdf, page_width_points, page_height_points, data)
+    middle = page_height_points / 2
+    pdf.setFillColor(PRIMARY)  # set text color
+    pdf.setFont("Poppins-Bold", 100) # set font and size
+    pdf.drawString(0.63 * inch, middle + 20, "2025") 
+    pdf.setFillColor(TEXT)
+    pdf.setFont("Poppins-Regular", 38.5)
+    pdf.drawString(0.63 * inch, middle - 20, "GEPP REPORT")
+    pdf.setFont("Poppins-Regular", 16.5)
+    pdf.drawString(0.63 * inch, middle - 40, "Data-Driven Transaformation")
+
+    # 💡 Accent rectangle at the bottom
+    pdf.setFillColor(PRIMARY)
+    pdf.rect(4.54 * inch, middle - 45, page_width_points - (4.54 * inch), 2.07 * inch, fill=1, stroke=0)
+
+def draw_overview(pdf, page_width_points: float, page_height_points: float, data: dict) -> None:
+    pdf.showPage() # New page
+    _header(pdf, page_width_points, page_height_points, data)
+    _sub_header(pdf, page_width_points, page_height_points, data, "Overview")
+    # layout measurements
+    margin = 0.78 * inch
+    content_top = page_height_points - (2.2 * inch)
+    col_gap = 0.3 * inch
+    left_col_w = 3.7 * inch
+    right_col_w = page_width_points - margin - margin - left_col_w - col_gap
+
+    # small stat chips (top-left row)
+    chip_w = 1.78 * inch
+    chip_h = 0.60 * inch
+    chip_y = content_top - chip_h
+    _stat_chip(pdf, margin, chip_y, chip_w, chip_h, "Total Transactions", data["overview_data"]["transactions_total"])
+    _stat_chip(pdf, margin + chip_w + 12, chip_y, chip_w, chip_h, "Total Approved", data["overview_data"]["transactions_approved"])
+
+    # left column cards
+    # Key Indicators
+    ki_h = 2.2 * inch
+    ki_y = chip_y - 16 - ki_h
+    _rounded_card(pdf, margin, ki_y, left_col_w, ki_h, radius=8)
+    pad = 20
+    pdf.setFillColor(TEXT)
+    pdf.setFont("Poppins-Medium", 12)
+    pdf.drawString(margin + pad, page_height_points - (3.42 * inch), "Key Indicators")
+
+    ki = data["overview_data"]["key_indicators"]
+    tw = float(ki.get("total_waste", 0) or 0)
+    rr = float(ki.get("recycle_rate", 0) or 0)
+    ghg = float(ki.get("ghg_reduction", 0) or 0)
+    # normalize non-percentage bars against max of tw & ghg
+    norm_base = max(tw, ghg, 1.0)
+    row_w = left_col_w - 2 * pad
+    row_x = margin + pad
+    row_y = ki_y + ki_h - 50
+    _label_progress(pdf, row_x, row_y - 24, row_w, "Total Waste (kg)", _format_number(tw), tw / norm_base, colors.HexColor("#b7c6cc"), colors.HexColor("#e1e7ef"))
+    _label_progress(pdf, row_x, row_y - 58, row_w, "Recycle rate (%)", f"{rr:,.2f}", rr / 100.0, colors.HexColor("#8fcfc6"), colors.HexColor("#e1e7ef"))
+    _label_progress(pdf, row_x, row_y - 92, row_w, "GHG Reduction (kgCO2e)", _format_number(ghg), ghg / norm_base, colors.HexColor("#77b9d8"), colors.HexColor("#e1e7ef"))
+
+    # Top Recyclables
+    tr_h = 2.15 * inch
+    tr_y = ki_y - 18 - tr_h
+    _rounded_card(pdf, margin, tr_y, left_col_w, tr_h, radius=8)
+
+    pdf.setFillColor(TEXT)
+    pdf.setFont("Poppins-Medium", 12)
+    pdf.drawString(margin + pad, tr_y + tr_h - 30, "Top Recyclables")
+    items = data["overview_data"].get("top_recyclables", [])[:3]
+    if items:
+        max_val = max(float(it.get("total_waste", 0) or 0) for it in items) or 1.0
+        y_ptr = tr_y + tr_h - 72
+        for it in items:
+            name = str(it.get("origin_name", ""))
+            val = float(it.get("total_waste", 0) or 0)
+            ratio = val / max_val
+            _label_progress(pdf, margin + pad, y_ptr, left_col_w - 2 * pad, name, _format_number(val), ratio, colors.HexColor("#c8ced4"), colors.HexColor("#e1e7ef"))
+            y_ptr -= 32
+
+    # Right column: Overall card with small stats and chart
+    overall_x = margin + left_col_w + col_gap
+    overall_y = tr_y
+    overall_h = (chip_y - overall_y) + chip_h  # span to top row baseline
+    _rounded_card(pdf, overall_x, overall_y, right_col_w, overall_h, radius=8, fill=WHITE)
+    pdf.setFillColor(TEXT)
+    pdf.setFont("Poppins-Medium", 12)
+    pdf.drawString(overall_x + 16, overall_y + overall_h - 30, "Overall")
+
+    # top stat chips in overall card
+    stats = data["overview_data"]["overall_charts"]["chart_stat_data"]
+    sw = 1.78 * inch
+    sh = 0.60 * inch
+    sy = overall_y + overall_h - 26 - 16 - sh
+    for i, st in enumerate(stats[:3]):
+        sx = overall_x + 16 + i * (sw + 8)
+        _stat_chip(pdf, sx, sy, sw, sh, st["title"], st["value"], "white")
+
+    # bar chart (supports multiple years)
+    chart_data = data["overview_data"]["overall_charts"]["chart_data"]
+    cy = overall_y + 16
+    ch = sy - cy - 16
+    _simple_bar_chart(pdf, overall_x + 12, cy, right_col_w - 24, ch, chart_data)
+
+    _footer(pdf, page_width_points)
+
+def draw_performance(pdf, page_width_points: float, page_height_points: float, data: dict, performance_data: dict) -> None:
+    pdf.showPage() # New page
+    _header(pdf, page_width_points, page_height_points, data)
+    _sub_header(pdf, page_width_points, page_height_points, data, "Performance")
+    margin = 0.78 * inch
+
+    _rounded_card(pdf, margin, page_height_points - (6.98 * inch), 3.22 * inch, 4.54* inch, radius=8, fill=WHITE)
+    pdf.setFillColor(TEXT)
+    pdf.setFont("Poppins-Medium", 12)
+    pdf.drawString(1 * inch, page_height_points - (2.85 * inch), f"{performance_data['branchName']}")
+    pdf.setFont("Poppins-Regular", 8)
+    label_text = "Recycling Rate"
+    label_width = stringWidth(label_text, "Poppins-Medium", 8)
+    pdf.drawString(3.82 * inch - label_width, page_height_points - (2.72 * inch), label_text)
+    pdf.setFont("Poppins-Bold", 13)
+    value_text = f"{performance_data['recyclingRatePercent']} %"
+    value_width = stringWidth(value_text, "Poppins-Medium", 13)
+    pdf.drawString(3.82 * inch - value_width, page_height_points - (2.97 * inch), value_text)
+    
+    for idx, (label, amount) in enumerate(performance_data["metrics"].items()):
+        start_y = page_height_points - (3.41 * inch)
+        bar_h = 0.08 * inch
+        gap = 0.36 * inch
+        y = start_y - idx * (bar_h + gap)
+        pdf.setFillColor(TEXT)
+        pdf.setFont("Poppins-Regular", 8)
+        pdf.drawString(1 * inch, y + bar_h + 0.12 * inch, label)
+        value_text = f"{amount} kg"
+        value_width = stringWidth(value_text, "Poppins-Regular", 8)
+        pdf.drawString(1 * inch + 2.8 * inch - value_width, y + bar_h + 0.12 * inch, value_text)
+        _progress_bar(pdf, 1 * inch, y, 2.8 * inch, bar_h, amount / performance_data["totalWasteKg"], MATERIAL_COLORS[label])
+    gap = 1 * inch
+    outer_x = gap + 3.22 * inch
+    outer_y = page_height_points - (6.98 * inch)
+    outer_w = 6.8 * inch
+    outer_h = 4.54 * inch
+    _rounded_card(pdf, outer_x, outer_y, outer_w, outer_h, radius=8, fill=colors.HexColor("#f1f5f9"))
+    # inner card with 24px padding and white fill
+    pad = 16  # points
+    inner_x = outer_x + pad
+    inner_y = outer_y + pad
+    inner_w = outer_w - 2 * pad
+    inner_h = outer_h - 2 * pad
+    _rounded_card(pdf, inner_x, inner_y, inner_w, inner_h, radius=8, fill=WHITE)
+    pdf.setFillColor(TEXT)
+    pdf.setFont("Poppins-Medium", 12)
+    # place title at top-left of inner card with 16pt padding
+    pdf.drawString(inner_x + 16, inner_y + inner_h - 16 - 12, "All Building")
+    pdf.setFont("Poppins-Regular", 10)
+    for idx, building in enumerate(performance_data["buildings"]):
+        y = inner_y + inner_h - 0.85 * inch - idx * (0.55 * inch)
+        pdf.setFillColor(TEXT)
+        pdf.drawString(inner_x + 16, y, building["buildingName"])
+        value_text = f"{building['totalWasteKg']} kg"
+        value_width = stringWidth(value_text, "Poppins-Regular", 8)
+        pdf.drawString(inner_x + 4 * inch - value_width, y, value_text)
+        _progress_bar(pdf, inner_x + 16, y - 0.2 * inch, inner_x - 0.5 * inch, 0.08 * inch, building['totalWasteKg'] / performance_data["totalWasteKg"], colors.HexColor("#b7cbd6"))
+    # Implement pie chart here
+    pdf.setFillColor(TEXT)
+    pdf.setFont("Poppins-Regular", 10)
+    pie_size = 1.20 * inch
+    pie_x = inner_x + inner_w - pie_size - 16
+
+    # 1) Total Buildings
+    title1_y = inner_y + inner_h - 48
+    pdf.drawString(pie_x, title1_y, "Total Buildings")
+    buildings_values = [float(b.get("totalWasteKg", 0) or 0) for b in performance_data.get("buildings", [])]
+    mono_color = colors.HexColor("#b7cbd6")
+    mono_colors_list = [mono_color for _ in buildings_values] or [mono_color]
+    _simple_pie_chart(pdf, pie_x, title1_y - 8 - pie_size, pie_size, buildings_values, mono_colors_list, gap_width=1, gap_color=colors.white)
+
+    # 2) All Types of Waste
+    title2_y = title1_y - pie_size - 32
+    pdf.drawString(pie_x, title2_y, "All Types of Waste")
+    metrics_items = list(performance_data.get("metrics", {}).items())
+    waste_values = [float(v or 0) for _, v in metrics_items]
+    waste_colors = [MATERIAL_COLORS.get(lbl, BAR3) for lbl, _ in metrics_items]
+    if not waste_colors:
+        waste_colors = SERIES_COLORS
+    _simple_pie_chart(pdf, pie_x, title2_y - 8 - pie_size, pie_size, waste_values, waste_colors, gap_width=1, gap_color=colors.white)
+    _footer(pdf, page_width_points)
+
+def draw_performance_table(pdf, page_width_points: float, page_height_points: float, data: dict) -> None:
+    pdf.showPage() # New page
+    _header(pdf, page_width_points, page_height_points, data)
+    _sub_header(pdf, page_width_points, page_height_points, data, "Performance")
+    padding = 0.78 * inch
+    pdf.setFillColor(TEXT)
+    pdf.setFont("Poppins-Medium", 12)
+    pdf.drawString(padding, page_height_points - (2.5 * inch), "Detailed Performance Metrics")
+    pdf.setFillColor(colors.HexColor("#f1f5f9"))
+    draw_table(pdf, padding, page_height_points - (3 * inch), page_width_points - 2 * padding, 24, 8, "Header")
+    pdf.setFillColor(TEXT)
+    pdf.setFont("Poppins-Regular", 8)
+    pdf.drawString(padding + 16, page_height_points - (2.88 * inch), "Building Name")
+    pdf.drawString(padding + 1.8 * inch, page_height_points - (2.88 * inch), "Total Waste (kg)")
+    pdf.drawString(padding + 3.2 * inch, page_height_points - (2.88 * inch), "General (kg)")
+    pdf.drawString(padding + 4.4 * inch, page_height_points - (2.88 * inch), "Total Recyclable incl. Recycled Organic Waste (kg)")
+    pdf.drawString(padding + 7.7 * inch, page_height_points - (2.88 * inch), "Recycling Rate (%)")
+    pdf.drawString(padding + 9.3 * inch, page_height_points - (2.88 * inch), "Status")
+    _footer(pdf, page_width_points)
+
+def main() -> None:
+    width_points = PAGE_WIDTH_IN * inch
+    height_points = PAGE_HEIGHT_IN * inch
+    pdfmetrics.registerFont(TTFont('Poppins-Bold', 'scripts/Poppins-Bold.ttf'))
+    pdfmetrics.registerFont(TTFont('Poppins-Regular', 'scripts/Poppins-Regular.ttf'))
+    pdfmetrics.registerFont(TTFont('Poppins-Medium', 'scripts/Poppins-Medium.ttf'))
+
     output_dir = Path("notebooks") / "output"
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
@@ -571,6 +1187,9 @@ def main() -> None:
     # Draw cover content
     draw_cover(pdf, width_points, height_points, data)
     draw_overview(pdf, width_points, height_points, data)
+    for performance_data in data["performance_data"]:
+        draw_performance(pdf, width_points, height_points, data, performance_data)
+    draw_performance_table(pdf, width_points, height_points, data)
     pdf.save()
 
     print(f"Saved: {output_path} ({PAGE_WIDTH_IN}in x {PAGE_HEIGHT_IN}in)")
