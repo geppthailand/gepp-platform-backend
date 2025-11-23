@@ -6,10 +6,12 @@ Handles all /api/reports/* routes
 from typing import Dict, Any, Optional, Tuple
 import csv
 import os
+import json
 import ast
 import math
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
+import boto3
 
 from .reports_service import ReportsService
 from ....exceptions import APIException, ValidationException, NotFoundException
@@ -1736,6 +1738,10 @@ def handle_reports_routes(event: Dict[str, Any], **common_params) -> Dict[str, A
         elif path == '/api/reports/materials':
             filters = _build_filters_from_query_params(query_params, timezone_name=tz_name)
             return _handle_materials_report(reports_service, organization_id, filters)
+
+        elif path == '/api/reports/export/pdf':
+            filters = _build_filters_from_query_params(query_params, timezone_name=tz_name)
+            return _handle_export_pdf_report(reports_service, organization_id, filters, current_user)
     
     except ValidationException as e:
         raise APIException(str(e), status_code=400, error_code="VALIDATION_ERROR")
@@ -1747,3 +1753,200 @@ def handle_reports_routes(event: Dict[str, Any], **common_params) -> Dict[str, A
             status_code=500,
             error_code="INTERNAL_ERROR"
         )
+
+def _invoke_pdf_lambda(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Invoke the PDF export Lambda with the aggregated payload.
+    Returns a dict with at least {success: bool, pdf_base64?: str, filename?: str, error?: str}
+    """
+    fn_name = os.getenv("PDF_EXPORT_FUNCTION", "DEV-GEPPGenerateV3Report")
+    client = boto3.client("lambda")
+    resp = client.invoke(
+        FunctionName=fn_name,
+        InvocationType="RequestResponse",
+        Payload=json.dumps({"data": payload}).encode("utf-8"),
+    )
+    raw = resp.get("Payload").read()
+    try:
+        out = json.loads(raw)
+        # API Gateway proxy shape
+        if isinstance(out, dict) and "statusCode" in out and "body" in out:
+            return json.loads(out.get("body") or "{}")
+        return out if isinstance(out, dict) else {"success": False, "error": "Unexpected Lambda response"}
+    except Exception:
+        return {"success": False, "error": "Invalid Lambda response"}
+
+def _handle_export_pdf_report(
+    reports_service: ReportsService,
+    organization_id: int,
+    filters: Dict[str, Any],
+    current_user: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    Aggregate data from all report handlers into a single structure
+    compatible with scripts/generate_pdf_report.py.
+    """
+    # 1) Pull data from the existing handlers/services
+    overview = _handle_overview_report(reports_service, organization_id, filters)
+    performance = _handle_performance_report(reports_service, organization_id, filters)
+    materials = _handle_materials_report(reports_service, organization_id, filters)
+    # For export's diversion: expand to full year from date_from's year and drop origin filter
+    diversion_filters = dict(filters or {})
+    try:
+        df = _parse_datetime(diversion_filters.get('date_from'))
+        if df:
+            year = df.year
+            start_of_year = datetime(year, 1, 1, 0, 0, 0, 0, tzinfo=timezone.utc)
+            start_of_next_year = datetime(year + 1, 1, 1, 0, 0, 0, 0, tzinfo=timezone.utc)
+            end_of_year = start_of_next_year - timedelta(microseconds=1)
+            diversion_filters['date_from'] = start_of_year.isoformat()
+            diversion_filters['date_to'] = end_of_year.isoformat()
+    except Exception:
+        # If parsing fails, leave dates as-is
+        pass
+    diversion_filters.pop('origin_ids', None)
+    diversion = _handle_diversion_report(reports_service, organization_id, diversion_filters)
+    # For export, comparison filters are fixed: period=12m, left=last year, right=current year
+    now_utc = datetime.now(timezone.utc)
+    current_year = now_utc.year
+    last_year = current_year - 1
+    comp_filters = {
+        'period': '12m',
+        'leftSelection': str(last_year),
+        'rightSelection': str(current_year),
+    }
+    comparison = _handle_comparison_report(reports_service, organization_id, comp_filters)
+
+    # 2) Format display dates like "01 Jan 2025" in client timezone
+    def _fmt_display_date_tz(iso_str: Optional[str], tz_name: Optional[str]) -> str:
+        dt = _parse_datetime(iso_str)
+        if not dt:
+            return str(iso_str or "")
+        try:
+            # Determine client timezone (fallback Asia/Bangkok)
+            tz = ZoneInfo(tz_name or current_user.get('timezone') or 'Asia/Bangkok')
+            # Convert to client timezone for display
+            local_dt = dt.astimezone(tz)
+            return local_dt.strftime("%d %b %Y")
+        except Exception:
+            return dt.isoformat()
+
+    client_tz_name = (current_user.get('timezone') or 'Asia/Bangkok')
+    date_from_disp = _fmt_display_date_tz(filters.get('date_from'), client_tz_name)
+    date_to_disp = _fmt_display_date_tz(filters.get('date_to'), client_tz_name)
+
+    # 3) Resolve display user name from UserLocation (by current user id)
+    def _display_user_name_from_db(user: Dict[str, Any]) -> str:
+        try:
+            user_id = user.get('id') or user.get('user_id') or user.get('uid')
+            if user_id:
+                row = reports_service.db.query(UserLocation).get(int(user_id))
+                if row:
+                    for key in ('display_name', 'name_en', 'name_th', 'username', 'email'):
+                        val = getattr(row, key, None)
+                        if isinstance(val, str) and val.strip():
+                            return val.strip()
+        except Exception:
+            pass
+
+    user_display = _display_user_name_from_db(current_user or {})
+
+    # 4) Resolve location names from origin_ids filter; fallback to "all"
+    def _resolve_locations_from_filters(_filters: Dict[str, Any]) -> list[str] | str:
+        origin_ids = _filters.get('origin_ids') or []
+        if not origin_ids:
+            return "all"
+        try:
+            origins_result = reports_service.get_origin_by_organization(organization_id=organization_id)
+            name_map = {
+                o.get('id'): (o.get('display_name') or o.get('name_en') or o.get('name_th'))
+                for o in origins_result.get('data', [])
+            }
+            names = [name_map.get(oid, f"Location {oid}") for oid in origin_ids]
+            names = [n for n in names if n]
+            return names or "all"
+        except Exception:
+            return "all"
+
+    location_disp = _resolve_locations_from_filters(filters or {})
+
+    # 5) Map materials handler keys to the generator's expected keys
+    main_materials_data = {
+        # keep original typo 'porportions' to match generator
+        'porportions': (materials.get('main_material') or {}).get('porportions', []),
+        'total_waste': (materials.get('main_material') or {}).get('total_waste', 0.0),
+    }
+    sub_materials_data = {
+        'porportions': (materials.get('sub_material') or {}).get('porportions', []),
+        'porportions_grouped': (materials.get('sub_material') or {}).get('porportions_grouped', {}),
+        'total_waste': (materials.get('sub_material') or {}).get('total_waste', 0.0),
+    }
+
+    # 6) Build the unified payload
+    # Ensure comparison periods exist for PDF rendering
+    _left_dict = comparison.get('left', {}) or {}
+    _right_dict = comparison.get('right', {}) or {}
+    _left_period = _left_dict.get('period') or comp_filters.get('leftSelection') or comp_filters.get('period') or "Left"
+    _right_period = _right_dict.get('period') or comp_filters.get('rightSelection') or comp_filters.get('period') or "Right"
+    _left_with_period = dict(_left_dict, period=_left_period)
+    _right_with_period = dict(_right_dict, period=_right_period)
+
+    data: Dict[str, Any] = {
+        # Header data
+        'users': user_display,
+        'profile_img': None,
+        'location': location_disp,
+        'date_from': date_from_disp,
+        'date_to': date_to_disp,
+
+        # Overview
+        'overview_data': {
+            'transactions_total': overview.get('transactions_total', 0),
+            'transactions_approved': overview.get('transactions_approved', 0),
+            'key_indicators': overview.get('key_indicators', {}),
+            'top_recyclables': overview.get('top_recyclables', []),
+            'overall_charts': overview.get('overall_charts', {}),
+        },
+        # Optional, not strictly required by renderer but present in example
+        'waste_type_proportions': overview.get('waste_type_proportions', []),
+        'material_summary': [],
+
+        # Performance (hierarchical org performance list)
+        'performance_data': performance.get('data', []),
+
+        # Comparison
+        'comparison_data': {
+            'left': _left_with_period,
+            'right': _right_with_period,
+            'scores': comparison.get('scores', {}),
+        },
+
+        # Materials breakdown pages
+        'main_materials_data': main_materials_data,
+        'sub_materials_data': sub_materials_data,
+
+        # Diversion (sankey + materials monthly table)
+        'diversion_data': {
+            'card_data': diversion.get('card_data', {}),
+            'sankey_data': diversion.get('sankey_data', []),
+            'material_table': diversion.get('material_table', []),
+        },
+    }
+
+    # Generate PDF via Lambda (primary path), fallback to local render if Lambda fails
+    lambda_result = _invoke_pdf_lambda(data)
+    if not lambda_result.get('success'):
+        raise APIException(f"PDF Lambda error: {lambda_result.get('error')}", status_code=500, error_code="PDF_ERROR")
+    pdf_b64 = lambda_result.get('pdf_base64')
+    filename = lambda_result.get('filename') or f"report_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.pdf"
+
+    # Return as downloadable PDF (API Gateway binary proxy response)
+    return {
+        "statusCode": 200,
+        "headers": {
+            "Content-Type": "application/pdf",
+            "Content-Disposition": f'attachment; filename="{filename}"'
+        },
+        "isBase64Encoded": True,
+        "body": pdf_b64 or ""
+    }
