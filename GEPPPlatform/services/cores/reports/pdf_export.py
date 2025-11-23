@@ -9,6 +9,11 @@ from datetime import datetime
 import json
 import base64
 import os
+try:
+    from PIL import Image
+    HAS_PIL = True
+except ImportError:
+    HAS_PIL = False
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import inch
 from reportlab.lib import colors
@@ -355,30 +360,71 @@ def draw_cover(pdf, page_width_points: float, page_height_points: float, data: d
     pdf.drawString(0.63 * inch, middle - 20, "GEPP REPORT")
     pdf.setFont("Poppins-Regular", 16.5)
     pdf.drawString(0.63 * inch, middle - 40, "Data-Driven Transaformation")
-    pdf.setFillColor(PRIMARY)
-    pdf.rect(4.54 * inch, middle - 45, page_width_points - (4.54 * inch), 2.07 * inch, fill=1, stroke=0)
+    # Draw ESG.png image instead of green rectangle
+    esg_image_path = "GEPPPlatform/services/cores/reports/Assets/ESG.png"
+    # Try multiple possible paths
+    possible_paths = [
+        esg_image_path,
+        "services/cores/reports/Assets/ESG.png",
+        "reports/Assets/ESG.png",
+        "Assets/ESG.png",
+        os.path.join(os.path.dirname(__file__), "Assets", "ESG.png"),
+    ]
+    image_path = None
+    for path in possible_paths:
+        if os.path.exists(path):
+            image_path = path
+            break
+    if image_path:
+        img_x = 4.54 * inch
+        img_y = middle - 45
+        img_w = page_width_points - (4.54 * inch)
+        img_h = 2.07 * inch
+        # Crop 1 pixel from the left of the image
+        if HAS_PIL:
+            try:
+                img = Image.open(image_path)
+                # Crop: (left, top, right, bottom) - remove 1px from left
+                cropped_img = img.crop((1, 0, img.width, img.height))
+                # Save to temporary BytesIO
+                temp_buffer = BytesIO()
+                cropped_img.save(temp_buffer, format='PNG')
+                temp_buffer.seek(0)
+                pdf.drawImage(temp_buffer, img_x, img_y, width=img_w, height=img_h, mask='auto')
+            except Exception:
+                # Fallback to original image if cropping fails
+                pdf.drawImage(image_path, img_x, img_y, width=img_w, height=img_h, mask='auto')
+        else:
+            # If PIL not available, draw original image
+            pdf.drawImage(image_path, img_x, img_y, width=img_w, height=img_h, mask='auto')
+    else:
+        # Fallback to green rectangle if image not found
+        pdf.setFillColor(PRIMARY)
+        pdf.rect(4.54 * inch, middle - 45, page_width_points - (4.54 * inch), 2.07 * inch, fill=1, stroke=0)
 
 def draw_overview(pdf, page_width_points: float, page_height_points: float, data: dict) -> None:
     pdf.showPage()
     _header(pdf, page_width_points, page_height_points, data)
     _sub_header(pdf, page_width_points, page_height_points, data, "Overview")
     margin = 0.78 * inch
-    content_top = page_height_points - (2.2 * inch)
-    col_gap = 0.3 * inch
+    # Sub header ends at page_height_points - (1.96 * inch), content starts 24 points below
+    content_top = page_height_points - (1.96 * inch) - 24
+    col_gap = 0.25 * inch
     left_col_w = 3.7 * inch
     right_col_w = page_width_points - margin - margin - left_col_w - col_gap
     chip_w = 1.78 * inch
     chip_h = 0.60 * inch
     chip_y = content_top - chip_h
+    chip_gap = 8
     _stat_chip(pdf, margin, chip_y, chip_w, chip_h, "Total Transactions", data["overview_data"]["transactions_total"])
-    _stat_chip(pdf, margin + chip_w + 12, chip_y, chip_w, chip_h, "Total Approved", data["overview_data"]["transactions_approved"])
+    _stat_chip(pdf, margin + chip_w + chip_gap, chip_y, chip_w, chip_h, "Total Approved", data["overview_data"]["transactions_approved"])
     ki_h = 2.2 * inch
-    ki_y = chip_y - 16 - ki_h
+    ki_y = chip_y - 8 - ki_h
     _rounded_card(pdf, margin, ki_y, left_col_w, ki_h, radius=8)
     pad = 20
     pdf.setFillColor(TEXT)
     pdf.setFont("Poppins-Medium", 12)
-    pdf.drawString(margin + pad, page_height_points - (3.42 * inch), "Key Indicators")
+    pdf.drawString(margin + pad, ki_y + ki_h - 30, "Key Indicators")
     ki = data["overview_data"]["key_indicators"]
     tw = float(ki.get("total_waste", 0) or 0)
     rr = float(ki.get("recycle_rate", 0) or 0)
@@ -391,7 +437,7 @@ def draw_overview(pdf, page_width_points: float, page_height_points: float, data
     _label_progress(pdf, row_x, row_y - 58, row_w, "Recycle rate (%)", f"{rr:,.2f}", rr / 100.0, colors.HexColor("#8fcfc6"), colors.HexColor("#e1e7ef"), bar_h=6)
     _label_progress(pdf, row_x, row_y - 92, row_w, "GHG Reduction (kgCO2e)", _format_number(ghg), ghg / norm_base, colors.HexColor("#77b9d8"), colors.HexColor("#e1e7ef"), bar_h=6)
     tr_h = 2.15 * inch
-    tr_y = ki_y - 18 - tr_h
+    tr_y = ki_y - 8 - tr_h
     _rounded_card(pdf, margin, tr_y, left_col_w, tr_h, radius=8)
     pdf.setFillColor(TEXT)
     pdf.setFont("Poppins-Medium", 12)
@@ -453,20 +499,26 @@ def draw_performance(pdf, page_width_points: float, page_height_points: float, d
     _header(pdf, page_width_points, page_height_points, data)
     _sub_header(pdf, page_width_points, page_height_points, data, "Performance")
     margin = 0.78 * inch
-    _rounded_card(pdf, margin, page_height_points - (6.98 * inch), 3.22 * inch, 4.54* inch, radius=8, fill=WHITE)
+    # Sub header ends at page_height_points - (1.96 * inch), content starts 24 points below
+    content_top = page_height_points - (1.96 * inch) - 24
+    left_card_w = 3.22 * inch
+    left_card_h = 4.54 * inch
+    left_card_y = content_top - left_card_h
+    _rounded_card(pdf, margin, left_card_y, left_card_w, left_card_h, radius=8, fill=WHITE)
     pdf.setFillColor(TEXT)
     pdf.setFont("Poppins-Medium", 12)
-    pdf.drawString(1 * inch, page_height_points - (2.85 * inch), f"{performance_data['branchName']}")
+    # Position text relative to card top (content_top)
+    pdf.drawString(1 * inch, content_top - 0.4 * inch, f"{performance_data['branchName']}")
     pdf.setFont("Poppins-Regular", 8)
     label_text = "Recycling Rate"
     label_width = stringWidth(label_text, "Poppins-Medium", 8)
-    pdf.drawString(3.82 * inch - label_width, page_height_points - (2.72 * inch), label_text)
+    pdf.drawString(3.82 * inch - label_width, content_top - 0.27 * inch, label_text)
     pdf.setFont("Poppins-Bold", 13)
     value_text = f"{performance_data['recyclingRatePercent']} %"
     value_width = stringWidth(value_text, "Poppins-Medium", 13)
-    pdf.drawString(3.82 * inch - value_width, page_height_points - (2.97 * inch), value_text)
+    pdf.drawString(3.82 * inch - value_width, content_top - 0.52 * inch, value_text)
     for idx, (label, amount) in enumerate(performance_data["metrics"].items()):
-        start_y = page_height_points - (3.41 * inch)
+        start_y = content_top - 0.96 * inch
         bar_h = 0.08 * inch
         gap = 0.36 * inch
         y = start_y - idx * (bar_h + gap)
@@ -479,7 +531,7 @@ def draw_performance(pdf, page_width_points: float, page_height_points: float, d
         _progress_bar(pdf, 1 * inch, y, 2.8 * inch, bar_h, amount / performance_data["totalWasteKg"], MATERIAL_COLORS[label])
     gap = 1 * inch
     outer_x = gap + 3.22 * inch
-    outer_y = page_height_points - (6.98 * inch)
+    outer_y = left_card_y
     outer_w = 6.8 * inch
     outer_h = 4.54 * inch
     _rounded_card(pdf, outer_x, outer_y, outer_w, outer_h, radius=8, fill=colors.HexColor("#f1f5f9"))
@@ -576,34 +628,40 @@ def draw_performance_table(pdf, page_width_points: float, page_height_points: fl
             pdf.drawString(padding + 9.3 * inch, y_text, "Normal" if branch["recyclingRatePercent"] > 20 else "Need Imprv")
 
 def draw_comparison_advice(pdf, page_width_points: float, page_height_points: float, data: dict) -> None:
+    # Skip rendering if there's an error in comparison data
+    comparison_data = data.get("comparison_data", {}) or {}
+    if comparison_data.get("error"):
+        return
+    
     pdf.showPage()
     _header(pdf, page_width_points, page_height_points, data)
     _sub_header(pdf, page_width_points, page_height_points, data, "Comparison")
     margin = 0.78 * inch
+    # Sub header ends at page_height_points - (1.96 * inch), content starts 24 points below
+    content_top = page_height_points - (1.96 * inch) - 24
     gap = 0.3 * inch
     card_w = (page_width_points - 2 * margin - 2 * gap) / 3.0
     card_h = 5 * inch
-    content_top = page_height_points - 2.2 * inch
     card_y = content_top - card_h
     cards = [
-        {"x": margin, "title": "Opportunities", "data": data["comparison_data"]["scores"].get("opportunities", [])},
-        {"x": margin + card_w + gap, "title": "Quick Wins", "data": data["comparison_data"]["scores"].get("quickwins", [])},
-        {"x": margin + 2 * (card_w + gap), "title": "Risks", "data": data["comparison_data"]["scores"].get("risks", [])}
+        {"x": margin, "title": "Opportunities", "data": comparison_data.get("scores", {}).get("opportunities", [])},
+        {"x": margin + card_w + gap, "title": "Quick Wins", "data": comparison_data.get("scores", {}).get("quickwins", [])},
+        {"x": margin + 2 * (card_w + gap), "title": "Risks", "data": comparison_data.get("scores", {}).get("risks", [])}
     ]
     for card in cards:
         _rounded_card(pdf, card["x"], card_y, card_w, card_h, radius=8, fill=WHITE)
         pdf.setFillColor(TEXT)
-        pdf.setFont("Poppins-Medium", 12)
+        pdf.setFont("Poppins-Medium", 14)
         pdf.drawString(card["x"] + 16, card_y + card_h - 24, card["title"])
     body_font = "Poppins-Regular"
-    body_size = 8
+    body_size = 10
     leading = 12
     pad = 16
     paragraph_gap = 8
     label_font = "Poppins-Medium"
-    label_size = 9
+    label_size = 11
     def _draw_recommendations(items, x_left):
-        y_cursor = card_y + card_h - 40
+        y_cursor = card_y + card_h - 50
         max_w = card_w - 2 * pad
         pdf.setFillColor(TEXT)
         pdf.setFont(body_font, body_size)
@@ -613,33 +671,34 @@ def draw_comparison_advice(pdf, page_width_points: float, page_height_points: fl
                 continue
             crit_name = str(itm.get("criteria_name") or itm.get("condition_name") or itm.get("name") or "").strip()
             display_name = crit_name.replace("_", " ") if crit_name else ""
-            para_text = f"{display_name}: {rec}" if display_name else rec
+            # Build text without header prefix for wrapping (just the recommendation text)
+            rec_text = rec
             text_x_offset = 0
             usable_w = max_w
             pdf.setFont(body_font, body_size)
-            lines = _wrap_text_lines(pdf, para_text, usable_w, body_font, body_size)
+            lines = _wrap_text_lines(pdf, rec_text, usable_w, body_font, body_size)
             if not lines:
                 continue
             if y_cursor < (card_y + pad):
                 return
             first_line_x = x_left + pad + text_x_offset
-            header_prefix = f"{display_name}: " if display_name else ""
-            if header_prefix and lines[0].startswith(header_prefix):
+            header_prefix = f"{display_name}:" if display_name else ""
+            if header_prefix:
+                # Draw the header prefix in medium font on its own line
                 pdf.setFont(label_font, label_size)
                 pdf.drawString(first_line_x, y_cursor, header_prefix)
-                header_w = stringWidth(header_prefix, label_font, label_size)
-                remainder = lines[0][len(header_prefix):]
-                if remainder:
-                    pdf.setFont(body_font, body_size)
-                    pdf.drawString(first_line_x + header_w, y_cursor, remainder)
+                y_cursor -= leading
+            # Draw all recommendation text lines in body font on new line(s)
+            if lines:
+                pdf.setFont(body_font, body_size)
+                for line in lines:
+                    if y_cursor < (card_y + pad):
+                        return
+                    pdf.drawString(first_line_x, y_cursor, line)
+                    y_cursor -= leading
             else:
                 pdf.setFont(body_font, body_size)
-                pdf.drawString(first_line_x, y_cursor, lines[0])
-            y_cursor -= leading
-            for line in lines[1:]:
-                if y_cursor < (card_y + pad):
-                    return
-                pdf.drawString(x_left + pad + text_x_offset, y_cursor, line)
+                pdf.drawString(first_line_x, y_cursor, rec)
                 y_cursor -= leading
             y_cursor -= paragraph_gap
             if y_cursor < (card_y + pad):
@@ -653,19 +712,33 @@ def draw_comparison(pdf, page_width_points: float, page_height_points: float, da
     pdf.showPage()
     _header(pdf, page_width_points, page_height_points, data)
     _sub_header(pdf, page_width_points, page_height_points, data, "Comparison")
+    # Sub header ends at page_height_points - (1.96 * inch), content starts 24 points below
+    content_top = page_height_points - (1.96 * inch) - 24
     card_x = padding
-    card_y = 0.75 * inch
-    card_w = page_width_points - 2 * padding
     card_h = 5.2 * inch
+    card_y = content_top - card_h
+    card_w = page_width_points - 2 * padding
     _rounded_card(pdf, card_x, card_y, card_w, card_h, radius=8, fill=WHITE)
+    
+    # Check for error message
+    comparison_data = data.get("comparison_data", {}) or {}
+    error_msg = comparison_data.get("error")
+    if error_msg:
+        # Display error message
+        pdf.setFillColor(TEXT)
+        pdf.setFont("Poppins-Medium", 14)
+        error_y = card_y + card_h / 2.0
+        pdf.drawCentredString(card_x + card_w / 2.0, error_y, error_msg)
+        return
+    
     pad = 20
     legend_w = 3.0 * inch
     bars_w = card_w - 2 * pad - legend_w
     bars_center_x = card_x + pad + (bars_w / 2.0)
     top_y = card_y + card_h - 48
     bottom_y = card_y + 28
-    left_mat = (data.get("comparison_data", {}).get("left", {}) or {}).get("material", {}) or {}
-    right_mat = (data.get("comparison_data", {}).get("right", {}) or {}).get("material", {}) or {}
+    left_mat = (comparison_data.get("left", {}) or {}).get("material", {}) or {}
+    right_mat = (comparison_data.get("right", {}) or {}).get("material", {}) or {}
     left_period = str((data.get("comparison_data", {}).get("left", {}) or {}).get("period", ""))
     right_period = str((data.get("comparison_data", {}).get("right", {}) or {}).get("period", ""))
     # Prefer categories present in data; fallback to predefined list
@@ -695,11 +768,31 @@ def draw_comparison(pdf, page_width_points: float, page_height_points: float, da
     pdf.setStrokeColor(STROKE)
     pdf.setLineWidth(1)
     pdf.line(bars_center_x, bottom_y, bars_center_x, top_y + 8)
+    # Extract years for display
+    def extract_year_from_period(period_str: str) -> str:
+        if not period_str:
+            return ""
+        # Try to extract year from date range format "DD MMM YYYY - DD MMM YYYY"
+        parts = period_str.split(" - ")
+        if len(parts) >= 1:
+            date_part = parts[0].strip()
+            # Extract year (last 4 digits)
+            words = date_part.split()
+            for word in reversed(words):
+                if word.isdigit() and len(word) == 4:
+                    return word
+        return ""
+    
+    left_period = str((data.get("comparison_data", {}).get("left", {}) or {}).get("period", ""))
+    right_period = str((data.get("comparison_data", {}).get("right", {}) or {}).get("period", ""))
+    left_year = extract_year_from_period(left_period) or "Last Year"
+    right_year = extract_year_from_period(right_period) or "Current Year"
+    
     pdf.setFillColor(TEXT)
     pdf.setFont("Poppins-Medium", 14)
-    lpw = stringWidth(left_period, "Poppins-Medium", 14)
-    pdf.drawString(bars_center_x - 8 - lpw, top_y + 20, left_period)
-    pdf.drawString(bars_center_x + 8, top_y + 20, right_period)
+    lpw = stringWidth(left_year, "Poppins-Medium", 14)
+    pdf.drawString(bars_center_x - 8 - lpw, top_y + 20, left_year)
+    pdf.drawString(bars_center_x + 8, top_y + 20, right_year)
     left_color = colors.HexColor("#d3dbe3")
     right_color = colors.HexColor("#c9e7df")
     def draw_right_bar(center_x, y_mid, length, height, color):
@@ -797,24 +890,39 @@ def draw_comparison(pdf, page_width_points: float, page_height_points: float, da
     _header(pdf, page_width_points, page_height_points, data)
     _sub_header(pdf, page_width_points, page_height_points, data, "Comparison")
     margin = padding
+    # Sub header ends at page_height_points - (1.96 * inch), content starts 24 points below
+    content_top = page_height_points - (1.96 * inch) - 24
     gap = 0.3 * inch
     card_w2 = (page_width_points - 2 * margin)
-    card_h2 = 2.5 * inch
-    content_bottom = 0.8 * inch
-    content_top = page_height_points - 3.0 * inch
-    stack_h = (2 * card_h2) + gap
-    available_h = max(0.0, content_top - content_bottom)
-    start_y = content_bottom + max(0.0, (available_h - stack_h) / 2.0)
-    lower_card_y = start_y
-    upper_card_y = lower_card_y + card_h2 + gap
+    card_h2 = 2.2 * inch
+    # Position upper card starting at content_top
+    upper_card_y = content_top - card_h2
+    lower_card_y = upper_card_y - card_h2 - gap
     card_y2 = upper_card_y
     x_left = margin
     _rounded_card(pdf, x_left, card_y2, card_w2, card_h2, radius=8, fill=WHITE)
     _rounded_card(pdf, x_left, lower_card_y, card_w2, card_h2, radius=8, fill=WHITE)
     left_months = (data.get("comparison_data", {}).get("left", {}) or {}).get("month", {}) or {}
     right_months = (data.get("comparison_data", {}).get("right", {}) or {}).get("month", {}) or {}
-    series_a_label = (data.get("comparison_data", {}).get("left", {}) or {}).get("period", "") or "Left"
-    series_b_label = (data.get("comparison_data", {}).get("right", {}) or {}).get("period", "") or "Right"
+    # Extract years from date_from and date_to, or from period strings
+    def extract_year(period_str: str) -> str:
+        if not period_str:
+            return ""
+        # Try to extract year from date range format "DD MMM YYYY - DD MMM YYYY"
+        parts = period_str.split(" - ")
+        if len(parts) >= 1:
+            date_part = parts[0].strip()
+            # Extract year (last 4 digits)
+            words = date_part.split()
+            for word in reversed(words):
+                if word.isdigit() and len(word) == 4:
+                    return word
+        return ""
+    
+    left_period = (data.get("comparison_data", {}).get("left", {}) or {}).get("period", "") or ""
+    right_period = (data.get("comparison_data", {}).get("right", {}) or {}).get("period", "") or ""
+    series_a_label = extract_year(left_period) or "Last Year"
+    series_b_label = extract_year(right_period) or "Current Year"
     _months_short = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
     _map_idx = {m.lower(): i for i, m in enumerate(_months_short)}
     _map_idx.update({
@@ -933,7 +1041,7 @@ def draw_comparison(pdf, page_width_points: float, page_height_points: float, da
         pdf.drawString(gx + (group_w2 - mw2) / 2.0, card_y2 + 8, mlabel)
     pdf.setFillColor(TEXT)
     pdf.setFont("Poppins-Medium", 12)
-    pdf.drawString(x_left + pad2, lower_card_y + card_h2 - 24, f"Period Details : {data['comparison_data']['left']['period']} vs {data['comparison_data']['right']['period']}")
+    pdf.drawString(x_left + pad2, lower_card_y + card_h2 - 24, f"Period Details : {series_a_label} vs {series_b_label}")
     pdf.setFillColor(colors.HexColor("#f1f5f9"))
     draw_table(pdf, padding, lower_card_y + card_h2 - 58, page_width_points - 2 * padding, 24, 8, "Header")
     pdf.setFillColor(TEXT)
@@ -993,11 +1101,13 @@ def draw_main_materials(pdf, page_width_points: float, page_height_points: float
     _header(pdf, page_width_points, page_height_points, data)
     _sub_header(pdf, page_width_points, page_height_points, data, "Main Materials")
     margin = padding
+    # Sub header ends at page_height_points - (1.96 * inch), content starts 24 points below
+    content_top = page_height_points - (1.96 * inch) - 24
     gap = 0.3 * inch
     bar_card = (page_width_points - 2 * margin - gap) * 0.7
     pie_card = (page_width_points - 2 * margin - gap) * 0.3
     card_h2 = 3.8 * inch
-    card_y2 = 2 * inch
+    card_y2 = content_top - card_h2
     x_left = margin
     x_right = margin + bar_card + gap
     _rounded_card(pdf, x_left, card_y2 - 0.2 * inch, bar_card, card_h2 + 0.2 * inch, radius=8, fill=WHITE)
@@ -1130,23 +1240,27 @@ def draw_main_materials(pdf, page_width_points: float, page_height_points: float
 
 def draw_main_materials_table(pdf, page_width_points: float, page_height_points: float, data: dict) -> None:
     padding = 0.78 * inch
-    mats_per_page = 7
+    mats_per_page = 10
     total_mats = len(data["main_materials_data"]["porportions"])
+    # Sub header ends at page_height_points - (1.96 * inch), content starts 24 points below
+    content_top = page_height_points - (1.96 * inch) - 24
+    header_y = content_top - 24
+    header_text_y = content_top - 15
     for page_idx in range(0, total_mats, mats_per_page):
         pdf.showPage()
         _header(pdf, page_width_points, page_height_points, data)
         _sub_header(pdf, page_width_points, page_height_points, data, "Main Materials")
         pdf.setFillColor(colors.HexColor("#f1f5f9"))
-        draw_table(pdf, padding, page_height_points - (3 * inch), page_width_points - 2 * padding, 24, 8, "Header")
+        draw_table(pdf, padding, header_y, page_width_points - 2 * padding, 24, 8, "Header")
         pdf.setFillColor(TEXT)
         pdf.setFont("Poppins-Regular", 8)
-        pdf.drawString(padding + 16, page_height_points - (2.88 * inch), "Main Material")
-        pdf.drawString(padding + 3.2 * inch, page_height_points - (2.88 * inch), "Total Waste (kg)")
-        pdf.drawString(padding + 5.8 * inch, page_height_points - (2.88 * inch), "Percentage (%)")
-        pdf.drawString(padding + 8.5 * inch, page_height_points - (2.88 * inch), "GHG Reduction (kgCO2e)")
+        pdf.drawString(padding + 16, header_text_y, "Main Material")
+        pdf.drawString(padding + 3.2 * inch, header_text_y, "Total Waste (kg)")
+        pdf.drawString(padding + 5.8 * inch, header_text_y, "Percentage (%)")
+        pdf.drawString(padding + 8.5 * inch, header_text_y, "GHG Reduction (kgCO2e)")
         page_mats = data["main_materials_data"]["porportions"][page_idx:page_idx + mats_per_page]
         for idx, mat in enumerate(page_mats):
-            y_base = page_height_points - (3 * inch) - 32 - (idx * 32)
+            y_base = header_y - 32 - (idx * 32)
             table_type = "Footer" if idx == len(page_mats) - 1 else "Body"
             pdf.setFillColor(WHITE)
             draw_table(pdf, padding, y_base, page_width_points - 2 * padding, 32, 8, table_type)
@@ -1165,11 +1279,13 @@ def draw_sub_materials(pdf, page_width_points: float, page_height_points: float,
     _header(pdf, page_width_points, page_height_points, data)
     _sub_header(pdf, page_width_points, page_height_points, data, "Sub Materials")
     margin = padding
+    # Sub header ends at page_height_points - (1.96 * inch), content starts 24 points below
+    content_top = page_height_points - (1.96 * inch) - 24
     gap = 0.3 * inch
     bar_card = (page_width_points - 2 * margin - gap) * 0.7
     pie_card = (page_width_points - 2 * margin - gap) * 0.3
     card_h2 = 3.8 * inch
-    card_y2 = 2 * inch
+    card_y2 = content_top - card_h2
     x_left = margin
     x_right = margin + bar_card + gap
     _rounded_card(pdf, x_left, card_y2 - 0.2 * inch, bar_card, card_h2 + 0.2 * inch, radius=8, fill=WHITE)
@@ -1302,7 +1418,11 @@ def draw_sub_materials(pdf, page_width_points: float, page_height_points: float,
 
 def draw_sub_materials_table(pdf, page_width_points: float, page_height_points: float, data: dict) -> None:
     padding = 0.78 * inch
-    rows_per_page = 7
+    rows_per_page = 10
+    # Sub header ends at page_height_points - (1.96 * inch), content starts 24 points below
+    content_top = page_height_points - (1.96 * inch) - 24
+    header_y = content_top - 24
+    header_text_y = content_top - 15
     grouped = (data.get("sub_materials_data", {}) or {}).get("porportions_grouped", {}) or {}
     flat_rows = []
     for group_name, items in grouped.items():
@@ -1310,21 +1430,56 @@ def draw_sub_materials_table(pdf, page_width_points: float, page_height_points: 
         for item in items or []:
             flat_rows.append(("item", item))
     total_rows = len(flat_rows)
-    for start_idx in range(0, total_rows, rows_per_page):
-        page_rows = flat_rows[start_idx:start_idx + rows_per_page]
+    start_idx = 0
+    while start_idx < total_rows:
+        # Determine how many rows can fit on this page
+        # Check if we need to skip a group header that can't fit with at least one member
+        page_rows = []
+        current_idx = start_idx
+        min_y = 1.5 * inch  # Minimum y position for content
+        
+        while current_idx < total_rows and len(page_rows) < rows_per_page:
+            row_type, payload = flat_rows[current_idx]
+            
+            # If this is a group header, check if at least one member can fit after it
+            if row_type == "group":
+                # Check if there's at least one item after this group header
+                if current_idx + 1 < total_rows and flat_rows[current_idx + 1][0] == "item":
+                    # Check if we have room for both the group header and at least one item
+                    rows_needed = 2  # group header + at least 1 item
+                    if len(page_rows) + rows_needed <= rows_per_page:
+                        page_rows.append((row_type, payload))
+                        current_idx += 1
+                    else:
+                        # Not enough room, break to start new page
+                        break
+                else:
+                    # No items after this group, skip it (orphaned group header)
+                    current_idx += 1
+                    continue
+            else:
+                # Regular item, add it
+                page_rows.append((row_type, payload))
+                current_idx += 1
+        
+        # If no rows were added, skip to next item to avoid infinite loop
+        if not page_rows:
+            start_idx += 1
+            continue
+        
         pdf.showPage()
         _header(pdf, page_width_points, page_height_points, data)
         _sub_header(pdf, page_width_points, page_height_points, data, "Sub Materials")
         pdf.setFillColor(colors.HexColor("#f1f5f9"))
-        draw_table(pdf, padding, page_height_points - (3 * inch), page_width_points - 2 * padding, 24, 8, "Header")
+        draw_table(pdf, padding, header_y, page_width_points - 2 * padding, 24, 8, "Header")
         pdf.setFillColor(TEXT)
         pdf.setFont("Poppins-Regular", 8)
-        pdf.drawString(padding + 16, page_height_points - (2.88 * inch), "Sub Material")
-        pdf.drawString(padding + 3.2 * inch, page_height_points - (2.88 * inch), "Total Waste (kg)")
-        pdf.drawString(padding + 5.8 * inch, page_height_points - (2.88 * inch), "Percentage (%)")
-        pdf.drawString(padding + 8.5 * inch, page_height_points - (2.88 * inch), "GHG Reduction (kgCO2e)")
+        pdf.drawString(padding + 16, header_text_y, "Sub Material")
+        pdf.drawString(padding + 3.2 * inch, header_text_y, "Total Waste (kg)")
+        pdf.drawString(padding + 5.8 * inch, header_text_y, "Percentage (%)")
+        pdf.drawString(padding + 8.5 * inch, header_text_y, "GHG Reduction (kgCO2e)")
         for idx, (row_type, payload) in enumerate(page_rows):
-            y_base = page_height_points - (3 * inch) - 32 - (idx * 32)
+            y_base = header_y - 32 - (idx * 32)
             table_type = "Footer" if idx == len(page_rows) - 1 else "Body"
             if row_type == "group":
                 pdf.setFillColor(colors.HexColor("#f1f5f9"))
@@ -1344,19 +1499,40 @@ def draw_sub_materials_table(pdf, page_width_points: float, page_height_points: 
                 pdf.drawString(padding + 5.8 * inch, y_text, f"{float(mat.get('proportion_percent', 0) or 0):.2f}%")
                 pdf.drawString(padding + 8.5 * inch, y_text, _format_number(mat.get("ghg_reduction", 0)))
         _footer(pdf, page_width_points)
+        # Update start_idx to continue from where we left off
+        start_idx = current_idx
 
 def draw_waste_diversion(pdf, page_width_points: float, page_height_points: float, data: dict) -> None:
     pdf.showPage()
     padding = 0.78 * inch
     _header(pdf, page_width_points, page_height_points, data)
     _sub_header(pdf, page_width_points, page_height_points, data, "Waste Diversion")
-    card_data = ((data.get("diversion_data", {}) or {}).get("card_data", {}) or {})
+    
+    # Check for error message
+    diversion_data = data.get("diversion_data", {}) or {}
+    error_msg = diversion_data.get("error")
+    if error_msg:
+        # Display error message centered like comparison
+        card_x = padding
+        card_y = 0.75 * inch
+        card_w = page_width_points - 2 * padding
+        card_h = 5.2 * inch
+        _rounded_card(pdf, card_x, card_y, card_w, card_h, radius=8, fill=WHITE)
+        pdf.setFillColor(TEXT)
+        pdf.setFont("Poppins-Medium", 14)
+        error_y = card_y + card_h / 2.0
+        pdf.drawCentredString(card_x + card_w / 2.0, error_y, error_msg)
+        _footer(pdf, page_width_points)
+        return
+    
+    card_data = diversion_data.get("card_data", {}) or {}
     total_origin = card_data.get("total_origin", 0)
     complete_transfer = card_data.get("complete_transfer", 0)
     processing_transfer = card_data.get("processing_transfer", 0)
     completed_rate = card_data.get("completed_rate", 0)
     margin = padding
-    content_top = page_height_points - 2.2 * inch
+    # Sub header ends at page_height_points - (1.96 * inch), content starts 24 points below
+    content_top = page_height_points - (1.96 * inch) - 24
     chip_gap = 12
     usable_w = (page_width_points - 2 * margin)
     chip_w = max(1.0, (usable_w - (3 * chip_gap)) / 4.0)
@@ -1502,8 +1678,13 @@ def _draw_sankey_diagram(pdf, x, y_top, width, height, data_rows):
         print('DONE SANKEY')
 
 def draw_waste_diversion_table(pdf, page_width_points: float, page_height_points: float, data: dict) -> None:
+    # Skip rendering if there's an error in diversion data
+    diversion_data = data.get("diversion_data", {}) or {}
+    if diversion_data.get("error"):
+        return
+    
     padding = 0.78 * inch
-    rows = (((data.get("diversion_data", {}) or {}).get("material_table", []) or []))
+    rows = (diversion_data.get("material_table", []) or [])
     if not isinstance(rows, list):
         rows = []
     debug = bool(((data or {}).get("_debug", False)))
@@ -1512,7 +1693,9 @@ def draw_waste_diversion_table(pdf, page_width_points: float, page_height_points
             print(f"[waste_diversion_table] total_rows={len(rows)}")
         except Exception:
             pass
-    header_y = page_height_points - (3 * inch)
+    # Sub header ends at page_height_points - (1.96 * inch), content starts 24 points below
+    content_top = page_height_points - (1.96 * inch) - 24
+    header_y = content_top - 24
     header_h = 24
     content_x = padding
     content_w = page_width_points - 2 * padding
@@ -1568,7 +1751,7 @@ def draw_waste_diversion_table(pdf, page_width_points: float, page_height_points
         draw_table(pdf, content_x, header_y, content_w, header_h, 8, "Header")
         pdf.setFillColor(TEXT)
         pdf.setFont("Poppins-Regular", 8)
-        header_text_y = page_height_points - (2.88 * inch)
+        header_text_y = content_top - 15
         pdf.drawString(content_x + 16, header_text_y, "Materials")
         for i, m in enumerate(months):
             mx = col_x_for_month(i)
@@ -1792,9 +1975,9 @@ def lambda_handler(event, context):
         pdf_bytes = generate_pdf_bytes(payload)
         b64 = base64.b64encode(pdf_bytes).decode("utf-8")
         filename = f"report_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.pdf"
-        response_obj = {"success": True, "pdf_base64": b64, "filename": filename}
+        response_obj = {"success": True, "pdf_base64": b64, "filename": filename, "data": payload}
     except Exception as e:
-        response_obj = {"success": False, "error": str(e)}
+        response_obj = {"success": False, "error": str(e), "data": payload}
 
     # If this was API Gateway proxy, wrap in {"statusCode", "body"}
     if isinstance(event, dict) and ("httpMethod" in event or "requestContext" in event):

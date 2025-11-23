@@ -47,6 +47,14 @@ class ReportsService:
             Dict with transaction records data and metadata
         """
         try:
+            # Print input parameters
+            print(
+                f"get_transaction_records_by_organization called - "
+                f"organization_id: {organization_id}, "
+                f"report_type: {report_type}, "
+                f"filters: {filters}"
+            )
+            
             # Base query: Join transaction_records with transactions
             query = self.db.query(TransactionRecord).join(
                 Transaction,
@@ -57,19 +65,28 @@ class ReportsService:
                 Transaction.status != TransactionStatus.rejected
             )
             
+            # Track applied filters for logging
+            applied_filters = {}
+            
             # Apply additional filters if provided
             if filters:
                 # Filter by material_ids (supports multiple)
                 if filters.get('material_ids'):
                     query = query.filter(TransactionRecord.material_id.in_(filters['material_ids']))
+                    applied_filters['material_ids'] = filters['material_ids']
                 
                 # Filter by origin_ids (supports multiple)
                 if filters.get('origin_ids'):
                     query = query.filter(Transaction.origin_id.in_(filters['origin_ids']))
+                    applied_filters['origin_ids'] = filters['origin_ids']
                 
                 # Filter by date range
                 date_from = filters.get('date_from')
                 date_to = filters.get('date_to')
+                if date_from:
+                    applied_filters['date_from'] = date_from
+                if date_to:
+                    applied_filters['date_to'] = date_to
                 if report_type == 'comparison':
                     # For comparison, use provided range as-is, no clamping
                     if date_from:
@@ -106,6 +123,12 @@ class ReportsService:
                                 query = query.filter(TransactionRecord.transaction_date <= parsed.isoformat() if isinstance(date_to, str) else parsed)
                             except Exception:
                                 query = query.filter(TransactionRecord.transaction_date <= date_to)
+            
+            # Print applied filters before executing query
+            if applied_filters:
+                print(
+                    f"Applied filters for organization_id {organization_id}: {applied_filters}"
+                )
             
             # Execute query
             transaction_records = query.all()
@@ -194,6 +217,26 @@ class ReportsService:
                     record_dict['is_rejected'] = False
                 
                 records_data.append(record_dict)
+            
+            # Prepare result summary for logging
+            result_summary = {
+                'organization_id': organization_id,
+                'report_type': report_type,
+                'total_records': len(records_data),
+                'transactions_total': transactions_total,
+                'transactions_approved': transactions_approved,
+                'filters_applied': applied_filters if applied_filters else None
+            }
+            
+            # Print results
+            print(
+                f"get_transaction_records_by_organization results - "
+                f"organization_id: {organization_id}, "
+                f"report_type: {report_type}, "
+                f"total_records: {len(records_data)}, "
+                f"transactions_total: {transactions_total}, "
+                f"transactions_approved: {transactions_approved}"
+            )
             
             return {
                 'success': True,

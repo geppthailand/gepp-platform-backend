@@ -40,20 +40,6 @@ def _build_filters_from_query_params(query_params: Dict[str, Any], timezone_name
     - date_to: Set to 23:59:59.999999 of that day
     """
     filters = {}
-    # Determine client timezone
-    tz_param = query_params.get('tz') or query_params.get('timezone')
-    client_tz_name = (tz_param or timezone_name or 'Asia/Bangkok')
-    try:
-        client_tz = ZoneInfo(client_tz_name)
-    except Exception:
-        client_tz = ZoneInfo('UTC')
-        client_tz_name = 'UTC'
-
-    def to_utc_iso(dt: datetime) -> str:
-        # Attach client tz if naive, then convert to UTC and return ISO string
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=client_tz)
-        return dt.astimezone(timezone.utc).isoformat()
     
     # Handle material_id (comma-separated)
     if query_params.get('material_id'):
@@ -75,22 +61,29 @@ def _build_filters_from_query_params(query_params: Dict[str, Any], timezone_name
             # Single ID
             filters['origin_ids'] = [int(origin_ids_str)]
     
-    # Handle date filters with time adjustments (also accept 'datefrom'/'dateto')
+    # Handle date filters (dates are sent without timezone, use as-is)
     date_from_input = query_params.get('date_from') or query_params.get('datefrom')
     if date_from_input:
         date_from_str = date_from_input
         try:
-            # Parse the date and set to start of day (00:00:00)
+            # Extract the date part (YYYY-MM-DD) and create start of day in UTC
             if 'T' in date_from_str or ' ' in date_from_str:
-                # Already has time component, parse as-is then reset to start of day
-                dt = datetime.fromisoformat(date_from_str.replace('Z', '+00:00'))
+                # Has time component, extract date part
+                date_part = date_from_str.split('T')[0].split(' ')[0]
             else:
-                # Date only, parse and set to start of day
-                dt = datetime.fromisoformat(date_from_str)
+                # Date only
+                date_part = date_from_str
             
-            # Set to start of day (00:00:00)
-            start_local = dt.replace(hour=0, minute=0, second=0, microsecond=0)
-            filters['date_from'] = to_utc_iso(start_local)
+            # Parse the date part to get year, month, day
+            date_parts = date_part.split('-')
+            if len(date_parts) == 3:
+                year, month, day = int(date_parts[0]), int(date_parts[1]), int(date_parts[2])
+                # Create start of day in UTC (no timezone conversion)
+                start_utc = datetime(year, month, day, 0, 0, 0, 0, tzinfo=timezone.utc)
+                filters['date_from'] = start_utc.isoformat()
+            else:
+                # Fallback: try to parse as-is
+                filters['date_from'] = date_from_str
         except Exception:
             # Fallback to original value if parsing fails
             filters['date_from'] = date_from_str
@@ -99,36 +92,35 @@ def _build_filters_from_query_params(query_params: Dict[str, Any], timezone_name
     if date_to_input:
         date_to_str = date_to_input
         try:
-            # Parse the date and set to end of day (23:59:59.999999)
+            # Extract the date part (YYYY-MM-DD) and create end of day in UTC
             if 'T' in date_to_str or ' ' in date_to_str:
-                # Already has time component, parse as-is then reset to end of day
-                dt = datetime.fromisoformat(date_to_str.replace('Z', '+00:00'))
+                # Has time component, extract date part
+                date_part = date_to_str.split('T')[0].split(' ')[0]
             else:
-                # Date only, parse and set to end of day
-                dt = datetime.fromisoformat(date_to_str)
+                # Date only
+                date_part = date_to_str
             
-            # Set to end of day (23:59:59.999999)
-            end_local = dt.replace(hour=23, minute=59, second=59, microsecond=999999)
-            filters['date_to'] = to_utc_iso(end_local)
+            # Parse the date part to get year, month, day
+            date_parts = date_part.split('-')
+            if len(date_parts) == 3:
+                year, month, day = int(date_parts[0]), int(date_parts[1]), int(date_parts[2])
+                # Create end of day in UTC (no timezone conversion)
+                end_utc = datetime(year, month, day, 23, 59, 59, 999999, tzinfo=timezone.utc)
+                filters['date_to'] = end_utc.isoformat()
+            else:
+                # Fallback: try to parse as-is
+                filters['date_to'] = date_to_str
         except Exception:
             # Fallback to original value if parsing fails
             filters['date_to'] = date_to_str
 
-    # For Comparison path
-    if query_params.get('period'):
-        filters['period'] = query_params['period']
-    if query_params.get('leftSelection'):
-        filters['leftSelection'] = query_params['leftSelection']
-    if query_params.get('rightSelection'):
-        filters['rightSelection'] = query_params['rightSelection']
-    
     # Default YTD if no explicit dates provided (first day of current year -> end of today)
     if not filters.get('date_from') and not filters.get('date_to'):
         now_utc = datetime.now(timezone.utc)
-        start_of_year_local = datetime(now_utc.year, 1, 1, 0, 0, 0, 0, tzinfo=client_tz)
-        end_of_today_local = now_utc.astimezone(client_tz).replace(hour=23, minute=59, second=59, microsecond=999999)
-        filters['date_from'] = start_of_year_local.astimezone(timezone.utc).isoformat()
-        filters['date_to'] = end_of_today_local.astimezone(timezone.utc).isoformat()
+        start_of_year_utc = datetime(now_utc.year, 1, 1, 0, 0, 0, 0, tzinfo=timezone.utc)
+        end_of_today_utc = now_utc.replace(hour=23, minute=59, second=59, microsecond=999999)
+        filters['date_from'] = start_of_year_utc.isoformat()
+        filters['date_to'] = end_of_today_utc.isoformat()
 
     # Clamp date range constraints globally:
     # - date_to must not be in the future
@@ -185,67 +177,6 @@ def _parse_datetime(date_str: Optional[str]) -> Optional[datetime]:
         except Exception:
             pass
     return None
-
-
-def _compute_period_range(period: Optional[str], selection: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
-    """Compute ISO date_from/date_to from period and selection.
-    Supports quarters (Q1-Q4), halves (H1/H2 or First/Second Half), and year (YYYY).
-    If year not present in selection, defaults to current year.
-    """
-    if not period or not selection:
-        return None, None
-
-    sel_lower = selection.strip().lower()
-    now = datetime.utcnow()
-    # Extract year if present
-    year = None
-    for token in selection.replace('-', ' ').replace('_', ' ').split():
-        if token.isdigit() and len(token) == 4:
-            try:
-                year = int(token)
-                break
-            except ValueError:
-                pass
-    if year is None:
-        year = now.year
-
-    def month_range(y: int, m_start: int, m_end: int) -> Tuple[str, str]:
-        start = datetime(y, m_start, 1, 0, 0, 0, 0)
-        # compute end as last microsecond of end month
-        if m_end == 12:
-            end_boundary = datetime(y + 1, 1, 1)
-        else:
-            end_boundary = datetime(y, m_end + 1, 1)
-        end = end_boundary - timedelta(microseconds=1)
-        return start.isoformat(), end.isoformat()
-
-    p = (period or '').strip().lower()
-    # Quarter
-    if p in ('3m'):
-        if 'q1' in sel_lower:
-            return month_range(year, 1, 3)
-        if 'q2' in sel_lower:
-            return month_range(year, 4, 6)
-        if 'q3' in sel_lower:
-            return month_range(year, 7, 9)
-        if 'q4' in sel_lower:
-            return month_range(year, 10, 12)
-        return None, None
-
-    # Half-year
-    if p in ('6m'):
-        if 'first' in sel_lower or 'h1' in sel_lower:
-            return month_range(year, 1, 6)
-        if 'second' in sel_lower or 'h2' in sel_lower:
-            return month_range(year, 7, 12)
-        return None, None
-
-    # Year
-    if p in ('12m'):
-        return month_range(year, 1, 12)
-
-    # Unknown period
-    return None, None
 
 
 def _calculate_weight(record: Dict[str, Any], material: Dict[str, Any]) -> float:
@@ -1050,25 +981,112 @@ def _handle_performance_report(
 def _handle_comparison_report(
     reports_service: ReportsService,
     organization_id: int,
-    filters: Dict[str, Any]
+    filters: Dict[str, Any],
+    client_timezone: Optional[str] = None
 ) -> Dict[str, Any]:
-    """Handle /api/reports/comparison endpoint"""
+    """Handle /api/reports/comparison endpoint
     
-    period = filters.get('period')
-    left_sel = filters.get('leftSelection')
-    right_sel = filters.get('rightSelection')
+    Uses date_from and date_to from filters to define the period.
+    Left side: same period but in the previous year (last_year)
+    Right side: the selected period (date_from to date_to)
+    The period will never exceed 1 year and will never cross years.
+    """
     
-    # Build left and right date ranges
-    left_from, left_to = _compute_period_range(period, left_sel)
-    right_from, right_to = _compute_period_range(period, right_sel)
+    # Get date range from filters (required for comparison)
+    date_from = filters.get('date_from')
+    date_to = filters.get('date_to')
+    
+    if not date_from or not date_to:
+        raise ValidationException("date_from and date_to are required for comparison report")
+    
+    # Parse dates (these are already in UTC format from filter builder)
+    right_from_dt = _parse_datetime(date_from)
+    right_to_dt = _parse_datetime(date_to)
+    
+    if not right_from_dt or not right_to_dt:
+        raise ValidationException("Invalid date_from or date_to format")
+    
+    # Ensure dates are timezone-aware (convert to UTC if needed)
+    if right_from_dt.tzinfo is None:
+        right_from_dt = right_from_dt.replace(tzinfo=timezone.utc)
+    else:
+        right_from_dt = right_from_dt.astimezone(timezone.utc)
+    if right_to_dt.tzinfo is None:
+        right_to_dt = right_to_dt.replace(tzinfo=timezone.utc)
+    else:
+        right_to_dt = right_to_dt.astimezone(timezone.utc)
+    
+    # For validation, we need to check the calendar dates as the user intended them
+    # Convert UTC dates back to client timezone to get the actual calendar dates
+    client_tz_name = client_timezone or 'Asia/Bangkok'
+    try:
+        client_tz = ZoneInfo(client_tz_name)
+    except Exception:
+        client_tz = ZoneInfo('UTC')
+        client_tz_name = 'UTC'
+    
+    # Convert to client timezone to check calendar dates
+    from_local = right_from_dt.astimezone(client_tz)
+    to_local = right_to_dt.astimezone(client_tz)
+    
+    # Extract date portion (YYYY-MM-DD) from client timezone
+    from_date = from_local.date()
+    to_date = to_local.date()
+    
+    # Validate period doesn't exceed 1 year
+    delta_days = (to_date - from_date).days
+    if delta_days > 365:
+        raise ValidationException("Comparison period cannot exceed 1 year")
+    
+    # Check if dates are in the same calendar year (in client timezone)
+    if from_date.year != to_date.year:
+        raise ValidationException("Comparison period cannot cross years")
+    
+    # Calculate left period: same period but in the previous year
+    # Handle leap year edge case (Feb 29 -> Feb 28 in non-leap year)
+    def subtract_year(dt: datetime) -> datetime:
+        try:
+            return dt.replace(year=dt.year - 1)
+        except ValueError:
+            # Handle Feb 29 in leap year -> Feb 28 in non-leap year
+            if dt.month == 2 and dt.day == 29:
+                return dt.replace(year=dt.year - 1, day=28)
+            raise
+    
+    left_from_dt = subtract_year(right_from_dt)
+    left_to_dt = subtract_year(right_to_dt)
+    
+    # Ensure timezone is UTC for left dates
+    if left_from_dt.tzinfo is None:
+        left_from_dt = left_from_dt.replace(tzinfo=timezone.utc)
+    else:
+        left_from_dt = left_from_dt.astimezone(timezone.utc)
+    if left_to_dt.tzinfo is None:
+        left_to_dt = left_to_dt.replace(tzinfo=timezone.utc)
+    else:
+        left_to_dt = left_to_dt.astimezone(timezone.utc)
+    
+    # Convert back to ISO strings in consistent UTC format (+00:00)
+    left_from = left_from_dt.strftime('%Y-%m-%dT%H:%M:%S.%f') + '+00:00'
+    left_to = left_to_dt.strftime('%Y-%m-%dT%H:%M:%S.%f') + '+00:00'
+    # Right dates should already be in UTC format from filters, but ensure consistency
+    right_from = date_from
+    right_to = date_to
 
     def fetch_side(date_from: Optional[str], date_to: Optional[str]) -> Dict[str, Any]:
-        # For comparison, only use period-derived date range; ignore all other filters
+        # Build filters with date range and preserve other filters (material_ids, origin_ids)
         side_filters = {}
         if date_from:
             side_filters['date_from'] = date_from
         if date_to:
             side_filters['date_to'] = date_to
+        
+        # Apply other filters (material_ids, origin_ids) to both sides
+        if filters.get('material_ids'):
+            side_filters['material_ids'] = filters['material_ids']
+        if filters.get('origin_ids'):
+            side_filters['origin_ids'] = filters['origin_ids']
+        
         return reports_service.get_transaction_records_by_organization(
             organization_id=organization_id,
             filters=side_filters if side_filters else None,
@@ -1733,7 +1751,7 @@ def handle_reports_routes(event: Dict[str, Any], **common_params) -> Dict[str, A
         
         elif path == '/api/reports/comparison':
             filters = _build_filters_from_query_params(query_params, timezone_name=tz_name)
-            return _handle_comparison_report(reports_service, organization_id, filters)
+            return _handle_comparison_report(reports_service, organization_id, filters, client_timezone=tz_name)
 
         elif path == '/api/reports/materials':
             filters = _build_filters_from_query_params(query_params, timezone_name=tz_name)
@@ -1786,36 +1804,86 @@ def _handle_export_pdf_report(
     Aggregate data from all report handlers into a single structure
     compatible with scripts/generate_pdf_report.py.
     """
+    # Validate date range for comparison and diversion reports
+    date_from = filters.get('date_from')
+    date_to = filters.get('date_to')
+    
+    if date_from and date_to:
+        try:
+            # Parse dates
+            from_dt = _parse_datetime(date_from)
+            to_dt = _parse_datetime(date_to)
+            
+            if from_dt and to_dt:
+                # Ensure dates are timezone-aware
+                if from_dt.tzinfo is None:
+                    from_dt = from_dt.replace(tzinfo=timezone.utc)
+                else:
+                    from_dt = from_dt.astimezone(timezone.utc)
+                if to_dt.tzinfo is None:
+                    to_dt = to_dt.replace(tzinfo=timezone.utc)
+                else:
+                    to_dt = to_dt.astimezone(timezone.utc)
+                
+                # Convert to client timezone for validation
+                export_tz = current_user.get('timezone') or 'Asia/Bangkok'
+                try:
+                    client_tz = ZoneInfo(export_tz)
+                except Exception:
+                    client_tz = ZoneInfo('UTC')
+                
+                from_local = from_dt.astimezone(client_tz)
+                to_local = to_dt.astimezone(client_tz)
+                
+                from_date = from_local.date()
+                to_date = to_local.date()
+                
+                # Validate period doesn't exceed 1 year
+                delta_days = (to_date - from_date).days
+                date_error = None
+                if delta_days > 365:
+                    date_error = 'Please select valid date range. The date range must be within a single year and not exceed 365 days'
+                elif from_date.year != to_date.year:
+                    # Check if dates are in the same calendar year
+                    date_error = 'Please select valid date range. The date range must be within a single year and not exceed 365 days'
+                
+                if date_error:
+                    # Set error flags to render error message in PDF
+                    diversion = {'error': date_error}
+                    comparison = {'error': date_error}
+                else:
+                    # Dates are valid, will fetch data below
+                    diversion = None
+                    comparison = None
+            else:
+                diversion = None
+                comparison = None
+        except Exception:
+            # If validation fails, continue - let the handlers validate
+            diversion = None
+            comparison = None
+    else:
+        diversion = None
+        comparison = None
+    
     # 1) Pull data from the existing handlers/services
     overview = _handle_overview_report(reports_service, organization_id, filters)
     performance = _handle_performance_report(reports_service, organization_id, filters)
     materials = _handle_materials_report(reports_service, organization_id, filters)
-    # For export's diversion: expand to full year from date_from's year and drop origin filter
-    diversion_filters = dict(filters or {})
-    try:
-        df = _parse_datetime(diversion_filters.get('date_from'))
-        if df:
-            year = df.year
-            start_of_year = datetime(year, 1, 1, 0, 0, 0, 0, tzinfo=timezone.utc)
-            start_of_next_year = datetime(year + 1, 1, 1, 0, 0, 0, 0, tzinfo=timezone.utc)
-            end_of_year = start_of_next_year - timedelta(microseconds=1)
-            diversion_filters['date_from'] = start_of_year.isoformat()
-            diversion_filters['date_to'] = end_of_year.isoformat()
-    except Exception:
-        # If parsing fails, leave dates as-is
-        pass
-    diversion_filters.pop('origin_ids', None)
-    diversion = _handle_diversion_report(reports_service, organization_id, diversion_filters)
-    # For export, comparison filters are fixed: period=12m, left=last year, right=current year
-    now_utc = datetime.now(timezone.utc)
-    current_year = now_utc.year
-    last_year = current_year - 1
-    comp_filters = {
-        'period': '12m',
-        'leftSelection': str(last_year),
-        'rightSelection': str(current_year),
-    }
-    comparison = _handle_comparison_report(reports_service, organization_id, comp_filters)
+    
+    # Get diversion and comparison data if not already set with error
+    if diversion is None:
+        try:
+            diversion = _handle_diversion_report(reports_service, organization_id, filters)
+        except ValidationException as e:
+            diversion = {'error': 'Please select valid date range. The date range must be within a single year and not exceed 365 days'}
+    
+    export_tz = current_user.get('timezone') or 'Asia/Bangkok'
+    if comparison is None:
+        try:
+            comparison = _handle_comparison_report(reports_service, organization_id, filters, client_timezone=export_tz)
+        except ValidationException as e:
+            comparison = {'error': 'Please select valid date range. The date range must be within a single year and not exceed 365 days'}
 
     # 2) Format display dates like "01 Jan 2025" in client timezone
     def _fmt_display_date_tz(iso_str: Optional[str], tz_name: Optional[str]) -> str:
@@ -1883,13 +1951,77 @@ def _handle_export_pdf_report(
     }
 
     # 6) Build the unified payload
-    # Ensure comparison periods exist for PDF rendering
-    _left_dict = comparison.get('left', {}) or {}
-    _right_dict = comparison.get('right', {}) or {}
-    _left_period = _left_dict.get('period') or comp_filters.get('leftSelection') or comp_filters.get('period') or "Left"
-    _right_period = _right_dict.get('period') or comp_filters.get('rightSelection') or comp_filters.get('period') or "Right"
-    _left_with_period = dict(_left_dict, period=_left_period)
-    _right_with_period = dict(_right_dict, period=_right_period)
+    # Handle comparison data - check for errors first
+    if comparison.get('error'):
+        # If there's an error, create error structure for PDF rendering
+        comparison_data = {
+            'error': comparison.get('error'),
+            'left': {},
+            'right': {},
+            'scores': {}
+        }
+    else:
+        # Build comparison data with date ranges instead of periods
+        _left_dict = comparison.get('left', {}) or {}
+        _right_dict = comparison.get('right', {}) or {}
+        
+        # Calculate date ranges for left (last year) and right (current period)
+        date_from = filters.get('date_from')
+        date_to = filters.get('date_to')
+        
+        # Format date ranges for display
+        if date_from and date_to:
+            right_from_dt = _parse_datetime(date_from)
+            right_to_dt = _parse_datetime(date_to)
+            
+            if right_from_dt and right_to_dt:
+                # Convert to client timezone for display
+                export_tz = current_user.get('timezone') or 'Asia/Bangkok'
+                try:
+                    client_tz = ZoneInfo(export_tz)
+                except Exception:
+                    client_tz = ZoneInfo('UTC')
+                
+                # Right period dates (current)
+                right_from_local = right_from_dt.astimezone(client_tz)
+                right_to_local = right_to_dt.astimezone(client_tz)
+                _right_period = f"{right_from_local.strftime('%d %b %Y')} - {right_to_local.strftime('%d %b %Y')}"
+                
+                # Left period dates (last year - same calendar dates)
+                left_from_dt = right_from_dt.replace(year=right_from_dt.year - 1)
+                left_to_dt = right_to_dt.replace(year=right_to_dt.year - 1)
+                left_from_local = left_from_dt.astimezone(client_tz)
+                left_to_local = left_to_dt.astimezone(client_tz)
+                _left_period = f"{left_from_local.strftime('%d %b %Y')} - {left_to_local.strftime('%d %b %Y')}"
+            else:
+                _left_period = "Last Year"
+                _right_period = "Current Period"
+        else:
+            _left_period = "Last Year"
+            _right_period = "Current Period"
+        
+        _left_with_period = dict(_left_dict, period=_left_period)
+        _right_with_period = dict(_right_dict, period=_right_period)
+        comparison_data = {
+            'left': _left_with_period,
+            'right': _right_with_period,
+            'scores': comparison.get('scores', {}),
+        }
+    
+    # Handle diversion data - check for errors
+    if diversion.get('error'):
+        diversion_data = {
+            'error': diversion.get('error'),
+            'card_data': {},
+            'sankey_data': [],
+            'material_table': []
+        }
+    else:
+        diversion_data = {
+            'card_data': diversion.get('card_data', {}),
+            'sankey_data': diversion.get('sankey_data', []),
+            'material_table': diversion.get('material_table', []),
+        }
 
     data: Dict[str, Any] = {
         # Header data
@@ -1915,22 +2047,14 @@ def _handle_export_pdf_report(
         'performance_data': performance.get('data', []),
 
         # Comparison
-        'comparison_data': {
-            'left': _left_with_period,
-            'right': _right_with_period,
-            'scores': comparison.get('scores', {}),
-        },
+        'comparison_data': comparison_data,
 
         # Materials breakdown pages
         'main_materials_data': main_materials_data,
         'sub_materials_data': sub_materials_data,
 
         # Diversion (sankey + materials monthly table)
-        'diversion_data': {
-            'card_data': diversion.get('card_data', {}),
-            'sankey_data': diversion.get('sankey_data', []),
-            'material_table': diversion.get('material_table', []),
-        },
+        'diversion_data': diversion_data,
     }
 
     # Generate PDF via Lambda (primary path), fallback to local render if Lambda fails
