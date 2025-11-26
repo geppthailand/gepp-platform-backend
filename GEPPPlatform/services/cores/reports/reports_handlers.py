@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 import boto3
 
 from .reports_service import ReportsService
+from ..transactions.presigned_url_service import TransactionPresignedUrlService
 from ....exceptions import APIException, ValidationException, NotFoundException
 from GEPPPlatform.models.cores.references import MainMaterial, MaterialCategory
 from GEPPPlatform.models.users.user_location import UserLocation
@@ -36,10 +37,17 @@ def _build_filters_from_query_params(query_params: Dict[str, Any], timezone_name
     Example: ?material_id=1,2,3&origin_id=10,20
     
     Date handling:
-    - date_from: Set to 00:00:00 of that day
-    - date_to: Set to 23:59:59.999999 of that day
+    - If the incoming value includes a time (ISO with or without timezone), respect it.
+    - If only a date is provided, interpret it in the provided timezone (timezone_name or Asia/Bangkok),
+      setting date_from to start-of-day and date_to to end-of-day in that timezone.
+    - All stored filter values are normalized to UTC ISO strings.
     """
     filters = {}
+    # Resolve timezone for date-only inputs
+    try:
+        tz = ZoneInfo(timezone_name or 'Asia/Bangkok')
+    except Exception:
+        tz = timezone.utc
     
     # Handle material_id (comma-separated)
     if query_params.get('material_id'):
@@ -61,29 +69,25 @@ def _build_filters_from_query_params(query_params: Dict[str, Any], timezone_name
             # Single ID
             filters['origin_ids'] = [int(origin_ids_str)]
     
-    # Handle date filters (dates are sent without timezone, use as-is)
+    # Handle date filters (preserve provided times; apply local day bounds for date-only)
     date_from_input = query_params.get('date_from') or query_params.get('datefrom')
     if date_from_input:
         date_from_str = date_from_input
         try:
-            # Extract the date part (YYYY-MM-DD) and create start of day in UTC
             if 'T' in date_from_str or ' ' in date_from_str:
-                # Has time component, extract date part
-                date_part = date_from_str.split('T')[0].split(' ')[0]
+                # Has time component: parse full ISO, respect provided tz if any; if naive, assume tz
+                try:
+                    dt = datetime.fromisoformat(date_from_str.replace('Z', '+00:00'))
+                except Exception:
+                    dt = datetime.fromisoformat(date_from_str)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=tz)
+                filters['date_from'] = dt.astimezone(timezone.utc).isoformat()
             else:
-                # Date only
-                date_part = date_from_str
-            
-            # Parse the date part to get year, month, day
-            date_parts = date_part.split('-')
-            if len(date_parts) == 3:
-                year, month, day = int(date_parts[0]), int(date_parts[1]), int(date_parts[2])
-                # Create start of day in UTC (no timezone conversion)
-                start_utc = datetime(year, month, day, 0, 0, 0, 0, tzinfo=timezone.utc)
-                filters['date_from'] = start_utc.isoformat()
-            else:
-                # Fallback: try to parse as-is
-                filters['date_from'] = date_from_str
+                # Date only: interpret as start of day in specified timezone
+                y, m, d = map(int, date_from_str.split('-'))
+                local_dt = datetime(y, m, d, 0, 0, 0, 0, tzinfo=tz)
+                filters['date_from'] = local_dt.astimezone(timezone.utc).isoformat()
         except Exception:
             # Fallback to original value if parsing fails
             filters['date_from'] = date_from_str
@@ -92,24 +96,20 @@ def _build_filters_from_query_params(query_params: Dict[str, Any], timezone_name
     if date_to_input:
         date_to_str = date_to_input
         try:
-            # Extract the date part (YYYY-MM-DD) and create end of day in UTC
             if 'T' in date_to_str or ' ' in date_to_str:
-                # Has time component, extract date part
-                date_part = date_to_str.split('T')[0].split(' ')[0]
+                # Has time component: parse full ISO, respect provided tz if any; if naive, assume tz
+                try:
+                    dt = datetime.fromisoformat(date_to_str.replace('Z', '+00:00'))
+                except Exception:
+                    dt = datetime.fromisoformat(date_to_str)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=tz)
+                filters['date_to'] = dt.astimezone(timezone.utc).isoformat()
             else:
-                # Date only
-                date_part = date_to_str
-            
-            # Parse the date part to get year, month, day
-            date_parts = date_part.split('-')
-            if len(date_parts) == 3:
-                year, month, day = int(date_parts[0]), int(date_parts[1]), int(date_parts[2])
-                # Create end of day in UTC (no timezone conversion)
-                end_utc = datetime(year, month, day, 23, 59, 59, 999999, tzinfo=timezone.utc)
-                filters['date_to'] = end_utc.isoformat()
-            else:
-                # Fallback: try to parse as-is
-                filters['date_to'] = date_to_str
+                # Date only: interpret as end of day in specified timezone
+                y, m, d = map(int, date_to_str.split('-'))
+                local_dt = datetime(y, m, d, 23, 59, 59, 999999, tzinfo=tz)
+                filters['date_to'] = local_dt.astimezone(timezone.utc).isoformat()
         except Exception:
             # Fallback to original value if parsing fails
             filters['date_to'] = date_to_str
@@ -578,6 +578,8 @@ def _handle_diversion_report(
     sankey_map = {}
     material_table_map = {}
     main_material_ids = set()
+    category_ids = set()
+    category_to_main_map: Dict[int, set] = {}
     # Track unique disposal methods (used instead of destination IDs)
     disposal_methods = set()
     
@@ -585,6 +587,18 @@ def _handle_diversion_report(
     for record in result.get('data', []):
         material = record.get('material') or {}
         main_material_id = material.get('main_material_id') or record.get('main_material_id')
+        # Track category and map to main materials
+        cat_id = material.get('category_id') or record.get('category_id')
+        try:
+            if cat_id is not None:
+                cid_int = int(cat_id)
+                category_ids.add(cid_int)
+                if main_material_id:
+                    if cid_int not in category_to_main_map:
+                        category_to_main_map[cid_int] = set()
+                    category_to_main_map[cid_int].add(main_material_id)
+        except Exception:
+            pass
         
         # Track unique origins
         origin_id = record.get('origin_id')
@@ -652,6 +666,8 @@ def _handle_diversion_report(
     
     # Fetch main material names; disposal methods are already human-readable strings
     main_material_names = _fetch_main_material_names(reports_service.db, main_material_ids)
+    # Fetch category names for materials_data
+    category_names = _fetch_category_names(reports_service.db, category_ids)
     
     # Build sankey_data array
     sankey_data = [["From", "To", "Weight"]]
@@ -693,6 +709,33 @@ def _handle_diversion_report(
             'destination': destination_names_list
         })
     
+    # Build materials_data grouped into two buckets:
+    # - Dangerous Waste: categories 5 and 6
+    # - Non-Dangerous Waste: all other categories
+    danger_cids = {5, 6}
+    dangerous_main_ids = set()
+    non_dangerous_main_ids = set()
+    for cid, mm_set in category_to_main_map.items():
+        if cid in danger_cids:
+            dangerous_main_ids.update(mm_set)
+        else:
+            non_dangerous_main_ids.update(mm_set)
+    def build_main_children(mm_ids: set) -> list:
+        return [
+            {"id": mm_id, "name": main_material_names.get(mm_id, f"Material {mm_id}")}
+            for mm_id in sorted(mm_ids)
+        ]
+    materials_data = [
+        {
+            "category_name": "Dangerous Waste",
+            "main_materials": build_main_children(dangerous_main_ids),
+        },
+        {
+            "category_name": "Non-Dangerous Waste",
+            "main_materials": build_main_children(non_dangerous_main_ids),
+        },
+    ]
+
     return {
         "card_data": {
             "total_origin": len(unique_origins),
@@ -702,6 +745,7 @@ def _handle_diversion_report(
         },
         "sankey_data": sankey_data,
         "material_table": material_table,
+        "materials_data": materials_data,
     }
 
 def _handle_performance_report(
@@ -1804,6 +1848,7 @@ def _handle_export_pdf_report(
     Aggregate data from all report handlers into a single structure
     compatible with scripts/generate_pdf_report.py.
     """
+    print(f"FILTERS: {filters}")
     # Validate date range for comparison and diversion reports
     date_from = filters.get('date_from')
     date_to = filters.get('date_to')
@@ -1918,6 +1963,46 @@ def _handle_export_pdf_report(
             pass
 
     user_display = _display_user_name_from_db(current_user or {})
+    # Resolve profile image URL from UserLocation for header avatar
+    def _profile_image_url_from_db(user: Dict[str, Any]) -> Optional[str]:
+        try:
+            user_id = user.get('id') or user.get('user_id') or user.get('uid')
+            if user_id:
+                row = reports_service.db.query(UserLocation).get(int(user_id))
+                if row:
+                    url = getattr(row, 'profile_image_url', None)
+                    if isinstance(url, str) and url.strip():
+                        return url.strip()
+        except Exception:
+            pass
+        return None
+    profile_img_url = _profile_image_url_from_db(current_user or {})
+    # Generate a viewable URL (presigned if S3) for the profile image
+    profile_img_view_url = None
+    try:
+        if profile_img_url:
+            org_id = current_user.get('organization_id')
+            user_id = current_user.get('id') or current_user.get('user_id') or current_user.get('uid')
+            if org_id and user_id:
+                try:
+                    presigner = TransactionPresignedUrlService()
+                    resp = presigner.get_transaction_file_view_presigned_urls(
+                        file_urls=[profile_img_url],
+                        organization_id=int(org_id),
+                        user_id=int(user_id),
+                        expiration_seconds=3600,
+                        db=reports_service.db
+                    )
+                    if isinstance(resp, dict) and resp.get('success') and resp.get('presigned_urls'):
+                        profile_img_view_url = resp['presigned_urls'][0].get('view_url') or profile_img_url
+                    else:
+                        profile_img_view_url = profile_img_url
+                except Exception:
+                    profile_img_view_url = profile_img_url
+            else:
+                profile_img_view_url = profile_img_url
+    except Exception:
+        profile_img_view_url = profile_img_url
 
     # 4) Resolve location names from origin_ids filter; fallback to "all"
     def _resolve_locations_from_filters(_filters: Dict[str, Any]) -> list[str] | str:
@@ -2021,12 +2106,13 @@ def _handle_export_pdf_report(
             'card_data': diversion.get('card_data', {}),
             'sankey_data': diversion.get('sankey_data', []),
             'material_table': diversion.get('material_table', []),
+            'materials_data': diversion.get('materials_data', []),
         }
 
     data: Dict[str, Any] = {
         # Header data
         'users': user_display,
-        'profile_img': None,
+        'profile_img': profile_img_view_url,
         'location': location_disp,
         'date_from': date_from_disp,
         'date_to': date_to_disp,
