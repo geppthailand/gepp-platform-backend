@@ -238,10 +238,18 @@ def main(event, context):
                         from .services.cores.reports.reports_handlers import handle_reports_routes
 
                         reports_result = handle_reports_routes(event, **commonParams)
-                        results = {
-                            "success": True,
-                            "data": reports_result
-                        }
+                        # If handler returned an API Gateway proxy response (e.g., raw PDF),
+                        # pass it through directly without wrapping.
+                        if isinstance(reports_result, dict) and \
+                           "statusCode" in reports_result and \
+                           "headers" in reports_result and \
+                           "body" in reports_result:
+                            results = reports_result
+                        else:
+                            results = {
+                                "success": True,
+                                "data": reports_result
+                            }
 
                     elif "/api/transactions" in path:
                         # Handle all transaction management routes
@@ -364,13 +372,18 @@ def main(event, context):
                         })
                     }
 
-        return {
-            "statusCode": 200,
-            "headers": {
-                "Content-Type": "application/json",
-            },
-            "body": json.dumps(results),
-        }
+        # If a handler already returned a full proxy response (e.g., PDF binary),
+        # pass it through unmodified. Otherwise, wrap as JSON.
+        if isinstance(results, dict) and "statusCode" in results and "body" in results:
+            return results
+        else:
+            return {
+                "statusCode": 200,
+                "headers": {
+                    "Content-Type": "application/json",
+                },
+                "body": json.dumps(results),
+            }
         
     except Exception as e:
         import traceback

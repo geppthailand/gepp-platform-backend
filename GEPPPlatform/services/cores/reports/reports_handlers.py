@@ -6,12 +6,15 @@ Handles all /api/reports/* routes
 from typing import Dict, Any, Optional, Tuple
 import csv
 import os
+import json
 import ast
 import math
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
+import boto3
 
 from .reports_service import ReportsService
+from ..transactions.presigned_url_service import TransactionPresignedUrlService
 from ....exceptions import APIException, ValidationException, NotFoundException
 from GEPPPlatform.models.cores.references import MainMaterial, MaterialCategory
 from GEPPPlatform.models.users.user_location import UserLocation
@@ -34,24 +37,17 @@ def _build_filters_from_query_params(query_params: Dict[str, Any], timezone_name
     Example: ?material_id=1,2,3&origin_id=10,20
     
     Date handling:
-    - date_from: Set to 00:00:00 of that day
-    - date_to: Set to 23:59:59.999999 of that day
+    - If the incoming value includes a time (ISO with or without timezone), respect it.
+    - If only a date is provided, interpret it in the provided timezone (timezone_name or Asia/Bangkok),
+      setting date_from to start-of-day and date_to to end-of-day in that timezone.
+    - All stored filter values are normalized to UTC ISO strings.
     """
     filters = {}
-    # Determine client timezone
-    tz_param = query_params.get('tz') or query_params.get('timezone')
-    client_tz_name = (tz_param or timezone_name or 'Asia/Bangkok')
+    # Resolve timezone for date-only inputs
     try:
-        client_tz = ZoneInfo(client_tz_name)
+        tz = ZoneInfo(timezone_name or 'Asia/Bangkok')
     except Exception:
-        client_tz = ZoneInfo('UTC')
-        client_tz_name = 'UTC'
-
-    def to_utc_iso(dt: datetime) -> str:
-        # Attach client tz if naive, then convert to UTC and return ISO string
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=client_tz)
-        return dt.astimezone(timezone.utc).isoformat()
+        tz = timezone.utc
     
     # Handle material_id (comma-separated)
     if query_params.get('material_id'):
@@ -73,22 +69,25 @@ def _build_filters_from_query_params(query_params: Dict[str, Any], timezone_name
             # Single ID
             filters['origin_ids'] = [int(origin_ids_str)]
     
-    # Handle date filters with time adjustments (also accept 'datefrom'/'dateto')
+    # Handle date filters (preserve provided times; apply local day bounds for date-only)
     date_from_input = query_params.get('date_from') or query_params.get('datefrom')
     if date_from_input:
         date_from_str = date_from_input
         try:
-            # Parse the date and set to start of day (00:00:00)
             if 'T' in date_from_str or ' ' in date_from_str:
-                # Already has time component, parse as-is then reset to start of day
-                dt = datetime.fromisoformat(date_from_str.replace('Z', '+00:00'))
+                # Has time component: parse full ISO, respect provided tz if any; if naive, assume tz
+                try:
+                    dt = datetime.fromisoformat(date_from_str.replace('Z', '+00:00'))
+                except Exception:
+                    dt = datetime.fromisoformat(date_from_str)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=tz)
+                filters['date_from'] = dt.astimezone(timezone.utc).isoformat()
             else:
-                # Date only, parse and set to start of day
-                dt = datetime.fromisoformat(date_from_str)
-            
-            # Set to start of day (00:00:00)
-            start_local = dt.replace(hour=0, minute=0, second=0, microsecond=0)
-            filters['date_from'] = to_utc_iso(start_local)
+                # Date only: interpret as start of day in specified timezone
+                y, m, d = map(int, date_from_str.split('-'))
+                local_dt = datetime(y, m, d, 0, 0, 0, 0, tzinfo=tz)
+                filters['date_from'] = local_dt.astimezone(timezone.utc).isoformat()
         except Exception:
             # Fallback to original value if parsing fails
             filters['date_from'] = date_from_str
@@ -97,36 +96,31 @@ def _build_filters_from_query_params(query_params: Dict[str, Any], timezone_name
     if date_to_input:
         date_to_str = date_to_input
         try:
-            # Parse the date and set to end of day (23:59:59.999999)
             if 'T' in date_to_str or ' ' in date_to_str:
-                # Already has time component, parse as-is then reset to end of day
-                dt = datetime.fromisoformat(date_to_str.replace('Z', '+00:00'))
+                # Has time component: parse full ISO, respect provided tz if any; if naive, assume tz
+                try:
+                    dt = datetime.fromisoformat(date_to_str.replace('Z', '+00:00'))
+                except Exception:
+                    dt = datetime.fromisoformat(date_to_str)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=tz)
+                filters['date_to'] = dt.astimezone(timezone.utc).isoformat()
             else:
-                # Date only, parse and set to end of day
-                dt = datetime.fromisoformat(date_to_str)
-            
-            # Set to end of day (23:59:59.999999)
-            end_local = dt.replace(hour=23, minute=59, second=59, microsecond=999999)
-            filters['date_to'] = to_utc_iso(end_local)
+                # Date only: interpret as end of day in specified timezone
+                y, m, d = map(int, date_to_str.split('-'))
+                local_dt = datetime(y, m, d, 23, 59, 59, 999999, tzinfo=tz)
+                filters['date_to'] = local_dt.astimezone(timezone.utc).isoformat()
         except Exception:
             # Fallback to original value if parsing fails
             filters['date_to'] = date_to_str
 
-    # For Comparison path
-    if query_params.get('period'):
-        filters['period'] = query_params['period']
-    if query_params.get('leftSelection'):
-        filters['leftSelection'] = query_params['leftSelection']
-    if query_params.get('rightSelection'):
-        filters['rightSelection'] = query_params['rightSelection']
-    
     # Default YTD if no explicit dates provided (first day of current year -> end of today)
     if not filters.get('date_from') and not filters.get('date_to'):
         now_utc = datetime.now(timezone.utc)
-        start_of_year_local = datetime(now_utc.year, 1, 1, 0, 0, 0, 0, tzinfo=client_tz)
-        end_of_today_local = now_utc.astimezone(client_tz).replace(hour=23, minute=59, second=59, microsecond=999999)
-        filters['date_from'] = start_of_year_local.astimezone(timezone.utc).isoformat()
-        filters['date_to'] = end_of_today_local.astimezone(timezone.utc).isoformat()
+        start_of_year_utc = datetime(now_utc.year, 1, 1, 0, 0, 0, 0, tzinfo=timezone.utc)
+        end_of_today_utc = now_utc.replace(hour=23, minute=59, second=59, microsecond=999999)
+        filters['date_from'] = start_of_year_utc.isoformat()
+        filters['date_to'] = end_of_today_utc.isoformat()
 
     # Clamp date range constraints globally:
     # - date_to must not be in the future
@@ -183,67 +177,6 @@ def _parse_datetime(date_str: Optional[str]) -> Optional[datetime]:
         except Exception:
             pass
     return None
-
-
-def _compute_period_range(period: Optional[str], selection: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
-    """Compute ISO date_from/date_to from period and selection.
-    Supports quarters (Q1-Q4), halves (H1/H2 or First/Second Half), and year (YYYY).
-    If year not present in selection, defaults to current year.
-    """
-    if not period or not selection:
-        return None, None
-
-    sel_lower = selection.strip().lower()
-    now = datetime.utcnow()
-    # Extract year if present
-    year = None
-    for token in selection.replace('-', ' ').replace('_', ' ').split():
-        if token.isdigit() and len(token) == 4:
-            try:
-                year = int(token)
-                break
-            except ValueError:
-                pass
-    if year is None:
-        year = now.year
-
-    def month_range(y: int, m_start: int, m_end: int) -> Tuple[str, str]:
-        start = datetime(y, m_start, 1, 0, 0, 0, 0)
-        # compute end as last microsecond of end month
-        if m_end == 12:
-            end_boundary = datetime(y + 1, 1, 1)
-        else:
-            end_boundary = datetime(y, m_end + 1, 1)
-        end = end_boundary - timedelta(microseconds=1)
-        return start.isoformat(), end.isoformat()
-
-    p = (period or '').strip().lower()
-    # Quarter
-    if p in ('3m'):
-        if 'q1' in sel_lower:
-            return month_range(year, 1, 3)
-        if 'q2' in sel_lower:
-            return month_range(year, 4, 6)
-        if 'q3' in sel_lower:
-            return month_range(year, 7, 9)
-        if 'q4' in sel_lower:
-            return month_range(year, 10, 12)
-        return None, None
-
-    # Half-year
-    if p in ('6m'):
-        if 'first' in sel_lower or 'h1' in sel_lower:
-            return month_range(year, 1, 6)
-        if 'second' in sel_lower or 'h2' in sel_lower:
-            return month_range(year, 7, 12)
-        return None, None
-
-    # Year
-    if p in ('12m'):
-        return month_range(year, 1, 12)
-
-    # Unknown period
-    return None, None
 
 
 def _calculate_weight(record: Dict[str, Any], material: Dict[str, Any]) -> float:
@@ -645,6 +578,8 @@ def _handle_diversion_report(
     sankey_map = {}
     material_table_map = {}
     main_material_ids = set()
+    category_ids = set()
+    category_to_main_map: Dict[int, set] = {}
     # Track unique disposal methods (used instead of destination IDs)
     disposal_methods = set()
     
@@ -652,6 +587,18 @@ def _handle_diversion_report(
     for record in result.get('data', []):
         material = record.get('material') or {}
         main_material_id = material.get('main_material_id') or record.get('main_material_id')
+        # Track category and map to main materials
+        cat_id = material.get('category_id') or record.get('category_id')
+        try:
+            if cat_id is not None:
+                cid_int = int(cat_id)
+                category_ids.add(cid_int)
+                if main_material_id:
+                    if cid_int not in category_to_main_map:
+                        category_to_main_map[cid_int] = set()
+                    category_to_main_map[cid_int].add(main_material_id)
+        except Exception:
+            pass
         
         # Track unique origins
         origin_id = record.get('origin_id')
@@ -719,6 +666,8 @@ def _handle_diversion_report(
     
     # Fetch main material names; disposal methods are already human-readable strings
     main_material_names = _fetch_main_material_names(reports_service.db, main_material_ids)
+    # Fetch category names for materials_data
+    category_names = _fetch_category_names(reports_service.db, category_ids)
     
     # Build sankey_data array
     sankey_data = [["From", "To", "Weight"]]
@@ -760,6 +709,33 @@ def _handle_diversion_report(
             'destination': destination_names_list
         })
     
+    # Build materials_data grouped into two buckets:
+    # - Dangerous Waste: categories 5 and 6
+    # - Non-Dangerous Waste: all other categories
+    danger_cids = {5, 6}
+    dangerous_main_ids = set()
+    non_dangerous_main_ids = set()
+    for cid, mm_set in category_to_main_map.items():
+        if cid in danger_cids:
+            dangerous_main_ids.update(mm_set)
+        else:
+            non_dangerous_main_ids.update(mm_set)
+    def build_main_children(mm_ids: set) -> list:
+        return [
+            {"id": mm_id, "name": main_material_names.get(mm_id, f"Material {mm_id}")}
+            for mm_id in sorted(mm_ids)
+        ]
+    materials_data = [
+        {
+            "category_name": "Dangerous Waste",
+            "main_materials": build_main_children(dangerous_main_ids),
+        },
+        {
+            "category_name": "Non-Dangerous Waste",
+            "main_materials": build_main_children(non_dangerous_main_ids),
+        },
+    ]
+
     return {
         "card_data": {
             "total_origin": len(unique_origins),
@@ -769,6 +745,7 @@ def _handle_diversion_report(
         },
         "sankey_data": sankey_data,
         "material_table": material_table,
+        "materials_data": materials_data,
     }
 
 def _handle_performance_report(
@@ -1048,25 +1025,112 @@ def _handle_performance_report(
 def _handle_comparison_report(
     reports_service: ReportsService,
     organization_id: int,
-    filters: Dict[str, Any]
+    filters: Dict[str, Any],
+    client_timezone: Optional[str] = None
 ) -> Dict[str, Any]:
-    """Handle /api/reports/comparison endpoint"""
+    """Handle /api/reports/comparison endpoint
     
-    period = filters.get('period')
-    left_sel = filters.get('leftSelection')
-    right_sel = filters.get('rightSelection')
+    Uses date_from and date_to from filters to define the period.
+    Left side: same period but in the previous year (last_year)
+    Right side: the selected period (date_from to date_to)
+    The period will never exceed 1 year and will never cross years.
+    """
     
-    # Build left and right date ranges
-    left_from, left_to = _compute_period_range(period, left_sel)
-    right_from, right_to = _compute_period_range(period, right_sel)
+    # Get date range from filters (required for comparison)
+    date_from = filters.get('date_from')
+    date_to = filters.get('date_to')
+    
+    if not date_from or not date_to:
+        raise ValidationException("date_from and date_to are required for comparison report")
+    
+    # Parse dates (these are already in UTC format from filter builder)
+    right_from_dt = _parse_datetime(date_from)
+    right_to_dt = _parse_datetime(date_to)
+    
+    if not right_from_dt or not right_to_dt:
+        raise ValidationException("Invalid date_from or date_to format")
+    
+    # Ensure dates are timezone-aware (convert to UTC if needed)
+    if right_from_dt.tzinfo is None:
+        right_from_dt = right_from_dt.replace(tzinfo=timezone.utc)
+    else:
+        right_from_dt = right_from_dt.astimezone(timezone.utc)
+    if right_to_dt.tzinfo is None:
+        right_to_dt = right_to_dt.replace(tzinfo=timezone.utc)
+    else:
+        right_to_dt = right_to_dt.astimezone(timezone.utc)
+    
+    # For validation, we need to check the calendar dates as the user intended them
+    # Convert UTC dates back to client timezone to get the actual calendar dates
+    client_tz_name = client_timezone or 'Asia/Bangkok'
+    try:
+        client_tz = ZoneInfo(client_tz_name)
+    except Exception:
+        client_tz = ZoneInfo('UTC')
+        client_tz_name = 'UTC'
+    
+    # Convert to client timezone to check calendar dates
+    from_local = right_from_dt.astimezone(client_tz)
+    to_local = right_to_dt.astimezone(client_tz)
+    
+    # Extract date portion (YYYY-MM-DD) from client timezone
+    from_date = from_local.date()
+    to_date = to_local.date()
+    
+    # Validate period doesn't exceed 1 year
+    delta_days = (to_date - from_date).days
+    if delta_days > 365:
+        raise ValidationException("Comparison period cannot exceed 1 year")
+    
+    # Check if dates are in the same calendar year (in client timezone)
+    if from_date.year != to_date.year:
+        raise ValidationException("Comparison period cannot cross years")
+    
+    # Calculate left period: same period but in the previous year
+    # Handle leap year edge case (Feb 29 -> Feb 28 in non-leap year)
+    def subtract_year(dt: datetime) -> datetime:
+        try:
+            return dt.replace(year=dt.year - 1)
+        except ValueError:
+            # Handle Feb 29 in leap year -> Feb 28 in non-leap year
+            if dt.month == 2 and dt.day == 29:
+                return dt.replace(year=dt.year - 1, day=28)
+            raise
+    
+    left_from_dt = subtract_year(right_from_dt)
+    left_to_dt = subtract_year(right_to_dt)
+    
+    # Ensure timezone is UTC for left dates
+    if left_from_dt.tzinfo is None:
+        left_from_dt = left_from_dt.replace(tzinfo=timezone.utc)
+    else:
+        left_from_dt = left_from_dt.astimezone(timezone.utc)
+    if left_to_dt.tzinfo is None:
+        left_to_dt = left_to_dt.replace(tzinfo=timezone.utc)
+    else:
+        left_to_dt = left_to_dt.astimezone(timezone.utc)
+    
+    # Convert back to ISO strings in consistent UTC format (+00:00)
+    left_from = left_from_dt.strftime('%Y-%m-%dT%H:%M:%S.%f') + '+00:00'
+    left_to = left_to_dt.strftime('%Y-%m-%dT%H:%M:%S.%f') + '+00:00'
+    # Right dates should already be in UTC format from filters, but ensure consistency
+    right_from = date_from
+    right_to = date_to
 
     def fetch_side(date_from: Optional[str], date_to: Optional[str]) -> Dict[str, Any]:
-        # For comparison, only use period-derived date range; ignore all other filters
+        # Build filters with date range and preserve other filters (material_ids, origin_ids)
         side_filters = {}
         if date_from:
             side_filters['date_from'] = date_from
         if date_to:
             side_filters['date_to'] = date_to
+        
+        # Apply other filters (material_ids, origin_ids) to both sides
+        if filters.get('material_ids'):
+            side_filters['material_ids'] = filters['material_ids']
+        if filters.get('origin_ids'):
+            side_filters['origin_ids'] = filters['origin_ids']
+        
         return reports_service.get_transaction_records_by_organization(
             organization_id=organization_id,
             filters=side_filters if side_filters else None,
@@ -1375,24 +1439,9 @@ def _handle_comparison_report(
 
         return round(normalized, 2)
 
-    def _classify_score_quality(score_0_to_10: float) -> str:
-        # Simple, explainable bands; adjust if product needs different semantics
-        s = float(score_0_to_10)
-        if s < 2.0:
-            return 'very_poor'
-        if s < 4.0:
-            return 'poor'
-        if s < 6.0:
-            return 'fair'
-        if s < 8.0:
-            return 'good'
-        return 'excellent'
-
     for entry in raw_computations:
         raw_value = entry['raw_value']
         normalized_value = _normalize_score_to_ten(raw_value, min_raw_value, max_raw_value)
-        rating = _classify_score_quality(normalized_value)
-        is_good = normalized_value >= 6.0
         computed_scores.append({
             'id': entry['id'],
             'score_name': entry['score_name'],
@@ -1402,8 +1451,6 @@ def _handle_comparison_report(
             'value': normalized_value,
             # Preserve raw value for debugging/analytics
             'raw_value': round(float(raw_value), 2) if math.isfinite(raw_value) else 0.0,
-            'rating': rating,
-            'is_good': is_good,
             'reason': entry['reason']
         })
 
@@ -1748,11 +1795,15 @@ def handle_reports_routes(event: Dict[str, Any], **common_params) -> Dict[str, A
         
         elif path == '/api/reports/comparison':
             filters = _build_filters_from_query_params(query_params, timezone_name=tz_name)
-            return _handle_comparison_report(reports_service, organization_id, filters)
+            return _handle_comparison_report(reports_service, organization_id, filters, client_timezone=tz_name)
 
         elif path == '/api/reports/materials':
             filters = _build_filters_from_query_params(query_params, timezone_name=tz_name)
             return _handle_materials_report(reports_service, organization_id, filters)
+
+        elif path == '/api/reports/export/pdf':
+            filters = _build_filters_from_query_params(query_params, timezone_name=tz_name)
+            return _handle_export_pdf_report(reports_service, organization_id, filters, current_user)
     
     except ValidationException as e:
         raise APIException(str(e), status_code=400, error_code="VALIDATION_ERROR")
@@ -1764,3 +1815,348 @@ def handle_reports_routes(event: Dict[str, Any], **common_params) -> Dict[str, A
             status_code=500,
             error_code="INTERNAL_ERROR"
         )
+
+def _invoke_pdf_lambda(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Invoke the PDF export Lambda with the aggregated payload.
+    Returns a dict with at least {success: bool, pdf_base64?: str, filename?: str, error?: str}
+    """
+    fn_name = os.getenv("PDF_EXPORT_FUNCTION", "DEV-GEPPGenerateV3Report")
+    client = boto3.client("lambda")
+    resp = client.invoke(
+        FunctionName=fn_name,
+        InvocationType="RequestResponse",
+        Payload=json.dumps({"data": payload}).encode("utf-8"),
+    )
+    raw = resp.get("Payload").read()
+    try:
+        out = json.loads(raw)
+        # API Gateway proxy shape
+        if isinstance(out, dict) and "statusCode" in out and "body" in out:
+            return json.loads(out.get("body") or "{}")
+        return out if isinstance(out, dict) else {"success": False, "error": "Unexpected Lambda response"}
+    except Exception:
+        return {"success": False, "error": "Invalid Lambda response"}
+
+def _handle_export_pdf_report(
+    reports_service: ReportsService,
+    organization_id: int,
+    filters: Dict[str, Any],
+    current_user: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    Aggregate data from all report handlers into a single structure
+    compatible with scripts/generate_pdf_report.py.
+    """
+    print(f"FILTERS: {filters}")
+    # Validate date range for comparison and diversion reports
+    date_from = filters.get('date_from')
+    date_to = filters.get('date_to')
+    
+    if date_from and date_to:
+        try:
+            # Parse dates
+            from_dt = _parse_datetime(date_from)
+            to_dt = _parse_datetime(date_to)
+            
+            if from_dt and to_dt:
+                # Ensure dates are timezone-aware
+                if from_dt.tzinfo is None:
+                    from_dt = from_dt.replace(tzinfo=timezone.utc)
+                else:
+                    from_dt = from_dt.astimezone(timezone.utc)
+                if to_dt.tzinfo is None:
+                    to_dt = to_dt.replace(tzinfo=timezone.utc)
+                else:
+                    to_dt = to_dt.astimezone(timezone.utc)
+                
+                # Convert to client timezone for validation
+                export_tz = current_user.get('timezone') or 'Asia/Bangkok'
+                try:
+                    client_tz = ZoneInfo(export_tz)
+                except Exception:
+                    client_tz = ZoneInfo('UTC')
+                
+                from_local = from_dt.astimezone(client_tz)
+                to_local = to_dt.astimezone(client_tz)
+                
+                from_date = from_local.date()
+                to_date = to_local.date()
+                
+                # Validate period doesn't exceed 1 year
+                delta_days = (to_date - from_date).days
+                date_error = None
+                if delta_days > 365:
+                    date_error = 'Please select valid date range. The date range must be within a single year and not exceed 365 days'
+                elif from_date.year != to_date.year:
+                    # Check if dates are in the same calendar year
+                    date_error = 'Please select valid date range. The date range must be within a single year and not exceed 365 days'
+                
+                if date_error:
+                    # Set error flags to render error message in PDF
+                    diversion = {'error': date_error}
+                    comparison = {'error': date_error}
+                else:
+                    # Dates are valid, will fetch data below
+                    diversion = None
+                    comparison = None
+            else:
+                diversion = None
+                comparison = None
+        except Exception:
+            # If validation fails, continue - let the handlers validate
+            diversion = None
+            comparison = None
+    else:
+        diversion = None
+        comparison = None
+    
+    # 1) Pull data from the existing handlers/services
+    overview = _handle_overview_report(reports_service, organization_id, filters)
+    performance = _handle_performance_report(reports_service, organization_id, filters)
+    materials = _handle_materials_report(reports_service, organization_id, filters)
+    
+    # Get diversion and comparison data if not already set with error
+    if diversion is None:
+        try:
+            diversion = _handle_diversion_report(reports_service, organization_id, filters)
+        except ValidationException as e:
+            diversion = {'error': 'Please select valid date range. The date range must be within a single year and not exceed 365 days'}
+    
+    export_tz = current_user.get('timezone') or 'Asia/Bangkok'
+    if comparison is None:
+        try:
+            comparison = _handle_comparison_report(reports_service, organization_id, filters, client_timezone=export_tz)
+        except ValidationException as e:
+            comparison = {'error': 'Please select valid date range. The date range must be within a single year and not exceed 365 days'}
+
+    # 2) Format display dates like "01 Jan 2025" in client timezone
+    def _fmt_display_date_tz(iso_str: Optional[str], tz_name: Optional[str]) -> str:
+        dt = _parse_datetime(iso_str)
+        if not dt:
+            return str(iso_str or "")
+        try:
+            # Determine client timezone (fallback Asia/Bangkok)
+            tz = ZoneInfo(tz_name or current_user.get('timezone') or 'Asia/Bangkok')
+            # Convert to client timezone for display
+            local_dt = dt.astimezone(tz)
+            return local_dt.strftime("%d %b %Y")
+        except Exception:
+            return dt.isoformat()
+
+    client_tz_name = (current_user.get('timezone') or 'Asia/Bangkok')
+    date_from_disp = _fmt_display_date_tz(filters.get('date_from'), client_tz_name)
+    date_to_disp = _fmt_display_date_tz(filters.get('date_to'), client_tz_name)
+
+    # 3) Resolve display user name from UserLocation (by current user id)
+    def _display_user_name_from_db(user: Dict[str, Any]) -> str:
+        try:
+            user_id = user.get('id') or user.get('user_id') or user.get('uid')
+            if user_id:
+                row = reports_service.db.query(UserLocation).get(int(user_id))
+                if row:
+                    for key in ('display_name', 'name_en', 'name_th', 'username', 'email'):
+                        val = getattr(row, key, None)
+                        if isinstance(val, str) and val.strip():
+                            return val.strip()
+        except Exception:
+            pass
+
+    user_display = _display_user_name_from_db(current_user or {})
+    # Resolve profile image URL from UserLocation for header avatar
+    def _profile_image_url_from_db(user: Dict[str, Any]) -> Optional[str]:
+        try:
+            user_id = user.get('id') or user.get('user_id') or user.get('uid')
+            if user_id:
+                row = reports_service.db.query(UserLocation).get(int(user_id))
+                if row:
+                    url = getattr(row, 'profile_image_url', None)
+                    if isinstance(url, str) and url.strip():
+                        return url.strip()
+        except Exception:
+            pass
+        return None
+    profile_img_url = _profile_image_url_from_db(current_user or {})
+    # Generate a viewable URL (presigned if S3) for the profile image
+    profile_img_view_url = None
+    try:
+        if profile_img_url:
+            org_id = current_user.get('organization_id')
+            user_id = current_user.get('id') or current_user.get('user_id') or current_user.get('uid')
+            if org_id and user_id:
+                try:
+                    presigner = TransactionPresignedUrlService()
+                    resp = presigner.get_transaction_file_view_presigned_urls(
+                        file_urls=[profile_img_url],
+                        organization_id=int(org_id),
+                        user_id=int(user_id),
+                        expiration_seconds=3600,
+                        db=reports_service.db
+                    )
+                    if isinstance(resp, dict) and resp.get('success') and resp.get('presigned_urls'):
+                        profile_img_view_url = resp['presigned_urls'][0].get('view_url') or profile_img_url
+                    else:
+                        profile_img_view_url = profile_img_url
+                except Exception:
+                    profile_img_view_url = profile_img_url
+            else:
+                profile_img_view_url = profile_img_url
+    except Exception:
+        profile_img_view_url = profile_img_url
+
+    # 4) Resolve location names from origin_ids filter; fallback to "all"
+    def _resolve_locations_from_filters(_filters: Dict[str, Any]) -> list[str] | str:
+        origin_ids = _filters.get('origin_ids') or []
+        if not origin_ids:
+            return "all"
+        try:
+            origins_result = reports_service.get_origin_by_organization(organization_id=organization_id)
+            name_map = {
+                o.get('id'): (o.get('display_name') or o.get('name_en') or o.get('name_th'))
+                for o in origins_result.get('data', [])
+            }
+            names = [name_map.get(oid, f"Location {oid}") for oid in origin_ids]
+            names = [n for n in names if n]
+            return names or "all"
+        except Exception:
+            return "all"
+
+    location_disp = _resolve_locations_from_filters(filters or {})
+
+    # 5) Map materials handler keys to the generator's expected keys
+    main_materials_data = {
+        # keep original typo 'porportions' to match generator
+        'porportions': (materials.get('main_material') or {}).get('porportions', []),
+        'total_waste': (materials.get('main_material') or {}).get('total_waste', 0.0),
+    }
+    sub_materials_data = {
+        'porportions': (materials.get('sub_material') or {}).get('porportions', []),
+        'porportions_grouped': (materials.get('sub_material') or {}).get('porportions_grouped', {}),
+        'total_waste': (materials.get('sub_material') or {}).get('total_waste', 0.0),
+    }
+
+    # 6) Build the unified payload
+    # Handle comparison data - check for errors first
+    if comparison.get('error'):
+        # If there's an error, create error structure for PDF rendering
+        comparison_data = {
+            'error': comparison.get('error'),
+            'left': {},
+            'right': {},
+            'scores': {}
+        }
+    else:
+        # Build comparison data with date ranges instead of periods
+        _left_dict = comparison.get('left', {}) or {}
+        _right_dict = comparison.get('right', {}) or {}
+        
+        # Calculate date ranges for left (last year) and right (current period)
+        date_from = filters.get('date_from')
+        date_to = filters.get('date_to')
+        
+        # Format date ranges for display
+        if date_from and date_to:
+            right_from_dt = _parse_datetime(date_from)
+            right_to_dt = _parse_datetime(date_to)
+            
+            if right_from_dt and right_to_dt:
+                # Convert to client timezone for display
+                export_tz = current_user.get('timezone') or 'Asia/Bangkok'
+                try:
+                    client_tz = ZoneInfo(export_tz)
+                except Exception:
+                    client_tz = ZoneInfo('UTC')
+                
+                # Right period dates (current)
+                right_from_local = right_from_dt.astimezone(client_tz)
+                right_to_local = right_to_dt.astimezone(client_tz)
+                _right_period = f"{right_from_local.strftime('%d %b %Y')} - {right_to_local.strftime('%d %b %Y')}"
+                
+                # Left period dates (last year - same calendar dates)
+                left_from_dt = right_from_dt.replace(year=right_from_dt.year - 1)
+                left_to_dt = right_to_dt.replace(year=right_to_dt.year - 1)
+                left_from_local = left_from_dt.astimezone(client_tz)
+                left_to_local = left_to_dt.astimezone(client_tz)
+                _left_period = f"{left_from_local.strftime('%d %b %Y')} - {left_to_local.strftime('%d %b %Y')}"
+            else:
+                _left_period = "Last Year"
+                _right_period = "Current Period"
+        else:
+            _left_period = "Last Year"
+            _right_period = "Current Period"
+        
+        _left_with_period = dict(_left_dict, period=_left_period)
+        _right_with_period = dict(_right_dict, period=_right_period)
+        comparison_data = {
+            'left': _left_with_period,
+            'right': _right_with_period,
+            'scores': comparison.get('scores', {}),
+        }
+    
+    # Handle diversion data - check for errors
+    if diversion.get('error'):
+        diversion_data = {
+            'error': diversion.get('error'),
+            'card_data': {},
+            'sankey_data': [],
+            'material_table': []
+        }
+    else:
+        diversion_data = {
+            'card_data': diversion.get('card_data', {}),
+            'sankey_data': diversion.get('sankey_data', []),
+            'material_table': diversion.get('material_table', []),
+            'materials_data': diversion.get('materials_data', []),
+        }
+
+    data: Dict[str, Any] = {
+        # Header data
+        'users': user_display,
+        'profile_img': profile_img_view_url,
+        'location': location_disp,
+        'date_from': date_from_disp,
+        'date_to': date_to_disp,
+
+        # Overview
+        'overview_data': {
+            'transactions_total': overview.get('transactions_total', 0),
+            'transactions_approved': overview.get('transactions_approved', 0),
+            'key_indicators': overview.get('key_indicators', {}),
+            'top_recyclables': overview.get('top_recyclables', []),
+            'overall_charts': overview.get('overall_charts', {}),
+        },
+        # Optional, not strictly required by renderer but present in example
+        'waste_type_proportions': overview.get('waste_type_proportions', []),
+        'material_summary': [],
+
+        # Performance (hierarchical org performance list)
+        'performance_data': performance.get('data', []),
+
+        # Comparison
+        'comparison_data': comparison_data,
+
+        # Materials breakdown pages
+        'main_materials_data': main_materials_data,
+        'sub_materials_data': sub_materials_data,
+
+        # Diversion (sankey + materials monthly table)
+        'diversion_data': diversion_data,
+    }
+
+    # Generate PDF via Lambda (primary path), fallback to local render if Lambda fails
+    lambda_result = _invoke_pdf_lambda(data)
+    if not lambda_result.get('success'):
+        raise APIException(f"PDF Lambda error: {lambda_result.get('error')}", status_code=500, error_code="PDF_ERROR")
+    pdf_b64 = lambda_result.get('pdf_base64')
+    filename = lambda_result.get('filename') or f"report_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.pdf"
+
+    # Return as downloadable PDF (API Gateway binary proxy response)
+    return {
+        "statusCode": 200,
+        "headers": {
+            "Content-Type": "application/pdf",
+            "Content-Disposition": f'attachment; filename="{filename}"'
+        },
+        "isBase64Encoded": True,
+        "body": pdf_b64 or ""
+    }

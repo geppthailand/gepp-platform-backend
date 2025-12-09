@@ -47,6 +47,14 @@ class ReportsService:
             Dict with transaction records data and metadata
         """
         try:
+            # Print input parameters
+            print(
+                f"get_transaction_records_by_organization called - "
+                f"organization_id: {organization_id}, "
+                f"report_type: {report_type}, "
+                f"filters: {filters}"
+            )
+            
             # Base query: Join transaction_records with transactions
             query = self.db.query(TransactionRecord).join(
                 Transaction,
@@ -57,19 +65,28 @@ class ReportsService:
                 Transaction.status != TransactionStatus.rejected
             )
             
+            # Track applied filters for logging
+            applied_filters = {}
+            
             # Apply additional filters if provided
             if filters:
                 # Filter by material_ids (supports multiple)
                 if filters.get('material_ids'):
                     query = query.filter(TransactionRecord.material_id.in_(filters['material_ids']))
+                    applied_filters['material_ids'] = filters['material_ids']
                 
                 # Filter by origin_ids (supports multiple)
                 if filters.get('origin_ids'):
                     query = query.filter(Transaction.origin_id.in_(filters['origin_ids']))
+                    applied_filters['origin_ids'] = filters['origin_ids']
                 
                 # Filter by date range
                 date_from = filters.get('date_from')
                 date_to = filters.get('date_to')
+                if date_from:
+                    applied_filters['date_from'] = date_from
+                if date_to:
+                    applied_filters['date_to'] = date_to
                 if report_type == 'comparison':
                     # For comparison, use provided range as-is, no clamping
                     if date_from:
@@ -106,6 +123,12 @@ class ReportsService:
                                 query = query.filter(TransactionRecord.transaction_date <= parsed.isoformat() if isinstance(date_to, str) else parsed)
                             except Exception:
                                 query = query.filter(TransactionRecord.transaction_date <= date_to)
+            
+            # Print applied filters before executing query
+            if applied_filters:
+                print(
+                    f"Applied filters for organization_id {organization_id}: {applied_filters}"
+                )
             
             # Execute query
             transaction_records = query.all()
@@ -195,6 +218,26 @@ class ReportsService:
                 
                 records_data.append(record_dict)
             
+            # Prepare result summary for logging
+            result_summary = {
+                'organization_id': organization_id,
+                'report_type': report_type,
+                'total_records': len(records_data),
+                'transactions_total': transactions_total,
+                'transactions_approved': transactions_approved,
+                'filters_applied': applied_filters if applied_filters else None
+            }
+            
+            # Print results
+            print(
+                f"get_transaction_records_by_organization results - "
+                f"organization_id: {organization_id}, "
+                f"report_type: {report_type}, "
+                f"total_records: {len(records_data)}, "
+                f"transactions_total: {transactions_total}, "
+                f"transactions_approved: {transactions_approved}"
+            )
+            
             return {
                 'success': True,
                 'data': records_data,
@@ -227,9 +270,9 @@ class ReportsService:
         """
 
         try:
-            # If date filters provided, restrict origins to those that appear in transactions within the range
-            origin_ids_in_range: Optional[set] = None
-            if filters and (filters.get('date_from') or filters.get('date_to')):
+            # Determine origin ids that match provided filters (date range and/or material_ids)
+            origin_ids_filtered: Optional[set] = None
+            if filters and (filters.get('date_from') or filters.get('date_to') or filters.get('material_ids')):
                 tr_query = self.db.query(Transaction.origin_id).join(
                     TransactionRecord,
                     TransactionRecord.created_transaction_id == Transaction.id
@@ -238,38 +281,48 @@ class ReportsService:
                     TransactionRecord.is_active == True,
                     Transaction.status != TransactionStatus.rejected
                 )
-                # Clamp and apply date range
+                # Apply material filter if present
+                material_ids = (filters.get('material_ids') or [])
+                if material_ids:
+                    try:
+                        mids = [int(m) for m in material_ids]
+                        if mids:
+                            tr_query = tr_query.filter(TransactionRecord.material_id.in_(mids))
+                    except Exception:
+                        pass
+                # Clamp and apply date range if provided
                 date_from = filters.get('date_from')
                 date_to = filters.get('date_to')
-                try:
-                    MAX_DAYS = 365 * 3
-                    now = datetime.now(timezone.utc)
-                    end_of_today = now.replace(hour=23, minute=59, second=59, microsecond=999999)
-                    df = datetime.fromisoformat(date_from) if isinstance(date_from, str) else date_from
-                    dt = datetime.fromisoformat(date_to) if isinstance(date_to, str) else date_to
-                    if dt and dt > end_of_today:
-                        dt = end_of_today
-                    if df and dt and (dt - df).days > MAX_DAYS:
-                        df = dt - timedelta(days=MAX_DAYS)
-                    if df:
-                        tr_query = tr_query.filter(TransactionRecord.transaction_date >= df.isoformat() if isinstance(date_from, str) else df)
-                    if dt:
-                        tr_query = tr_query.filter(TransactionRecord.transaction_date <= dt.isoformat() if isinstance(date_to, str) else dt)
-                except Exception:
-                    if date_from:
-                        tr_query = tr_query.filter(TransactionRecord.transaction_date >= date_from)
-                    if date_to:
-                        try:
-                            parsed = datetime.fromisoformat(date_to) if isinstance(date_to, str) else date_to
-                            now = datetime.now(timezone.utc)
-                            end_of_today = now.replace(hour=23, minute=59, second=59, microsecond=999999)
-                            if parsed and parsed > end_of_today:
-                                parsed = end_of_today
-                            tr_query = tr_query.filter(TransactionRecord.transaction_date <= parsed.isoformat() if isinstance(date_to, str) else parsed)
-                        except Exception:
-                            tr_query = tr_query.filter(TransactionRecord.transaction_date <= date_to)
+                if date_from or date_to:
+                    try:
+                        MAX_DAYS = 365 * 3
+                        now = datetime.now(timezone.utc)
+                        end_of_today = now.replace(hour=23, minute=59, second=59, microsecond=999999)
+                        df = datetime.fromisoformat(date_from) if isinstance(date_from, str) else date_from
+                        dt = datetime.fromisoformat(date_to) if isinstance(date_to, str) else date_to
+                        if dt and dt > end_of_today:
+                            dt = end_of_today
+                        if df and dt and (dt - df).days > MAX_DAYS:
+                            df = dt - timedelta(days=MAX_DAYS)
+                        if df:
+                            tr_query = tr_query.filter(TransactionRecord.transaction_date >= (df.isoformat() if isinstance(date_from, str) else df))
+                        if dt:
+                            tr_query = tr_query.filter(TransactionRecord.transaction_date <= (dt.isoformat() if isinstance(date_to, str) else dt))
+                    except Exception:
+                        if date_from:
+                            tr_query = tr_query.filter(TransactionRecord.transaction_date >= date_from)
+                        if date_to:
+                            try:
+                                parsed = datetime.fromisoformat(date_to) if isinstance(date_to, str) else date_to
+                                now = datetime.now(timezone.utc)
+                                end_of_today = now.replace(hour=23, minute=59, second=59, microsecond=999999)
+                                if parsed and parsed > end_of_today:
+                                    parsed = end_of_today
+                                tr_query = tr_query.filter(TransactionRecord.transaction_date <= (parsed.isoformat() if isinstance(date_to, str) else parsed))
+                            except Exception:
+                                tr_query = tr_query.filter(TransactionRecord.transaction_date <= date_to)
                 rows = tr_query.distinct().all()
-                origin_ids_in_range = {row[0] for row in rows if row and row[0] is not None}
+                origin_ids_filtered = {row[0] for row in rows if row and row[0] is not None}
 
             # Base origins query
             query = self.db.query(UserLocation).filter(
@@ -278,11 +331,11 @@ class ReportsService:
                 UserLocation.is_location == True,
                 UserLocation.type.notin_(['hub', 'hub-main'])
             )
-            if origin_ids_in_range is not None:
-                if not origin_ids_in_range:
+            if origin_ids_filtered is not None:
+                if not origin_ids_filtered:
                     origins = []
                 else:
-                    query = query.filter(UserLocation.id.in_(list(origin_ids_in_range)))
+                    query = query.filter(UserLocation.id.in_(list(origin_ids_filtered)))
                     origins = query.all()
             else:
                 origins = query.all()
@@ -330,8 +383,27 @@ class ReportsService:
                 TransactionRecord.is_active == True,
                 Transaction.status != TransactionStatus.rejected
             )
-            # Apply optional date range filter (clamped)
+            # Apply optional filters
             if filters:
+                # Origin filter: restrict to specific origins if provided
+                origin_ids = (filters.get('origin_ids') or [])
+                if origin_ids:
+                    try:
+                        oids = [int(o) for o in origin_ids]
+                        if oids:
+                            transaction_records_query = transaction_records_query.filter(Transaction.origin_id.in_(oids))
+                    except Exception:
+                        pass
+                # Material filter (optional intersection)
+                material_ids = (filters.get('material_ids') or [])
+                if material_ids:
+                    try:
+                        mids = [int(m) for m in material_ids]
+                        if mids:
+                            transaction_records_query = transaction_records_query.filter(TransactionRecord.material_id.in_(mids))
+                    except Exception:
+                        pass
+                # Date range filter (clamped)
                 date_from = filters.get('date_from')
                 date_to = filters.get('date_to')
                 try:
