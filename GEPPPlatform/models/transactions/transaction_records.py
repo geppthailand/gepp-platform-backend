@@ -43,6 +43,7 @@ class TransactionRecord(Base, BaseModel):
     images = Column(JSONB, nullable=False, default=[])  # Array of image URLs/paths
 
     # Location tracking
+    destination_id = Column(BigInteger, ForeignKey('user_locations.id'), nullable=True)
     origin_coordinates = Column(JSONB)  # {lat: float, lng: float}
     destination_coordinates = Column(JSONB)  # {lat: float, lng: float}
 
@@ -77,6 +78,7 @@ class TransactionRecord(Base, BaseModel):
     currency = relationship("Currency")
     created_by = relationship("UserLocation", foreign_keys=[created_by_id])
     approved_by = relationship("UserLocation", foreign_keys=[approved_by_id])
+    destination = relationship("UserLocation", foreign_keys=[destination_id])
     # Note: Using JSONB 'images' field for storing S3 URLs instead of relationship
     def calculate_total_value(self):
         """Calculate total value based on quantity and unit price"""

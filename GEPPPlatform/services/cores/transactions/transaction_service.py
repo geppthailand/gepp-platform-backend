@@ -60,7 +60,7 @@ class TransactionService:
                 status=TransactionStatus(transaction_data.get('status', 'pending')),
                 organization_id=transaction_data.get('organization_id'),
                 origin_id=transaction_data.get('origin_id'),
-                destination_id=transaction_data.get('destination_id'),
+                destination_ids=[],  # Will be populated from transaction records
                 transaction_date=transaction_data.get('transaction_date', datetime.now()),
                 arrival_date=transaction_data.get('arrival_date'),
                 origin_coordinates=transaction_data.get('origin_coordinates'),
@@ -82,6 +82,7 @@ class TransactionService:
 
             # Create transaction records if provided
             transaction_record_ids = []
+            destination_ids = []
             if transaction_records_data:
                 for record_data in transaction_records_data:
                     record_result = self._create_transaction_record(
@@ -90,6 +91,8 @@ class TransactionService:
                     )
                     if record_result['success']:
                         transaction_record_ids.append(record_result['transaction_record'].id)
+                        # Collect destination_id from each record (in same order as records)
+                        destination_ids.append(record_data.get('destination_id'))
                     else:
                         # Rollback transaction if any record fails
                         self.db.rollback()
@@ -99,8 +102,9 @@ class TransactionService:
                             'errors': record_result.get('errors', [])
                         }
 
-            # Update transaction with record IDs and calculated totals
+            # Update transaction with record IDs, destination_ids, and calculated totals
             transaction.transaction_records = transaction_record_ids
+            transaction.destination_ids = destination_ids
             self._calculate_transaction_totals(transaction)
 
             # Handle file uploads if provided
@@ -165,10 +169,9 @@ class TransactionService:
             Dict with success status and transaction data
         """
         try:
-            # Eager load location relationships
+            # Eager load location relationships (destination_ids is an array, no relationship)
             transaction = self.db.query(Transaction).options(
-                joinedload(Transaction.origin),
-                joinedload(Transaction.destination)
+                joinedload(Transaction.origin)
             ).filter(
                 Transaction.id == transaction_id,
                 Transaction.is_active == True
@@ -184,10 +187,11 @@ class TransactionService:
             transaction_dict = self._transaction_to_dict(transaction)
 
             if include_records:
-                # Get transaction records with eager loading of material and category
+                # Get transaction records with eager loading of material, category, and destination
                 records = self.db.query(TransactionRecord).options(
                     joinedload(TransactionRecord.material),
-                    joinedload(TransactionRecord.category)
+                    joinedload(TransactionRecord.category),
+                    joinedload(TransactionRecord.destination)
                 ).filter(
                     TransactionRecord.created_transaction_id == transaction_id,
                     TransactionRecord.is_active == True
@@ -269,7 +273,8 @@ class TransactionService:
             if origin_id:
                 query = query.filter(Transaction.origin_id == origin_id)
             if destination_id:
-                query = query.filter(Transaction.destination_id == destination_id)
+                # Filter by destination_id in the destination_ids array
+                query = query.filter(Transaction.destination_ids.any(destination_id))
 
             # Search filter - search in notes and transaction ID
             if search:
@@ -361,8 +366,12 @@ class TransactionService:
 
                     if include_records:
                         logger.info(f"Including records for transaction {transaction.id}")
-                        # Get transaction records
-                        records = self.db.query(TransactionRecord).filter(
+                        # Get transaction records with eager loading of destination
+                        records = self.db.query(TransactionRecord).options(
+                            joinedload(TransactionRecord.material),
+                            joinedload(TransactionRecord.category),
+                            joinedload(TransactionRecord.destination)
+                        ).filter(
                             TransactionRecord.created_transaction_id == transaction.id,
                             TransactionRecord.is_active == True
                         ).all()
@@ -445,7 +454,7 @@ class TransactionService:
 
             # Update allowed fields
             updatable_fields = [
-                'transaction_method', 'status', 'destination_id', 'arrival_date',
+                'transaction_method', 'status', 'destination_ids', 'arrival_date',
                 'destination_coordinates', 'notes', 'images', 'vehicle_info',
                 'driver_info', 'hazardous_level', 'treatment_method', 'disposal_method'
             ]
@@ -614,6 +623,7 @@ class TransactionService:
                 currency_id=record_data.get('currency_id'),
                 notes=record_data.get('notes'),
                 images=record_data.get('images', []),
+                destination_id=record_data.get('destination_id'),
                 origin_coordinates=record_data.get('origin_coordinates'),
                 destination_coordinates=record_data.get('destination_coordinates'),
                 hazardous_level=record_data.get('hazardous_level', 0),
@@ -701,14 +711,7 @@ class TransactionService:
             if not origin:
                 errors.append('Origin location not found or inactive')
 
-        # Validate destination location exists (if provided)
-        if data.get('destination_id'):
-            destination = self.db.query(UserLocation).filter(
-                UserLocation.id == data['destination_id'],
-                UserLocation.is_active == True
-            ).first()
-            if not destination:
-                errors.append('Destination location not found or inactive')
+        # Note: destination_ids is populated from transaction records, no validation needed here
 
         return errors
 
@@ -804,15 +807,6 @@ class TransactionService:
                 'display_name': transaction.origin.display_name if hasattr(transaction.origin, 'display_name') else None
             }
 
-        destination_location = None
-        if hasattr(transaction, 'destination') and transaction.destination:
-            destination_location = {
-                'id': transaction.destination.id,
-                'name_en': transaction.destination.name_en if hasattr(transaction.destination, 'name_en') else None,
-                'name_th': transaction.destination.name_th if hasattr(transaction.destination, 'name_th') else None,
-                'display_name': transaction.destination.display_name if hasattr(transaction.destination, 'display_name') else None
-            }
-
         return {
             'id': transaction.id,
             'transaction_records': transaction.transaction_records,
@@ -820,9 +814,8 @@ class TransactionService:
             'status': transaction.status.value if transaction.status else None,
             'organization_id': transaction.organization_id,
             'origin_id': transaction.origin_id,
-            'destination_id': transaction.destination_id,
+            'destination_ids': transaction.destination_ids if hasattr(transaction, 'destination_ids') else [],
             'origin_location': origin_location,
-            'destination_location': destination_location,
             'weight_kg': float(transaction.weight_kg) if transaction.weight_kg else 0,
             'total_amount': float(transaction.total_amount) if transaction.total_amount else 0,
             'transaction_date': transaction.transaction_date.isoformat() if transaction.transaction_date else None,
@@ -868,6 +861,16 @@ class TransactionService:
                 'name_th': record.category.name_th if hasattr(record.category, 'name_th') else None
             }
 
+        # Include destination object if available
+        destination = None
+        if hasattr(record, 'destination') and record.destination:
+            destination = {
+                'id': record.destination.id,
+                'name_en': record.destination.name_en if hasattr(record.destination, 'name_en') else None,
+                'name_th': record.destination.name_th if hasattr(record.destination, 'name_th') else None,
+                'display_name': record.destination.display_name if hasattr(record.destination, 'display_name') else None
+            }
+
         return {
             'id': record.id,
             'status': record.status,
@@ -888,6 +891,8 @@ class TransactionService:
             'currency_id': record.currency_id,
             'notes': record.notes,
             'images': record.images,
+            'destination_id': record.destination_id,
+            'destination': destination,
             'origin_coordinates': record.origin_coordinates,
             'destination_coordinates': record.destination_coordinates,
             'hazardous_level': record.hazardous_level,

@@ -411,7 +411,7 @@ class ManualAuditService:
             'status': transaction.status.value if hasattr(transaction.status, 'value') else str(transaction.status),
             'organization_id': transaction.organization_id,
             'origin_id': transaction.origin_id,
-            'destination_id': transaction.destination_id,
+            'destination_ids': transaction.destination_ids if hasattr(transaction, 'destination_ids') else [],
             'weight_kg': float(transaction.weight_kg) if transaction.weight_kg else 0.0,
             'total_amount': float(transaction.total_amount) if transaction.total_amount else 0.0,
             'transaction_date': transaction.transaction_date.isoformat() if transaction.transaction_date else None,

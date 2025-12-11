@@ -76,7 +76,7 @@ class Transaction(Base, BaseModel):
     # Organization and locations
     organization_id = Column(BigInteger, ForeignKey('organizations.id'), nullable=True)
     origin_id = Column(BigInteger, ForeignKey('user_locations.id'), nullable=True)
-    destination_id = Column(BigInteger, ForeignKey('user_locations.id'), nullable=True)
+    destination_ids = Column(ARRAY(BigInteger), nullable=False, default=[])  # Array of destination IDs matching transaction_records positions
     location_tag_id = Column(BigInteger, nullable=True)
     ext_id_1 = Column(String(50), nullable=True)
     ext_id_2 = Column(String(50), nullable=True)
@@ -125,7 +125,7 @@ class Transaction(Base, BaseModel):
     # Relationships
     organization = relationship("Organization")
     origin = relationship("UserLocation", foreign_keys=[origin_id])
-    destination = relationship("UserLocation", foreign_keys=[destination_id])
+    # Note: destination_ids is an array, no relationship - use destination_id on transaction_records for individual destinations
     created_by = relationship("UserLocation", foreign_keys=[created_by_id])
     updated_by = relationship("UserLocation", foreign_keys=[updated_by_id])
     approved_by = relationship("UserLocation", foreign_keys=[approved_by_id])
