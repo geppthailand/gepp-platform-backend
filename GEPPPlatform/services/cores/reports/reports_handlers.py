@@ -2143,20 +2143,6 @@ def _handle_export_pdf_report(
         'diversion_data': diversion_data,
     }
 
-    # Generate PDF via Lambda (primary path), fallback to local render if Lambda fails
-    lambda_result = _invoke_pdf_lambda(data)
-    if not lambda_result.get('success'):
-        raise APIException(f"PDF Lambda error: {lambda_result.get('error')}", status_code=500, error_code="PDF_ERROR")
-    pdf_b64 = lambda_result.get('pdf_base64')
-    filename = lambda_result.get('filename') or f"report_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.pdf"
-
-    # Return as downloadable PDF (API Gateway binary proxy response)
-    return {
-        "statusCode": 200,
-        "headers": {
-            "Content-Type": "application/pdf",
-            "Content-Disposition": f'attachment; filename="{filename}"'
-        },
-        "isBase64Encoded": True,
-        "body": pdf_b64 or ""
-    }
+    # Generate PDF via Lambda hub (routes to reports export function)
+    from ..pdf_export_hub import generate_pdf_via_lambda
+    return generate_pdf_via_lambda(data, export_type="reports", default_filename_prefix="report")
