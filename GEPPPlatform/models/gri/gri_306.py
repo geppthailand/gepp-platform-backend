@@ -18,6 +18,7 @@ class Gri306_1(Base, BaseModel):
     onsite = Column(Boolean)
     weight = Column(Numeric)
     description = Column(Text)
+    value_chain_position = Column(Text)
     record_year = Column(String(20))
     organization = Column(BigInteger, ForeignKey('organizations.id'))
     created_by = Column(BigInteger, ForeignKey('user_locations.id'))
@@ -61,9 +62,8 @@ class Gri306Export(Base, BaseModel):
     """
     __tablename__ = 'gri306_export'
 
-    version = Column(Integer)
+    version = Column(String(255))  # Changed from Integer to String to support version names like "Test 1"
     export_file_url = Column(Text)
     record_year = Column(String(20))
     organization = Column(BigInteger, ForeignKey('organizations.id'))
     created_by = Column(BigInteger, ForeignKey('user_locations.id'))
-
