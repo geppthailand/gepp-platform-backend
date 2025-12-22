@@ -10,7 +10,8 @@ from datetime import datetime
 from .gri_service import GriService
 from ....exceptions import (
     APIException,
-    BadRequestException
+    BadRequestException,
+    NotFoundException
 )
 
 logger = logging.getLogger(__name__)
@@ -110,12 +111,22 @@ def handle_gri_routes(event: Dict[str, Any], **params) -> Dict[str, Any]:
                 # Prefer display_name, fallback to name_en or name_th
                 creator_name = display_name or name_en or name_th
                 
+                # Generate presigned URL for export file if URL exists (same pattern as profile images)
+                export_file_presigned_url = None
+                if export.export_file_url:
+                    export_file_presigned_url = gri_service._generate_view_presigned_url(
+                        export.export_file_url,
+                        organization_id,
+                        user_id or 0
+                    )
+                
                 versions.append({
+                    "id": export.id,
                     "version": export.version,
                     "created_date": export.created_date.isoformat() if export.created_date else None,
                     "created_by_name": creator_name,
                     "record_year": export.record_year,
-                    "export_file_url": export.export_file_url
+                    "export_file_url": export_file_presigned_url or export.export_file_url
                 })
             
             return {"data": versions}
@@ -125,6 +136,52 @@ def handle_gri_routes(event: Dict[str, Any], **params) -> Dict[str, Any]:
             result = gri_service.get_gri306_3_records(organization_id, record_year)
             return {"data": result}
 
+    # --- DELETE Routes ---
+    if method == 'DELETE':
+        # DELETE /api/gri/versions/{id} or /api/gri/export/versions/{id}
+        if '/api/gri/versions/' in path or '/api/gri/export/versions/' in path:
+            from ....models.gri.gri_306 import Gri306Export
+            
+            # Extract version ID from path
+            version_id = None
+            if path_params and 'id' in path_params:
+                try:
+                    version_id = int(path_params['id'])
+                except (ValueError, TypeError):
+                    raise BadRequestException("Invalid version ID format")
+            else:
+                # Fallback: extract from path string
+                path_parts = path.rstrip('/').split('/')
+                if len(path_parts) > 0:
+                    try:
+                        version_id = int(path_parts[-1])
+                    except (ValueError, TypeError):
+                        raise BadRequestException("Invalid version ID format")
+            
+            if not version_id:
+                raise BadRequestException("Version ID is required")
+            
+            # Find the export record
+            export_record = db_session.query(Gri306Export).filter(
+                Gri306Export.id == version_id,
+                Gri306Export.organization == organization_id,
+                Gri306Export.is_active == True
+            ).first()
+            
+            if not export_record:
+                raise NotFoundException(f"GRI export version with ID {version_id} not found")
+            
+            # Soft delete the export record
+            export_record.is_active = False
+            export_record.deleted_date = datetime.now()
+            db_session.commit()
+            
+            logger.info(f"Deleted GRI export version {version_id} by user {user_id}")
+            
+            return {
+                "message": f"GRI export version {version_id} deleted successfully",
+                "deleted_id": version_id
+            }
 
     # --- POST Routes ---
     if method == 'POST':

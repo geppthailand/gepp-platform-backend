@@ -871,3 +871,49 @@ class GriService:
             "created_by": record.created_by,
             "created_date": record.created_date.isoformat() if record.created_date else None
         }
+
+    def _generate_view_presigned_url(
+        self,
+        s3_url: str,
+        organization_id: int,
+        user_id: int,
+        expiration_seconds: int = 3600
+    ) -> str:
+        """
+        Generate a presigned URL for viewing an S3 file
+        Similar to UserService._generate_view_presigned_url
+
+        Args:
+            s3_url: The S3 URL to generate a presigned URL for
+            organization_id: Organization ID for access control
+            user_id: User ID for audit trail
+            expiration_seconds: URL expiration time (default: 1 hour)
+
+        Returns:
+            Presigned URL string for viewing the file
+        """
+        try:
+            from ..transactions.presigned_url_service import TransactionPresignedUrlService
+
+            # Initialize presigned URL service
+            presigned_service = TransactionPresignedUrlService()
+
+            # Generate presigned URL for viewing
+            result = presigned_service.get_transaction_file_view_presigned_urls(
+                file_urls=[s3_url],
+                organization_id=organization_id,
+                user_id=user_id,
+                expiration_seconds=expiration_seconds
+            )
+
+            if result.get('success') and result.get('presigned_urls'):
+                return result['presigned_urls'][0]['view_url']
+            else:
+                # If presigned URL generation fails, return original URL
+                # (fallback for public files or development)
+                return s3_url
+
+        except Exception as e:
+            # If there's an error, log it and return the original URL
+            logger.warning(f"Error generating presigned URL for viewing: {str(e)}")
+            return s3_url
