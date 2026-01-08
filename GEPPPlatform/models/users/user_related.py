@@ -37,15 +37,35 @@ class UserRole(Base, BaseModel):
         return f"<UserRole(id={self.id}, name='{self.name}', organization_id={self.organization_id})>"
 
 class UserInputChannel(Base, BaseModel):
+    """
+    User Input Channel for QR code-based transaction input
+    Maps to the old user_input_channels schema for mobile input
+    """
     __tablename__ = 'user_input_channels'
 
     user_location_id = Column(ForeignKey('user_locations.id'))
     organization_id = Column(BigInteger, ForeignKey('organizations.id'), nullable=False)
 
-    channel_name = Column(String(255))
-    channel_type = Column(String(100))
-    configuration = Column(Text)
+    # QR Code hash for unique identification
+    hash = Column(String(255), unique=True, index=True)
 
+    # Channel configuration
+    channel_type = Column(String(100), default='qr')  # qr, api, etc.
+    form_type = Column(String(50), default='form')  # form, daily, monthly
+
+    # Material configuration (JSON arrays)
+    sub_material_ids = Column(JSON, default=list)  # List of material IDs
+    sub_material_destination_ids = Column(JSON, default=list)  # List of destination location IDs
+
+    # Sub-user configuration
+    subuser_names = Column(JSON, default=list)  # List of sub-user names for login
+
+    # Feature flags
+    enable_upload_image = Column(Boolean, default=False)
+    required_tag = Column(Boolean, default=False)
+    is_drop_off_point = Column(Boolean, default=False)
+
+    # Relationships
     user_location = relationship("UserLocation", back_populates="input_channels")
     organization = relationship("Organization")
 

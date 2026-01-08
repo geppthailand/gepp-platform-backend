@@ -66,6 +66,32 @@ def handle_user_routes(event: Dict[str, Any], data: Dict[str, Any], **params) ->
     elif '/api/users/bulk' in path and method == 'POST':
         return handle_bulk_operations(user_service, data, current_user_id)
 
+    # Input Channel routes (QR code-based input)
+    elif '/api/users/' in path and '/input-channel/regenerate' in path and method == 'POST':
+        # Regenerate QR code hash: /api/users/{user_id}/input-channel/regenerate
+        user_id = path.split('/users/')[1].split('/')[0]
+        return handle_regenerate_input_channel(db_session, user_id, current_user_organization_id)
+
+    elif '/api/users/' in path and '/input-channel' in path and method == 'GET':
+        # Get input channel: /api/users/{user_id}/input-channel
+        user_id = path.split('/users/')[1].split('/')[0]
+        return handle_get_input_channel(db_session, user_id)
+
+    elif '/api/users/' in path and '/input-channel' in path and method == 'POST':
+        # Create input channel: /api/users/{user_id}/input-channel
+        user_id = path.split('/users/')[1].split('/')[0]
+        return handle_create_input_channel(db_session, user_id, data, current_user_organization_id)
+
+    elif '/api/users/' in path and '/input-channel' in path and method == 'PUT':
+        # Update input channel: /api/users/{user_id}/input-channel
+        user_id = path.split('/users/')[1].split('/')[0]
+        return handle_update_input_channel(db_session, user_id, data)
+
+    elif '/api/users/' in path and '/input-channel' in path and method == 'DELETE':
+        # Delete input channel: /api/users/{user_id}/input-channel
+        user_id = path.split('/users/')[1].split('/')[0]
+        return handle_delete_input_channel(db_session, user_id)
+
     elif '/api/users/' in path and '/suspend' in path and method == 'POST':
         # Suspend user: /api/users/{user_id}/suspend
         user_id = path.split('/users/')[1].split('/')[0]
@@ -578,3 +604,106 @@ def handle_get_profile_upload_presigned_url(
     except Exception as e:
         raise APIException(f'Failed to get presigned URL: {str(e)}')
 
+
+# Input Channel Handlers
+def handle_get_input_channel(db_session, user_id: str) -> Dict[str, Any]:
+    """Handle GET /api/users/{user_id}/input-channel - Get input channel"""
+    try:
+        from .input_channel_service import InputChannelService
+        service = InputChannelService(db_session)
+
+        result = service.get_input_channel(int(user_id))
+        if not result:
+            return {'channel': None, 'message': 'No input channel found'}
+
+        return {'channel': result}
+
+    except Exception as e:
+        raise APIException(f'Failed to get input channel: {str(e)}')
+
+
+def handle_create_input_channel(
+    db_session,
+    user_id: str,
+    data: Dict[str, Any],
+    organization_id: int
+) -> Dict[str, Any]:
+    """Handle POST /api/users/{user_id}/input-channel - Create input channel"""
+    try:
+        from .input_channel_service import InputChannelService
+        service = InputChannelService(db_session)
+
+        result = service.create_input_channel(
+            user_location_id=int(user_id),
+            organization_id=organization_id,
+            data=data
+        )
+
+        return {'channel': result, 'message': 'Input channel created successfully'}
+
+    except Exception as e:
+        raise APIException(f'Failed to create input channel: {str(e)}')
+
+
+def handle_update_input_channel(
+    db_session,
+    user_id: str,
+    data: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Handle PUT /api/users/{user_id}/input-channel - Update input channel"""
+    try:
+        from .input_channel_service import InputChannelService
+        service = InputChannelService(db_session)
+
+        result = service.update_input_channel(
+            user_location_id=int(user_id),
+            data=data
+        )
+
+        return {'channel': result, 'message': 'Input channel updated successfully'}
+
+    except Exception as e:
+        raise APIException(f'Failed to update input channel: {str(e)}')
+
+
+def handle_regenerate_input_channel(
+    db_session,
+    user_id: str,
+    organization_id: int
+) -> Dict[str, Any]:
+    """Handle POST /api/users/{user_id}/input-channel/regenerate - Regenerate QR code hash"""
+    try:
+        from .input_channel_service import InputChannelService
+        service = InputChannelService(db_session)
+
+        # Check if channel exists, if not create one
+        existing = service.get_input_channel(int(user_id))
+        if not existing:
+            result = service.create_input_channel(
+                user_location_id=int(user_id),
+                organization_id=organization_id,
+                data={}
+            )
+        else:
+            result = service.regenerate_hash(int(user_id))
+
+        return {'channel': result, 'message': 'QR code regenerated successfully'}
+
+    except Exception as e:
+        raise APIException(f'Failed to regenerate input channel: {str(e)}')
+
+
+def handle_delete_input_channel(db_session, user_id: str) -> Dict[str, Any]:
+    """Handle DELETE /api/users/{user_id}/input-channel - Delete input channel"""
+    try:
+        from .input_channel_service import InputChannelService
+        service = InputChannelService(db_session)
+
+        success = service.delete_input_channel(int(user_id))
+        if success:
+            return {'message': 'Input channel deleted successfully'}
+        else:
+            raise NotFoundException('Input channel not found')
+
+    except Exception as e:
+        raise APIException(f'Failed to delete input channel: {str(e)}')

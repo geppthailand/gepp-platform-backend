@@ -134,7 +134,54 @@ def main(event, context):
             elif path == "/health" or "/health" in path:
                 # Health check endpoint (no authorization required)
                 results = {"status": "healthy", "timestamp": datetime.now().isoformat(), "method": http_method}
-                
+
+            elif "/api/input-channel/" in path:
+                # Public input channel access (no authorization required)
+                # Used for QR code mobile input
+                from GEPPPlatform.services.cores.users.input_channel_service import InputChannelService
+
+                # Extract hash from path: /api/input-channel/{hash} or /api/input-channel/{hash}/submit
+                path_parts = path.split('/api/input-channel/')[1].split('/')
+                hash_value = path_parts[0].split('?')[0]
+                is_submit = len(path_parts) > 1 and path_parts[1] == 'submit'
+
+                input_service = InputChannelService(session)
+
+                if is_submit and http_method == 'POST':
+                    # Handle transaction submission from QR input
+                    submit_result = input_service.submit_transaction_by_hash(hash_value, body)
+                    if submit_result.get('status') == 'success':
+                        results = {
+                            "success": True,
+                            "data": submit_result
+                        }
+                    else:
+                        return {
+                            "statusCode": 400,
+                            "headers": headers,
+                            "body": json.dumps({
+                                'success': False,
+                                'message': submit_result.get('message', 'Submission failed'),
+                                'data': submit_result
+                            })
+                        }
+                else:
+                    # Get channel data
+                    subuser = query_params.get('subuser')
+                    channel_data = input_service.get_input_channel_by_hash(hash_value, subuser)
+
+                    if channel_data:
+                        results = {
+                            "success": True,
+                            "data": channel_data
+                        }
+                    else:
+                        return {
+                            "statusCode": 404,
+                            "headers": headers,
+                            "body": json.dumps({'success': False, 'message': 'Input channel not found'})
+                        }
+
             else:
                 # All other routes require authorization
                 auth_header = event.get('headers', {}).get('Authorization', '') or event.get('headers', {}).get('authorization', '')
