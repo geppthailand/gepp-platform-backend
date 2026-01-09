@@ -258,11 +258,31 @@ def handle_gri_routes(event: Dict[str, Any], **params) -> Dict[str, Any]:
             version_name = body_data.get('version_name')
             record_year = body_data.get('year')
             
+            # gri_1_ids is required in body
+            if 'gri_1_ids' not in body_data:
+                raise BadRequestException("gri_1_ids is required in request body")
+            
+            gri_1_ids = body_data.get('gri_1_ids')
+            
             if not record_year:
                 raise BadRequestException("Year is required for export")
             
+            # Validate and convert gri_1_ids
+            if not isinstance(gri_1_ids, list):
+                raise BadRequestException("gri_1_ids must be a list")
+            
+            # Convert to list of integers if not empty
+            if gri_1_ids:
+                try:
+                    gri_1_ids = [int(id) for id in gri_1_ids if id is not None]
+                except (ValueError, TypeError):
+                    raise BadRequestException("gri_1_ids must be a list of integers")
+            # If empty list, keep it as empty list (will skip GRI-1 data)
+            
             # Calculate and get all GRI 306-1, 306-2, and 306-3 data with calculations
-            result = gri_service.calculate_gri_export_data(organization_id, record_year)
+            # If gri_1_ids is empty list, no GRI-1 data will be fetched and zeros will be returned
+            # If gri_1_ids is None, all GRI-1 records will be used (backward compatibility)
+            result = gri_service.calculate_gri_export_data(organization_id, record_year, gri_1_ids=gri_1_ids)
             
             # Generate PDF via Lambda hub (routes to GRI export function)
             from ..pdf_export_hub import generate_pdf_via_lambda, upload_pdf_to_s3

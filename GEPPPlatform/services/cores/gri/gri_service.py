@@ -491,7 +491,7 @@ class GriService:
             "gri306_3": self.get_gri306_3_records(organization_id, record_year)
         }
 
-    def calculate_gri_export_data(self, organization_id: int, record_year: Optional[str] = None) -> Dict[str, Any]:
+    def calculate_gri_export_data(self, organization_id: int, record_year: Optional[str] = None, gri_1_ids: Optional[List[int]] = None) -> Dict[str, Any]:
         """
         Calculate GRI export data:
         - Waste Generated: Total weight from GRI-1
@@ -499,6 +499,11 @@ class GriService:
         - Directed to Disposal: Sum of weights by method
         - Total Spills: Sum of volumes from GRI-3
         - Waste Composition: Breakdown by material category
+        
+        Args:
+            organization_id: Organization ID
+            record_year: Optional year filter
+            gri_1_ids: Optional list of GRI-1 IDs to filter by. If None, uses all records. If empty list, skips GRI-1 data entirely.
         """
         WASTE_MANAGEMENT_GROUPS = {
             "Diverted from Disposal": [
@@ -515,27 +520,26 @@ class GriService:
             ],
         }
 
-        # Get raw data
-        gri306_1_data = self.get_gri306_1_records(organization_id, record_year)
-        gri306_2_data = self.get_gri306_2_records(organization_id, record_year)
+        # Get GRI-3 data (always fetched, independent of GRI-1)
         gri306_3_data = self.get_gri306_3_records(organization_id, record_year)
         
-        # Get list of GRI-1 IDs that are approached in GRI-2
-        approached_gri1_ids = set()
-        for gri2_record in gri306_2_data.get("gri306_2_records", []):
-            approached_id = gri2_record.get("approached_id")
-            if approached_id:
-                approached_gri1_ids.add(approached_id)
+        # Handle GRI-1 data based on gri_1_ids
+        if gri_1_ids is None or len(gri_1_ids) == 0:
+            # None or empty list means skip GRI-1 data entirely
+            gri_records = []
+        else:
+            # Get GRI-1 data and filter by provided IDs
+            gri306_1_data = self.get_gri306_1_records(organization_id, record_year)
+            all_gri_records = gri306_1_data.get("gri_records", [])
+            
+            # Filter by provided GRI-1 IDs
+            gri_1_ids_set = set(gri_1_ids)
+            gri_records = [record for record in all_gri_records if record.get("id") in gri_1_ids_set]
         
-        # Filter GRI-1 records to only include those approached in GRI-2
-        material_data = gri306_1_data.get("material_data", [])
-        all_gri_records = gri306_1_data.get("gri_records", [])
-        gri_records = [record for record in all_gri_records if record.get("id") in approached_gri1_ids]
-        
-        # Total weight from GRI records (only those in GRI-2)
+        # Total weight from filtered GRI records
         total_gri_weight = sum(record.get("weight", 0.0) for record in gri_records)
         
-        # Waste Generated = only from GRI records that are in GRI-2
+        # Waste Generated = total from filtered GRI records
         waste_generated = total_gri_weight
         
         # Group by method: Diverted vs Directed
@@ -545,7 +549,7 @@ class GriService:
         # Waste composition by category
         category_composition = {}
         
-        # Process GRI records by category (only those in GRI-2)
+        # Process GRI records by category
         for record in gri_records:
             method = record.get("method", "")
             weight = record.get("weight", 0.0) or 0.0
