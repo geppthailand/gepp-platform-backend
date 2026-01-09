@@ -297,7 +297,16 @@ def main(event, context):
                                 "success": True,
                                 "data": reports_result
                             }
+                    elif "/api/gri" in path:
+                        # Handle all GRI routes
+                        from .services.cores.gri.gri_handlers import handle_gri_routes
 
+                        gri_result = handle_gri_routes(event, **commonParams)
+                        results = {
+                            "success": True,
+                            "data": gri_result
+                        }
+                        
                     elif "/api/transactions" in path:
                         # Handle all transaction management routes
                         from .services.cores.transactions.transaction_handlers import handle_transaction_routes
