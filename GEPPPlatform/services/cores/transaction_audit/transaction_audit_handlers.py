@@ -576,37 +576,69 @@ def handle_get_audit_report(
         queued_percentage = round((queued_count / total_transactions * 100), 2) if total_transactions > 0 else 0
 
         # Monthly trend data (for stacked bar chart)
-        # Initialize all months for current year with zero values
-        from datetime import datetime
-        current_year = datetime.now().year
+        # Always show last 12 months (from 11 months ago to current month)
+        from datetime import datetime, timedelta
+
+        current_date = datetime.now()
         monthly_data = {}
 
-        # Initialize all 12 months with zero values
-        month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-        for i in range(1, 13):
-            month_key = f"{current_year}-{i:02d}"
-            monthly_data[month_key] = {'approved': 0, 'rejected': 0, 'month_name': month_names[i-1]}
+        # Thai month abbreviations for display
+        thai_month_names = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.',
+                          'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.']
+
+        # Generate last 12 months (from 11 months ago to current month)
+        for i in range(11, -1, -1):
+            # Calculate month by going back i months
+            year = current_date.year
+            month = current_date.month - i
+            while month <= 0:
+                month += 12
+                year -= 1
+            month_key = f"{year}-{month:02d}"
+            month_idx = month - 1
+            # Use Thai Buddhist year (add 543)
+            buddhist_year = (year + 543) % 100  # Get last 2 digits
+            # Format: month name and year on separate lines for frontend
+            month_label = thai_month_names[month_idx]
+            year_label = str(buddhist_year)
+            monthly_data[month_key] = {
+                'approved': 0,
+                'rejected': 0,
+                'month_label': month_label,
+                'year_label': year_label
+            }
+
+        logger.info(f"Monthly data keys initialized (last 12 months): {list(monthly_data.keys())}")
 
         # Count transactions by month (based on ALL filtered transactions)
+        approved_in_range = 0
+        rejected_in_range = 0
         for transaction in all_transactions:
             if transaction.transaction_date:
                 month_key = transaction.transaction_date.strftime('%Y-%m')
-                # Only count if it's from current year
-                if transaction.transaction_date.year == current_year:
-                    if month_key in monthly_data:
-                        if transaction.ai_audit_status == AIAuditStatus.approved:
-                            monthly_data[month_key]['approved'] += 1
-                        elif transaction.ai_audit_status == AIAuditStatus.rejected:
-                            monthly_data[month_key]['rejected'] += 1
+                # Only count if the month is in our last 12 months range
+                if month_key in monthly_data:
+                    # Count based on ai_audit_status
+                    if transaction.ai_audit_status == AIAuditStatus.approved:
+                        monthly_data[month_key]['approved'] += 1
+                        approved_in_range += 1
+                    elif transaction.ai_audit_status == AIAuditStatus.rejected:
+                        monthly_data[month_key]['rejected'] += 1
+                        rejected_in_range += 1
 
-        # Sort by month and format for frontend
+        logger.info(f"Transactions counted - approved: {approved_in_range}, rejected: {rejected_in_range}")
+
+        # Sort by month and format for frontend (chronological order)
         monthly_trends = []
-        for month in sorted(monthly_data.keys()):
+        for month_key in sorted(monthly_data.keys()):
             monthly_trends.append({
-                'month': monthly_data[month]['month_name'],
-                'approved': monthly_data[month]['approved'],
-                'rejected': monthly_data[month]['rejected']
+                'month': monthly_data[month_key]['month_label'],
+                'year': monthly_data[month_key]['year_label'],
+                'approved': monthly_data[month_key]['approved'],
+                'rejected': monthly_data[month_key]['rejected']
             })
+
+        logger.info(f"Monthly trends data: {monthly_trends}")
 
         # Rejection reasons breakdown (for pie chart)
         # Extract all reject_triggers and count occurrences
