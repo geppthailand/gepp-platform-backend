@@ -57,27 +57,29 @@ MATERIAL_COLORS = {
     "Electronic Waste": colors.HexColor("#d9d9d9"),
 }
 main_material_colorPalette = [
-  "#180055","#1a1662","#1b296d","#1c3b77","#1d4c81","#215d8b","#2880a0",
-  "#3091aa","#44a2b1","#58b4b9","#6cc5c0","#85d5ca","#a7e3d7","#c9f1e4","#eafff1"
+  "#305b4a","#3b6f5a","#417b64","#4b8970","#50987c","#56a586","#5fb593",
+  "#68c7a2","#70d5ae","#75deb5","#7be9be","#7ff0c4","#8df5cd","#95ffd6",
+  "#b1ffe1","#ceffec","#ddfff2","#eafff7","#f3fffa","#fafffd"
 ]
 sub_material_colorPalette = [
-    "#00313a","#073f3e","#0e4d41","#155b45","#1e6a48","#1e6a48","#3b9752",
-    "#4ca658","#62b55e","#79c365","#8fd16c","#a6df73","#c5ea99","#e2f5bd","#ffffe0"
+    "#007648","#008350","#009359","#00a463","#00b36c","#00c476","#00d580",
+    "#00e388","#00f492","#10ff9f","#43feb3","#7ff0c4","#8df5cd","#95ffd6",
+    "#b1ffe1","#ceffec","#ddfff2","#eafff7","#f3fffa","#fafffd"
 ]
 
 PAGE_WIDTH_IN = 11.69
 PAGE_HEIGHT_IN = 8.27
-PRIMARY = colors.HexColor("#95c9c4")
-TEXT = colors.HexColor("#5b6e8c")
+PRIMARY = colors.HexColor("#54937a")
+TEXT = colors.HexColor("#54937a")
 CARD = colors.HexColor("#f6f8fb")
 STROKE = colors.HexColor("#e6edf4")
-BAR = colors.HexColor("#a9d5d0")
+BAR = colors.HexColor("#efefef")
 WHITE = colors.white
 BLACK = colors.black
-BAR2 = colors.HexColor("#77b9d8")
+BAR2 = colors.HexColor("#84b8a3")
 BAR3 = colors.HexColor("#c8ced4")
 BAR4 = colors.HexColor("#8fcfc6")
-SERIES_COLORS = [BAR, BAR2, BAR4, BAR3, TEXT]
+SERIES_COLORS = [colors.HexColor("#84b8a3"), colors.HexColor("#d1e4dc"), BAR4, BAR3, TEXT]
 
 def wrap_label(text, font, size, max_w):
     words = text.split()
@@ -95,9 +97,15 @@ def wrap_label(text, font, size, max_w):
         lines.append(current)
     return lines
 
+def snake_to_title(text: str) -> str:
+    """Convert snake_case text to Title Case (e.g., 'mother_fucker' -> 'Mother Fucker')."""
+    if not text:
+        return text
+    return ' '.join(word.capitalize() for word in str(text).split('_'))
+
 def _header(pdf, page_width_points: float, page_height_points: float, data: dict) -> None:
     text = data["users"]
-    font_name = "Poppins-Regular"
+    font_name = "IBMPlexSansThai-Regular"
     font_size = 12
     padding = 0.78 * inch
     text_width = stringWidth(text, font_name, font_size)
@@ -155,7 +163,7 @@ def _header(pdf, page_width_points: float, page_height_points: float, data: dict
         # Silently ignore image issues
         image_drawn = False
     if not image_drawn:
-        pdf.setFillColor(TEXT)
+        pdf.setFillColor(colors.HexColor("#666666"))
         pdf.setFont(font_name, font_size)
         pdf.drawString(x, y, text)
 
@@ -167,10 +175,9 @@ def _sub_header(pdf, page_width_points: float, page_height_points: float, data: 
     else:
         location_text = str(location_data)
     pdf.setFillColor(PRIMARY)
-    pdf.setFont("Poppins-Bold", 48)
+    pdf.setFont("IBMPlexSansThai-Bold", 48)
     pdf.drawString(padding, page_height_points - (1.38 * inch), header_text)
-    pdf.setFillColor(TEXT)
-    pdf.setFont("Poppins-Regular", 12)
+    pdf.setFont("IBMPlexSansThai-Regular", 12)
     pdf.drawString(padding, page_height_points - (1.75 * inch), f"Location: {location_text}")
     pdf.drawString(padding, page_height_points - (1.96 * inch), f"Date: {data['date_from']} - {data['date_to']}")
 
@@ -208,9 +215,9 @@ def _stat_chip(pdf, x, y, w, h, title, value, variant="gray"):
     _rounded_card(pdf, x, y, w, h, radius=8, fill=fill_color)
     pad_x = 12 if variant == "white" else 20
     pdf.setFillColor(TEXT)
-    pdf.setFont("Poppins-Regular", 8)
+    pdf.setFont("IBMPlexSansThai-Regular", 8)
     pdf.drawString(x + pad_x, y + h - 18, title)
-    pdf.setFont("Poppins-Regular", 12)
+    pdf.setFont("IBMPlexSansThai-Regular", 12)
     # Allow callers to pass pre-formatted strings; otherwise format numerics
     try:
         if isinstance(value, str):
@@ -232,11 +239,11 @@ def _progress_bar(pdf, x, y, w, h, ratio, bar_color=PRIMARY, back_color=STROKE):
 
 def _label_progress(pdf, x, y, w, label, value_text, ratio, bar_color, back_color, bar_h=8):
     pdf.setFillColor(TEXT)
-    pdf.setFont("Poppins-Regular", 10)
+    pdf.setFont("IBMPlexSansThai-Regular", 10)
     pdf.drawString(x, y + 16, label)
     pdf.setFillColor(TEXT)
-    pdf.setFont("Poppins-Regular", 10)
-    txt_w = stringWidth(value_text, "Poppins-Regular", 10)
+    pdf.setFont("IBMPlexSansThai-Regular", 10)
+    txt_w = stringWidth(value_text, "IBMPlexSansThai-Regular", 10)
     pdf.drawString(x + w - txt_w, y + 16, value_text)
     _progress_bar(pdf, x, y, w, bar_h, ratio, bar_color, back_color)
 
@@ -316,8 +323,8 @@ def _simple_bar_chart(pdf, x, y, w, h, chart_series, allowed_months: set[int] | 
         # label at left of y-axis
         lbl = f"{int(round(tv))}"
         pdf.setFillColor(TEXT)
-        pdf.setFont("Poppins-Regular", 10)
-        lw_lbl = stringWidth(lbl, "Poppins-Regular", 10)
+        pdf.setFont("IBMPlexSansThai-Regular", 10)
+        lw_lbl = stringWidth(lbl, "IBMPlexSansThai-Regular", 10)
         pdf.drawString(gx - 6 - lw_lbl, y_tick - 3, lbl)
     # Determine which months to render based on allowed_months (1..12)
     if allowed_months:
@@ -351,19 +358,19 @@ def _simple_bar_chart(pdf, x, y, w, h, chart_series, allowed_months: set[int] | 
             _draw_bar_top_round_rect(pdf, bx, gy, bar_w, bh, radius, color)
         lbl = months[mi]
         pdf.setFillColor(TEXT)
-        pdf.setFont("Poppins-Regular", 8)
-        lw = stringWidth(lbl, "Poppins-Regular", 8)
+        pdf.setFont("IBMPlexSansThai-Regular", 8)
+        lw = stringWidth(lbl, "IBMPlexSansThai-Regular", 8)
         pdf.drawString(slot_x + (slot_w - lw) / 2, gy - 14, lbl)
     pdf.setFillColor(TEXT)
-    pdf.setFont("Poppins-Regular", 9)
+    pdf.setFont("IBMPlexSansThai-Regular", 9)
     pdf.drawString(gx - 18, gy + gh + 6, "kg")
     if series_keys:
         sq = 8
         cur_x = x + w - 10
-        pdf.setFont("Poppins-Regular", 9)
+        pdf.setFont("IBMPlexSansThai-Regular", 9)
         for si in reversed(range(len(series_keys))):
             label = str(series_keys[si])
-            lw = stringWidth(label, "Poppins-Regular", 9)
+            lw = stringWidth(label, "IBMPlexSansThai-Regular", 9)
             entry_w = sq + 6 + lw + 12
             cur_x -= entry_w
             pdf.setFillColor(SERIES_COLORS[si % len(SERIES_COLORS)])
@@ -374,8 +381,8 @@ def _simple_bar_chart(pdf, x, y, w, h, chart_series, allowed_months: set[int] | 
 def _footer(pdf, page_width_points: float):
     text = "Copyright © 2018–2023 GEPP Sa-Ard Co., Ltd. ALL RIGHTS RESERVED"
     pdf.setFillColor(TEXT)
-    pdf.setFont("Poppins-Regular", 9)
-    tw = stringWidth(text, "Poppins-Regular", 9)
+    pdf.setFont("IBMPlexSansThai-Regular", 9)
+    tw = stringWidth(text, "IBMPlexSansThai-Regular", 9)
     pdf.drawString((page_width_points - tw) / 2, 0.25 * inch, text)
 
 def _parse_date_to_date(value) -> datetime.date | None:
@@ -460,7 +467,20 @@ def _simple_pie_chart(pdf, x, y, size, values, colors_list, gap_width=2, gap_col
     renderPDF.draw(d, pdf, x, y)
 
 def draw_table(pdf, x, y, w, h, r=6, type="Header"):
-    pdf.setStrokeColor(colors.HexColor("#e2e8ef"))
+    # Use the current fill color for the stroke to match the background
+    # For headers, explicitly use gray background and border
+    if type == "Header":
+        header_gray = colors.HexColor("#f3f3f3")
+        pdf.setFillColor(header_gray)
+        pdf.setStrokeColor(header_gray)
+    else:
+        try:
+            # Get the current fill color from the canvas
+            fill_color = pdf._fillColorObj if hasattr(pdf, '_fillColorObj') else colors.HexColor("#e2e8ef")
+            pdf.setStrokeColor(fill_color)
+        except Exception:
+            # Fallback to default if we can't get the fill color
+            pdf.setStrokeColor(colors.HexColor("#e2e8ef"))
     pdf.setLineWidth(0.5)
     if type == "Body":
         pdf.rect(x, y, w, h, stroke=1, fill=1)
@@ -491,13 +511,14 @@ def draw_cover(pdf, page_width_points: float, page_height_points: float, data: d
     # Slightly shift content down to better center on the page
     content_center = middle - 20
     pdf.setFillColor(PRIMARY)
-    pdf.setFont("Poppins-Bold", 100)
+    pdf.setFont("IBMPlexSansThai-Bold", 100)
     # Move text block down a bit to better center vertically
     pdf.drawString(0.63 * inch, content_center + 0, "2025")
-    pdf.setFillColor(TEXT)
-    pdf.setFont("Poppins-Medium", 38.5)
+    pdf.setFillColor(colors.HexColor("#9ac7b5"))
+    pdf.setFont("IBMPlexSansThai-Medium", 38.5)
     pdf.drawString(0.63 * inch, content_center - 40, "GEPP REPORT")
-    pdf.setFont("Poppins-Regular", 16.5)
+    pdf.setFont("IBMPlexSansThai-Regular", 16.5)
+    pdf.setFillColor(colors.HexColor("#666666"))
     pdf.drawString(0.63 * inch, content_center - 60, "Data-Driven Transaformation")
     # Draw ESG.png image instead of green rectangle
     esg_image_path = "GEPPPlatform/services/cores/reports/Assets/ESG.png"
@@ -571,7 +592,7 @@ def draw_overview(pdf, page_width_points: float, page_height_points: float, data
     _rounded_card(pdf, margin, ki_y, left_col_w, ki_h, radius=8)
     pad = 28
     pdf.setFillColor(TEXT)
-    pdf.setFont("Poppins-Medium", 12)
+    pdf.setFont("IBMPlexSansThai-Medium", 12)
     pdf.drawString(margin + pad, ki_y + ki_h - 30, "Key Indicators")
     ki = data["overview_data"]["key_indicators"]
     tw = float(ki.get("total_waste", 0) or 0)
@@ -581,14 +602,14 @@ def draw_overview(pdf, page_width_points: float, page_height_points: float, data
     row_w = left_col_w - 2 * pad
     row_x = margin + pad
     row_y = ki_y + ki_h - 50
-    _label_progress(pdf, row_x, row_y - 24, row_w, "Total Waste (kg)", _format_number(tw), tw / norm_base, colors.HexColor("#b7c6cc"), colors.HexColor("#e1e7ef"), bar_h=6)
-    _label_progress(pdf, row_x, row_y - 58, row_w, "Recycle rate (%)", f"{_format_number(rr)}", rr / 100.0, colors.HexColor("#8fcfc6"), colors.HexColor("#e1e7ef"), bar_h=6)
-    _label_progress(pdf, row_x, row_y - 92, row_w, "GHG Reduction (kgCO2e)", _format_number(ghg), ghg / norm_base, colors.HexColor("#77b9d8"), colors.HexColor("#e1e7ef"), bar_h=6)
+    _label_progress(pdf, row_x, row_y - 24, row_w, "Total Waste (kg)", _format_number(tw), tw / norm_base, colors.HexColor("#84b8a3"), colors.HexColor("#e1e7ef"), bar_h=6)
+    _label_progress(pdf, row_x, row_y - 58, row_w, "Recycle rate (%)", f"{_format_number(rr)}", rr / 100.0, colors.HexColor("#9ac7b5"), colors.HexColor("#e1e7ef"), bar_h=6)
+    _label_progress(pdf, row_x, row_y - 92, row_w, "GHG Reduction (kgCO2e)", _format_number(ghg), ghg / norm_base, colors.HexColor("#b6d7c9"), colors.HexColor("#e1e7ef"), bar_h=6)
     tr_h = 2.15 * inch
     tr_y = ki_y - 8 - tr_h
     _rounded_card(pdf, margin, tr_y, left_col_w, tr_h, radius=8)
     pdf.setFillColor(TEXT)
-    pdf.setFont("Poppins-Medium", 12)
+    pdf.setFont("IBMPlexSansThai-Medium", 12)
     pdf.drawString(margin + pad, tr_y + tr_h - 30, "Top Recyclables")
     items = data["overview_data"].get("top_recyclables", [])[:3]
     if items:
@@ -605,7 +626,7 @@ def draw_overview(pdf, page_width_points: float, page_height_points: float, data
     overall_h = (chip_y - overall_y) + chip_h
     _rounded_card(pdf, overall_x, overall_y, right_col_w, overall_h, radius=8, fill=WHITE)
     pdf.setFillColor(TEXT)
-    pdf.setFont("Poppins-Medium", 12)
+    pdf.setFont("IBMPlexSansThai-Medium", 12)
     pdf.drawString(overall_x + 16, overall_y + overall_h - 30, "Overall")
     stats = data["overview_data"]["overall_charts"]["chart_stat_data"]
     sw = 1.78 * inch
@@ -665,7 +686,7 @@ def draw_overview_breakdown(pdf, page_width_points: float, page_height_points: f
     # Left card: Category proportion
     _rounded_card(pdf, left_x, card_y, left_w, card_h, radius=8, fill=WHITE)
     pdf.setFillColor(TEXT)
-    pdf.setFont("Poppins-Medium", 12)
+    pdf.setFont("IBMPlexSansThai-Medium", 12)
     pdf.drawString(left_x + 16, card_y + card_h - 24, "Category proportion")
     # Resolve items
     wt_props = (data.get("overview_data", {}).get("waste_type_proportions")
@@ -707,7 +728,7 @@ def draw_overview_breakdown(pdf, page_width_points: float, page_height_points: f
     legend_x = left_x + 16
     legend_y_start = pie_y - 24
     row_h = 22  # add more gap between legend rows
-    pdf.setFont("Poppins-Regular", 10)
+    pdf.setFont("IBMPlexSansThai-Regular", 10)
     for i, it in enumerate(items[:10]):
         y = legend_y_start - (i * row_h)
         box_c = colors_list[i % len(colors_list)]
@@ -724,29 +745,29 @@ def draw_overview_breakdown(pdf, page_width_points: float, page_height_points: f
             except Exception:
                 perc_val = 0.0
         disp = f"{_format_number(perc_val)} %"
-        dw = stringWidth(disp, "Poppins-Regular", 10)
+        dw = stringWidth(disp, "IBMPlexSansThai-Regular", 10)
         pdf.drawString(left_x + left_w - 16 - dw, y, disp)
     # Right card: Materials Summary table
     _rounded_card(pdf, right_x, card_y, right_w, card_h, radius=8, fill=WHITE)
     pdf.setFillColor(TEXT)
-    pdf.setFont("Poppins-Medium", 12)
+    pdf.setFont("IBMPlexSansThai-Medium", 12)
     pdf.drawString(right_x + 16, card_y + card_h - 24, "Materials Summary")
     # Header
     header_y = card_y + card_h - 58
-    pdf.setFillColor(colors.HexColor("#f1f5f9"))
+    pdf.setFillColor(colors.HexColor("#f5faf8"))
     draw_table(pdf, right_x + 12, header_y, right_w - 24, 24, 8, "Header")
     pdf.setFillColor(TEXT)
-    pdf.setFont("Poppins-Medium", 9)
+    pdf.setFont("IBMPlexSansThai-Medium", 9)
     col_w = (right_w - 24) / 3.0
     hx = right_x + 12
     hy = header_y + 9
     pdf.drawString(hx + 10, hy, "Category")
     # Right-align the headers for Weight and Proportion to match value alignment
     _hdr_weight = "Weight (kg.)"
-    _hdr_weight_w = stringWidth(_hdr_weight, "Poppins-Medium", 9)
+    _hdr_weight_w = stringWidth(_hdr_weight, "IBMPlexSansThai-Medium", 9)
     pdf.drawString(hx + 2 * col_w - 10 - _hdr_weight_w, hy, _hdr_weight)
     _hdr_prop = "Proportion (%)"
-    _hdr_prop_w = stringWidth(_hdr_prop, "Poppins-Medium", 9)
+    _hdr_prop_w = stringWidth(_hdr_prop, "IBMPlexSansThai-Medium", 9)
     pdf.drawString(hx + 3 * col_w - 10 - _hdr_prop_w, hy, _hdr_prop)
     # Rows (limit to fit)
     max_rows = 8
@@ -754,17 +775,17 @@ def draw_overview_breakdown(pdf, page_width_points: float, page_height_points: f
     for i, it in enumerate(items[:max_rows]):
         y_row = header_y - row_h - i * row_h
         table_type = "Footer" if i == min(max_rows, len(items)) - 1 else "Body"
-        row_bg = WHITE if (i % 2 == 0) else colors.HexColor("#f1f5f9")
+        row_bg = WHITE if (i % 2 == 0) else colors.HexColor("#f5faf8")
         pdf.setFillColor(row_bg)
         draw_table(pdf, right_x + 12, y_row, right_w - 24, row_h, 8, table_type)
         pdf.setFillColor(TEXT)
-        pdf.setFont("Poppins-Regular", 9)
+        pdf.setFont("IBMPlexSansThai-Regular", 9)
         y_text = y_row + 12
         # category name
         pdf.drawString(hx + 10, y_text, it["name"])
         # weight
         w_text = _format_number(it["total"])
-        w_w = stringWidth(w_text, "Poppins-Regular", 9)
+        w_w = stringWidth(w_text, "IBMPlexSansThai-Regular", 9)
         pdf.drawString(hx + col_w + col_w - 10 - w_w, y_text, w_text)
         # percent
         perc_val = it["perc"]
@@ -774,7 +795,7 @@ def draw_overview_breakdown(pdf, page_width_points: float, page_height_points: f
             except Exception:
                 perc_val = 0.0
         p_text = f"{_format_number(perc_val)} %"
-        p_w = stringWidth(p_text, "Poppins-Regular", 9)
+        p_w = stringWidth(p_text, "IBMPlexSansThai-Regular", 9)
         pdf.drawString(hx + 3 * col_w - 10 - p_w, y_text, p_text)
     _footer(pdf, page_width_points)
 def draw_performance(pdf, page_width_points: float, page_height_points: float, data: dict, performance_data: dict) -> None:
@@ -789,16 +810,16 @@ def draw_performance(pdf, page_width_points: float, page_height_points: float, d
     left_card_y = content_top - left_card_h
     _rounded_card(pdf, margin, left_card_y, left_card_w, left_card_h, radius=8, fill=WHITE)
     pdf.setFillColor(TEXT)
-    pdf.setFont("Poppins-Medium", 12)
+    pdf.setFont("IBMPlexSansThai-Medium", 12)
     # Position text relative to card top (content_top)
     pdf.drawString(1 * inch, content_top - 0.4 * inch - 4, f"{performance_data['branchName']}")
-    pdf.setFont("Poppins-Regular", 8)
+    pdf.setFont("IBMPlexSansThai-Regular", 8)
     label_text = "Recycling Rate"
-    label_width = stringWidth(label_text, "Poppins-Medium", 8)
+    label_width = stringWidth(label_text, "IBMPlexSansThai-Medium", 8)
     pdf.drawString(3.82 * inch - label_width, content_top - 0.27 * inch - 4, label_text)
-    pdf.setFont("Poppins-Bold", 13)
+    pdf.setFont("IBMPlexSansThai-Bold", 13)
     value_text = f"{_format_number(performance_data['recyclingRatePercent'])} %"
-    value_width = stringWidth(value_text, "Poppins-Medium", 13)
+    value_width = stringWidth(value_text, "IBMPlexSansThai-Medium", 13)
     pdf.drawString(3.82 * inch - value_width, content_top - 0.52 * inch - 4, value_text)
     # Progress bars section (first: Total Waste at 100%)
     start_y = content_top - 1.2 * inch
@@ -808,20 +829,20 @@ def draw_performance(pdf, page_width_points: float, page_height_points: float, d
     total_waste_val = float(performance_data.get("totalWasteKg", 0) or 0)
     y_total = start_y
     pdf.setFillColor(TEXT)
-    pdf.setFont("Poppins-Regular", 10)
+    pdf.setFont("IBMPlexSansThai-Regular", 10)
     pdf.drawString(1 * inch, y_total + bar_h + 0.12 * inch, "Total Waste")
     total_text = f"{_format_number(total_waste_val)} kg"
-    total_text_w = stringWidth(total_text, "Poppins-Regular", 10)
+    total_text_w = stringWidth(total_text, "IBMPlexSansThai-Regular", 10)
     pdf.drawString(1 * inch + 2.8 * inch - total_text_w, y_total + bar_h + 0.12 * inch, total_text)
     _progress_bar(pdf, 1 * inch, y_total, 2.8 * inch, bar_h, 1.0, colors.HexColor("#c5d2da"))
     # Subsequent bars for individual waste types
     for idx, (label, amount) in enumerate(performance_data["metrics"].items()):
         y = start_y - (idx + 1) * (bar_h + gap)
         pdf.setFillColor(TEXT)
-        pdf.setFont("Poppins-Regular", 10)
+        pdf.setFont("IBMPlexSansThai-Regular", 10)
         pdf.drawString(1 * inch, y + bar_h + 0.12 * inch, label)
         value_text = f"{_format_number(amount)} kg"
-        value_width = stringWidth(value_text, "Poppins-Regular", 10)
+        value_width = stringWidth(value_text, "IBMPlexSansThai-Regular", 10)
         pdf.drawString(1 * inch + 2.8 * inch - value_width, y + bar_h + 0.12 * inch, value_text)
         _progress_bar(pdf, 1 * inch, y, 2.8 * inch, bar_h, amount / performance_data["totalWasteKg"], MATERIAL_COLORS[label])
     gap = 1 * inch
@@ -829,17 +850,17 @@ def draw_performance(pdf, page_width_points: float, page_height_points: float, d
     outer_y = left_card_y
     outer_w = 6.8 * inch
     outer_h = 5.0 * inch
-    _rounded_card(pdf, outer_x, outer_y, outer_w, outer_h, radius=8, fill=colors.HexColor("#f1f5f9"))
+    _rounded_card(pdf, outer_x, outer_y, outer_w, outer_h, radius=8, fill=WHITE)
     pad = 16
     inner_x = outer_x + pad
     inner_y = outer_y + pad
     inner_w = outer_w - 2 * pad
     inner_h = outer_h - 2 * pad
-    _rounded_card(pdf, inner_x, inner_y, inner_w, inner_h, radius=8, fill=WHITE)
+    # _rounded_card(pdf, inner_x, inner_y, inner_w, inner_h, radius=8, fill=WHITE)
     pdf.setFillColor(TEXT)
-    pdf.setFont("Poppins-Medium", 12)
+    pdf.setFont("IBMPlexSansThai-Medium", 12)
     pdf.drawString(inner_x + 16, inner_y + inner_h - 16 - 12, "All Building")
-    pdf.setFont("Poppins-Regular", 10)
+    pdf.setFont("IBMPlexSansThai-Regular", 10)
     # Assign per-building colors from BuildingColors randomly, reuse for list and pie
     try:
         import random as _rand
@@ -857,12 +878,12 @@ def draw_performance(pdf, page_width_points: float, page_height_points: float, d
         pdf.setFillColor(TEXT)
         pdf.drawString(inner_x + 16, y, building["buildingName"])
         value_text = f"{_format_number(building['totalWasteKg'])} kg"
-        value_width = stringWidth(value_text, "Poppins-Regular", 8)
+        value_width = stringWidth(value_text, "IBMPlexSansThai-Regular", 8)
         pdf.drawString(inner_x + 4 * inch - value_width, y, value_text)
         _color = _assigned_colors[idx] if idx < len(_assigned_colors) else colors.HexColor("#b7cbd6")
         _progress_bar(pdf, inner_x + 16, y - 0.2 * inch, inner_x - 0.5 * inch, 0.08 * inch, building['totalWasteKg'] / performance_data["totalWasteKg"], _color)
     pdf.setFillColor(TEXT)
-    pdf.setFont("Poppins-Regular", 10)
+    pdf.setFont("IBMPlexSansThai-Regular", 10)
     pie_size = 1.20 * inch
     pie_x = inner_x + inner_w - pie_size - 16
     title1_y = inner_y + inner_h - 48
@@ -895,12 +916,12 @@ def draw_performance_table(pdf, page_width_points: float, page_height_points: fl
         _header(pdf, page_width_points, page_height_points, data)
         _sub_header(pdf, page_width_points, page_height_points, data, "Performance")
         pdf.setFillColor(TEXT)
-        pdf.setFont("Poppins-Medium", 12)
+        pdf.setFont("IBMPlexSansThai-Medium", 12)
         pdf.drawString(padding, page_height_points - (2.5 * inch), "Detailed Performance Metrics")
-        pdf.setFillColor(colors.HexColor("#f1f5f9"))
+        pdf.setFillColor(colors.HexColor("#f5faf8"))
         draw_table(pdf, padding, page_height_points - (3 * inch), page_width_points - 2 * padding, 24, 8, "Header")
         pdf.setFillColor(TEXT)
-        pdf.setFont("Poppins-Medium", 9)
+        pdf.setFont("IBMPlexSansThai-Medium", 9)
         pdf.drawString(padding + 16, page_height_points - (2.88 * inch), "Building Name")
         pdf.drawString(padding + 1.8 * inch, page_height_points - (2.88 * inch), "Total Waste (kg)")
         pdf.drawString(padding + 3.2 * inch, page_height_points - (2.88 * inch), "General (kg)")
@@ -918,29 +939,29 @@ def draw_performance_table(pdf, page_width_points: float, page_height_points: fl
             y_base = page_height_points - (3 * inch) - 32 - (idx * 32)
             table_type = "Footer" if idx == len(page_branches) - 1 else "Body"
             # Alternating row background starting with white
-            row_bg = WHITE if (idx % 2 == 0) else colors.HexColor("#f1f5f9")
+            row_bg = WHITE if (idx % 2 == 0) else colors.HexColor("#f5faf8")
             pdf.setFillColor(row_bg)
             draw_table(pdf, padding, y_base, page_width_points - 2 * padding, 32, 8, table_type)
             pdf.setFillColor(TEXT)
-            pdf.setFont("Poppins-Regular", 9)
+            pdf.setFont("IBMPlexSansThai-Regular", 9)
             y_text = y_base + 12
             pdf.drawImage(icon_path, padding + 16, y_base + 11, width=icon_size, height=icon_size, mask='auto')
             pdf.drawString(padding + 30, y_base + 12, branch["branchName"])
             _txt_total = _format_number(branch["totalWasteKg"])
-            _w_total = stringWidth(_txt_total, "Poppins-Regular", 9)
+            _w_total = stringWidth(_txt_total, "IBMPlexSansThai-Regular", 9)
             pdf.drawString(_right_total - _w_total, y_text, _txt_total)
             general = branch.get("metrics", {}).get("General Waste") or 0
             _txt_general = _format_number(general)
-            _w_general = stringWidth(_txt_general, "Poppins-Regular", 9)
+            _w_general = stringWidth(_txt_general, "IBMPlexSansThai-Regular", 9)
             pdf.drawString(_right_general - _w_general, y_text, _txt_general)
             recyclable = branch.get("metrics", {}).get("Recyclable Waste") or 0
             organic = branch.get("metrics", {}).get("Organic Waste") or 0
 
             _txt_recyclable = _format_number(recyclable + organic)
-            _w_recyclable = stringWidth(_txt_recyclable, "Poppins-Regular", 9)
+            _w_recyclable = stringWidth(_txt_recyclable, "IBMPlexSansThai-Regular", 9)
             pdf.drawString(_right_recyclable - _w_recyclable, y_text, _txt_recyclable)
             _txt_rate = f"{_format_number(branch['recyclingRatePercent'])} %"
-            _w_rate = stringWidth(_txt_rate, "Poppins-Regular", 9)
+            _w_rate = stringWidth(_txt_rate, "IBMPlexSansThai-Regular", 9)
             pdf.drawString(_right_rate - _w_rate, y_text, _txt_rate)
             color = colors.HexColor("#0bb980") if branch["recyclingRatePercent"] > 20 else colors.HexColor("#f49d0d")
             pdf.setFillColor(color)
@@ -973,14 +994,14 @@ def draw_comparison_advice(pdf, page_width_points: float, page_height_points: fl
     for card in cards:
         _rounded_card(pdf, card["x"], card_y, card_w, card_h, radius=8, fill=WHITE)
         pdf.setFillColor(TEXT)
-        pdf.setFont("Poppins-Medium", 14)
+        pdf.setFont("IBMPlexSansThai-Medium", 14)
         pdf.drawString(card["x"] + 16, card_y + card_h - 24, card["title"])
-    body_font = "Poppins-Regular"
+    body_font = "IBMPlexSansThai-Regular"
     body_size = 10
     leading = 12
     pad = 16
     paragraph_gap = 8
-    label_font = "Poppins-Medium"
+    label_font = "IBMPlexSansThai-Medium"
     label_size = 11
     def _draw_recommendations(items, x_left):
         y_cursor = card_y + card_h - 50
@@ -1048,7 +1069,7 @@ def draw_comparison(pdf, page_width_points: float, page_height_points: float, da
     if error_msg:
         # Display error message
         pdf.setFillColor(TEXT)
-        pdf.setFont("Poppins-Medium", 14)
+        pdf.setFont("IBMPlexSansThai-Medium", 14)
         error_y = card_y + card_h / 2.0
         pdf.drawCentredString(card_x + card_w / 2.0, error_y, error_msg)
         return
@@ -1129,17 +1150,17 @@ def draw_comparison(pdf, page_width_points: float, page_height_points: float, da
         tick_fracs = [1/3, 2/3, 1.0]
         pdf.setStrokeColor(STROKE)
         pdf.setFillColor(TEXT)
-        pdf.setFont("Poppins-Regular", 8)
+        pdf.setFont("IBMPlexSansThai-Regular", 8)
         # Center 0 label
         zero_lbl = "0"
-        zw = stringWidth(zero_lbl, "Poppins-Regular", 8)
+        zw = stringWidth(zero_lbl, "IBMPlexSansThai-Regular", 8)
         pdf.drawString(bars_center_x - zw / 2.0, bottom_y - 30, zero_lbl)
         # Left ticks and labels
         for frac in tick_fracs:
             x_tick = bars_center_x - frac * half_w
             val = int(round(top_axis * frac))
             lbl = f"{val}"
-            lw_lbl = stringWidth(lbl, "Poppins-Regular", 8)
+            lw_lbl = stringWidth(lbl, "IBMPlexSansThai-Regular", 8)
             # pdf.line(x_tick, bottom_y - 5, x_tick, bottom_y + 3)
             pdf.drawString(x_tick - lw_lbl / 2.0, bottom_y - 30, lbl)
         # Right ticks and labels
@@ -1147,7 +1168,7 @@ def draw_comparison(pdf, page_width_points: float, page_height_points: float, da
             x_tick = bars_center_x + frac * half_w
             val = int(round(top_axis * frac))
             lbl = f"{val}"
-            lw_lbl = stringWidth(lbl, "Poppins-Regular", 8)
+            lw_lbl = stringWidth(lbl, "IBMPlexSansThai-Regular", 8)
             # pdf.line(x_tick, bottom_y - 5, x_tick, bottom_y + 3)    
             pdf.drawString(x_tick - lw_lbl / 2.0, bottom_y - 30, lbl)
     except Exception:
@@ -1173,12 +1194,12 @@ def draw_comparison(pdf, page_width_points: float, page_height_points: float, da
     right_year = extract_year_from_period(right_period) or "Current Year"
     
     pdf.setFillColor(TEXT)
-    pdf.setFont("Poppins-Medium", 12)
-    lpw = stringWidth(left_year, "Poppins-Medium", 12)
+    pdf.setFont("IBMPlexSansThai-Medium", 12)
+    lpw = stringWidth(left_year, "IBMPlexSansThai-Medium", 12)
     pdf.drawString(bars_center_x - 8 - lpw, top_y + 20, left_year)
     pdf.drawString(bars_center_x + 8, top_y + 20, right_year)
-    left_color = colors.HexColor("#d3dbe3")
-    right_color = colors.HexColor("#c9e7df")
+    left_color = colors.HexColor("#efefef")
+    right_color = colors.HexColor("#84b8a3")
     def draw_right_bar(center_x, y_mid, length, height, color):
         if length <= 0:
             return 0.0
@@ -1219,7 +1240,7 @@ def draw_comparison(pdf, page_width_points: float, page_height_points: float, da
         pdf.setFillColor(color)
         pdf.drawPath(p, stroke=0, fill=1)
         return rect_len
-    pdf.setFont("Poppins-Regular", 9)
+    pdf.setFont("IBMPlexSansThai-Regular", 9)
     for idx, cat in enumerate(categories):
         y = y_positions[idx] if idx < len(y_positions) else (top_y - idx * 40)
         left_v = get_val(left_mat, cat)
@@ -1231,7 +1252,7 @@ def draw_comparison(pdf, page_width_points: float, page_height_points: float, da
         txt_left = _format_number(left_v)
         txt_right = _format_number(right_v)
         pdf.setFillColor(TEXT)
-        sw_left = stringWidth(txt_left, "Poppins-Regular", 9)
+        sw_left = stringWidth(txt_left, "IBMPlexSansThai-Regular", 9)
         avail_left = max(0.0, left_rect - 16)
         if left_rect > 0 and sw_left <= avail_left:
             x_text = bars_center_x - left_rect + 8
@@ -1239,7 +1260,7 @@ def draw_comparison(pdf, page_width_points: float, page_height_points: float, da
         else:
             x_out = max(card_x + 6, bars_center_x - left_len - sw_left - 8)
             pdf.drawString(x_out, y - 4, txt_left)
-        sw_right = stringWidth(txt_right, "Poppins-Regular", 9)
+        sw_right = stringWidth(txt_right, "IBMPlexSansThai-Regular", 9)
         avail_right = max(0.0, right_rect - 16)
         if right_rect > 0 and sw_right <= avail_right:
             x_text = bars_center_x + right_rect - sw_right - 8
@@ -1254,10 +1275,11 @@ def draw_comparison(pdf, page_width_points: float, page_height_points: float, da
     legend_x = card_x + card_w - pad - legend_w + 20 + 60
     # Align legend rows to the same evenly spaced y positions as the bars
     legend_y_positions = y_positions if y_positions else [top_y]
-    pdf.setFillColor(TEXT)
     for idx, cat in enumerate(categories):
         y = legend_y_positions[idx] if idx < len(legend_y_positions) else (top_y - idx * 40)
-        pdf.setFont("Poppins-Regular", 10)
+        # Category label in gray
+        pdf.setFillColor(colors.HexColor("#666666"))
+        pdf.setFont("IBMPlexSansThai-Regular", 10)
         display_name = cat.replace(" Waste", "")
         display_name = display_name.replace("Bio-Hazardous", "Bio-Hazardous")
         pdf.drawString(legend_x, y + 8, display_name if display_name != "Waste To Energy" else "Waste To Energy")
@@ -1267,7 +1289,9 @@ def draw_comparison(pdf, page_width_points: float, page_height_points: float, da
         sign = "+" if delta >= 0 else "-"
         abs_delta = abs(delta)
         delta_str = _format_number(abs_delta)
-        pdf.setFont("Poppins-Regular", 9)
+        # Number stays green (TEXT color)
+        pdf.setFillColor(TEXT)
+        pdf.setFont("IBMPlexSansThai-Regular", 9)
         pdf.drawString(legend_x, y - 8, f"{sign} {delta_str} kg.")
     _footer(pdf, page_width_points)
     pdf.showPage()
@@ -1347,19 +1371,19 @@ def draw_comparison(pdf, page_width_points: float, page_height_points: float, da
         chart_right2 -= side_pad
         chart_w2 = new_w2
     pdf.setFillColor(TEXT)
-    pdf.setFont("Poppins-Medium", 12)
+    pdf.setFont("IBMPlexSansThai-Medium", 12)
     pdf.drawString(x_left + pad2, title_y2, "Quantity Comparison")
     sw2 = 10
     sh2 = 6
-    s1w2 = stringWidth(series_a_label, "Poppins-Regular", 9)
-    s2w2 = stringWidth(series_b_label, "Poppins-Regular", 9)
+    s1w2 = stringWidth(series_a_label, "IBMPlexSansThai-Regular", 9)
+    s2w2 = stringWidth(series_b_label, "IBMPlexSansThai-Regular", 9)
     total_legend_w2 = sw2 + 6 + s1w2 + 14 + sw2 + 6 + s2w2
     lx2 = chart_right2 - pad2 - total_legend_w2 + pad2
     ly2 = title_y2 + 1
     pdf.setFillColor(BAR)
     pdf.roundRect(lx2, ly2, sw2, sh2, 3, stroke=0, fill=1)
     pdf.setFillColor(TEXT)
-    pdf.setFont("Poppins-Regular", 9)
+    pdf.setFont("IBMPlexSansThai-Regular", 9)
     pdf.drawString(lx2 + sw2 + 6, ly2 - 1, series_a_label)
     lx2b = lx2 + sw2 + 6 + s1w2 + 14
     pdf.setFillColor(BAR2)
@@ -1389,13 +1413,13 @@ def draw_comparison(pdf, page_width_points: float, page_height_points: float, da
         y = chart_bottom2 + (tv / top_val2) * chart_h2
         pdf.line(chart_left2, y, chart_right2, y)
         lbl = f"{int(round(tv))}"
-        lw = stringWidth(lbl, "Poppins-Regular", 8)
+        lw = stringWidth(lbl, "IBMPlexSansThai-Regular", 8)
         pdf.setFillColor(TEXT)
-        pdf.setFont("Poppins-Regular", 8)
+        pdf.setFont("IBMPlexSansThai-Regular", 8)
         pdf.drawString(chart_left2 - 6 - lw, y - 3, lbl)
     pdf.saveState()
     pdf.setFillColor(TEXT)
-    pdf.setFont("Poppins-Regular", 9)
+    pdf.setFont("IBMPlexSansThai-Regular", 9)
     pdf.translate(x_left + 12, (chart_bottom2 + chart_top2) / 2.0)
     pdf.rotate(90)
     pdf.drawCentredString(0, 0, "Kg.")
@@ -1430,23 +1454,23 @@ def draw_comparison(pdf, page_width_points: float, page_height_points: float, da
         _draw_top_round_rect(gx + inner_offset2 + bar_w2 + bar_gap2, chart_bottom2, bar_w2, rh, min(bar_w2 * 0.25, 5), BAR2)
         mlabel = _month_label(mk)
         pdf.setFillColor(TEXT)
-        pdf.setFont("Poppins-Regular", 9)
-        mw2 = stringWidth(mlabel, "Poppins-Regular", 9)
+        pdf.setFont("IBMPlexSansThai-Regular", 9)
+        mw2 = stringWidth(mlabel, "IBMPlexSansThai-Regular", 9)
         pdf.drawString(gx + (group_w2 - mw2) / 2.0, card_y2 + 8, mlabel)
     pdf.setFillColor(TEXT)
-    pdf.setFont("Poppins-Medium", 12)
+    pdf.setFont("IBMPlexSansThai-Medium", 12)
     pdf.drawString(x_left + pad2, lower_card_y + card_h2 - 24, f"Period Details : {series_a_label} vs {series_b_label}")
-    pdf.setFillColor(colors.HexColor("#f1f5f9"))
+    pdf.setFillColor(colors.HexColor("#f5faf8"))
     draw_table(pdf, padding, lower_card_y + card_h2 - 58, page_width_points - 2 * padding, 24, 8, "Header")
     pdf.setFillColor(TEXT)
-    pdf.setFont("Poppins-Medium", 9)
+    pdf.setFont("IBMPlexSansThai-Medium", 9)
     months_for_header = (month_keys or [])[:12]
     col_count = max(2, len(months_for_header) + 2)
     header_x0 = padding
     header_w = page_width_points - 2 * padding
     col_w = header_w / float(col_count)
     header_y = lower_card_y + card_h2 - 50
-    pdf.drawCentredString(header_x0 + (0.5 * col_w), header_y, "Period")
+    pdf.drawCentredString(header_x0 + (0.2 * col_w), header_y, "Period")
     for idx, mk in enumerate(months_for_header, start=1):
         pdf.drawCentredString(header_x0 + (idx + 0.5) * col_w, header_y, _month_label(mk))
     pdf.drawCentredString(header_x0 + (col_count - 0.5) * col_w, header_y, "Total")
@@ -1457,12 +1481,12 @@ def draw_comparison(pdf, page_width_points: float, page_height_points: float, da
     # Alternating row backgrounds starting with white
     pdf.setFillColor(WHITE)
     draw_table(pdf, padding, first_row_y, page_width_points - 2 * padding, row_h, 8, "Body")
-    pdf.setFillColor(colors.HexColor("#f1f5f9"))
+    pdf.setFillColor(colors.HexColor("#f5faf8"))
     draw_table(pdf, padding, second_row_y, page_width_points - 2 * padding, row_h, 8, "Body")
     pdf.setFillColor(WHITE)
     draw_table(pdf, padding, third_row_y, page_width_points - 2 * padding, row_h, 8, "Footer")
     pdf.setFillColor(TEXT)
-    pdf.setFont("Poppins-Regular", 9)
+    pdf.setFont("IBMPlexSansThai-Regular", 9)
     y_text_1 = first_row_y + 12
     y_text_2 = second_row_y + 12
     y_text_3 = third_row_y + 12
@@ -1515,10 +1539,10 @@ def draw_main_materials(pdf, page_width_points: float, page_height_points: float
     items_top = items_sorted[:top_n]
     pad = 24
     title_y = card_y2 + card_h2 - 28
-    pdf.setFont("Poppins-Regular", 10)
+    pdf.setFont("IBMPlexSansThai-Regular", 10)
     max_label_area = bar_card * 0.45
     min_label_area = 60
-    longest_word_w = max((stringWidth(w, "Poppins-Regular", 10) for it in items_top for w in str(it.get("main_material_name", "")).split()), default=40)
+    longest_word_w = max((stringWidth(w, "IBMPlexSansThai-Regular", 10) for it in items_top for w in str(it.get("main_material_name", "")).split()), default=40)
     label_area = max(min_label_area, longest_word_w + 6)
     label_area = min(label_area, max_label_area)
     chart_left = x_left + pad + label_area + 8
@@ -1528,7 +1552,7 @@ def draw_main_materials(pdf, page_width_points: float, page_height_points: float
     chart_w = max(1.0, chart_right - chart_left)
     chart_h = max(1.0, chart_top - chart_bottom)
     pdf.setFillColor(TEXT)
-    pdf.setFont("Poppins-Medium", 12)
+    pdf.setFont("IBMPlexSansThai-Medium", 12)
     pdf.drawString(x_left + pad, title_y, "Top Materials by Quantity (Kg.)")
     max_val = max([1.0] + [float(it.get("total_waste", 0) or 0) for it in items_top])
     mag = 1.0
@@ -1546,9 +1570,9 @@ def draw_main_materials(pdf, page_width_points: float, page_height_points: float
         x = chart_left + (tv / top_val) * chart_w
         pdf.line(x, chart_bottom, x, chart_top)
         lbl = f"{int(round(tv))}"
-        lw = stringWidth(lbl, "Poppins-Regular", 9)
+        lw = stringWidth(lbl, "IBMPlexSansThai-Regular", 9)
         pdf.setFillColor(TEXT)
-        pdf.setFont("Poppins-Regular", 9)
+        pdf.setFont("IBMPlexSansThai-Regular", 9)
         pdf.drawCentredString(x, chart_bottom - 12, lbl)
     # Baseline along x-axis under tick labels
     pdf.setStrokeColor(STROKE)
@@ -1580,18 +1604,18 @@ def draw_main_materials(pdf, page_width_points: float, page_height_points: float
         bar_color = colors.HexColor(main_material_colorPalette[i % len(main_material_colorPalette)])
         _draw_right_round_rect(chart_left, y_bar, w, row_h, cap_r, bar_color)
         name = str(it.get("main_material_name", ""))
-        label_lines = wrap_label(name, "Poppins-Regular", 10, label_area)
+        label_lines = wrap_label(name, "IBMPlexSansThai-Regular", 10, label_area)
         pdf.setFillColor(TEXT)
-        pdf.setFont("Poppins-Regular", 10)
+        pdf.setFont("IBMPlexSansThai-Regular", 10)
         total_label_h = len(label_lines) * 11
         label_y_start = y_bar + (row_h - total_label_h) / 2 + 2
         for j, line in enumerate(label_lines):
             y_line = label_y_start + (len(label_lines) - 1 - j) * 11
             pdf.drawRightString(chart_left - 10, y_line, line)
         val_text = _format_number(value)
-        sw = stringWidth(val_text, "Poppins-Regular", 10)
+        sw = stringWidth(val_text, "IBMPlexSansThai-Regular", 10)
         inside_space = max(0.0, w - cap_r - 8)
-        pdf.setFont("Poppins-Regular", 10)
+        pdf.setFont("IBMPlexSansThai-Regular", 10)
         if sw <= inside_space and w > 0:
             pdf.setFillColor(WHITE if BAR2 != WHITE else TEXT)
             pdf.drawRightString(chart_left + w - cap_r - 6, y_bar + row_h / 2.0 - 4, val_text)
@@ -1606,7 +1630,7 @@ def draw_main_materials(pdf, page_width_points: float, page_height_points: float
     pie_x = x_right + (pie_card - pie_size) / 2.0
     pie_y = card_y2 + (card_h2 - pie_size) - 36
     pdf.setFillColor(TEXT)
-    pdf.setFont("Poppins-Medium", 12)
+    pdf.setFont("IBMPlexSansThai-Medium", 12)
     pdf.drawString(pie_x - 24, title_y, "Materials Proportion")
     _simple_pie_chart(pdf, pie_x, pie_y - 12, pie_size, pie_values, pie_colors, gap_width=1, gap_color=colors.white)
     top5 = items_top[:5]
@@ -1615,7 +1639,7 @@ def draw_main_materials(pdf, page_width_points: float, page_height_points: float
     left_x = x_right + 12
     right_x = x_right + pie_card - 12
     box_size = 8
-    pdf.setFont("Poppins-Regular", 10)
+    pdf.setFont("IBMPlexSansThai-Regular", 10)
     for i, it in enumerate(top5):
         y = start_y - i * (row_h + 6)
         c = colors.HexColor(main_material_colorPalette[i % len(main_material_colorPalette)])
@@ -1625,7 +1649,7 @@ def draw_main_materials(pdf, page_width_points: float, page_height_points: float
         pdf.setFillColor(TEXT)
         max_name_w = (right_x - left_x) - box_size - 54
         label = name
-        while stringWidth(label, "Poppins-Regular", 10) > max_name_w and len(label) > 1:
+        while stringWidth(label, "IBMPlexSansThai-Regular", 10) > max_name_w and len(label) > 1:
             label = label[:-2] + "…"
         pdf.drawString(left_x + box_size + 6, y, label)
         perc = it.get("proportion_percent")
@@ -1633,7 +1657,7 @@ def draw_main_materials(pdf, page_width_points: float, page_height_points: float
             total_w = float((data.get("main_materials_data", {}) or {}).get("total_waste", 0) or 0) or sum(pie_values) or 1.0
             perc = (float(it.get("total_waste", 0) or 0) / total_w) * 100.0
         perc_text = f"{_format_number(perc)}%"
-        pw = stringWidth(perc_text, "Poppins-Regular", 10)
+        pw = stringWidth(perc_text, "IBMPlexSansThai-Regular", 10)
         pdf.drawString(right_x - pw, y, perc_text)
     _footer(pdf, page_width_points)
 
@@ -1649,17 +1673,17 @@ def draw_main_materials_table(pdf, page_width_points: float, page_height_points:
         pdf.showPage()
         _header(pdf, page_width_points, page_height_points, data)
         _sub_header(pdf, page_width_points, page_height_points, data, "Main Materials")
-        pdf.setFillColor(colors.HexColor("#f1f5f9"))
+        pdf.setFillColor(colors.HexColor("#f5faf8"))
         draw_table(pdf, padding, header_y, page_width_points - 2 * padding, 24, 8, "Header")
         pdf.setFillColor(TEXT)
-        pdf.setFont("Poppins-Medium", 9)
+        pdf.setFont("IBMPlexSansThai-Medium", 9)
         pdf.drawString(padding + 16, header_text_y, "Main Material")
         pdf.drawString(padding + 3.2 * inch, header_text_y, "Total Waste (kg)")
         pdf.drawString(padding + 5.8 * inch, header_text_y, "Percentage (%)")
         # Right-align the GHG header so its right edge is 16pt from the right table border
         ghg_header = "GHG Reduction (kgCO2e)"
         ghg_right = page_width_points - padding - 16
-        ghg_header_w = stringWidth(ghg_header, "Poppins-Medium", 9)
+        ghg_header_w = stringWidth(ghg_header, "IBMPlexSansThai-Medium", 9)
         pdf.drawString(ghg_right - ghg_header_w, header_text_y, ghg_header)
         # Compute right edges for Total Waste and Percentage columns (align values to these)
         _col_pad_mm = 8
@@ -1669,24 +1693,24 @@ def draw_main_materials_table(pdf, page_width_points: float, page_height_points:
         for idx, mat in enumerate(page_mats):
             y_base = header_y - 32 - (idx * 32)
             table_type = "Footer" if idx == len(page_mats) - 1 else "Body"
-            row_bg = WHITE if (idx % 2 == 0) else colors.HexColor("#f1f5f9")
+            row_bg = WHITE if (idx % 2 == 0) else colors.HexColor("#f5faf8")
             pdf.setFillColor(row_bg)
             draw_table(pdf, padding, y_base, page_width_points - 2 * padding, 32, 8, table_type)
             pdf.setFillColor(TEXT)
-            pdf.setFont("Poppins-Regular", 9)
+            pdf.setFont("IBMPlexSansThai-Regular", 9)
             y_text = y_base + 12
             pdf.drawString(padding + 16, y_text, mat["main_material_name"])
             # Right-align Total Waste within its column
             _txt_total_mm = _format_number(mat["total_waste"])
-            _w_total_mm = stringWidth(_txt_total_mm, "Poppins-Regular", 9)
+            _w_total_mm = stringWidth(_txt_total_mm, "IBMPlexSansThai-Regular", 9)
             pdf.drawString(_right_total_mm - _w_total_mm, y_text, _txt_total_mm)
             # Right-align Percentage within its column
             _txt_percent_mm = f"{mat['proportion_percent']:.2f}%"
-            _w_percent_mm = stringWidth(_txt_percent_mm, "Poppins-Regular", 9)
+            _w_percent_mm = stringWidth(_txt_percent_mm, "IBMPlexSansThai-Regular", 9)
             pdf.drawString(_right_percent_mm - _w_percent_mm, y_text, _txt_percent_mm)
             # Right-align the GHG value to keep 16pt gap from right border
             ghg_val = _format_number(mat["ghg_reduction"])
-            ghg_val_w = stringWidth(ghg_val, "Poppins-Regular", 9)
+            ghg_val_w = stringWidth(ghg_val, "IBMPlexSansThai-Regular", 9)
             pdf.drawString(ghg_right - ghg_val_w, y_text, ghg_val)
         _footer(pdf, page_width_points)
 
@@ -1713,10 +1737,10 @@ def draw_sub_materials(pdf, page_width_points: float, page_height_points: float,
     items_top = items_sorted[:top_n]
     pad = 24
     title_y = card_y2 + card_h2 - 28
-    pdf.setFont("Poppins-Regular", 10)
+    pdf.setFont("IBMPlexSansThai-Regular", 10)
     max_label_area = bar_card * 0.45
     min_label_area = 60
-    longest_word_w = max((stringWidth(w, "Poppins-Regular", 10) for it in items_top for w in str(it.get("material_name", "")).split()), default=40)
+    longest_word_w = max((stringWidth(w, "IBMPlexSansThai-Regular", 10) for it in items_top for w in str(it.get("material_name", "")).split()), default=40)
     label_area = max(min_label_area, longest_word_w + 6)
     label_area = min(label_area, max_label_area)
     chart_left = x_left + pad + label_area + 8
@@ -1726,7 +1750,7 @@ def draw_sub_materials(pdf, page_width_points: float, page_height_points: float,
     chart_w = max(1.0, chart_right - chart_left)
     chart_h = max(1.0, chart_top - chart_bottom)
     pdf.setFillColor(TEXT)
-    pdf.setFont("Poppins-Medium", 12)
+    pdf.setFont("IBMPlexSansThai-Medium", 12)
     pdf.drawString(x_left + pad, title_y, "Top Materials by Quantity (Kg.)")
     max_val = max([1.0] + [float(it.get("total_waste", 0) or 0) for it in items_top])
     mag = 1.0
@@ -1744,9 +1768,9 @@ def draw_sub_materials(pdf, page_width_points: float, page_height_points: float,
         x = chart_left + (tv / top_val) * chart_w
         pdf.line(x, chart_bottom, x, chart_top)
         lbl = f"{int(round(tv))}"
-        lw = stringWidth(lbl, "Poppins-Regular", 9)
+        lw = stringWidth(lbl, "IBMPlexSansThai-Regular", 9)
         pdf.setFillColor(TEXT)
-        pdf.setFont("Poppins-Regular", 9)
+        pdf.setFont("IBMPlexSansThai-Regular", 9)
         pdf.drawCentredString(x, chart_bottom - 12, lbl)
     # Baseline along x-axis under tick labels
     pdf.setStrokeColor(STROKE)
@@ -1778,18 +1802,18 @@ def draw_sub_materials(pdf, page_width_points: float, page_height_points: float,
         bar_color = colors.HexColor(sub_material_colorPalette[i % len(sub_material_colorPalette)])
         _draw_right_round_rect(chart_left, y_bar, w, row_h, cap_r, bar_color)
         name = str(it.get("material_name", ""))
-        label_lines = wrap_label(name, "Poppins-Regular", 10, label_area)
+        label_lines = wrap_label(name, "IBMPlexSansThai-Regular", 10, label_area)
         pdf.setFillColor(TEXT)
-        pdf.setFont("Poppins-Regular", 10)
+        pdf.setFont("IBMPlexSansThai-Regular", 10)
         total_label_h = len(label_lines) * 11
         label_y_start = y_bar + (row_h - total_label_h) / 2 + 2
         for j, line in enumerate(label_lines):
             y_line = label_y_start + (len(label_lines) - 1 - j) * 11
             pdf.drawRightString(chart_left - 10, y_line, line)
         val_text = _format_number(value)
-        sw = stringWidth(val_text, "Poppins-Regular", 10)
+        sw = stringWidth(val_text, "IBMPlexSansThai-Regular", 10)
         inside_space = max(0.0, w - cap_r - 8)
-        pdf.setFont("Poppins-Regular", 10)
+        pdf.setFont("IBMPlexSansThai-Regular", 10)
         if sw <= inside_space and w > 0:
             pdf.setFillColor(WHITE if BAR2 != WHITE else TEXT)
             pdf.drawRightString(chart_left + w - cap_r - 6, y_bar + row_h / 2.0 - 4, val_text)
@@ -1804,7 +1828,7 @@ def draw_sub_materials(pdf, page_width_points: float, page_height_points: float,
     pie_x = x_right + (pie_card - pie_size) / 2.0
     pie_y = card_y2 + (card_h2 - pie_size) - 36
     pdf.setFillColor(TEXT)
-    pdf.setFont("Poppins-Medium", 12)
+    pdf.setFont("IBMPlexSansThai-Medium", 12)
     pdf.drawString(pie_x - 24, title_y, "Materials Proportion")
     _simple_pie_chart(pdf, pie_x, pie_y - 12, pie_size, pie_values, pie_colors, gap_width=1, gap_color=colors.white)
     top5 = items_top[:5]
@@ -1813,7 +1837,7 @@ def draw_sub_materials(pdf, page_width_points: float, page_height_points: float,
     left_x = x_right + 12
     right_x = x_right + pie_card - 12
     box_size = 8
-    pdf.setFont("Poppins-Regular", 10)
+    pdf.setFont("IBMPlexSansThai-Regular", 10)
     for i, it in enumerate(top5):
         y = start_y - i * (row_h + 6)
         c = colors.HexColor(sub_material_colorPalette[i % len(sub_material_colorPalette)])
@@ -1823,7 +1847,7 @@ def draw_sub_materials(pdf, page_width_points: float, page_height_points: float,
         pdf.setFillColor(TEXT)
         max_name_w = (right_x - left_x) - box_size - 54
         label = name
-        while stringWidth(label, "Poppins-Regular", 10) > max_name_w and len(label) > 1:
+        while stringWidth(label, "IBMPlexSansThai-Regular", 10) > max_name_w and len(label) > 1:
             label = label[:-2] + "…"
         pdf.drawString(left_x + box_size + 6, y, label)
         perc = it.get("proportion_percent")
@@ -1831,7 +1855,7 @@ def draw_sub_materials(pdf, page_width_points: float, page_height_points: float,
             total_w = float((data.get("sub_materials_data", {}) or {}).get("total_waste", 0) or 0) or sum(pie_values) or 1.0
             perc = (float(it.get("total_waste", 0) or 0) / total_w) * 100.0
         perc_text = f"{_format_number(perc)}%"
-        pw = stringWidth(perc_text, "Poppins-Regular", 10)
+        pw = stringWidth(perc_text, "IBMPlexSansThai-Regular", 10)
         pdf.drawString(right_x - pw, y, perc_text)
     _footer(pdf, page_width_points)
 
@@ -1889,17 +1913,17 @@ def draw_sub_materials_table(pdf, page_width_points: float, page_height_points: 
         pdf.showPage()
         _header(pdf, page_width_points, page_height_points, data)
         _sub_header(pdf, page_width_points, page_height_points, data, "Sub Materials")
-        pdf.setFillColor(colors.HexColor("#f1f5f9"))
+        pdf.setFillColor(colors.HexColor("#f5faf8"))
         draw_table(pdf, padding, header_y, page_width_points - 2 * padding, 24, 8, "Header")
         pdf.setFillColor(TEXT)
-        pdf.setFont("Poppins-Medium", 9)
+        pdf.setFont("IBMPlexSansThai-Medium", 9)
         pdf.drawString(padding + 16, header_text_y, "Sub Material")
         pdf.drawString(padding + 3.2 * inch, header_text_y, "Total Waste (kg)")
         pdf.drawString(padding + 5.8 * inch, header_text_y, "Percentage (%)")
         # Right-align the GHG header so its right edge is 16pt from the right table border
         ghg_header = "GHG Reduction (kgCO2e)"
         ghg_right = page_width_points - padding - 16
-        ghg_header_w = stringWidth(ghg_header, "Poppins-Medium", 9)
+        ghg_header_w = stringWidth(ghg_header, "IBMPlexSansThai-Medium", 9)
         pdf.drawString(ghg_right - ghg_header_w, header_text_y, ghg_header)
         # Compute right edges for Total Waste and Percentage columns (align values to these)
         _col_pad_sm = 8
@@ -1909,32 +1933,32 @@ def draw_sub_materials_table(pdf, page_width_points: float, page_height_points: 
             y_base = header_y - 32 - (idx * 32)
             table_type = "Footer" if idx == len(page_rows) - 1 else "Body"
             # Alternating background for all Body/Footer rows starting white
-            row_bg = WHITE if (idx % 2 == 0) else colors.HexColor("#f1f5f9")
+            row_bg = WHITE if (idx % 2 == 0) else colors.HexColor("#f5faf8")
             if row_type == "group":
                 pdf.setFillColor(row_bg)
                 draw_table(pdf, padding, y_base, page_width_points - 2 * padding, 32, 8, table_type)
                 pdf.setFillColor(TEXT)
-                pdf.setFont("Poppins-Medium", 10)
+                pdf.setFont("IBMPlexSansThai-Medium", 10)
                 pdf.drawString(padding + 16, y_base + 12, str(payload))
             else:
                 mat = payload
                 pdf.setFillColor(row_bg)
                 draw_table(pdf, padding, y_base, page_width_points - 2 * padding, 32, 8, table_type)
                 pdf.setFillColor(TEXT)
-                pdf.setFont("Poppins-Regular", 9)
+                pdf.setFont("IBMPlexSansThai-Regular", 9)
                 y_text = y_base + 12
                 pdf.drawString(padding + 16, y_text, str(mat.get("material_name", "")))
                 # Right-align Total Waste value
                 _txt_total_sm = _format_number(mat.get("total_waste", 0))
-                _w_total_sm = stringWidth(_txt_total_sm, "Poppins-Regular", 9)
+                _w_total_sm = stringWidth(_txt_total_sm, "IBMPlexSansThai-Regular", 9)
                 pdf.drawString(_right_total_sm - _w_total_sm, y_text, _txt_total_sm)
                 # Right-align Percentage value
                 _txt_percent_sm = f"{float(mat.get('proportion_percent', 0) or 0):.2f}%"
-                _w_percent_sm = stringWidth(_txt_percent_sm, "Poppins-Regular", 9)
+                _w_percent_sm = stringWidth(_txt_percent_sm, "IBMPlexSansThai-Regular", 9)
                 pdf.drawString(_right_percent_sm - _w_percent_sm, y_text, _txt_percent_sm)
                 # Right-align the GHG value to keep 16pt gap from right border
                 ghg_val = _format_number(mat.get("ghg_reduction", 0))
-                ghg_val_w = stringWidth(ghg_val, "Poppins-Regular", 9)
+                ghg_val_w = stringWidth(ghg_val, "IBMPlexSansThai-Regular", 9)
                 pdf.drawString(ghg_right - ghg_val_w, y_text, ghg_val)
         _footer(pdf, page_width_points)
         # Update start_idx to continue from where we left off
@@ -1957,7 +1981,7 @@ def draw_waste_diversion(pdf, page_width_points: float, page_height_points: floa
         card_h = 5.2 * inch
         _rounded_card(pdf, card_x, card_y, card_w, card_h, radius=8, fill=WHITE)
         pdf.setFillColor(TEXT)
-        pdf.setFont("Poppins-Medium", 14)
+        pdf.setFont("IBMPlexSansThai-Medium", 14)
         error_y = card_y + card_h / 2.0
         pdf.drawCentredString(card_x + card_w / 2.0, error_y, error_msg)
         _footer(pdf, page_width_points)
@@ -2037,15 +2061,51 @@ def draw_waste_diversion(pdf, page_width_points: float, page_height_points: floa
         print("SANKEY DID NOT GOT USED")
         # Draw a friendly placeholder when there are no flows (only header present)
         pdf.setFillColor(TEXT)
-        pdf.setFont("Poppins-Regular", 11)
+        pdf.setFont("IBMPlexSansThai-Regular", 11)
         msg = "No diversion flows available for the selected period."
-        tw = stringWidth(msg, "Poppins-Regular", 11)
+        tw = stringWidth(msg, "IBMPlexSansThai-Regular", 11)
         center_x = margin + (usable_w - tw) / 2.0
         center_y = (chart_y_top + (1.5 * inch)) / 2.0
         pdf.drawString(center_x, center_y, msg)
     _footer(pdf, page_width_points)
 
 def _draw_sankey_diagram(pdf, x, y_top, width, height, data_rows, source_color_map=None):
+    # Keyword lists for color determination
+    diverted_keywords = [
+        'preparation for reuse',
+        'recycling (own)',
+        'other recover operation',
+        'recycle',
+        'recycling',
+        'reuse',
+        'recover'
+    ]
+    directed_keywords = [
+        'composted by municipality',
+        'municipality receive',
+        'incineration without energy',
+        'incineration with energy',
+        'composted',
+        'municipality',
+        'incineration',
+        'disposal'
+    ]
+    
+    def get_target_color(target_name: str):
+        """Determine target color based on keywords."""
+        # Normalize snake_case to spaces for keyword matching
+        target_normalized = str(target_name).lower().strip().replace('_', ' ')
+        # Check diverted keywords
+        for keyword in diverted_keywords:
+            if keyword in target_normalized:
+                return colors.HexColor("#54937a")
+        # Check directed keywords
+        for keyword in directed_keywords:
+            if keyword in target_normalized:
+                return colors.HexColor("#95c9c4")
+        # Default color if no match
+        return colors.Color(0.3, 0.6, 0.9)
+    
     rows = data_rows[1:] if data_rows[0][0] == "From" else data_rows
     sources = {}
     targets = {}
@@ -2163,16 +2223,19 @@ def _draw_sankey_diagram(pdf, x, y_top, width, height, data_rows, source_color_m
         pdf.setFillColor(text_color)
         pdf.drawString(x + bar_width + 8, bar_y + data['h']/2 - 3, name)
     pdf.setFont("Helvetica-Bold", 9)
-    target_bar_color = colors.Color(0.3, 0.6, 0.9)
     for name in target_names:
         data = target_coords[name]
         bar_y = data['y'] - data['h']
+        # Get color based on keywords
+        target_bar_color = get_target_color(name)
         pdf.setFillColor(target_bar_color)
         pdf.setStrokeColor(target_bar_color)
         pdf.rect(x + width - bar_width, bar_y, bar_width, data['h'], fill=1, stroke=0)
         pdf.setFillColor(text_color)
-        text_w = pdf.stringWidth(name, "Helvetica-Bold", 9)
-        pdf.drawString(x + width - bar_width - 8 - text_w, bar_y + data['h']/2 - 3, name)
+        # Convert snake_case to Title Case for display
+        display_name = snake_to_title(name)
+        text_w = pdf.stringWidth(display_name, "Helvetica-Bold", 9)
+        pdf.drawString(x + width - bar_width - 8 - text_w, bar_y + data['h']/2 - 3, display_name)
         print('DONE SANKEY')
 
 def draw_waste_diversion_table(pdf, page_width_points: float, page_height_points: float, data: dict) -> None:
@@ -2259,10 +2322,10 @@ def draw_waste_diversion_table(pdf, page_width_points: float, page_height_points
         return months_area_left + (i * month_w)
     def fit_text(text: str, max_w: float) -> str:
         t = str(text or "")
-        if stringWidth(t, "Poppins-Regular", 8) <= max_w:
+        if stringWidth(t, "IBMPlexSansThai-Regular", 8) <= max_w:
             return t
         ell = "…"
-        while t and stringWidth(t + ell, "Poppins-Regular", 8) > max_w:
+        while t and stringWidth(t + ell, "IBMPlexSansThai-Regular", 8) > max_w:
             t = t[:-1]
         return (t + ell) if t else ell
     total_rows = len(rows)
@@ -2273,9 +2336,11 @@ def draw_waste_diversion_table(pdf, page_width_points: float, page_height_points
         dest_val = row.get("destination", [])
         parts = dest_val if isinstance(dest_val, list) else [str(dest_val)]
         groups: list[list[str]] = []
-        pdf.setFont("Poppins-Regular", 9)
+        pdf.setFont("IBMPlexSansThai-Regular", 9)
         for part in (parts or ["-"]):
-            wrapped = _wrap_text_lines(pdf, str(part), destination_w - 12, "Poppins-Regular", 9)
+            # Convert snake_case to Title Case
+            part_text = snake_to_title(str(part))
+            wrapped = _wrap_text_lines(pdf, part_text, destination_w - 12, "IBMPlexSansThai-Regular", 9)
             groups.append(wrapped or ["-"])
         return groups
     def compute_row_height(row) -> float:
@@ -2298,10 +2363,10 @@ def draw_waste_diversion_table(pdf, page_width_points: float, page_height_points
                     print("[waste_diversion_table] no rows to render (header-only page)")
             except Exception:
                 pass
-        pdf.setFillColor(colors.HexColor("#f1f5f9"))
+        pdf.setFillColor(colors.HexColor("#f5faf8"))
         draw_table(pdf, content_x, header_y, content_w, header_h, 8, "Header")
         pdf.setFillColor(TEXT)
-        pdf.setFont("Poppins-Medium", 9)
+        pdf.setFont("IBMPlexSansThai-Medium", 9)
         header_text_y = content_top - 15
         pdf.drawString(content_x + 16, header_text_y, "Materials")
         for i, m in enumerate(months_to_show):
@@ -2328,11 +2393,11 @@ def draw_waste_diversion_table(pdf, page_width_points: float, page_height_points
             is_last_on_page = (current_y - this_h - next_h) < min_y or (idx_global + 1) >= total_rows
             y_base = current_y - this_h
             table_type = "Footer" if is_last_on_page else "Body"
-            row_bg = WHITE if (rows_on_page % 2 == 0) else colors.HexColor("#f1f5f9")
+            row_bg = WHITE if (rows_on_page % 2 == 0) else colors.HexColor("#f5faf8")
             pdf.setFillColor(row_bg)
             draw_table(pdf, content_x, y_base, content_w, this_h, 8, table_type)
             pdf.setFillColor(TEXT)
-            pdf.setFont("Poppins-Regular", 9)
+            pdf.setFont("IBMPlexSansThai-Regular", 9)
             y_text = y_base + (this_h / 2) - 4
             pdf.drawString(content_x + 16, y_text, str(this_row.get("materials", "")))
             if debug:
@@ -2377,7 +2442,7 @@ def draw_waste_diversion_table(pdf, page_width_points: float, page_height_points
                 except Exception:
                     col_w = month_w
                 max_text_w = max(0.0, (col_w - 8))  # padding
-                base_font = "Poppins-Regular"
+                base_font = "IBMPlexSansThai-Regular"
                 font_size = 9
                 while font_size > 6 and stringWidth(txt, base_font, font_size) > max_text_w:
                     font_size -= 1
@@ -2390,9 +2455,9 @@ def draw_waste_diversion_table(pdf, page_width_points: float, page_height_points
             if status_val.lower() == "processing":
                 badge_bg = colors.HexColor("#FFF4E5")
                 badge_text = colors.HexColor("#F59E0B")
-                pdf.setFont("Poppins-Medium", 9)
+                pdf.setFont("IBMPlexSansThai-Medium", 9)
                 disp = fit_text(status_val, status_w - 16)
-                tw = stringWidth(disp, "Poppins-Medium", 9)
+                tw = stringWidth(disp, "IBMPlexSansThai-Medium", 9)
                 pad_x = 10
                 badge_w = min(status_w - 8, tw + 2 * pad_x)
                 badge_h = 18
@@ -2406,13 +2471,13 @@ def draw_waste_diversion_table(pdf, page_width_points: float, page_height_points
                 ty = by + (badge_h / 2) - 3
                 pdf.drawString(tx, ty, disp)
                 pdf.setFillColor(TEXT)
-                pdf.setFont("Poppins-Regular", 9)
+                pdf.setFont("IBMPlexSansThai-Regular", 9)
             elif status_val.lower().startswith("complete"):
                 badge_bg = colors.HexColor("#EAF7F0")
                 badge_text = colors.HexColor("#16A34A")
-                pdf.setFont("Poppins-Medium", 9)
+                pdf.setFont("IBMPlexSansThai-Medium", 9)
                 disp = fit_text(status_val, status_w - 16)
-                tw = stringWidth(disp, "Poppins-Medium", 9)
+                tw = stringWidth(disp, "IBMPlexSansThai-Medium", 9)
                 pad_x = 10
                 badge_w = min(status_w - 8, tw + 2 * pad_x)
                 badge_h = 18
@@ -2426,10 +2491,10 @@ def draw_waste_diversion_table(pdf, page_width_points: float, page_height_points
                 ty = by + (badge_h / 2) - 3
                 pdf.drawString(tx, ty, disp)
                 pdf.setFillColor(TEXT)
-                pdf.setFont("Poppins-Regular", 9)
+                pdf.setFont("IBMPlexSansThai-Regular", 9)
             else:
                 pdf.drawString(status_x + 4, y_text, fit_text(status_val, status_w - 8))
-            pdf.setFont("Poppins-Regular", 9)
+            pdf.setFont("IBMPlexSansThai-Regular", 9)
             groups = destination_groups(this_row)
             if debug:
                 try:
@@ -2443,8 +2508,8 @@ def draw_waste_diversion_table(pdf, page_width_points: float, page_height_points
             placeholder_only = (len(groups) == 1 and len(groups[0]) == 1 and groups[0][0] == "-")
             if placeholder_only:
                 dash = "-"
-                pdf.setFont("Poppins-Regular", 9)
-                tw_dash = stringWidth(dash, "Poppins-Regular", 9)
+                pdf.setFont("IBMPlexSansThai-Regular", 9)
+                tw_dash = stringWidth(dash, "IBMPlexSansThai-Regular", 9)
                 tx = dest_x + (destination_w - tw_dash) / 2
                 pdf.drawString(tx, y_text, dash)
             else:
@@ -2472,13 +2537,13 @@ def draw_waste_diversion_table(pdf, page_width_points: float, page_height_points
 
 def _register_fonts() -> None:
     """
-    Try to register Poppins fonts from common locations (repo scripts/, lambda layer /opt/fonts, cwd).
+    Try to register IBMPlexSansThai fonts from common locations (repo scripts/, lambda layer /opt/fonts, cwd).
     If not found, silently continue (ReportLab will use default fonts).
     """
     candidates = [
-        ("Poppins-Bold",   ["scripts/Poppins-Bold.ttf",   "/opt/fonts/Poppins-Bold.ttf",   "Poppins-Bold.ttf"]),
-        ("Poppins-Regular",["scripts/Poppins-Regular.ttf","/opt/fonts/Poppins-Regular.ttf","Poppins-Regular.ttf"]),
-        ("Poppins-Medium", ["scripts/Poppins-Medium.ttf", "/opt/fonts/Poppins-Medium.ttf", "Poppins-Medium.ttf"]),
+        ("IBMPlexSansThai-Bold",   ["scripts/IBMPlexSansThai-Bold.ttf",   "/opt/fonts/IBMPlexSansThai-Bold.ttf",   "IBMPlexSansThai-Bold.ttf"]),
+        ("IBMPlexSansThai-Regular",["scripts/IBMPlexSansThai-Regular.ttf","/opt/fonts/IBMPlexSansThai-Regular.ttf","IBMPlexSansThai-Regular.ttf"]),
+        ("IBMPlexSansThai-Medium", ["scripts/IBMPlexSansThai-Medium.ttf", "/opt/fonts/IBMPlexSansThai-Medium.ttf", "IBMPlexSansThai-Medium.ttf"]),
     ]
     for family, paths in candidates:
         for p in paths:
