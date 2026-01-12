@@ -96,11 +96,39 @@ def get_iot_devices_paths() -> Dict[str, Any]:
                 }
             }
         },
+        "/api/iot-devices/user-id-login": {
+            "post": {
+                "tags": ["IOT Devices"],
+                "summary": "User ID login (no password required)",
+                "description": "Authenticate a user using only user_id. No password verification required. Returns auth and refresh tokens like normal user login.",
+                "security": [{"BearerAuth": []}],
+                "requestBody": {
+                    "required": True,
+                    "content": {
+                        "application/json": {
+                            "schema": {"$ref": "#/components/schemas/IotDeviceUserIdLoginRequest"}
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Login successful",
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/LoginResponse"}
+                            }
+                        }
+                    },
+                    "400": {"$ref": "#/components/responses/BadRequestError"},
+                    "401": {"$ref": "#/components/responses/UnauthorizedError"}
+                }
+            }
+        },
         "/api/iot-devices/my-memberships": {
             "post": {
                 "tags": ["IOT Devices"],
                 "summary": "List locations where current user is a dataInput member",
-                "description": "Requires Bearer device token. Provide user JWT token in body via `user_token` to resolve memberships. Returns reduced location objects: id, display_name, materials.",
+                "description": "Requires Bearer device token. Provide user JWT token in body via `user_token` to resolve memberships. Returns locations and all materials separately. Materials include category and main_material as objects.",
                 "security": [{"BearerAuth": []}],
                 "parameters": [
                     {
@@ -121,7 +149,7 @@ def get_iot_devices_paths() -> Dict[str, Any]:
                 },
                 "responses": {
                     "200": {
-                        "description": "List of member locations",
+                        "description": "List of member locations and all materials",
                         "content": {
                             "application/json": {
                                 "schema": {
@@ -298,28 +326,47 @@ def get_iot_devices_schemas() -> Dict[str, Any]:
                 ]
             }
         },
+        "MaterialCategoryRef": {
+            "type": "object",
+            "nullable": True,
+            "properties": {
+                "id": {"type": "integer", "example": 5},
+                "name_en": {"type": "string", "example": "Plastic"},
+                "name_th": {"type": "string", "example": "พลาสติก"},
+                "code": {"type": "string", "nullable": True, "example": "PLASTIC"}
+            }
+        },
+        "MainMaterialRef": {
+            "type": "object",
+            "nullable": True,
+            "properties": {
+                "id": {"type": "integer", "example": 2},
+                "name_en": {"type": "string", "example": "PET"},
+                "name_th": {"type": "string", "example": "PET"},
+                "name_local": {"type": "string", "nullable": True, "example": "PET"},
+                "code": {"type": "string", "nullable": True, "example": "PET"}
+            }
+        },
         "MaterialRef": {
             "type": "object",
             "properties": {
-                "id": {"type": "integer", "example": 101},
+                "material_id": {"type": "integer", "example": 101},
                 "name_en": {"type": "string", "example": "PET Bottle"},
                 "name_th": {"type": "string", "example": "ขวด PET"},
                 "category_id": {"type": "integer", "nullable": True, "example": 5},
                 "main_material_id": {"type": "integer", "nullable": True, "example": 2},
+                "category": {"$ref": "#/components/schemas/MaterialCategoryRef"},
+                "main_material": {"$ref": "#/components/schemas/MainMaterialRef"},
                 "unit_name_th": {"type": "string", "example": "กก."},
                 "unit_name_en": {"type": "string", "example": "kg"},
-                "unit_weight": {"type": "number", "format": "float", "example": 1.0}
+                "unit_weight": {"type": "number", "format": "float", "nullable": True, "example": 1.0}
             }
         },
         "LocationReduced": {
             "type": "object",
             "properties": {
-                "id": {"type": "integer", "example": 123},
-                "display_name": {"type": "string", "example": "Main Branch"},
-                "materials": {
-                    "type": "array",
-                    "items": {"$ref": "#/components/schemas/MaterialRef"}
-                }
+                "origin_id": {"type": "integer", "example": 123},
+                "display_name": {"type": "string", "example": "Main Branch"}
             }
         },
         "LocationsByMembershipResponse": {
@@ -327,8 +374,28 @@ def get_iot_devices_schemas() -> Dict[str, Any]:
             "properties": {
                 "success": {"type": "boolean", "example": True},
                 "data": {
-                    "type": "array",
-                    "items": {"$ref": "#/components/schemas/LocationReduced"}
+                    "type": "object",
+                    "properties": {
+                        "locations": {
+                            "type": "array",
+                            "items": {"$ref": "#/components/schemas/LocationReduced"}
+                        },
+                        "materials": {
+                            "type": "array",
+                            "items": {"$ref": "#/components/schemas/MaterialRef"}
+                        }
+                    }
+                }
+            }
+        },
+        "IotDeviceUserIdLoginRequest": {
+            "type": "object",
+            "required": ["user_id"],
+            "properties": {
+                "user_id": {
+                    "type": "integer",
+                    "description": "User ID to login (no password required)",
+                    "example": 123
                 }
             }
         },
