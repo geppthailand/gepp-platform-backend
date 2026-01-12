@@ -1749,7 +1749,6 @@ class TransactionAuditService:
                 else:
                     raise parse_err
 
-            print("<<<<<<<", ai_data)
             violations = ai_data.get('violations', [])
 
             # Build audit rules map by database ID for lookup

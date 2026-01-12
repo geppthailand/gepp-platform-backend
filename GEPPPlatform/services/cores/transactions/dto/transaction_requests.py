@@ -160,7 +160,7 @@ class CreateTransactionRequest(BaseDTO):
             errors.append('origin_id is required')
 
         # Validate transaction method
-        valid_methods = ['origin', 'transport', 'transform']
+        valid_methods = ['origin', 'transport', 'transform', 'qr_input', 'scale_input']
         if self.transaction_method not in valid_methods:
             errors.append(f'transaction_method must be one of: {", ".join(valid_methods)}')
 
@@ -238,7 +238,7 @@ class UpdateTransactionRequest(BaseDTO):
 
         # Validate transaction method if provided
         if self.transaction_method is not None:
-            valid_methods = ['origin', 'transport', 'transform']
+            valid_methods = ['origin', 'transport', 'transform', 'qr_input', 'scale_input']
             if self.transaction_method not in valid_methods:
                 errors.append(f'transaction_method must be one of: {", ".join(valid_methods)}')
 

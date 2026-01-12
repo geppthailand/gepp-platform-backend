@@ -398,6 +398,237 @@ class ManualAuditService:
                 'data': None
             }
 
+    def approve_transaction_record(
+        self,
+        db: Session,
+        record_id: int,
+        auditor_user_id: int,
+        notes: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Manually approve a pending transaction record
+
+        Args:
+            db: Database session
+            record_id: Transaction record ID to approve
+            auditor_user_id: ID of the user performing the audit
+            notes: Optional audit notes
+
+        Returns:
+            Dict containing operation result
+        """
+        try:
+            logger.info(f"Approving transaction record {record_id} by user {auditor_user_id}")
+
+            # Get transaction record
+            record = db.query(TransactionRecord).filter(TransactionRecord.id == record_id).first()
+
+            if not record:
+                return {
+                    'success': False,
+                    'error': f'Transaction record {record_id} not found',
+                    'data': None
+                }
+
+            # Update transaction record status to approved
+            record.status = 'approved'
+            # Note: approved_by_id expects user_location_id, not user_id
+            # For now, we skip setting it as we only have user_id from the JWT token
+
+            # Add audit notes to the record
+            if notes:
+                audit_note = f"Manual Audit - APPROVED by User #{auditor_user_id} at {datetime.now(timezone.utc).isoformat()}"
+                audit_note += f"\nAuditor Notes: {notes}"
+                if record.notes:
+                    record.notes += f"\n\n{audit_note}"
+                else:
+                    record.notes = audit_note
+
+            # Flush changes to the record
+            db.flush()
+
+            # Check if all records for this transaction are now approved
+            # If so, update the parent transaction status
+            transaction = db.query(Transaction).filter(
+                Transaction.id == record.created_transaction_id
+            ).first()
+
+            transaction_status_updated = False
+            if transaction:
+                # Get all records for this transaction
+                all_records = db.query(TransactionRecord).filter(
+                    TransactionRecord.created_transaction_id == transaction.id
+                ).all()
+
+                # Check statuses
+                all_approved = all(r.status == 'approved' for r in all_records)
+                any_rejected = any(r.status == 'rejected' for r in all_records)
+
+                if any_rejected:
+                    # If any record is rejected, transaction is rejected
+                    transaction.status = TransactionStatus.rejected
+                    transaction.approved_by_id = auditor_user_id
+                    transaction.updated_by_id = auditor_user_id
+                    transaction.updated_date = datetime.now(timezone.utc)
+                    transaction.is_user_audit = True
+                    transaction.audit_date = datetime.now(timezone.utc)
+                    transaction_status_updated = True
+                    logger.info(f"Transaction {transaction.id} status updated to rejected (has rejected records)")
+                elif all_approved:
+                    # All records approved, update transaction status
+                    transaction.status = TransactionStatus.approved
+                    transaction.approved_by_id = auditor_user_id
+                    transaction.updated_by_id = auditor_user_id
+                    transaction.updated_date = datetime.now(timezone.utc)
+                    transaction.is_user_audit = True
+                    transaction.audit_date = datetime.now(timezone.utc)
+                    transaction_status_updated = True
+                    logger.info(f"Transaction {transaction.id} status updated to approved (all records approved)")
+
+                db.flush()
+
+            # Commit all changes
+            db.commit()
+            db.refresh(record)
+
+            logger.info(f"Transaction record {record_id} approved successfully with status: {record.status}")
+
+            return {
+                'success': True,
+                'message': f'Transaction record {record_id} approved successfully',
+                'data': {
+                    'record_id': record_id,
+                    'new_status': 'approved',
+                    'approved_by': auditor_user_id,
+                    'approved_at': datetime.now(timezone.utc).isoformat(),
+                    'transaction_status_updated': transaction_status_updated,
+                    'transaction_status': transaction.status.value if transaction and transaction_status_updated else None
+                }
+            }
+
+        except SQLAlchemyError as e:
+            logger.error(f"Database error approving transaction record {record_id}: {str(e)}")
+            db.rollback()
+            return {
+                'success': False,
+                'error': f'Database error: {str(e)}',
+                'data': None
+            }
+        except Exception as e:
+            logger.error(f"Unexpected error approving transaction record {record_id}: {str(e)}")
+            db.rollback()
+            return {
+                'success': False,
+                'error': f'Unexpected error: {str(e)}',
+                'data': None
+            }
+
+    def reject_transaction_record(
+        self,
+        db: Session,
+        record_id: int,
+        auditor_user_id: int,
+        rejection_reason: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Manually reject a pending transaction record
+
+        Args:
+            db: Database session
+            record_id: Transaction record ID to reject
+            auditor_user_id: ID of the user performing the audit
+            rejection_reason: Optional reason for rejection
+
+        Returns:
+            Dict containing operation result
+        """
+        try:
+            logger.info(f"Rejecting transaction record {record_id} by user {auditor_user_id}")
+
+            # Get transaction record
+            record = db.query(TransactionRecord).filter(TransactionRecord.id == record_id).first()
+
+            if not record:
+                return {
+                    'success': False,
+                    'error': f'Transaction record {record_id} not found',
+                    'data': None
+                }
+
+            # Update transaction record status to rejected
+            record.status = 'rejected'
+            # Note: approved_by_id expects user_location_id, not user_id
+            # For now, we skip setting it as we only have user_id from the JWT token
+
+            # Add rejection notes to the record
+            rejection_note = f"Manual Audit - REJECTED by User #{auditor_user_id} at {datetime.now(timezone.utc).isoformat()}"
+            if rejection_reason:
+                rejection_note += f"\nRejection Reason: {rejection_reason}"
+
+            if record.notes:
+                record.notes += f"\n\n{rejection_note}"
+            else:
+                record.notes = rejection_note
+
+            # Flush changes to the record
+            db.flush()
+
+            # When a record is rejected, update the parent transaction status to rejected
+            transaction = db.query(Transaction).filter(
+                Transaction.id == record.created_transaction_id
+            ).first()
+
+            transaction_status_updated = False
+            if transaction:
+                # Any rejected record means the transaction is rejected
+                transaction.status = TransactionStatus.rejected
+                transaction.approved_by_id = auditor_user_id
+                transaction.updated_by_id = auditor_user_id
+                transaction.updated_date = datetime.now(timezone.utc)
+                transaction.is_user_audit = True
+                transaction.audit_date = datetime.now(timezone.utc)
+                transaction_status_updated = True
+                logger.info(f"Transaction {transaction.id} status updated to rejected")
+
+                db.flush()
+
+            # Commit all changes
+            db.commit()
+            db.refresh(record)
+
+            logger.info(f"Transaction record {record_id} rejected successfully with status: {record.status}")
+
+            return {
+                'success': True,
+                'message': f'Transaction record {record_id} rejected successfully',
+                'data': {
+                    'record_id': record_id,
+                    'new_status': 'rejected',
+                    'rejected_by': auditor_user_id,
+                    'rejected_at': datetime.now(timezone.utc).isoformat(),
+                    'rejection_reason': rejection_reason,
+                    'transaction_status_updated': transaction_status_updated,
+                    'transaction_status': 'rejected' if transaction_status_updated else None
+                }
+            }
+
+        except SQLAlchemyError as e:
+            logger.error(f"Database error rejecting transaction record {record_id}: {str(e)}")
+            db.rollback()
+            return {
+                'success': False,
+                'error': f'Database error: {str(e)}',
+                'data': None
+            }
+        except Exception as e:
+            logger.error(f"Unexpected error rejecting transaction record {record_id}: {str(e)}")
+            db.rollback()
+            return {
+                'success': False,
+                'error': f'Unexpected error: {str(e)}',
+                'data': None
+            }
+
     def _serialize_transactions(self, transactions: List[Transaction]) -> List[Dict[str, Any]]:
         """Serialize a list of transactions to dictionaries"""
         return [self._serialize_transaction(transaction) for transaction in transactions]

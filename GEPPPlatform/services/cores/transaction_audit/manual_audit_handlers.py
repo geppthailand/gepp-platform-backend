@@ -100,6 +100,41 @@ def handle_manual_audit_routes(event: Dict[str, Any], data: Dict[str, Any], **pa
                 current_user_id
             )
 
+        # Transaction Record-level audit routes
+        elif path.startswith('/api/audit/manual/record/') and path.endswith('/approve') and method == 'POST':
+            # Extract record ID from path: /api/audit/manual/record/{id}/approve
+            path_parts = path.split('/')
+            try:
+                record_id = int(path_parts[5])  # /api/audit/manual/record/{id}/approve
+            except (IndexError, ValueError):
+                raise BadRequestException('Invalid record ID in path')
+
+            return handle_approve_transaction_record(
+                manual_audit_service,
+                db_session,
+                record_id,
+                data,
+                current_user_organization_id,
+                current_user_id
+            )
+
+        elif path.startswith('/api/audit/manual/record/') and path.endswith('/reject') and method == 'POST':
+            # Extract record ID from path: /api/audit/manual/record/{id}/reject
+            path_parts = path.split('/')
+            try:
+                record_id = int(path_parts[5])  # /api/audit/manual/record/{id}/reject
+            except (IndexError, ValueError):
+                raise BadRequestException('Invalid record ID in path')
+
+            return handle_reject_transaction_record(
+                manual_audit_service,
+                db_session,
+                record_id,
+                data,
+                current_user_organization_id,
+                current_user_id
+            )
+
         else:
             # Route not found
             raise NotFoundException(f'Manual audit route not found: {method} {path}')
@@ -394,6 +429,140 @@ def handle_reject_transaction(
         return {
             'success': False,
             'message': f'Failed to reject transaction {transaction_id}',
+            'error': f'Internal server error: {str(e)}',
+            'data': None
+        }
+
+
+def handle_approve_transaction_record(
+    service: ManualAuditService,
+    db_session: Any,
+    record_id: int,
+    data: Dict[str, Any],
+    organization_id: int,
+    current_user_id: int
+) -> Dict[str, Any]:
+    """
+    Handle POST /api/audit/manual/record/{id}/approve - Approve a pending transaction record
+
+    Expected payload:
+    {
+        "notes": "Optional audit notes"
+    }
+    """
+    try:
+        logger.info(f"Approving transaction record {record_id} by user {current_user_id}")
+
+        # Parse request data
+        notes = data.get('notes')
+
+        # Approve transaction record
+        result = service.approve_transaction_record(
+            db=db_session,
+            record_id=record_id,
+            auditor_user_id=current_user_id,
+            notes=notes
+        )
+
+        if not result['success']:
+            if 'not found' in result.get('error', '').lower():
+                raise NotFoundException(f'Transaction record {record_id} not found')
+            elif 'not pending' in result.get('error', '').lower():
+                raise BadRequestException(result.get('error', 'Transaction record is not in pending status'))
+
+            return {
+                'success': False,
+                'message': result.get('error', 'Failed to approve transaction record'),
+                'error': result.get('error'),
+                'data': None
+            }
+
+        return {
+            'success': True,
+            'message': result['message'],
+            'data': result['data']
+        }
+
+    except NotFoundException:
+        raise  # Re-raise not found errors
+
+    except BadRequestException:
+        raise  # Re-raise bad request errors
+
+    except Exception as e:
+        logger.error(f"Error approving transaction record {record_id}: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+
+        return {
+            'success': False,
+            'message': f'Failed to approve transaction record {record_id}',
+            'error': f'Internal server error: {str(e)}',
+            'data': None
+        }
+
+
+def handle_reject_transaction_record(
+    service: ManualAuditService,
+    db_session: Any,
+    record_id: int,
+    data: Dict[str, Any],
+    organization_id: int,
+    current_user_id: int
+) -> Dict[str, Any]:
+    """
+    Handle POST /api/audit/manual/record/{id}/reject - Reject a pending transaction record
+
+    Expected payload:
+    {
+        "rejection_reason": "Optional reason for rejection"
+    }
+    """
+    try:
+        logger.info(f"Rejecting transaction record {record_id} by user {current_user_id}")
+
+        # Parse request data
+        rejection_reason = data.get('rejection_reason')
+
+        # Reject transaction record
+        result = service.reject_transaction_record(
+            db=db_session,
+            record_id=record_id,
+            auditor_user_id=current_user_id,
+            rejection_reason=rejection_reason
+        )
+
+        if not result['success']:
+            if 'not found' in result.get('error', '').lower():
+                raise NotFoundException(f'Transaction record {record_id} not found')
+            elif 'not pending' in result.get('error', '').lower():
+                raise BadRequestException(result.get('error', 'Transaction record is not in pending status'))
+
+            return {
+                'success': False,
+                'message': result.get('error', 'Failed to reject transaction record'),
+                'error': result.get('error'),
+                'data': None
+            }
+
+        return {
+            'success': True,
+            'message': result['message'],
+            'data': result['data']
+        }
+
+    except NotFoundException:
+        raise  # Re-raise not found errors
+
+    except BadRequestException:
+        raise  # Re-raise bad request errors
+
+    except Exception as e:
+        logger.error(f"Error rejecting transaction record {record_id}: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+
+        return {
+            'success': False,
+            'message': f'Failed to reject transaction record {record_id}',
             'error': f'Internal server error: {str(e)}',
             'data': None
         }
