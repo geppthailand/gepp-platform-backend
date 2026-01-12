@@ -140,14 +140,48 @@ def main(event, context):
                 # Used for QR code mobile input
                 from GEPPPlatform.services.cores.users.input_channel_service import InputChannelService
 
-                # Extract hash from path: /api/input-channel/{hash} or /api/input-channel/{hash}/submit
+                # Extract hash from path: /api/input-channel/{hash} or /api/input-channel/{hash}/submit or /api/input-channel/{hash}/preferences
                 path_parts = path.split('/api/input-channel/')[1].split('/')
                 hash_value = path_parts[0].split('?')[0]
                 is_submit = len(path_parts) > 1 and path_parts[1] == 'submit'
+                is_preferences = len(path_parts) > 1 and path_parts[1].startswith('preferences')
 
                 input_service = InputChannelService(session)
 
-                if is_submit and http_method == 'POST':
+                if is_preferences:
+                    # Handle preferences GET/POST
+                    subuser = query_params.get('subuser') or body.get('subuser', '')
+                    if http_method == 'GET':
+                        # Get subuser preferences
+                        prefs = input_service.get_subuser_preferences(hash_value, subuser)
+                        results = {
+                            "success": True,
+                            "data": prefs
+                        }
+                    elif http_method == 'POST':
+                        # Save subuser preferences
+                        material_ids = body.get('material_ids', [])
+                        save_result = input_service.save_subuser_preferences(hash_value, subuser, material_ids)
+                        results = {
+                            "success": save_result.get('success', False),
+                            "data": save_result
+                        }
+                        if not save_result.get('success'):
+                            return {
+                                "statusCode": 400,
+                                "headers": headers,
+                                "body": json.dumps({
+                                    'success': False,
+                                    'message': save_result.get('message', 'Failed to save preferences')
+                                })
+                            }
+                    else:
+                        return {
+                            "statusCode": 405,
+                            "headers": headers,
+                            "body": json.dumps({'success': False, 'message': 'Method not allowed'})
+                        }
+                elif is_submit and http_method == 'POST':
                     # Handle transaction submission from QR input
                     submit_result = input_service.submit_transaction_by_hash(hash_value, body)
                     if submit_result.get('status') == 'success':
@@ -181,6 +215,80 @@ def main(event, context):
                             "headers": headers,
                             "body": json.dumps({'success': False, 'message': 'Input channel not found'})
                         }
+
+            # Check for channel-based authentication for materials endpoints (QR mobile input)
+            elif path.startswith('/api/materials') and http_method == 'GET':
+                # Allow materials access with channel_hash + subuser authentication
+                channel_hash = query_params.get('channel_hash')
+                subuser = query_params.get('subuser')
+
+                if channel_hash and subuser:
+                    # Validate channel and subuser
+                    from GEPPPlatform.services.cores.users.input_channel_service import InputChannelService
+                    input_service = InputChannelService(session)
+                    channel_data = input_service.get_input_channel_by_hash(channel_hash, subuser)
+
+                    if channel_data and channel_data.get('subUser', {}).get('isValid'):
+                        # Valid channel access - serve materials data without token
+                        from GEPPPlatform.services.cores.materials.materials_handlers import handle_materials_routes
+                        materials_result = handle_materials_routes(
+                            event,
+                            db_session=session,
+                            method=http_method,
+                            query_params=query_params,
+                            path_params={},
+                            headers=event.get('headers', {}),
+                            current_user={'channel_auth': True, 'organization_id': channel_data.get('organization_id')}
+                        )
+                        results = {
+                            "success": True,
+                            "data": materials_result
+                        }
+                    else:
+                        return {
+                            "statusCode": 401,
+                            "headers": headers,
+                            "body": json.dumps({'success': False, 'message': 'Invalid channel or subuser'})
+                        }
+                else:
+                    # No channel auth provided, fall through to regular token auth
+                    auth_header = event.get('headers', {}).get('Authorization', '') or event.get('headers', {}).get('authorization', '')
+                    if not auth_header.startswith('Bearer '):
+                        return {
+                            "statusCode": 401,
+                            "headers": headers,
+                            "body": json.dumps({'success': False, 'message': 'Missing or invalid authorization header'})
+                        }
+                    token = auth_header[7:]
+                    auth_handler = AuthHandlers(session)
+                    token_data = auth_handler.verify_jwt_token(token, path)
+                    if token_data is None:
+                        return {
+                            "statusCode": 401,
+                            "headers": headers,
+                            "body": json.dumps({'success': False, 'message': 'Invalid token or insufficient permissions'})
+                        }
+                    # Handle materials routes with token auth
+                    from GEPPPlatform.services.cores.materials.materials_handlers import handle_materials_routes
+                    current_user = {
+                        'user_id': token_data['user_id'],
+                        'organization_id': token_data.get('organization_id'),
+                        'email': token_data.get('email'),
+                        'token_data': token_data
+                    }
+                    materials_result = handle_materials_routes(
+                        event,
+                        db_session=session,
+                        method=http_method,
+                        query_params=query_params,
+                        path_params={},
+                        headers=event.get('headers', {}),
+                        current_user=current_user
+                    )
+                    results = {
+                        "success": True,
+                        "data": materials_result
+                    }
 
             else:
                 # All other routes require authorization

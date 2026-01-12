@@ -59,6 +59,7 @@ class UserInputChannel(Base, BaseModel):
 
     # Sub-user configuration
     subuser_names = Column(JSON, default=list)  # List of sub-user names for login
+    subuser_material_preferences = Column(JSON, default=dict)  # Per-subuser material preferences: {"subuser_name": [material_id1, ...]}
 
     # Feature flags
     enable_upload_image = Column(Boolean, default=False)

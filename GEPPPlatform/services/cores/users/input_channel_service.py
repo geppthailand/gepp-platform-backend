@@ -358,32 +358,50 @@ class InputChannelService:
 
         # Get material and weight data
         mat_data = data.get('matData', [])
-        material_ids = channel.sub_material_ids or []
         destination_ids = channel.sub_material_destination_ids or []
-
-        if len(mat_data) != len(material_ids):
-            return {'status': 'error', 'message': 'Material data mismatch'}
 
         # Filter out zero/empty weights
         transaction_records_data = []
         total_weight = Decimal('0')
 
-        for i, weight in enumerate(mat_data):
-            if weight and float(weight) > 0:
-                weight_decimal = Decimal(str(weight))
-                total_weight += weight_decimal
+        # Handle both new format (array of {id, weight} objects) and legacy format (array of weights)
+        if mat_data and isinstance(mat_data[0], dict):
+            # New format: array of {id, weight} objects from dynamic material selection
+            for item in mat_data:
+                material_id = item.get('id')
+                weight = item.get('weight', 0)
+                if material_id and weight and float(weight) > 0:
+                    weight_decimal = Decimal(str(weight))
+                    total_weight += weight_decimal
 
-                # Get destination for this material (if destinations are configured)
-                dest_id = None
-                if destination_ids and i < len(destination_ids):
-                    dest_id = destination_ids[i]
+                    transaction_records_data.append({
+                        'material_id': material_id,
+                        'destination_id': None,  # Dynamic selection doesn't have preset destinations
+                        'weight_kg': weight_decimal,
+                        'quantity': 1,
+                    })
+        else:
+            # Legacy format: array of weights matching channel.sub_material_ids order
+            material_ids = channel.sub_material_ids or []
+            if len(mat_data) != len(material_ids):
+                return {'status': 'error', 'message': 'Material data mismatch'}
 
-                transaction_records_data.append({
-                    'material_id': material_ids[i],
-                    'destination_id': dest_id,
-                    'weight_kg': weight_decimal,
-                    'quantity': 1,
-                })
+            for i, weight in enumerate(mat_data):
+                if weight and float(weight) > 0:
+                    weight_decimal = Decimal(str(weight))
+                    total_weight += weight_decimal
+
+                    # Get destination for this material (if destinations are configured)
+                    dest_id = None
+                    if destination_ids and i < len(destination_ids):
+                        dest_id = destination_ids[i]
+
+                    transaction_records_data.append({
+                        'material_id': material_ids[i],
+                        'destination_id': dest_id,
+                        'weight_kg': weight_decimal,
+                        'quantity': 1,
+                    })
 
         if not transaction_records_data:
             return {'status': 'error', 'message': 'No valid material weights provided'}
@@ -482,3 +500,68 @@ class InputChannelService:
                 'message': f'Failed to create transaction: {str(e)}',
                 'traceback': traceback.format_exc()
             }
+
+    def get_subuser_preferences(
+        self,
+        hash_value: str,
+        subuser: str
+    ) -> Dict[str, Any]:
+        """Get material preferences for a specific subuser"""
+        channel = self.db.query(UserInputChannel).filter(
+            and_(
+                UserInputChannel.hash == hash_value,
+                UserInputChannel.is_active == True,
+                UserInputChannel.deleted_date.is_(None)
+            )
+        ).first()
+
+        if not channel:
+            return {'material_ids': []}
+
+        # Validate subuser
+        subuser_names = channel.subuser_names or []
+        if subuser not in subuser_names:
+            return {'material_ids': []}
+
+        # Get preferences from the JSON field
+        preferences = channel.subuser_material_preferences or {}
+        material_ids = preferences.get(subuser, [])
+
+        return {'material_ids': material_ids}
+
+    def save_subuser_preferences(
+        self,
+        hash_value: str,
+        subuser: str,
+        material_ids: List[int]
+    ) -> Dict[str, Any]:
+        """Save material preferences for a specific subuser"""
+        channel = self.db.query(UserInputChannel).filter(
+            and_(
+                UserInputChannel.hash == hash_value,
+                UserInputChannel.is_active == True,
+                UserInputChannel.deleted_date.is_(None)
+            )
+        ).first()
+
+        if not channel:
+            return {'success': False, 'message': 'Input channel not found'}
+
+        # Validate subuser
+        subuser_names = channel.subuser_names or []
+        if subuser not in subuser_names:
+            return {'success': False, 'message': 'Invalid subuser'}
+
+        # Update preferences
+        preferences = channel.subuser_material_preferences or {}
+        preferences[subuser] = material_ids
+        channel.subuser_material_preferences = preferences
+        channel.updated_date = datetime.utcnow()
+
+        self.db.commit()
+
+        return {
+            'success': True,
+            'message': 'Preferences saved successfully',
+            'material_ids': material_ids
+        }
