@@ -39,27 +39,31 @@ class UserRole(Base, BaseModel):
 class UserInputChannel(Base, BaseModel):
     """
     User Input Channel for QR code-based transaction input
-    Maps to the old user_input_channels schema for mobile input
+    Channels are organization-level, subusers are validated against organization members
     """
     __tablename__ = 'user_input_channels'
 
-    user_location_id = Column(ForeignKey('user_locations.id'))
+    # user_location_id is optional - channels are now organization-level
+    user_location_id = Column(ForeignKey('user_locations.id'), nullable=True)
     organization_id = Column(BigInteger, ForeignKey('organizations.id'), nullable=False)
+
+    # Channel name for identification
+    channel_name = Column(String(255), nullable=True)
 
     # QR Code hash for unique identification
     hash = Column(String(255), unique=True, index=True)
 
     # Channel configuration
     channel_type = Column(String(100), default='qr')  # qr, api, etc.
-    form_type = Column(String(50), default='form')  # form, daily, monthly
+    form_type = Column(String(50), default='daily')  # form, daily, monthly
 
-    # Material configuration (JSON arrays)
+    # Material configuration (JSON arrays) - kept for legacy but not used in new flow
     sub_material_ids = Column(JSON, default=list)  # List of material IDs
     sub_material_destination_ids = Column(JSON, default=list)  # List of destination location IDs
 
-    # Sub-user configuration
-    subuser_names = Column(JSON, default=list)  # List of sub-user names for login
-    subuser_material_preferences = Column(JSON, default=dict)  # Per-subuser material preferences: {"subuser_name": [material_id1, ...]}
+    # Sub-user configuration - kept for legacy but validation now uses organization membership
+    subuser_names = Column(JSON, default=list)  # List of sub-user names for login (legacy)
+    subuser_material_preferences = Column(JSON, default=dict)  # Per-subuser material preferences
 
     # Feature flags
     enable_upload_image = Column(Boolean, default=False)

@@ -676,7 +676,7 @@ class TransactionService:
 
         # Validate transaction method
         transaction_method = data.get('transaction_method', 'origin')
-        valid_methods = ['origin', 'transport', 'transform']
+        valid_methods = ['origin', 'transport', 'transform', 'qr_input', 'scale_input']
         if transaction_method not in valid_methods:
             errors.append(f'transaction_method must be one of: {", ".join(valid_methods)}')
 

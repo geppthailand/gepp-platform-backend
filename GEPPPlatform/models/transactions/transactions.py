@@ -116,7 +116,7 @@ class Transaction(Base, BaseModel):
 
     # Constraints
     __table_args__ = (
-        CheckConstraint('transaction_method IN (\'origin\', \'transport\', \'transform\')', name='chk_transaction_method'),
+        CheckConstraint('transaction_method IN (\'origin\', \'transport\', \'transform\', \'qr_input\', \'scale_input\')', name='chk_transaction_method'),
         CheckConstraint('hazardous_level BETWEEN 0 AND 5', name='chk_hazardous_level'),
         CheckConstraint('weight_kg >= 0', name='chk_weight_kg'),
         CheckConstraint('total_amount >= 0', name='chk_total_amount'),

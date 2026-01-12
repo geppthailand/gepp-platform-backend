@@ -66,7 +66,33 @@ def handle_user_routes(event: Dict[str, Any], data: Dict[str, Any], **params) ->
     elif '/api/users/bulk' in path and method == 'POST':
         return handle_bulk_operations(user_service, data, current_user_id)
 
-    # Input Channel routes (QR code-based input)
+    # ==================== Organization-level Input Channel routes ====================
+    # These routes manage QR input channels at the organization level (not tied to specific users)
+
+    elif '/api/input-channels/' in path and method == 'GET':
+        # Get channel by ID: /api/input-channels/{channel_id}
+        channel_id = path.split('/input-channels/')[1].rstrip('/')
+        return handle_get_organization_channel(db_session, channel_id, current_user_organization_id)
+
+    elif '/api/input-channels/' in path and method == 'PUT':
+        # Update channel: /api/input-channels/{channel_id}
+        channel_id = path.split('/input-channels/')[1].rstrip('/')
+        return handle_update_organization_channel(db_session, channel_id, data, current_user_organization_id)
+
+    elif '/api/input-channels/' in path and method == 'DELETE':
+        # Delete channel: /api/input-channels/{channel_id}
+        channel_id = path.split('/input-channels/')[1].rstrip('/')
+        return handle_delete_organization_channel(db_session, channel_id, current_user_organization_id)
+
+    elif path == '/api/input-channels' and method == 'GET':
+        # List all channels: /api/input-channels
+        return handle_list_organization_channels(db_session, current_user_organization_id)
+
+    elif path == '/api/input-channels' and method == 'POST':
+        # Create channel: /api/input-channels
+        return handle_create_organization_channel(db_session, data, current_user_organization_id)
+
+    # ==================== Legacy User-based Input Channel routes (kept for backward compatibility) ====================
     elif '/api/users/' in path and '/input-channel/regenerate' in path and method == 'POST':
         # Regenerate QR code hash: /api/users/{user_id}/input-channel/regenerate
         user_id = path.split('/users/')[1].split('/')[0]
@@ -705,5 +731,113 @@ def handle_delete_input_channel(db_session, user_id: str) -> Dict[str, Any]:
         else:
             raise NotFoundException('Input channel not found')
 
+    except Exception as e:
+        raise APIException(f'Failed to delete input channel: {str(e)}')
+
+
+# ==================== Organization-level Input Channel Handlers ====================
+
+def handle_list_organization_channels(db_session, organization_id: int) -> Dict[str, Any]:
+    """Handle GET /api/input-channels - List all channels for organization"""
+    try:
+        from .input_channel_service import InputChannelService
+        service = InputChannelService(db_session)
+
+        channels = service.get_organization_channels(organization_id)
+        return {
+            'channels': channels,
+            'total': len(channels)
+        }
+
+    except Exception as e:
+        raise APIException(f'Failed to list input channels: {str(e)}')
+
+
+def handle_get_organization_channel(
+    db_session,
+    channel_id: str,
+    organization_id: int
+) -> Dict[str, Any]:
+    """Handle GET /api/input-channels/{channel_id} - Get channel by ID"""
+    try:
+        from .input_channel_service import InputChannelService
+        service = InputChannelService(db_session)
+
+        result = service.get_channel_by_id(int(channel_id), organization_id)
+        if not result:
+            raise NotFoundException('Input channel not found')
+
+        return {'channel': result}
+
+    except NotFoundException:
+        raise
+    except Exception as e:
+        raise APIException(f'Failed to get input channel: {str(e)}')
+
+
+def handle_create_organization_channel(
+    db_session,
+    data: Dict[str, Any],
+    organization_id: int
+) -> Dict[str, Any]:
+    """Handle POST /api/input-channels - Create organization-level channel"""
+    try:
+        from .input_channel_service import InputChannelService
+        service = InputChannelService(db_session)
+
+        result = service.create_organization_channel(
+            organization_id=organization_id,
+            data=data
+        )
+
+        return {'channel': result, 'message': 'Input channel created successfully'}
+
+    except Exception as e:
+        raise APIException(f'Failed to create input channel: {str(e)}')
+
+
+def handle_update_organization_channel(
+    db_session,
+    channel_id: str,
+    data: Dict[str, Any],
+    organization_id: int
+) -> Dict[str, Any]:
+    """Handle PUT /api/input-channels/{channel_id} - Update channel"""
+    try:
+        from .input_channel_service import InputChannelService
+        service = InputChannelService(db_session)
+
+        result = service.update_organization_channel(
+            channel_id=int(channel_id),
+            organization_id=organization_id,
+            data=data
+        )
+
+        return {'channel': result, 'message': 'Input channel updated successfully'}
+
+    except NotFoundException:
+        raise
+    except Exception as e:
+        raise APIException(f'Failed to update input channel: {str(e)}')
+
+
+def handle_delete_organization_channel(
+    db_session,
+    channel_id: str,
+    organization_id: int
+) -> Dict[str, Any]:
+    """Handle DELETE /api/input-channels/{channel_id} - Delete channel"""
+    try:
+        from .input_channel_service import InputChannelService
+        service = InputChannelService(db_session)
+
+        success = service.delete_organization_channel(int(channel_id), organization_id)
+        if success:
+            return {'message': 'Input channel deleted successfully'}
+        else:
+            raise NotFoundException('Input channel not found')
+
+    except NotFoundException:
+        raise
     except Exception as e:
         raise APIException(f'Failed to delete input channel: {str(e)}')

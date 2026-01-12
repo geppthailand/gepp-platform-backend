@@ -358,8 +358,8 @@ def main(event, context):
                             "success": True,
                             "data": iot_devices_result
                         }
-                    elif "/api/users" in path or "/api/locations" in path:
-                        # Handle all user management routes
+                    elif "/api/users" in path or "/api/locations" in path or "/api/input-channels" in path:
+                        # Handle all user management routes (including organization-level input channels)
                         from GEPPPlatform.services.cores.users.user_handlers import handle_user_routes
 
                         user_result = handle_user_routes(event, data=body, **commonParams)
