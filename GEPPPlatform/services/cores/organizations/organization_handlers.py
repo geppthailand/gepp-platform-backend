@@ -301,11 +301,18 @@ def handle_get_organization_setup(org_service: OrganizationService, user_id: int
         # Get organization setup
         setup_data = org_service.get_organization_setup(organization.id)
 
+        # Extract organization data
+        organization_data = {
+            'id': organization.id,
+            'display_name': organization.organization_info.display_name if organization.organization_info else None
+        }
+
         if not setup_data:
             # Return null/None if no setup found as specified in requirements
             return {
                 'success': True,
                 'data': None,
+                'organization': organization_data,
                 'message': 'No organization setup found'
             }
 
@@ -315,6 +322,7 @@ def handle_get_organization_setup(org_service: OrganizationService, user_id: int
         return {
             'success': True,
             'data': setup_response.to_dict(),
+            'organization': organization_data,
             'message': 'Organization setup retrieved successfully'
         }
 

@@ -19,7 +19,7 @@ TEXT = colors.HexColor("#5b6e8c")
 BASE_DIR = os.path.dirname(__file__)
 ASSETS_DIR = os.path.join(BASE_DIR, "assets")
 FONTS_DIR = os.path.join(ASSETS_DIR, "fonts")
-LEAF_COVER_PATH = os.path.join(ASSETS_DIR, "LeafCover.png")
+LEAF_COVER_PATH = os.path.join(ASSETS_DIR, "LeafCover.jpg")
 GEPP_LOGO_PATH = os.path.join(ASSETS_DIR, "GeppLogo.png")
 GEPP_LOGO_OUTRO_PATH = os.path.join(ASSETS_DIR, "GeppLogoOutro.png")
 TEL_ICON_PATH = os.path.join(ASSETS_DIR, "Tel.png")
@@ -60,6 +60,78 @@ def _get_font_name(preferred: str, fallback: str) -> str:
         return preferred
     except Exception:
         return fallback
+
+def _draw_rounded_rect_bottom_only(pdf: canvas.Canvas, x: float, y: float, width: float, height: float, radius: float, fill_color=None, stroke_color=None) -> None:
+    """
+    Draw a rectangle with rounded corners only at the bottom.
+    Uses a workaround: draws a full rounded rectangle, then covers the top corners.
+    
+    Args:
+        pdf: Canvas object
+        x: X coordinate of bottom-left corner
+        y: Y coordinate of bottom-left corner
+        width: Width of rectangle
+        height: Height of rectangle
+        radius: Radius for bottom corners
+        fill_color: Color to fill (None for no fill)
+        stroke_color: Color to stroke (None for no stroke)
+    """
+    # Save current graphics state
+    pdf.saveState()
+    
+    # Draw full rounded rectangle
+    if fill_color:
+        pdf.setFillColor(fill_color)
+    if stroke_color:
+        pdf.setStrokeColor(stroke_color)
+    
+    pdf.roundRect(x, y, width, height, radius, fill=int(fill_color is not None), stroke=int(stroke_color is not None))
+    
+    # Cover top corners with filled rectangles to make them square
+    if fill_color:
+        pdf.setFillColor(fill_color)
+        pdf.setStrokeColor(fill_color)  # Match fill color for seamless cover
+        # Top-left corner cover
+        pdf.rect(x, y + height - radius, radius, radius, fill=1, stroke=0)
+        # Top-right corner cover
+        pdf.rect(x + width - radius, y + height - radius, radius, radius, fill=1, stroke=0)
+        
+        # Redraw top edge with stroke if needed
+        if stroke_color:
+            pdf.setStrokeColor(stroke_color)
+            pdf.setLineWidth(0.5)
+            pdf.line(x, y + height, x + width, y + height)
+    
+    # Restore graphics state
+    pdf.restoreState()
+
+def _kg_to_tons_formatted(kg_value: float, use_comma: bool = False) -> str:
+    """
+    Convert kg to tons and format to 2 decimal places.
+    
+    Args:
+        kg_value: Weight in kg
+        use_comma: If True, use comma as thousand separator (e.g., 1,234.56)
+                   If False, use no separator (e.g., 1234.56)
+    
+    Returns:
+        Formatted string with 2 decimal places
+    """
+    if kg_value is None:
+        kg_value = 0.0
+    
+    # Convert kg to tons (divide by 1000)
+    tons_value = float(kg_value) / 1000.0
+    
+    # Format to 2 decimal places
+    if use_comma:
+        # Format with comma separator and 2 decimals
+        formatted = f"{tons_value:,.2f}"
+        return formatted
+    else:
+        # Format without comma separator and 2 decimals
+        formatted = f"{tons_value:.2f}"
+        return formatted
 
 def _footer(pdf: canvas.Canvas, page_width_points: float) -> None:
     """Draw footer on every page with copyright text."""
@@ -409,17 +481,17 @@ def _draw_table_rows(
         category_name = category.get("category_name", "")
         pdf.drawString(table_title_x + 0.4 * inch, text_y, category_name)
         
-        # Draw generated value
+        # Draw generated value (convert kg to tons)
         generated = category.get("generated", 0.0)
-        pdf.drawString(table_title_x + 5 * inch, text_y, f"{generated:,.2f}")
+        pdf.drawString(table_title_x + 5 * inch, text_y, _kg_to_tons_formatted(generated, use_comma=True))
         
-        # Draw diverted value
+        # Draw diverted value (convert kg to tons)
         diverted = category.get("diverted", 0.0)
-        pdf.drawString(table_title_x + 6.9 * inch, text_y, f"{diverted:,.2f}")
+        pdf.drawString(table_title_x + 6.9 * inch, text_y, _kg_to_tons_formatted(diverted, use_comma=True))
         
-        # Draw directed value
+        # Draw directed value (convert kg to tons)
         directed = category.get("directed", 0.0)
-        pdf.drawString(table_title_x + 8.8 * inch, text_y, f"{directed:,.2f}")
+        pdf.drawString(table_title_x + 8.8 * inch, text_y, _kg_to_tons_formatted(directed, use_comma=True))
     
     # Draw totals row only on the last page
     if is_last_page and totals:
@@ -442,17 +514,17 @@ def _draw_table_rows(
         # Draw "Total" label - aligned with row number column
         pdf.drawString(table_title_x, text_y, "Total")
         
-        # Draw total generated
+        # Draw total generated (convert kg to tons)
         total_generated = totals.get("generated", 0.0)
-        pdf.drawString(table_title_x + 5 * inch, text_y, f"{total_generated:,.2f}")
+        pdf.drawString(table_title_x + 5 * inch, text_y, _kg_to_tons_formatted(total_generated, use_comma=True))
         
-        # Draw total diverted
+        # Draw total diverted (convert kg to tons)
         total_diverted = totals.get("diverted", 0.0)
-        pdf.drawString(table_title_x + 6.9 * inch, text_y, f"{total_diverted:,.2f}")
+        pdf.drawString(table_title_x + 6.9 * inch, text_y, _kg_to_tons_formatted(total_diverted, use_comma=True))
         
-        # Draw total directed
+        # Draw total directed (convert kg to tons)
         total_directed = totals.get("directed", 0.0)
-        pdf.drawString(table_title_x + 8.8 * inch, text_y, f"{total_directed:,.2f}")
+        pdf.drawString(table_title_x + 8.8 * inch, text_y, _kg_to_tons_formatted(total_directed, use_comma=True))
 
 
 def _draw_full_disclosure_page(pdf: canvas.Canvas, data: dict) -> None:
@@ -573,47 +645,61 @@ def _draw_full_disclosure_page(pdf: canvas.Canvas, data: dict) -> None:
         # Card value - same x position as label, with more spacing
         pdf.setFillColor(dark_green)
         pdf.setFont(table_header_font, 18)
-        value_text = f"{card['value']:.2f} {card['unit']}"
+        # Convert kg to tons for weight values (not spills which are in liters)
+        if card['unit'] == 't':
+            value_text = f"{_kg_to_tons_formatted(card['value'], use_comma=False)} {card['unit']}"
+        else:
+            value_text = f"{card['value']:.2f} {card['unit']}"
         value_x = label_x  # Same x position as label
         value_y = label_y - 0.4 * inch  # Increased spacing from bottom
         pdf.drawString(value_x, value_y, value_text)
-    
-    # Table
-    table_start_y = 62
-    table_height = 4 * inch - 82
-    pdf.setFillColor(colors.HexColor("#ffffff"))
-    pdf.setStrokeColor(colors.HexColor("#e3f2ec"))
-    pdf.setLineWidth(1)
-    pdf.roundRect(margin_points, table_start_y, width_points - margin_points * 2, table_height, 12, fill=1, stroke=1)
-
-    # Table title
-    pdf.setFillColor(dark_green)
-    pdf.setFont(table_title_font, 12)
-    table_title_x = margin_points + 12 + 4
-    table_title_y = table_height + table_start_y - 0.35 * inch
-    table_title = "Table 1: Waste by composition"
-    pdf.drawString(table_title_x, table_title_y, table_title)
-
-    table_header_start_y = table_title_y - 0.5 * inch - 0.17 * inch
-    pdf.setFillColor(colors.HexColor("#f3f3f3"))
-    pdf.rect(margin_points, table_header_start_y, width_points - margin_points * 2, 0.4 * inch, fill=1, stroke=0)
-    pdf.setFillColor(dark_green)
-    pdf.setFont(card_font, 9)
-    table_header_y = table_header_start_y + 0.16 * inch
-    pdf.drawString(table_title_x, table_header_y, "#")
-    pdf.drawString(table_title_x + 0.4 * inch, table_header_y, "Waste Composition")
-    pdf.drawString(table_title_x + 5 * inch, table_header_y, "Generated (T)")
-    pdf.drawString(table_title_x + 6.9 * inch, table_header_y, "Diverted (T)")
-    pdf.drawString(table_title_x + 8.8 * inch, table_header_y, "Directed (T)")
     
     # Draw table rows with pagination
     categories = waste_composition.get("categories", [])
     totals = waste_composition.get("totals", {})
     row_height = 0.6 * inch
     
-    # Pagination: First page max 3 rows, subsequent pages max 8 rows
-    if len(categories) <= 3:
-        # All rows fit on first page
+    # Calculate dynamic table height for first page based on actual data
+    # Header: 0.4 inch, Title area: 0.5 + 0.17 + 0.35 = 1.02 inch
+    header_and_title_height = 0.4 * inch + 0.5 * inch + 0.17 * inch + 0.35 * inch
+    
+    # Pagination: First page max 3 rows (including total row), subsequent pages max 8 rows
+    if len(categories) <= 2:
+        # Calculate height: header + title + rows (including total)
+        num_rows = len(categories) + (1 if totals else 0)  # categories + total row
+        table_height = header_and_title_height + (num_rows * row_height)
+        
+        # Calculate table start position from bottom
+        table_start_y = 62  # Fixed bottom position
+        table_title_x = margin_points + 12 + 4
+        
+        # Draw table border with dynamic height
+        pdf.setFillColor(colors.HexColor("#ffffff"))
+        pdf.setStrokeColor(colors.HexColor("#e3f2ec"))
+        pdf.setLineWidth(1)
+        pdf.roundRect(margin_points, table_start_y, width_points - margin_points * 2, table_height, 12, fill=1, stroke=1)
+        
+        # Table title
+        pdf.setFillColor(dark_green)
+        pdf.setFont(table_title_font, 12)
+        table_title_y = table_height + table_start_y - 0.35 * inch
+        table_title = "Table 1: Waste by composition"
+        pdf.drawString(table_title_x, table_title_y, table_title)
+        
+        table_header_start_y = table_title_y - 0.5 * inch - 0.17 * inch
+        pdf.setFillColor(colors.HexColor("#f3f3f3"))
+        pdf.rect(margin_points, table_header_start_y, width_points - margin_points * 2, 0.4 * inch, fill=1, stroke=0)
+        pdf.setFillColor(dark_green)
+        pdf.setFont(card_font, 9)
+        table_header_y = table_header_start_y + 0.16 * inch
+        pdf.drawString(table_title_x, table_header_y, "#")
+        pdf.drawString(table_title_x + 0.4 * inch, table_header_y, "Waste Composition")
+        pdf.drawString(table_title_x + 5 * inch, table_header_y, "Generated (T)")
+        pdf.drawString(table_title_x + 6.9 * inch, table_header_y, "Diverted (T)")
+        pdf.drawString(table_title_x + 8.8 * inch, table_header_y, "Directed (T)")
+        
+        # Draw rows
+        # 2 or fewer categories: show all + total = max 3 rows
         _draw_table_rows(
             pdf, categories, start_row_num=1, row_start_y_pos=table_header_start_y,
             row_height=row_height, margin_points=margin_points, width_points=width_points,
@@ -621,9 +707,133 @@ def _draw_full_disclosure_page(pdf: canvas.Canvas, data: dict) -> None:
             card_font=card_font, table_header_font=table_header_font, totals=totals,
             is_last_page=True, is_first_row_on_page=False
         )
+    elif len(categories) == 3:
+        # Exactly 3 categories: show 2 categories + total = 3 rows on first page
+        first_page_categories = categories[:2]
+        remaining_categories = categories[2:]
+        
+        # Calculate height: header + title + 2 categories + 1 total = 3 rows
+        num_rows = 3  # 2 categories + 1 total
+        table_height = header_and_title_height + (num_rows * row_height)
+        
+        # Calculate table start position from bottom
+        table_start_y = 62  # Fixed bottom position
+        table_title_x = margin_points + 12 + 4
+        
+        # Draw table border with dynamic height
+        pdf.setFillColor(colors.HexColor("#ffffff"))
+        pdf.setStrokeColor(colors.HexColor("#e3f2ec"))
+        pdf.setLineWidth(1)
+        pdf.roundRect(margin_points, table_start_y, width_points - margin_points * 2, table_height, 12, fill=1, stroke=1)
+        
+        # Table title
+        pdf.setFillColor(dark_green)
+        pdf.setFont(table_title_font, 12)
+        table_title_y = table_height + table_start_y - 0.35 * inch
+        table_title = "Table 1: Waste by composition"
+        pdf.drawString(table_title_x, table_title_y, table_title)
+        
+        table_header_start_y = table_title_y - 0.5 * inch - 0.17 * inch
+        pdf.setFillColor(colors.HexColor("#f3f3f3"))
+        pdf.rect(margin_points, table_header_start_y, width_points - margin_points * 2, 0.4 * inch, fill=1, stroke=0)
+        pdf.setFillColor(dark_green)
+        pdf.setFont(card_font, 9)
+        table_header_y = table_header_start_y + 0.16 * inch
+        pdf.drawString(table_title_x, table_header_y, "#")
+        pdf.drawString(table_title_x + 0.4 * inch, table_header_y, "Waste Composition")
+        pdf.drawString(table_title_x + 5 * inch, table_header_y, "Generated (T)")
+        pdf.drawString(table_title_x + 6.9 * inch, table_header_y, "Diverted (T)")
+        pdf.drawString(table_title_x + 8.8 * inch, table_header_y, "Directed (T)")
+        
+        # First page: 2 categories + total
+        _draw_table_rows(
+            pdf, first_page_categories, start_row_num=1, row_start_y_pos=table_header_start_y,
+            row_height=row_height, margin_points=margin_points, width_points=width_points,
+            table_title_x=table_title_x, dark_green=dark_green, light_green=light_green,
+            card_font=card_font, table_header_font=table_header_font, totals=totals,
+            is_last_page=True, is_first_row_on_page=False
+        )
+        
+        # Remaining category goes to next page
+        if remaining_categories:
+            _footer(pdf, width_points)
+            pdf.showPage()
+            _draw_page_header(pdf, year, width_points, height_points, margin_points)
+            
+            # Calculate dynamic table height for remaining category
+            total_height = len(remaining_categories) * row_height - 26
+            table_start_y_dynamic = height_points - margin_points - total_height - 0.4 * inch - 0.5 * inch - 0.17 * inch - 0.35 * inch - 96
+            
+            # Draw table container
+            pdf.setFillColor(colors.HexColor("#ffffff"))
+            pdf.setStrokeColor(colors.HexColor("#e3f2ec"))
+            pdf.setLineWidth(1)
+            pdf.roundRect(margin_points, table_start_y_dynamic, width_points - margin_points * 2, total_height + 0.4 * inch + 0.5 * inch + 0.17 * inch + 0.35 * inch, 12, fill=1, stroke=1)
+            
+            # Table title
+            pdf.setFillColor(dark_green)
+            pdf.setFont(table_title_font, 12)
+            table_title_y = table_start_y_dynamic + total_height + 0.4 * inch + 0.5 * inch + 0.17 * inch + 0.35 * inch - 0.35 * inch
+            pdf.drawString(table_title_x, table_title_y, "Table 1: Waste by composition")
+            
+            # Table header
+            table_header_start_y = table_title_y - 0.5 * inch - 0.17 * inch
+            pdf.setFillColor(colors.HexColor("#f3f3f3"))
+            pdf.rect(margin_points, table_header_start_y, width_points - margin_points * 2, 0.4 * inch, fill=1, stroke=0)
+            pdf.setFillColor(dark_green)
+            pdf.setFont(card_font, 9)
+            table_header_y = table_header_start_y + 0.16 * inch
+            pdf.drawString(table_title_x, table_header_y, "#")
+            pdf.drawString(table_title_x + 0.4 * inch, table_header_y, "Waste Composition")
+            pdf.drawString(table_title_x + 5 * inch, table_header_y, "Generated (T)")
+            pdf.drawString(table_title_x + 6.9 * inch, table_header_y, "Diverted (T)")
+            pdf.drawString(table_title_x + 8.8 * inch, table_header_y, "Directed (T)")
+            
+            # Draw remaining category
+            _draw_table_rows(
+                pdf, remaining_categories, start_row_num=3, row_start_y_pos=table_header_start_y,
+                row_height=row_height, margin_points=margin_points, width_points=width_points,
+                table_title_x=table_title_x, dark_green=dark_green, light_green=light_green,
+                card_font=card_font, table_header_font=table_header_font, totals=None,
+                is_last_page=False, is_first_row_on_page=False
+            )
     else:
-        # First page: 3 rows
-        first_page_categories = categories[:3]
+        # More than 3 categories: First page: 2 categories (no total, total goes to last page)
+        first_page_categories = categories[:2]
+        
+        # Calculate height: header + title + 2 categories (no total on first page)
+        num_rows = 2
+        table_height = header_and_title_height + (num_rows * row_height)
+        
+        # Calculate table start position from bottom
+        table_start_y = 62  # Fixed bottom position
+        table_title_x = margin_points + 12 + 4
+        
+        # Draw table border with dynamic height
+        pdf.setFillColor(colors.HexColor("#ffffff"))
+        pdf.setStrokeColor(colors.HexColor("#e3f2ec"))
+        pdf.setLineWidth(1)
+        pdf.roundRect(margin_points, table_start_y, width_points - margin_points * 2, table_height, 12, fill=1, stroke=1)
+        
+        # Table title
+        pdf.setFillColor(dark_green)
+        pdf.setFont(table_title_font, 12)
+        table_title_y = table_height + table_start_y - 0.35 * inch
+        table_title = "Table 1: Waste by composition"
+        pdf.drawString(table_title_x, table_title_y, table_title)
+        
+        table_header_start_y = table_title_y - 0.5 * inch - 0.17 * inch
+        pdf.setFillColor(colors.HexColor("#f3f3f3"))
+        pdf.rect(margin_points, table_header_start_y, width_points - margin_points * 2, 0.4 * inch, fill=1, stroke=0)
+        pdf.setFillColor(dark_green)
+        pdf.setFont(card_font, 9)
+        table_header_y = table_header_start_y + 0.16 * inch
+        pdf.drawString(table_title_x, table_header_y, "#")
+        pdf.drawString(table_title_x + 0.4 * inch, table_header_y, "Waste Composition")
+        pdf.drawString(table_title_x + 5 * inch, table_header_y, "Generated (T)")
+        pdf.drawString(table_title_x + 6.9 * inch, table_header_y, "Diverted (T)")
+        pdf.drawString(table_title_x + 8.8 * inch, table_header_y, "Directed (T)")
+        
         _draw_table_rows(
             pdf, first_page_categories, start_row_num=1, row_start_y_pos=table_header_start_y,
             row_height=row_height, margin_points=margin_points, width_points=width_points,
@@ -769,7 +979,7 @@ def _draw_diverted_data_table(pdf: canvas.Canvas, diverted_data: dict, year: str
         })
     
     # Helper function to draw rows on a page
-    def draw_diverted_rows(page_rows, row_start_y_pos, is_first_row_on_page=False):
+    def draw_diverted_rows(page_rows, row_start_y_pos, is_first_row_on_page=False, is_last_page=False):
         """Draw diverted data rows for a given page"""
         row_start_y = row_start_y_pos
         
@@ -808,31 +1018,42 @@ def _draw_diverted_data_table(pdf: canvas.Canvas, diverted_data: dict, year: str
                 text_y = row_y - (header_row_height / 2) - 3
                 pdf.drawString(table_title_x + 0.4 * inch, text_y, row["label"])
             elif row["type"] == "total":
-                # Total row - same styling as data rows
+                # Total row - green background with rounded bottom corners if last row on last page
                 row_y = row_start_y - prev_height
-                is_last_row = (idx == len(page_rows) - 1)
+                is_last_row = (idx == len(page_rows) - 1) and is_last_page
                 
-                # Draw total row background
-                pdf.setFillColor(colors.HexColor("#f5faf8"))
-                pdf.rect(margin_points, row_y - row_height, width_points - margin_points * 2, row_height, fill=1, stroke=0)
+                # Draw total row background with green color
+                light_green = colors.HexColor("#f5faf8")
+                border_color = colors.HexColor("#e3f2ec")
                 
-                # Draw row border
-                pdf.setStrokeColor(colors.HexColor("#e3f2ec"))
-                pdf.setLineWidth(0.5)
                 if is_last_row:
-                    # Draw only top and sides (no bottom)
-                    pdf.line(margin_points, row_y, margin_points + (width_points - margin_points * 2), row_y)  # Top
-                    pdf.line(margin_points, row_y - row_height, margin_points, row_y)  # Left
-                    pdf.line(margin_points + (width_points - margin_points * 2), row_y - row_height, 
-                            margin_points + (width_points - margin_points * 2), row_y)  # Right
-                elif is_first_row:
-                    # Draw only sides and bottom (no top border)
-                    pdf.line(margin_points, row_y - row_height, margin_points, row_y)  # Left
-                    pdf.line(margin_points + (width_points - margin_points * 2), row_y - row_height, 
-                            margin_points + (width_points - margin_points * 2), row_y)  # Right
-                    pdf.line(margin_points, row_y - row_height, margin_points + (width_points - margin_points * 2), row_y - row_height)  # Bottom
+                    # Last total row: green background with rounded bottom corners
+                    _draw_rounded_rect_bottom_only(
+                        pdf, 
+                        margin_points, 
+                        row_y - row_height, 
+                        width_points - margin_points * 2, 
+                        row_height, 
+                        radius=12,
+                        fill_color=light_green,
+                        stroke_color=border_color
+                    )
                 else:
-                    pdf.rect(margin_points, row_y - row_height, width_points - margin_points * 2, row_height, fill=0, stroke=1)
+                    # Not last row: regular green background
+                    pdf.setFillColor(light_green)
+                    pdf.rect(margin_points, row_y - row_height, width_points - margin_points * 2, row_height, fill=1, stroke=0)
+                    
+                    # Draw row border
+                    pdf.setStrokeColor(border_color)
+                    pdf.setLineWidth(0.5)
+                    if is_first_row:
+                        # Draw only sides and bottom (no top border)
+                        pdf.line(margin_points, row_y - row_height, margin_points, row_y)  # Left
+                        pdf.line(margin_points + (width_points - margin_points * 2), row_y - row_height, 
+                                margin_points + (width_points - margin_points * 2), row_y)  # Right
+                        pdf.line(margin_points, row_y - row_height, margin_points + (width_points - margin_points * 2), row_y - row_height)  # Bottom
+                    else:
+                        pdf.rect(margin_points, row_y - row_height, width_points - margin_points * 2, row_height, fill=0, stroke=1)
                 
                 # Total row data
                 pdf.setFillColor(dark_green)
@@ -841,9 +1062,10 @@ def _draw_diverted_data_table(pdf: canvas.Canvas, diverted_data: dict, year: str
                 
                 pdf.drawString(table_title_x, text_y, "")  # Empty number column
                 pdf.drawString(table_title_x + 0.4 * inch, text_y, row["label"])
-                pdf.drawString(table_title_x + 5 * inch, text_y, f"{row['data'].get('onsite', 0.0):,.2f}")
-                pdf.drawString(table_title_x + 6.9 * inch, text_y, f"{row['data'].get('offsite', 0.0):,.2f}")
-                pdf.drawString(table_title_x + 8.8 * inch, text_y, f"{row['data'].get('total', 0.0):,.2f}")
+                # Convert kg to tons for all weight values
+                pdf.drawString(table_title_x + 5 * inch, text_y, _kg_to_tons_formatted(row['data'].get('onsite', 0.0), use_comma=True))
+                pdf.drawString(table_title_x + 6.9 * inch, text_y, _kg_to_tons_formatted(row['data'].get('offsite', 0.0), use_comma=True))
+                pdf.drawString(table_title_x + 8.8 * inch, text_y, _kg_to_tons_formatted(row['data'].get('total', 0.0), use_comma=True))
             else:  # row["type"] == "data"
                 # Data row
                 row_y = row_start_y - prev_height
@@ -874,9 +1096,10 @@ def _draw_diverted_data_table(pdf: canvas.Canvas, diverted_data: dict, year: str
                 
                 pdf.drawString(table_title_x, text_y, str(row["num"]))
                 pdf.drawString(table_title_x + 0.4 * inch, text_y, row["method"])
-                pdf.drawString(table_title_x + 5 * inch, text_y, f"{row['data'].get('onsite', 0.0):,.2f}")
-                pdf.drawString(table_title_x + 6.9 * inch, text_y, f"{row['data'].get('offsite', 0.0):,.2f}")
-                pdf.drawString(table_title_x + 8.8 * inch, text_y, f"{row['data'].get('total', 0.0):,.2f}")
+                # Convert kg to tons for all weight values
+                pdf.drawString(table_title_x + 5 * inch, text_y, _kg_to_tons_formatted(row['data'].get('onsite', 0.0), use_comma=True))
+                pdf.drawString(table_title_x + 6.9 * inch, text_y, _kg_to_tons_formatted(row['data'].get('offsite', 0.0), use_comma=True))
+                pdf.drawString(table_title_x + 8.8 * inch, text_y, _kg_to_tons_formatted(row['data'].get('total', 0.0), use_comma=True))
     
     # Pagination: First page max 3 rows, subsequent pages max 8 rows
     if len(all_rows) <= 3:
@@ -920,7 +1143,7 @@ def _draw_diverted_data_table(pdf: canvas.Canvas, diverted_data: dict, year: str
         
         # Draw rows
         top_start_y = table_header_start_y
-        draw_diverted_rows(all_rows, top_start_y, is_first_row_on_page=False)
+        draw_diverted_rows(all_rows, top_start_y, is_first_row_on_page=False, is_last_page=True)
     else:
         # First page: 3 rows
         first_page_rows = all_rows[:8]
@@ -966,11 +1189,12 @@ def _draw_diverted_data_table(pdf: canvas.Canvas, diverted_data: dict, year: str
         
         # Draw first page rows
         top_start_y = table_header_start_y
-        draw_diverted_rows(first_page_rows, top_start_y, is_first_row_on_page=False)
+        draw_diverted_rows(first_page_rows, top_start_y, is_first_row_on_page=False, is_last_page=False)
         
         # Process remaining in chunks of 8
         for i in range(0, len(remaining_rows), 8):
             chunk = remaining_rows[i:i+8]
+            is_last_chunk = (i + 8 >= len(remaining_rows))
             
             # Calculate dynamic table height
             num_rows = len(chunk)
@@ -994,7 +1218,7 @@ def _draw_diverted_data_table(pdf: canvas.Canvas, diverted_data: dict, year: str
             
             # Draw rows - start from the top
             top_start_y = table_start_y_dynamic + total_height
-            draw_diverted_rows(chunk, top_start_y, is_first_row_on_page=True)
+            draw_diverted_rows(chunk, top_start_y, is_first_row_on_page=True, is_last_page=is_last_chunk)
 
 
 def _draw_directed_data_table(pdf: canvas.Canvas, directed_data: dict, year: str, width_points: float, height_points: float, margin_points: float) -> None:
@@ -1067,7 +1291,7 @@ def _draw_directed_data_table(pdf: canvas.Canvas, directed_data: dict, year: str
         })
     
     # Helper function to draw rows on a page
-    def draw_directed_rows(page_rows, row_start_y_pos, is_first_row_on_page=False):
+    def draw_directed_rows(page_rows, row_start_y_pos, is_first_row_on_page=False, is_last_page=False):
         """Draw directed data rows for a given page"""
         row_start_y = row_start_y_pos
         
@@ -1106,31 +1330,42 @@ def _draw_directed_data_table(pdf: canvas.Canvas, directed_data: dict, year: str
                 text_y = row_y - (header_row_height / 2) - 3
                 pdf.drawString(table_title_x + 0.4 * inch, text_y, row["label"])
             elif row["type"] == "total":
-                # Total row - same styling as data rows
+                # Total row - green background with rounded bottom corners if last row on last page
                 row_y = row_start_y - prev_height
-                is_last_row = (idx == len(page_rows) - 1)
+                is_last_row = (idx == len(page_rows) - 1) and is_last_page
                 
-                # Draw total row background
-                pdf.setFillColor(colors.HexColor("#f5faf8"))
-                pdf.rect(margin_points, row_y - row_height, width_points - margin_points * 2, row_height, fill=1, stroke=0)
+                # Draw total row background with green color
+                light_green = colors.HexColor("#f5faf8")
+                border_color = colors.HexColor("#e3f2ec")
                 
-                # Draw row border
-                pdf.setStrokeColor(colors.HexColor("#e3f2ec"))
-                pdf.setLineWidth(0.5)
                 if is_last_row:
-                    # Draw only top and sides (no bottom)
-                    pdf.line(margin_points, row_y, margin_points + (width_points - margin_points * 2), row_y)  # Top
-                    pdf.line(margin_points, row_y - row_height, margin_points, row_y)  # Left
-                    pdf.line(margin_points + (width_points - margin_points * 2), row_y - row_height, 
-                            margin_points + (width_points - margin_points * 2), row_y)  # Right
-                elif is_first_row:
-                    # Draw only sides and bottom (no top border)
-                    pdf.line(margin_points, row_y - row_height, margin_points, row_y)  # Left
-                    pdf.line(margin_points + (width_points - margin_points * 2), row_y - row_height, 
-                            margin_points + (width_points - margin_points * 2), row_y)  # Right
-                    pdf.line(margin_points, row_y - row_height, margin_points + (width_points - margin_points * 2), row_y - row_height)  # Bottom
+                    # Last total row: green background with rounded bottom corners
+                    _draw_rounded_rect_bottom_only(
+                        pdf, 
+                        margin_points, 
+                        row_y - row_height, 
+                        width_points - margin_points * 2, 
+                        row_height, 
+                        radius=12,
+                        fill_color=light_green,
+                        stroke_color=border_color
+                    )
                 else:
-                    pdf.rect(margin_points, row_y - row_height, width_points - margin_points * 2, row_height, fill=0, stroke=1)
+                    # Not last row: regular green background
+                    pdf.setFillColor(light_green)
+                    pdf.rect(margin_points, row_y - row_height, width_points - margin_points * 2, row_height, fill=1, stroke=0)
+                    
+                    # Draw row border
+                    pdf.setStrokeColor(border_color)
+                    pdf.setLineWidth(0.5)
+                    if is_first_row:
+                        # Draw only sides and bottom (no top border)
+                        pdf.line(margin_points, row_y - row_height, margin_points, row_y)  # Left
+                        pdf.line(margin_points + (width_points - margin_points * 2), row_y - row_height, 
+                                margin_points + (width_points - margin_points * 2), row_y)  # Right
+                        pdf.line(margin_points, row_y - row_height, margin_points + (width_points - margin_points * 2), row_y - row_height)  # Bottom
+                    else:
+                        pdf.rect(margin_points, row_y - row_height, width_points - margin_points * 2, row_height, fill=0, stroke=1)
                 
                 # Total row data
                 pdf.setFillColor(dark_green)
@@ -1139,9 +1374,10 @@ def _draw_directed_data_table(pdf: canvas.Canvas, directed_data: dict, year: str
                 
                 pdf.drawString(table_title_x, text_y, "")  # Empty number column
                 pdf.drawString(table_title_x + 0.4 * inch, text_y, row["label"])
-                pdf.drawString(table_title_x + 5 * inch, text_y, f"{row['data'].get('onsite', 0.0):,.2f}")
-                pdf.drawString(table_title_x + 6.9 * inch, text_y, f"{row['data'].get('offsite', 0.0):,.2f}")
-                pdf.drawString(table_title_x + 8.8 * inch, text_y, f"{row['data'].get('total', 0.0):,.2f}")
+                # Convert kg to tons for all weight values
+                pdf.drawString(table_title_x + 5 * inch, text_y, _kg_to_tons_formatted(row['data'].get('onsite', 0.0), use_comma=True))
+                pdf.drawString(table_title_x + 6.9 * inch, text_y, _kg_to_tons_formatted(row['data'].get('offsite', 0.0), use_comma=True))
+                pdf.drawString(table_title_x + 8.8 * inch, text_y, _kg_to_tons_formatted(row['data'].get('total', 0.0), use_comma=True))
             else:  # row["type"] == "data"
                 # Data row
                 row_y = row_start_y - prev_height
@@ -1172,9 +1408,10 @@ def _draw_directed_data_table(pdf: canvas.Canvas, directed_data: dict, year: str
                 
                 pdf.drawString(table_title_x, text_y, str(row["num"]))
                 pdf.drawString(table_title_x + 0.4 * inch, text_y, row["method"])
-                pdf.drawString(table_title_x + 5 * inch, text_y, f"{row['data'].get('onsite', 0.0):,.2f}")
-                pdf.drawString(table_title_x + 6.9 * inch, text_y, f"{row['data'].get('offsite', 0.0):,.2f}")
-                pdf.drawString(table_title_x + 8.8 * inch, text_y, f"{row['data'].get('total', 0.0):,.2f}")
+                # Convert kg to tons for all weight values
+                pdf.drawString(table_title_x + 5 * inch, text_y, _kg_to_tons_formatted(row['data'].get('onsite', 0.0), use_comma=True))
+                pdf.drawString(table_title_x + 6.9 * inch, text_y, _kg_to_tons_formatted(row['data'].get('offsite', 0.0), use_comma=True))
+                pdf.drawString(table_title_x + 8.8 * inch, text_y, _kg_to_tons_formatted(row['data'].get('total', 0.0), use_comma=True))
     
     # Pagination: First page max 8 rows, subsequent pages max 8 rows
     if len(all_rows) <= 8:
@@ -1218,7 +1455,7 @@ def _draw_directed_data_table(pdf: canvas.Canvas, directed_data: dict, year: str
         
         # Draw rows
         top_start_y = table_header_start_y
-        draw_directed_rows(all_rows, top_start_y, is_first_row_on_page=False)
+        draw_directed_rows(all_rows, top_start_y, is_first_row_on_page=False, is_last_page=True)
     else:
         # First page: 8 rows
         first_page_rows = all_rows[:8]
@@ -1264,11 +1501,12 @@ def _draw_directed_data_table(pdf: canvas.Canvas, directed_data: dict, year: str
         
         # Draw first page rows
         top_start_y = table_header_start_y
-        draw_directed_rows(first_page_rows, top_start_y, is_first_row_on_page=False)
+        draw_directed_rows(first_page_rows, top_start_y, is_first_row_on_page=False, is_last_page=False)
         
         # Process remaining in chunks of 8
         for i in range(0, len(remaining_rows), 8):
             chunk = remaining_rows[i:i+8]
+            is_last_chunk = (i + 8 >= len(remaining_rows))
             
             # Calculate dynamic table height
             num_rows = len(chunk)
@@ -1292,7 +1530,7 @@ def _draw_directed_data_table(pdf: canvas.Canvas, directed_data: dict, year: str
             
             # Draw rows - start from the top
             top_start_y = table_start_y_dynamic + total_height
-            draw_directed_rows(chunk, top_start_y, is_first_row_on_page=True)
+            draw_directed_rows(chunk, top_start_y, is_first_row_on_page=True, is_last_page=is_last_chunk)
 
 
 def _draw_spill_data_table(pdf: canvas.Canvas, spill_data: dict, year: str, width_points: float, height_points: float, margin_points: float) -> None:
@@ -1363,18 +1601,20 @@ def _draw_spill_data_table(pdf: canvas.Canvas, spill_data: dict, year: str, widt
         if is_last_page and totals:
             total_row_y = row_start_y - len(page_records) * row_height
             
-            # Draw total row background
-            pdf.setFillColor(colors.HexColor("#f5faf8"))
-            pdf.rect(margin_points, total_row_y - row_height, width_points - margin_points * 2, row_height, fill=1, stroke=0)
+            # Draw total row background with green color and rounded bottom corners
+            light_green = colors.HexColor("#f5faf8")
+            border_color = colors.HexColor("#e3f2ec")
             
-            # Draw border - exclude bottom border
-            pdf.setStrokeColor(colors.HexColor("#e3f2ec"))
-            pdf.setLineWidth(0.5)
-            # Draw only top and sides (no bottom)
-            pdf.line(margin_points, total_row_y, margin_points + (width_points - margin_points * 2), total_row_y)  # Top
-            pdf.line(margin_points, total_row_y - row_height, margin_points, total_row_y)  # Left
-            pdf.line(margin_points + (width_points - margin_points * 2), total_row_y - row_height, 
-                    margin_points + (width_points - margin_points * 2), total_row_y)  # Right
+            _draw_rounded_rect_bottom_only(
+                pdf,
+                margin_points,
+                total_row_y - row_height,
+                width_points - margin_points * 2,
+                row_height,
+                radius=12,
+                fill_color=light_green,
+                stroke_color=border_color
+            )
             
             # Totals data
             pdf.setFillColor(dark_green)
