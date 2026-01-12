@@ -171,7 +171,8 @@ class TransactionService:
         try:
             # Eager load location relationships (destination_ids is an array, no relationship)
             transaction = self.db.query(Transaction).options(
-                joinedload(Transaction.origin)
+                joinedload(Transaction.origin),
+                joinedload(Transaction.created_by)
             ).filter(
                 Transaction.id == transaction_id,
                 Transaction.is_active == True
@@ -263,7 +264,10 @@ class TransactionService:
 
             # Test basic query first
             logger.info(f"Starting transaction query with org_id={organization_id}, status={status}")
-            query = self.db.query(Transaction).filter(Transaction.deleted_date.is_(None))
+            query = self.db.query(Transaction).options(
+                joinedload(Transaction.origin),
+                joinedload(Transaction.created_by)
+            ).filter(Transaction.deleted_date.is_(None))
 
             # Apply filters
             if organization_id:
@@ -807,6 +811,11 @@ class TransactionService:
                 'display_name': transaction.origin.display_name if hasattr(transaction.origin, 'display_name') else None
             }
 
+        # Get creator display name from relationship
+        created_by_name = None
+        if hasattr(transaction, 'created_by') and transaction.created_by:
+            created_by_name = transaction.created_by.display_name or transaction.created_by.name_en or transaction.created_by.name_th
+
         return {
             'id': transaction.id,
             'transaction_records': transaction.transaction_records,
@@ -830,6 +839,7 @@ class TransactionService:
             'treatment_method': transaction.treatment_method,
             'disposal_method': transaction.disposal_method,
             'created_by_id': transaction.created_by_id,
+            'created_by_name': created_by_name,
             'updated_by_id': transaction.updated_by_id,
             'approved_by_id': transaction.approved_by_id,
             'ai_audit_status': transaction.ai_audit_status.value if hasattr(transaction, 'ai_audit_status') and transaction.ai_audit_status else None,
