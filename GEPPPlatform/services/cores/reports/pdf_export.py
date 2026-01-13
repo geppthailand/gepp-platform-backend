@@ -861,40 +861,63 @@ def draw_performance(pdf, page_width_points: float, page_height_points: float, d
     pdf.setFont("IBMPlexSansThai-Medium", 12)
     pdf.drawString(inner_x + 16, inner_y + inner_h - 16 - 12, "All Building")
     pdf.setFont("IBMPlexSansThai-Regular", 10)
-    # Assign per-building colors from BuildingColors randomly, reuse for list and pie
-    try:
-        import random as _rand
-        _palette = [colors.HexColor(c) for c in (BuildingColors or [])]
-        if _palette:
-            _shuffled = _palette[:]
-            _rand.shuffle(_shuffled)
-            _assigned_colors = [_shuffled[i % len(_shuffled)] for i in range(len(performance_data.get("buildings", [])))]
-        else:
+    
+    # Check if buildings data exists
+    buildings = performance_data.get("buildings", [])
+    has_buildings = buildings and isinstance(buildings, list) and len(buildings) > 0
+    _assigned_colors = []  # Initialize to avoid undefined variable errors
+    
+    if not has_buildings:
+        # Display "No data" message
+        no_data_y = inner_y + inner_h - 0.85 * inch
+        pdf.setFillColor(colors.HexColor("#666666"))
+        pdf.setFont("IBMPlexSansThai-Regular", 10)
+        pdf.drawString(inner_x + 16, no_data_y, "No data")
+    else:
+        # Assign per-building colors from BuildingColors randomly, reuse for list and pie
+        try:
+            import random as _rand
+            _palette = [colors.HexColor(c) for c in (BuildingColors or [])]
+            if _palette:
+                _shuffled = _palette[:]
+                _rand.shuffle(_shuffled)
+                _assigned_colors = [_shuffled[i % len(_shuffled)] for i in range(len(buildings))]
+            else:
+                _assigned_colors = []
+        except Exception:
             _assigned_colors = []
-    except Exception:
-        _assigned_colors = []
-    for idx, building in enumerate(performance_data["buildings"]):
-        y = inner_y + inner_h - 0.85 * inch - idx * (0.55 * inch)
-        pdf.setFillColor(TEXT)
-        pdf.drawString(inner_x + 16, y, building["buildingName"])
-        value_text = f"{_format_number(building['totalWasteKg'])} kg"
-        value_width = stringWidth(value_text, "IBMPlexSansThai-Regular", 8)
-        pdf.drawString(inner_x + 4 * inch - value_width, y, value_text)
-        _color = _assigned_colors[idx] if idx < len(_assigned_colors) else colors.HexColor("#b7cbd6")
-        _progress_bar(pdf, inner_x + 16, y - 0.2 * inch, inner_x - 0.5 * inch, 0.08 * inch, building['totalWasteKg'] / performance_data["totalWasteKg"], _color)
+        
+        for idx, building in enumerate(buildings):
+            y = inner_y + inner_h - 0.85 * inch - idx * (0.55 * inch)
+            pdf.setFillColor(TEXT)
+            pdf.drawString(inner_x + 16, y, building.get("buildingName", ""))
+            value_text = f"{_format_number(building.get('totalWasteKg', 0))} kg"
+            value_width = stringWidth(value_text, "IBMPlexSansThai-Regular", 8)
+            pdf.drawString(inner_x + 4 * inch - value_width, y, value_text)
+            _color = _assigned_colors[idx] if idx < len(_assigned_colors) else colors.HexColor("#b7cbd6")
+            total_waste = float(performance_data.get("totalWasteKg", 0) or 0)
+            if total_waste > 0:
+                _progress_bar(pdf, inner_x + 16, y - 0.2 * inch, inner_x - 0.5 * inch, 0.08 * inch, building.get('totalWasteKg', 0) / total_waste, _color)
+    
     pdf.setFillColor(TEXT)
     pdf.setFont("IBMPlexSansThai-Regular", 10)
     pie_size = 1.20 * inch
     pie_x = inner_x + inner_w - pie_size - 16
     title1_y = inner_y + inner_h - 48
     pdf.drawString(pie_x, title1_y, "Total Buildings")
-    buildings_values = [float(b.get("totalWasteKg", 0) or 0) for b in performance_data.get("buildings", [])]
-    if _assigned_colors:
-        building_colors_for_pie = [_assigned_colors[i % len(_assigned_colors)] for i in range(len(buildings_values))]
+    
+    if has_buildings:
+        buildings_values = [float(b.get("totalWasteKg", 0) or 0) for b in buildings]
+        if _assigned_colors:
+            building_colors_for_pie = [_assigned_colors[i % len(_assigned_colors)] for i in range(len(buildings_values))]
+        else:
+            mono_color = colors.HexColor("#b7cbd6")
+            building_colors_for_pie = [mono_color for _ in buildings_values] or [mono_color]
+        _simple_pie_chart(pdf, pie_x, title1_y - 8 - pie_size, pie_size, buildings_values, building_colors_for_pie, gap_width=1, gap_color=colors.white)
     else:
-        mono_color = colors.HexColor("#b7cbd6")
-        building_colors_for_pie = [mono_color for _ in buildings_values] or [mono_color]
-    _simple_pie_chart(pdf, pie_x, title1_y - 8 - pie_size, pie_size, buildings_values, building_colors_for_pie, gap_width=1, gap_color=colors.white)
+        # Show placeholder pie chart with single value
+        placeholder_color = colors.HexColor("#e0e0e0")
+        _simple_pie_chart(pdf, pie_x, title1_y - 8 - pie_size, pie_size, [1.0], [placeholder_color], gap_width=1, gap_color=colors.white)
     title2_y = title1_y - pie_size - 52
     pdf.drawString(pie_x, title2_y, "All Types of Waste")
     metrics_items = list(performance_data.get("metrics", {}).items())
