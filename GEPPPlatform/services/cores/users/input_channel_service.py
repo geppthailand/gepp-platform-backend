@@ -722,15 +722,9 @@ class InputChannelService:
         return result
 
     def _get_user_locations(self, channel: UserInputChannel) -> List[Dict[str, Any]]:
-        """Get accessible locations for the user"""
-        user_location = self.db.query(UserLocation).filter(
-            UserLocation.id == channel.user_location_id
-        ).first()
-
-        if not user_location:
-            return []
-
-        # Get all locations in the same organization that are actual locations
+        """Get accessible locations for the channel's organization"""
+        # Get all locations in the organization that are actual locations
+        # For organization-level channels, we don't need user_location_id
         locations = self.db.query(UserLocation).filter(
             and_(
                 UserLocation.organization_id == channel.organization_id,

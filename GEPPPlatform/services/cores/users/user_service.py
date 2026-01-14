@@ -687,6 +687,36 @@ class UserService:
             }
             location_data.append(location_dict)
 
+        # Fetch tags for all locations in one query
+        if location_data:
+            from GEPPPlatform.models.users.user_related import UserLocationTag
+            location_ids = [loc['id'] for loc in location_data]
+            tags = self.db.query(UserLocationTag).filter(
+                UserLocationTag.user_location_id.in_(location_ids),
+                UserLocationTag.organization_id == organization_id,
+                UserLocationTag.deleted_date.is_(None)
+            ).all()
+
+            # Group tags by location_id
+            tags_by_location = {}
+            for tag in tags:
+                if tag.user_location_id not in tags_by_location:
+                    tags_by_location[tag.user_location_id] = []
+                tags_by_location[tag.user_location_id].append({
+                    'id': tag.id,
+                    'name': tag.name,
+                    'note': tag.note,
+                    'start_date': tag.start_date.isoformat() if tag.start_date else None,
+                    'end_date': tag.end_date.isoformat() if tag.end_date else None,
+                    'members': tag.members or [],
+                    'is_active': tag.is_active,
+                    'created_date': tag.created_date.isoformat() if tag.created_date else None
+                })
+
+            # Add tags to each location
+            for loc in location_data:
+                loc['tags'] = tags_by_location.get(loc['id'], [])
+
         return location_data
 
     def get_locations_by_member(
