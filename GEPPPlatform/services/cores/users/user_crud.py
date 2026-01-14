@@ -46,6 +46,8 @@ class UserCRUD:
             name_th=user_data.get('name_th'),
             name_en=user_data.get('name_en'),
             display_name=user_data.get('display_name', user_data.get('name_en', '')),
+            first_name=user_data.get('first_name'),
+            last_name=user_data.get('last_name'),
 
             # Contact
             email=user_data.get('email'),

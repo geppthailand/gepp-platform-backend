@@ -448,6 +448,8 @@ class UserService:
             'display_name': user.display_name,
             'name_en': user.name_en,
             'name_th': user.name_th,
+            'first_name': user.first_name,
+            'last_name': user.last_name,
             'email': user.email,
             'phone': user.phone,
             'username': user.username,

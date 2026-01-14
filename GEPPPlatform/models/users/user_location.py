@@ -33,7 +33,9 @@ class UserLocation(Base, BaseModel):
     name_th = Column(String(255))
     name_en = Column(String(255))
     display_name = Column(String(255))
-    
+    first_name = Column(String(255))
+    last_name = Column(String(255))
+
     # User-specific authentication fields
     email = Column(String(255))
     is_email_active = Column(Boolean, nullable=False, default=False)
