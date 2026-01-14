@@ -260,3 +260,34 @@ class UserInvitation(Base, BaseModel):
     # Relationships
     invited_by = relationship("UserLocation", foreign_keys=[invited_by_id])
     created_user = relationship("UserLocation", foreign_keys=[created_user_id])
+
+
+class UserLocationTag(Base, BaseModel):
+    """
+    Location tags for categorizing and grouping waste origin points within locations.
+    Tags can be used to organize collection points, events, or specific areas within a location.
+    Tags are organization-level and can be mapped to multiple locations (many-to-many).
+    """
+    __tablename__ = 'user_location_tags'
+
+    # Basic info
+    name = Column(String(255), nullable=False)
+    note = Column(Text)
+
+    # Organization ownership (tags belong to organization, can be mapped to any location in that org)
+    organization_id = Column(BigInteger, ForeignKey('organizations.id'), nullable=False)
+    created_by_id = Column(ForeignKey('user_locations.id'))
+
+    # Many-to-many: JSONB array of user_location IDs this tag is associated with
+    user_locations = Column(JSON, default=list)
+
+    # Members (JSONB array of user_location IDs assigned to this tag - users who can use this tag)
+    members = Column(JSON, default=list)
+
+    # Event date range (optional - for time-based tags/events)
+    start_date = Column(DateTime(timezone=True))
+    end_date = Column(DateTime(timezone=True))
+
+    # Relationships
+    created_by = relationship("UserLocation", foreign_keys=[created_by_id])
+    organization = relationship("Organization")

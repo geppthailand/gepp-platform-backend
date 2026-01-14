@@ -202,7 +202,8 @@ def main(event, context):
                 else:
                     # Get channel data
                     subuser = query_params.get('subuser')
-                    channel_data = input_service.get_input_channel_by_hash(hash_value, subuser)
+                    display_name = query_params.get('display_name')
+                    channel_data = input_service.get_input_channel_by_hash(hash_value, subuser, display_name)
 
                     if channel_data:
                         results = {

@@ -448,6 +448,8 @@ class UserService:
             'display_name': user.display_name,
             'name_en': user.name_en,
             'name_th': user.name_th,
+            'first_name': user.first_name,
+            'last_name': user.last_name,
             'email': user.email,
             'phone': user.phone,
             'username': user.username,
@@ -686,6 +688,44 @@ class UserService:
                 'footprint': float(location.footprint) if location.footprint else None,
             }
             location_data.append(location_dict)
+
+        # Fetch tags for all locations in one query
+        if location_data:
+            from GEPPPlatform.models.users.user_related import UserLocationTag
+            location_ids = [loc['id'] for loc in location_data]
+
+            # Get all tags for the organization (tags now use user_locations JSONB array)
+            tags = self.db.query(UserLocationTag).filter(
+                UserLocationTag.organization_id == organization_id,
+                UserLocationTag.deleted_date.is_(None)
+            ).all()
+
+            # Group tags by location_id (check if location_id is in tag's user_locations array)
+            tags_by_location = {}
+            for tag in tags:
+                tag_locations = tag.user_locations or []
+                tag_data = {
+                    'id': tag.id,
+                    'name': tag.name,
+                    'note': tag.note,
+                    'start_date': tag.start_date.isoformat() if tag.start_date else None,
+                    'end_date': tag.end_date.isoformat() if tag.end_date else None,
+                    'members': tag.members or [],
+                    'user_locations': tag_locations,
+                    'is_active': tag.is_active,
+                    'created_date': tag.created_date.isoformat() if tag.created_date else None
+                }
+                # Add tag to each location it belongs to
+                for loc_id in tag_locations:
+                    loc_id_int = int(loc_id) if isinstance(loc_id, str) else loc_id
+                    if loc_id_int in location_ids:
+                        if loc_id_int not in tags_by_location:
+                            tags_by_location[loc_id_int] = []
+                        tags_by_location[loc_id_int].append(tag_data)
+
+            # Add tags to each location
+            for loc in location_data:
+                loc['tags'] = tags_by_location.get(loc['id'], [])
 
         return location_data
 

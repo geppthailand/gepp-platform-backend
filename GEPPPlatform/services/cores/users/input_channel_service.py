@@ -25,10 +25,16 @@ class InputChannelService:
         """Generate a unique hash for the input channel"""
         return secrets.token_urlsafe(32)
 
-    def _validate_organization_member(self, organization_id: int, user_identifier: str) -> Optional[UserLocation]:
+    def _validate_organization_member(
+        self,
+        organization_id: int,
+        user_identifier: str,
+        display_name: Optional[str] = None
+    ) -> Optional[UserLocation]:
         """
         Validate if a user identifier belongs to an organization member.
         User identifier can be user_id, username, display_name, or name.
+        If display_name is provided, also validates that it matches.
         Returns the UserLocation if valid, None otherwise.
         """
         # Build query conditions
@@ -54,6 +60,12 @@ class InputChannelService:
             and_(*conditions),
             or_(*id_conditions)
         ).first()
+
+        # If display_name is provided, also validate it matches
+        if user and display_name:
+            user_display_name = user.display_name or ''
+            if user_display_name.lower() != display_name.lower():
+                return None
 
         return user
 
@@ -468,7 +480,12 @@ class InputChannelService:
 
         return self._serialize_channel(channel)
 
-    def get_input_channel_by_hash(self, hash_value: str, subuser: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    def get_input_channel_by_hash(
+        self,
+        hash_value: str,
+        subuser: Optional[str] = None,
+        display_name: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
         """Get input channel by hash (for QR code access)"""
         channel = self.db.query(UserInputChannel).filter(
             and_(
@@ -501,10 +518,14 @@ class InputChannelService:
             subuser_names = channel.subuser_names or []
             is_valid = subuser in subuser_names
 
-            # If not in legacy list, check organization membership
+            # If not in legacy list, check organization membership with display_name validation
             validated_user = None
             if not is_valid:
-                validated_user = self._validate_organization_member(channel.organization_id, subuser)
+                validated_user = self._validate_organization_member(
+                    channel.organization_id,
+                    subuser,
+                    display_name
+                )
                 is_valid = validated_user is not None
 
             # Get saved preferences for this subuser
@@ -522,7 +543,7 @@ class InputChannelService:
             # Get materials with details and locations if valid subuser
             if is_valid:
                 result['materials'] = self._get_materials_with_details(channel)
-                result['locations'] = self._get_user_locations(channel)
+                result['locations'] = self._get_user_locations(channel, validated_user)
                 result['savedMaterialIds'] = saved_material_ids
 
         return result
@@ -721,22 +742,27 @@ class InputChannelService:
 
         return result
 
-    def _get_user_locations(self, channel: UserInputChannel) -> List[Dict[str, Any]]:
-        """Get accessible locations for the user"""
-        user_location = self.db.query(UserLocation).filter(
-            UserLocation.id == channel.user_location_id
-        ).first()
+    def _get_user_locations(
+        self,
+        channel: UserInputChannel,
+        validated_user: Optional[UserLocation] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Get accessible locations for the channel's organization.
+        Only returns root_nodes (origins) - locations without parent_location_id.
+        Also includes tags for each location where the user is a member.
+        """
+        from GEPPPlatform.models.users.user_related import UserLocationTag
 
-        if not user_location:
-            return []
-
-        # Get all locations in the same organization that are actual locations
+        # Get only root_nodes (origins) - locations without parent_location_id
+        # These are the top-level locations in the hierarchy
         locations = self.db.query(UserLocation).filter(
             and_(
                 UserLocation.organization_id == channel.organization_id,
                 UserLocation.is_location == True,
                 UserLocation.is_active == True,
-                UserLocation.deleted_date.is_(None)
+                UserLocation.deleted_date.is_(None),
+                UserLocation.parent_location_id.is_(None)  # Only root nodes (origins)
             )
         ).all()
 
@@ -749,11 +775,49 @@ class InputChannelService:
                 elif isinstance(loc.functions, str):
                     functions = [loc.functions]
 
+            # Get tags for this location using the new many-to-many structure
+            # Tags are stored in location.tags JSONB array AND tag.user_locations array
+            location_tag_ids = loc.tags or []
+            location_tags = []
+
+            if location_tag_ids:
+                # Handle both int and string IDs
+                tag_ids_int = [int(tid) if isinstance(tid, str) else tid for tid in location_tag_ids]
+                tags = self.db.query(UserLocationTag).filter(
+                    and_(
+                        UserLocationTag.id.in_(tag_ids_int),
+                        UserLocationTag.organization_id == channel.organization_id,
+                        UserLocationTag.is_active == True,
+                        UserLocationTag.deleted_date.is_(None)
+                    )
+                ).all()
+
+                # Filter tags to only those where the validated_user is a member (if user exists)
+                for tag in tags:
+                    # If user validation is required, check if user is in tag members
+                    if validated_user:
+                        tag_members = tag.members or []
+                        # Check both integer and string representations since members may be stored as strings
+                        user_id_int = validated_user.id
+                        user_id_str = str(validated_user.id)
+                        if user_id_int in tag_members or user_id_str in tag_members:
+                            location_tags.append({
+                                'id': str(tag.id),
+                                'name': tag.name
+                            })
+                    else:
+                        # If no user validation, include all tags
+                        location_tags.append({
+                            'id': str(tag.id),
+                            'name': tag.name
+                        })
+
             result.append({
                 'id': str(loc.id),
                 'name_th': loc.display_name,
                 'name_en': loc.display_name,
                 'functions': functions,
+                'tags': location_tags,
             })
 
         return result
@@ -902,6 +966,15 @@ class InputChannelService:
             if validated_user and validated_user.display_name:
                 subuser_display = f"{validated_user.display_name} ({subuser})"
 
+            # Parse location_tag_id from tags field (if selected and not empty)
+            location_tag_id = None
+            tags_value = data.get('tags')
+            if tags_value and tags_value != '':
+                try:
+                    location_tag_id = int(tags_value)
+                except (ValueError, TypeError):
+                    pass  # Invalid tag ID, skip
+
             transaction = Transaction(
                 transaction_method='qr_input',
                 status=TransactionStatus.pending,
@@ -913,6 +986,7 @@ class InputChannelService:
                 weight_kg=total_weight,
                 total_amount=Decimal('0'),
                 created_by_id=creator_user_location_id,  # Use validated subuser's user_location_id
+                location_tag_id=location_tag_id,  # Set location tag if selected
                 is_active=True,
             )
 

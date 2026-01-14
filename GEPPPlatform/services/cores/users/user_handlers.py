@@ -160,6 +160,51 @@ def handle_user_routes(event: Dict[str, Any], data: Dict[str, Any], **params) ->
         # Get user locations (is_location = True)
         return handle_get_locations(user_service, query_params, current_user, headers)
 
+    elif '/api/locations/' in path and method == 'PUT' and '/tags/' not in path:
+        # Update location: /api/locations/{location_id}
+        location_id = path.split('/locations/')[1].rstrip('/')
+        return handle_update_location(db_session, location_id, data, current_user_organization_id)
+
+    # ==================== Location Tags routes ====================
+
+    elif '/api/locations/tags/' in path and '/attach' in path and method == 'POST':
+        # Attach tag to location: /api/locations/tags/{tag_id}/attach
+        tag_id = path.split('/tags/')[1].split('/')[0]
+        return handle_attach_tag_to_location(db_session, tag_id, data, current_user_organization_id)
+
+    elif '/api/locations/tags/' in path and '/detach' in path and method == 'POST':
+        # Detach tag from location: /api/locations/tags/{tag_id}/detach
+        tag_id = path.split('/tags/')[1].split('/')[0]
+        return handle_detach_tag_from_location(db_session, tag_id, data, current_user_organization_id)
+
+    elif '/api/locations/tags/' in path and '/members' in path and method == 'PUT':
+        # Update tag members: /api/locations/tags/{tag_id}/members
+        tag_id = path.split('/tags/')[1].split('/')[0]
+        return handle_update_tag_members(db_session, tag_id, data, current_user_organization_id)
+
+    elif '/api/locations/tags/' in path and method == 'GET':
+        # Get tag by ID: /api/locations/tags/{tag_id}
+        tag_id = path.split('/tags/')[1].rstrip('/')
+        return handle_get_location_tag(db_session, tag_id, current_user_organization_id)
+
+    elif '/api/locations/tags/' in path and method == 'PUT':
+        # Update tag: /api/locations/tags/{tag_id}
+        tag_id = path.split('/tags/')[1].rstrip('/')
+        return handle_update_location_tag(db_session, tag_id, data, current_user_organization_id)
+
+    elif '/api/locations/tags/' in path and method == 'DELETE':
+        # Delete tag: /api/locations/tags/{tag_id}
+        tag_id = path.split('/tags/')[1].rstrip('/')
+        return handle_delete_location_tag(db_session, tag_id, current_user_organization_id)
+
+    elif '/api/locations/tags' == path and method == 'GET':
+        # List tags: /api/locations/tags?user_location_id=X or all for organization
+        return handle_list_location_tags(db_session, query_params, current_user_organization_id)
+
+    elif '/api/locations/tags' == path and method == 'POST':
+        # Create tag: /api/locations/tags
+        return handle_create_location_tag(db_session, data, current_user_organization_id, current_user_id)
+
     else:
         raise NotFoundException(f'Route not found: {path} [{method}]')
 
@@ -577,6 +622,94 @@ def handle_get_locations(user_service: UserService, query_params: Dict[str, Any]
     except Exception as e:
         raise APIException(f'Error fetching locations: {str(e)}')
 
+
+def handle_update_location(
+    db_session,
+    location_id: str,
+    data: Dict[str, Any],
+    organization_id: int
+) -> Dict[str, Any]:
+    """Handle PUT /api/locations/{location_id} - Update location"""
+    try:
+        from GEPPPlatform.models.users.user_location import UserLocation
+        from GEPPPlatform.models.users.user_related import UserLocationTag
+        from sqlalchemy import and_
+        from datetime import datetime
+
+        # Find the location
+        location = db_session.query(UserLocation).filter(
+            and_(
+                UserLocation.id == int(location_id),
+                UserLocation.organization_id == organization_id,
+                UserLocation.is_location == True,
+                UserLocation.deleted_date.is_(None)
+            )
+        ).first()
+
+        if not location:
+            raise NotFoundException(f'Location not found: {location_id}')
+
+        # Update basic fields
+        if 'name' in data:
+            location.name_en = data['name']
+            location.display_name = data['name']
+        if 'address' in data:
+            location.address = data['address']
+
+        # Handle user assignments
+        if 'users' in data:
+            location.users = data['users']
+
+        location.updated_date = datetime.utcnow()
+        db_session.commit()
+
+        # Get tags for this location using the new many-to-many structure
+        # Tags are now stored in location.tags JSONB array
+        location_tag_ids = location.tags or []
+        tags = []
+        if location_tag_ids:
+            # Handle both int and string IDs
+            tag_ids_int = [int(tid) if isinstance(tid, str) else tid for tid in location_tag_ids]
+            tags = db_session.query(UserLocationTag).filter(
+                and_(
+                    UserLocationTag.id.in_(tag_ids_int),
+                    UserLocationTag.organization_id == organization_id,
+                    UserLocationTag.deleted_date.is_(None)
+                )
+            ).all()
+
+        # Serialize response
+        return {
+            'success': True,
+            'location': {
+                'id': location.id,
+                'name': location.display_name or location.name_en,
+                'address': getattr(location, 'address', None),
+                'users': getattr(location, 'users', []) or [],
+                'tags': [
+                    {
+                        'id': tag.id,
+                        'name': tag.name,
+                        'note': tag.note,
+                        'user_locations': tag.user_locations or [],
+                        'start_date': tag.start_date.isoformat() if tag.start_date else None,
+                        'end_date': tag.end_date.isoformat() if tag.end_date else None,
+                        'members': tag.members or []
+                    }
+                    for tag in tags
+                ],
+                'updated_date': location.updated_date.isoformat() if location.updated_date else None
+            },
+            'message': 'Location updated successfully'
+        }
+
+    except NotFoundException:
+        raise
+    except Exception as e:
+        db_session.rollback()
+        raise APIException(f'Failed to update location: {str(e)}')
+
+
 def handle_get_user_profile(user_service: UserService, current_user_id: str) -> Dict[str, Any]:
     """Handle GET /api/users/profile - Get current user's profile"""
     try:
@@ -841,3 +974,224 @@ def handle_delete_organization_channel(
         raise
     except Exception as e:
         raise APIException(f'Failed to delete input channel: {str(e)}')
+
+
+# ==================== Location Tags Handlers ====================
+
+def handle_list_location_tags(
+    db_session,
+    query_params: Dict[str, Any],
+    organization_id: int
+) -> Dict[str, Any]:
+    """Handle GET /api/locations/tags - List tags"""
+    try:
+        from .location_tag_service import LocationTagService
+        service = LocationTagService(db_session)
+
+        user_location_id = query_params.get('user_location_id')
+        include_inactive = query_params.get('include_inactive', '').lower() == 'true'
+
+        if user_location_id:
+            # Get tags for specific location
+            tags = service.get_tags_by_location(
+                user_location_id=int(user_location_id),
+                organization_id=organization_id,
+                include_inactive=include_inactive
+            )
+        else:
+            # Get all tags for organization
+            tags = service.get_tags_by_organization(
+                organization_id=organization_id,
+                include_inactive=include_inactive
+            )
+
+        return {
+            'tags': tags,
+            'total': len(tags)
+        }
+
+    except Exception as e:
+        raise APIException(f'Failed to list location tags: {str(e)}')
+
+
+def handle_get_location_tag(
+    db_session,
+    tag_id: str,
+    organization_id: int
+) -> Dict[str, Any]:
+    """Handle GET /api/locations/tags/{tag_id} - Get tag by ID"""
+    try:
+        from .location_tag_service import LocationTagService
+        service = LocationTagService(db_session)
+
+        result = service.get_tag_by_id(int(tag_id), organization_id)
+        if not result:
+            raise NotFoundException('Location tag not found')
+
+        return {'tag': result}
+
+    except NotFoundException:
+        raise
+    except Exception as e:
+        raise APIException(f'Failed to get location tag: {str(e)}')
+
+
+def handle_create_location_tag(
+    db_session,
+    data: Dict[str, Any],
+    organization_id: int,
+    current_user_id: Optional[str]
+) -> Dict[str, Any]:
+    """Handle POST /api/locations/tags - Create tag (organization-level, optionally linked to location)"""
+    try:
+        from .location_tag_service import LocationTagService
+        service = LocationTagService(db_session)
+
+        # user_location_id is optional - tags are now organization-level
+        user_location_id = data.get('user_location_id')
+
+        result = service.create_tag(
+            organization_id=organization_id,
+            data=data,
+            created_by_id=int(current_user_id) if current_user_id else None,
+            user_location_id=int(user_location_id) if user_location_id else None
+        )
+
+        return {'tag': result, 'message': 'Location tag created successfully'}
+
+    except (NotFoundException, BadRequestException, ValidationException):
+        raise
+    except Exception as e:
+        raise APIException(f'Failed to create location tag: {str(e)}')
+
+
+def handle_update_location_tag(
+    db_session,
+    tag_id: str,
+    data: Dict[str, Any],
+    organization_id: int
+) -> Dict[str, Any]:
+    """Handle PUT /api/locations/tags/{tag_id} - Update tag"""
+    try:
+        from .location_tag_service import LocationTagService
+        service = LocationTagService(db_session)
+
+        result = service.update_tag(
+            tag_id=int(tag_id),
+            organization_id=organization_id,
+            data=data
+        )
+
+        return {'tag': result, 'message': 'Location tag updated successfully'}
+
+    except NotFoundException:
+        raise
+    except Exception as e:
+        raise APIException(f'Failed to update location tag: {str(e)}')
+
+
+def handle_delete_location_tag(
+    db_session,
+    tag_id: str,
+    organization_id: int
+) -> Dict[str, Any]:
+    """Handle DELETE /api/locations/tags/{tag_id} - Delete tag"""
+    try:
+        from .location_tag_service import LocationTagService
+        service = LocationTagService(db_session)
+
+        success = service.delete_tag(int(tag_id), organization_id)
+        if success:
+            return {'message': 'Location tag deleted successfully'}
+        else:
+            raise NotFoundException('Location tag not found')
+
+    except NotFoundException:
+        raise
+    except Exception as e:
+        raise APIException(f'Failed to delete location tag: {str(e)}')
+
+
+def handle_attach_tag_to_location(
+    db_session,
+    tag_id: str,
+    data: Dict[str, Any],
+    organization_id: int
+) -> Dict[str, Any]:
+    """Handle POST /api/locations/tags/{tag_id}/attach - Attach tag to location"""
+    try:
+        from .location_tag_service import LocationTagService
+        service = LocationTagService(db_session)
+
+        user_location_id = data.get('user_location_id')
+        if not user_location_id:
+            raise ValidationException('user_location_id is required')
+
+        result = service.attach_tag_to_location(
+            tag_id=int(tag_id),
+            user_location_id=int(user_location_id),
+            organization_id=organization_id
+        )
+
+        return {'tag': result, 'message': 'Tag attached to location successfully'}
+
+    except (NotFoundException, ValidationException):
+        raise
+    except Exception as e:
+        raise APIException(f'Failed to attach tag to location: {str(e)}')
+
+
+def handle_detach_tag_from_location(
+    db_session,
+    tag_id: str,
+    data: Dict[str, Any],
+    organization_id: int
+) -> Dict[str, Any]:
+    """Handle POST /api/locations/tags/{tag_id}/detach - Detach tag from location"""
+    try:
+        from .location_tag_service import LocationTagService
+        service = LocationTagService(db_session)
+
+        user_location_id = data.get('user_location_id')
+        if not user_location_id:
+            raise ValidationException('user_location_id is required')
+
+        result = service.detach_tag_from_location(
+            tag_id=int(tag_id),
+            user_location_id=int(user_location_id),
+            organization_id=organization_id
+        )
+
+        return {'tag': result, 'message': 'Tag detached from location successfully'}
+
+    except (NotFoundException, ValidationException):
+        raise
+    except Exception as e:
+        raise APIException(f'Failed to detach tag from location: {str(e)}')
+
+
+def handle_update_tag_members(
+    db_session,
+    tag_id: str,
+    data: Dict[str, Any],
+    organization_id: int
+) -> Dict[str, Any]:
+    """Handle PUT /api/locations/tags/{tag_id}/members - Update tag members"""
+    try:
+        from .location_tag_service import LocationTagService
+        service = LocationTagService(db_session)
+
+        member_ids = data.get('member_ids', [])
+
+        result = service.assign_members_to_tag(
+            tag_id=int(tag_id),
+            organization_id=organization_id,
+            member_ids=member_ids
+        )
+
+        return {'tag': result, 'message': 'Tag members updated successfully'}
+
+    except NotFoundException:
+        raise
+    except Exception as e:
+        raise APIException(f'Failed to update tag members: {str(e)}')
