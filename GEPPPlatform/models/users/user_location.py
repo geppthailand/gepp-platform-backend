@@ -99,7 +99,10 @@ class UserLocation(Base, BaseModel):
 
     # Location members (user assignments for locations)
     members = Column(JSONB)  # JSONB array of member objects with user_id and role
-    
+
+    # Tags (JSONB array of tag IDs associated with this location - many-to-many)
+    tags = Column(JSONB, default=list)  # JSONB array of user_location_tag IDs
+
     # Localization
     locale = Column(String(15), default='TH')
     nationality_id = Column(ForeignKey('nationalities.id'))
