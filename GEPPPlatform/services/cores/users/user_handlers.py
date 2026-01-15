@@ -20,11 +20,18 @@ def handle_user_routes(event: Dict[str, Any], data: Dict[str, Any], **params) ->
     """
     Main handler for user management routes
     """
-    path = event.get("rawPath", "")
+    raw_path = event.get("rawPath", "")
     method = params.get('method', 'GET')
     path_params = params.get('path_params', {})
     query_params = params.get('query_params', {})
     headers = params.get('headers', {})
+
+    # Normalize path to remove deployment state prefix (e.g., /dev/api/... -> /api/...)
+    path = raw_path
+    path_parts = raw_path.strip('/').split('/')
+    if len(path_parts) >= 2 and path_parts[1] == 'api':
+        # Path has format: /{deployment_state}/api/*
+        path = '/' + '/'.join(path_parts[1:])
 
     # Get database session from commonParams
     db_session = params.get('db_session')
