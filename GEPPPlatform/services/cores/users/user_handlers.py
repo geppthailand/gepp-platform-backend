@@ -641,6 +641,7 @@ def handle_update_location(
         from GEPPPlatform.models.users.user_location import UserLocation
         from GEPPPlatform.models.users.user_related import UserLocationTag
         from sqlalchemy import and_
+        from sqlalchemy.orm.attributes import flag_modified
         from datetime import datetime
 
         # Find the location
@@ -663,12 +664,31 @@ def handle_update_location(
         if 'address' in data:
             location.address = data['address']
 
-        # Handle user assignments
+        # Handle user assignments - store in members JSONB column
+        print(f"[DEBUG] ===== UPDATE LOCATION {location_id} =====")
+        print(f"[DEBUG] Full data received: {data}")
+
         if 'users' in data:
-            location.users = data['users']
+            print(f"[DEBUG] Users data: {data['users']}")
+            location.members = data['users']
+            flag_modified(location, 'members')
+            print(f"[DEBUG] Set location.members to: {location.members}")
+        else:
+            print(f"[DEBUG] No 'users' key in data!")
 
         location.updated_date = datetime.utcnow()
+
+        print(f"[DEBUG] Before commit - location.members: {location.members}")
+        db_session.flush()
+        print(f"[DEBUG] After flush - location.members: {location.members}")
         db_session.commit()
+        print(f"[DEBUG] After commit - location.members: {location.members}")
+
+        # Verify by re-querying
+        db_session.expire(location)
+        verify_location = db_session.query(UserLocation).filter(UserLocation.id == int(location_id)).first()
+        print(f"[DEBUG] Re-queried location.members: {verify_location.members if verify_location else 'NOT FOUND'}")
+        print(f"[DEBUG] ===== END UPDATE =====")
 
         # Get tags for this location using the new many-to-many structure
         # Tags are now stored in location.tags JSONB array
@@ -692,7 +712,7 @@ def handle_update_location(
                 'id': location.id,
                 'name': location.display_name or location.name_en,
                 'address': getattr(location, 'address', None),
-                'users': getattr(location, 'users', []) or [],
+                'members': location.members or [],
                 'tags': [
                     {
                         'id': tag.id,

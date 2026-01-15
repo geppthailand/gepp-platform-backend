@@ -476,6 +476,7 @@ class UserService:
             data['organization_role'] = {
                 'id': user.organization_role.id,
                 'name': user.organization_role.name,
+                'key': user.organization_role.key if hasattr(user.organization_role, 'key') else None,
                 'description': user.organization_role.description
             }
 
@@ -605,6 +606,9 @@ class UserService:
         # Serialize location data - include all columns except sensitive fields
         location_data = []
         for location in locations:
+            # Debug: log members for each location
+            if location.members:
+                print(f"[DEBUG] get_locations: Location {location.id} ({location.display_name}) has members: {location.members}")
             location_dict = {
                 # Base model fields
                 'id': location.id,
