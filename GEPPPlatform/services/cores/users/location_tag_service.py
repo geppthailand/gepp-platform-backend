@@ -135,11 +135,13 @@ class LocationTagService:
                 initial_locations = [user_location_id]
 
         # Create tag
+        # Note: user_location_id is set for backward compatibility until DB migration completes
         tag = UserLocationTag(
             name=name,
             note=data.get('note'),
             organization_id=organization_id,
             created_by_id=created_by_id,
+            user_location_id=user_location_id,  # Legacy field for backward compatibility
             user_locations=initial_locations,
             members=data.get('members', []),
             start_date=start_date,
