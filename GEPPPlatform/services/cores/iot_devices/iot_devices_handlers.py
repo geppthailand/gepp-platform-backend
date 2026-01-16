@@ -12,6 +12,7 @@ from GEPPPlatform.services.cores.transactions.transaction_service import Transac
 from GEPPPlatform.services.cores.users.user_service import UserService
 from GEPPPlatform.models.users.user_location import UserLocation
 from GEPPPlatform.models.cores.references import Material
+from GEPPPlatform.models.cores.iot_devices import IoTDevice
 
 from ....exceptions import APIException, UnauthorizedException, ValidationException, NotFoundException
 
@@ -116,6 +117,25 @@ def handle_iot_devices_routes(event: Dict[str, Any], data: Dict[str, Any], **com
     path = event.get('rawPath', '')
     if not current_device or not current_device.get('device_id'):
         raise UnauthorizedException('Unauthorized device')
+    
+    # Check organization match between device and user (if user is present)
+    if current_user and current_user.get('user_id'):
+        device_id = current_device.get('device_id')
+        device = db_session.query(IoTDevice).filter_by(
+            id=device_id,
+            is_active=True
+        ).first()
+        
+        if not device:
+            raise NotFoundException('Device not found')
+        
+        user_organization_id = current_user.get('organization_id')
+        device_organization_id = device.organization_id
+        
+        # Only check if both have organization IDs set
+        if user_organization_id is not None and device_organization_id is not None:
+            if user_organization_id != device_organization_id:
+                raise UnauthorizedException('User organization does not match device organization')
     
     try:
         if method == '':
