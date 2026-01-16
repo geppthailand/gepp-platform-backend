@@ -20,11 +20,18 @@ def handle_user_routes(event: Dict[str, Any], data: Dict[str, Any], **params) ->
     """
     Main handler for user management routes
     """
-    path = event.get("rawPath", "")
+    raw_path = event.get("rawPath", "")
     method = params.get('method', 'GET')
     path_params = params.get('path_params', {})
     query_params = params.get('query_params', {})
     headers = params.get('headers', {})
+
+    # Normalize path to remove deployment state prefix (e.g., /dev/api/... -> /api/...)
+    path = raw_path
+    path_parts = raw_path.strip('/').split('/')
+    if len(path_parts) >= 2 and path_parts[1] == 'api':
+        # Path has format: /{deployment_state}/api/*
+        path = '/' + '/'.join(path_parts[1:])
 
     # Get database session from commonParams
     db_session = params.get('db_session')
@@ -54,6 +61,9 @@ def handle_user_routes(event: Dict[str, Any], data: Dict[str, Any], **params) ->
     elif '/api/users/profile' in path and method == 'PUT':
         # Update current user's profile: /api/users/profile
         return handle_update_user_profile(user_service, data, current_user_id)
+
+    elif '/api/users/check-email' in path and method == 'POST':
+        return handle_check_email_availability(user_service, data)
 
     elif '/api/users/invite' in path and method == 'POST':
         return handle_send_invitation(user_service, data, current_user_id)
@@ -312,6 +322,48 @@ def handle_create_user(
 
     except Exception as e:
         raise APIException(f'Failed to create user: {str(e)}')
+
+
+def handle_check_email_availability(
+    user_service: UserService,
+    data: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Handle POST /api/users/check-email - Check if email is available"""
+    try:
+        email = data.get('email', '').strip().lower()
+
+        if not email:
+            raise ValidationException('Email is required')
+
+        # Check email format
+        if '@' not in email or '.' not in email.split('@')[-1]:
+            return {
+                'available': False,
+                'error': 'invalid_format',
+                'message': 'Invalid email format'
+            }
+
+        # Check if email already exists
+        from .user_crud import UserCRUD
+        crud = UserCRUD(user_service.db)
+        existing_user = crud.get_user_by_email(email)
+
+        if existing_user:
+            return {
+                'available': False,
+                'error': 'email_exists',
+                'message': 'Email already exists'
+            }
+
+        return {
+            'available': True,
+            'message': 'Email is available'
+        }
+
+    except ValidationException:
+        raise
+    except Exception as e:
+        raise APIException(f'Failed to check email availability: {str(e)}')
 
 
 def handle_get_user_details(user_service: UserService, user_id: str) -> Dict[str, Any]:
@@ -634,6 +686,7 @@ def handle_update_location(
         from GEPPPlatform.models.users.user_location import UserLocation
         from GEPPPlatform.models.users.user_related import UserLocationTag
         from sqlalchemy import and_
+        from sqlalchemy.orm.attributes import flag_modified
         from datetime import datetime
 
         # Find the location
@@ -656,12 +709,31 @@ def handle_update_location(
         if 'address' in data:
             location.address = data['address']
 
-        # Handle user assignments
+        # Handle user assignments - store in members JSONB column
+        print(f"[DEBUG] ===== UPDATE LOCATION {location_id} =====")
+        print(f"[DEBUG] Full data received: {data}")
+
         if 'users' in data:
-            location.users = data['users']
+            print(f"[DEBUG] Users data: {data['users']}")
+            location.members = data['users']
+            flag_modified(location, 'members')
+            print(f"[DEBUG] Set location.members to: {location.members}")
+        else:
+            print(f"[DEBUG] No 'users' key in data!")
 
         location.updated_date = datetime.utcnow()
+
+        print(f"[DEBUG] Before commit - location.members: {location.members}")
+        db_session.flush()
+        print(f"[DEBUG] After flush - location.members: {location.members}")
         db_session.commit()
+        print(f"[DEBUG] After commit - location.members: {location.members}")
+
+        # Verify by re-querying
+        db_session.expire(location)
+        verify_location = db_session.query(UserLocation).filter(UserLocation.id == int(location_id)).first()
+        print(f"[DEBUG] Re-queried location.members: {verify_location.members if verify_location else 'NOT FOUND'}")
+        print(f"[DEBUG] ===== END UPDATE =====")
 
         # Get tags for this location using the new many-to-many structure
         # Tags are now stored in location.tags JSONB array
@@ -685,7 +757,7 @@ def handle_update_location(
                 'id': location.id,
                 'name': location.display_name or location.name_en,
                 'address': getattr(location, 'address', None),
-                'users': getattr(location, 'users', []) or [],
+                'members': location.members or [],
                 'tags': [
                     {
                         'id': tag.id,

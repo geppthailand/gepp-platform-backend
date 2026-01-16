@@ -416,6 +416,12 @@ class UserService:
             errors.append('User not found')
             return {'valid': False, 'errors': errors}
 
+        # Display name validation - cannot be empty if being updated
+        if 'display_name' in updates:
+            display_name = updates['display_name']
+            if not display_name or not display_name.strip():
+                errors.append('Display name is required')
+
         # Email uniqueness check
         if 'email' in updates and updates['email'] != user.email:
             existing_user = self.crud.get_user_by_email(updates['email'])
@@ -476,6 +482,7 @@ class UserService:
             data['organization_role'] = {
                 'id': user.organization_role.id,
                 'name': user.organization_role.name,
+                'key': user.organization_role.key if hasattr(user.organization_role, 'key') else None,
                 'description': user.organization_role.description
             }
 
@@ -605,6 +612,9 @@ class UserService:
         # Serialize location data - include all columns except sensitive fields
         location_data = []
         for location in locations:
+            # Debug: log members for each location
+            if location.members:
+                print(f"[DEBUG] get_locations: Location {location.id} ({location.display_name}) has members: {location.members}")
             location_dict = {
                 # Base model fields
                 'id': location.id,
@@ -726,6 +736,11 @@ class UserService:
             # Add tags to each location
             for loc in location_data:
                 loc['tags'] = tags_by_location.get(loc['id'], [])
+
+        # Build and add path traces for all locations
+        location_paths = self._build_location_paths(organization_id, location_data)
+        for loc in location_data:
+            loc['path'] = location_paths.get(loc['id'], '')
 
         return location_data
 
@@ -868,6 +883,102 @@ class UserService:
             # Recursively extract from children
             if 'children' in node and isinstance(node['children'], list):
                 self._extract_node_ids(node['children'], location_ids)
+
+    def _build_location_paths(self, organization_id: int, location_data: List[Dict[str, Any]]) -> Dict[int, str]:
+        """
+        Build path traces for all locations from their branch root to the location.
+        Returns a dict mapping location_id to path string (e.g., "Branch A → Building 1 → Floor 2")
+
+        Uses organization_setup.root_nodes tree structure to trace the hierarchy.
+        Tree structure: branch -> building -> floor -> room
+        """
+        try:
+            from GEPPPlatform.models.users.user_location import UserLocation
+            from GEPPPlatform.models.subscriptions.organizations import OrganizationSetup
+
+            # Fetch organization setup to get the tree structure
+            setup = self.db.query(OrganizationSetup).filter(
+                OrganizationSetup.organization_id == organization_id,
+                OrganizationSetup.is_active == True
+            ).first()
+
+            if not setup or not setup.root_nodes:
+                return {}
+
+            # Fetch ALL locations in the organization to get their names
+            all_locations = self.db.query(UserLocation).filter(
+                UserLocation.organization_id == organization_id,
+                UserLocation.is_active == True,
+                UserLocation.deleted_date.is_(None)
+            ).all()
+
+            # Create name lookup map
+            location_names = {
+                loc.id: loc.display_name or loc.name_en or loc.name_th or f"Location {loc.id}"
+                for loc in all_locations
+            }
+
+            # Build parent map from tree structure
+            # key: nodeId, value: parentId
+            parent_map: Dict[int, int] = {}
+
+            def build_parent_map(nodes: List[Dict], parent_id: Optional[int] = None):
+                """Recursively build parent map from tree structure"""
+                for node in nodes:
+                    node_id = node.get('nodeId')
+                    if node_id is not None:
+                        node_id = int(node_id) if isinstance(node_id, str) else node_id
+                        if parent_id is not None:
+                            parent_map[node_id] = parent_id
+                        # Process children
+                        children = node.get('children', [])
+                        if children:
+                            build_parent_map(children, node_id)
+
+            # Build the parent map from root_nodes
+            root_nodes = setup.root_nodes
+            if isinstance(root_nodes, list):
+                build_parent_map(root_nodes, None)
+
+            # Build paths for each location
+            location_paths = {}
+
+            def get_ancestors(loc_id: int, visited: set = None) -> List[str]:
+                """Get list of ancestor names from root to parent (not including current node)"""
+                if visited is None:
+                    visited = set()
+
+                # Prevent infinite loops
+                if loc_id in visited:
+                    return []
+                visited.add(loc_id)
+
+                parent_id = parent_map.get(loc_id)
+                if parent_id is None:
+                    # This is a root node, return empty (no ancestors)
+                    return []
+
+                # Get parent's ancestors recursively, then add parent
+                parent_ancestors = get_ancestors(parent_id, visited)
+                parent_name = location_names.get(parent_id, f"Location {parent_id}")
+                return parent_ancestors + [parent_name]
+
+            # Build paths only for the locations in location_data
+            for loc in location_data:
+                loc_id = loc['id']
+                ancestors = get_ancestors(loc_id)
+
+                if ancestors:
+                    location_paths[loc_id] = ' → '.join(ancestors)
+                else:
+                    # Root node - no ancestors to show
+                    location_paths[loc_id] = ''
+
+            return location_paths
+
+        except Exception as e:
+            print(f"Error building location paths for organization {organization_id}: {str(e)}")
+            return {}
 
     # ========== PROFILE MANAGEMENT ==========
 
