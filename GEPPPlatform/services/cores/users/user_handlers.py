@@ -62,6 +62,9 @@ def handle_user_routes(event: Dict[str, Any], data: Dict[str, Any], **params) ->
         # Update current user's profile: /api/users/profile
         return handle_update_user_profile(user_service, data, current_user_id)
 
+    elif '/api/users/check-email' in path and method == 'POST':
+        return handle_check_email_availability(user_service, data)
+
     elif '/api/users/invite' in path and method == 'POST':
         return handle_send_invitation(user_service, data, current_user_id)
 
@@ -319,6 +322,48 @@ def handle_create_user(
 
     except Exception as e:
         raise APIException(f'Failed to create user: {str(e)}')
+
+
+def handle_check_email_availability(
+    user_service: UserService,
+    data: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Handle POST /api/users/check-email - Check if email is available"""
+    try:
+        email = data.get('email', '').strip().lower()
+
+        if not email:
+            raise ValidationException('Email is required')
+
+        # Check email format
+        if '@' not in email or '.' not in email.split('@')[-1]:
+            return {
+                'available': False,
+                'error': 'invalid_format',
+                'message': 'Invalid email format'
+            }
+
+        # Check if email already exists
+        from .user_crud import UserCRUD
+        crud = UserCRUD(user_service.db)
+        existing_user = crud.get_user_by_email(email)
+
+        if existing_user:
+            return {
+                'available': False,
+                'error': 'email_exists',
+                'message': 'Email already exists'
+            }
+
+        return {
+            'available': True,
+            'message': 'Email is available'
+        }
+
+    except ValidationException:
+        raise
+    except Exception as e:
+        raise APIException(f'Failed to check email availability: {str(e)}')
 
 
 def handle_get_user_details(user_service: UserService, user_id: str) -> Dict[str, Any]:

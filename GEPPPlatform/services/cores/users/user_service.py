@@ -416,6 +416,12 @@ class UserService:
             errors.append('User not found')
             return {'valid': False, 'errors': errors}
 
+        # Display name validation - cannot be empty if being updated
+        if 'display_name' in updates:
+            display_name = updates['display_name']
+            if not display_name or not display_name.strip():
+                errors.append('Display name is required')
+
         # Email uniqueness check
         if 'email' in updates and updates['email'] != user.email:
             existing_user = self.crud.get_user_by_email(updates['email'])
