@@ -23,7 +23,7 @@ def handle_get_locations_by_membership(user_service: UserService, query_params: 
         if not current_user or not current_user.get('user_id'):
             raise UnauthorizedException('Unauthorized')
 
-        role = (query_params.get('role') or 'dataInput').strip()
+        role = (query_params.get('role') or 'data_input').strip()
         organization_id = current_user.get('organization_id') if current_user else None
 
         if not organization_id:
