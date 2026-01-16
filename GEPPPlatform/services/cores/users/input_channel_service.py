@@ -742,6 +742,19 @@ class InputChannelService:
 
         return result
 
+    def _extract_node_ids_from_tree(self, nodes: List[Dict]) -> List[int]:
+        """
+        Recursively extract all nodeIds from a tree structure.
+        The tree has format: [{"nodeId": 123, "children": [{"nodeId": 456, ...}]}]
+        """
+        node_ids = []
+        for node in nodes:
+            if 'nodeId' in node:
+                node_ids.append(int(node['nodeId']))
+            if 'children' in node and isinstance(node['children'], list):
+                node_ids.extend(self._extract_node_ids_from_tree(node['children']))
+        return node_ids
+
     def _get_user_locations(
         self,
         channel: UserInputChannel,
@@ -749,20 +762,43 @@ class InputChannelService:
     ) -> List[Dict[str, Any]]:
         """
         Get accessible locations for the channel's organization.
-        Only returns root_nodes (origins) - locations without parent_location_id.
+        Only returns locations from root_nodes in organization_setup (not hub_node).
         Also includes tags for each location where the user is a member.
         """
         from GEPPPlatform.models.users.user_related import UserLocationTag
+        from GEPPPlatform.models.subscriptions.organizations import OrganizationSetup
 
-        # Get only root_nodes (origins) - locations without parent_location_id
-        # These are the top-level locations in the hierarchy
+        # Get the latest active organization setup
+        org_setup = self.db.query(OrganizationSetup).filter(
+            and_(
+                OrganizationSetup.organization_id == channel.organization_id,
+                OrganizationSetup.is_active == True,
+                OrganizationSetup.deleted_date.is_(None)
+            )
+        ).order_by(OrganizationSetup.created_date.desc()).first()
+
+        if not org_setup or not org_setup.root_nodes:
+            # Fallback: no organization setup, return empty list
+            return []
+
+        # Extract all nodeIds from root_nodes (recursively including children)
+        root_nodes = org_setup.root_nodes
+        if not isinstance(root_nodes, list):
+            root_nodes = [root_nodes] if root_nodes else []
+
+        location_ids = self._extract_node_ids_from_tree(root_nodes)
+
+        if not location_ids:
+            return []
+
+        # Query user_locations for those specific IDs
         locations = self.db.query(UserLocation).filter(
             and_(
+                UserLocation.id.in_(location_ids),
                 UserLocation.organization_id == channel.organization_id,
                 UserLocation.is_location == True,
                 UserLocation.is_active == True,
-                UserLocation.deleted_date.is_(None),
-                UserLocation.parent_location_id.is_(None)  # Only root nodes (origins)
+                UserLocation.deleted_date.is_(None)
             )
         ).all()
 
@@ -1158,4 +1194,105 @@ class InputChannelService:
             'success': True,
             'message': 'Preferences saved successfully',
             'material_ids': material_ids
+        }
+
+    def get_all_materials_for_picker(
+        self,
+        hash_value: str,
+        subuser: str
+    ) -> Dict[str, Any]:
+        """
+        Get all materials, categories, and main_materials for the material picker.
+        This returns materials in the format expected by the frontend picker component.
+        """
+        from GEPPPlatform.models.cores.references import Material, MaterialCategory, MainMaterial
+
+        channel = self.db.query(UserInputChannel).filter(
+            and_(
+                UserInputChannel.hash == hash_value,
+                UserInputChannel.is_active == True,
+                UserInputChannel.deleted_date.is_(None)
+            )
+        ).first()
+
+        if not channel:
+            return {'success': False, 'message': 'Input channel not found', 'materials': [], 'categories': [], 'main_materials': []}
+
+        # Validate subuser
+        subuser_names = channel.subuser_names or []
+        is_valid = subuser in subuser_names
+        if not is_valid:
+            validated_user = self._validate_organization_member(channel.organization_id, subuser)
+            is_valid = validated_user is not None
+
+        if not is_valid:
+            return {'success': False, 'message': 'Invalid subuser', 'materials': [], 'categories': [], 'main_materials': []}
+
+        # Get all active materials (global + organization-specific)
+        materials = self.db.query(Material).filter(
+            and_(
+                Material.is_active == True,
+                Material.deleted_date.is_(None),
+                or_(
+                    Material.is_global == True,
+                    Material.organization_id == channel.organization_id
+                )
+            )
+        ).all()
+
+        # Get all active categories
+        categories = self.db.query(MaterialCategory).filter(
+            and_(
+                MaterialCategory.is_active == True,
+                MaterialCategory.deleted_date.is_(None)
+            )
+        ).order_by(MaterialCategory.name_th).all()
+
+        # Get all active main materials
+        main_materials = self.db.query(MainMaterial).filter(
+            and_(
+                MainMaterial.is_active == True,
+                MainMaterial.deleted_date.is_(None)
+            )
+        ).order_by(MainMaterial.display_order).all()
+
+        # Serialize materials
+        materials_data = []
+        for mat in materials:
+            materials_data.append({
+                'id': mat.id,
+                'name_th': mat.name_th,
+                'name_en': mat.name_en,
+                'unit_name_th': mat.unit_name_th,
+                'unit_name_en': mat.unit_name_en,
+                'color': mat.color,
+                'category_id': mat.category_id,
+                'main_material_id': mat.main_material_id,
+            })
+
+        # Serialize categories
+        categories_data = []
+        for cat in categories:
+            categories_data.append({
+                'id': cat.id,
+                'name_th': cat.name_th,
+                'name_en': cat.name_en,
+                'color': cat.color,
+            })
+
+        # Serialize main materials
+        main_materials_data = []
+        for mm in main_materials:
+            main_materials_data.append({
+                'id': mm.id,
+                'name_th': mm.name_th,
+                'name_en': mm.name_en,
+                'color': mm.color,
+            })
+
+        return {
+            'success': True,
+            'materials': materials_data,
+            'categories': categories_data,
+            'main_materials': main_materials_data
         }

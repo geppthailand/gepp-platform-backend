@@ -28,6 +28,10 @@ SET user_locations = jsonb_build_array(user_location_id)
 WHERE user_location_id IS NOT NULL
   AND (user_locations IS NULL OR user_locations = '[]'::jsonb);
 
+-- Step 2.5: Make user_location_id nullable (tags are now organization-level)
+ALTER TABLE user_location_tags
+ALTER COLUMN user_location_id DROP NOT NULL;
+
 -- Step 3: Add tags column to user_locations if it doesn't exist
 DO $$
 BEGIN

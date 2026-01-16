@@ -278,6 +278,10 @@ class UserLocationTag(Base, BaseModel):
     organization_id = Column(BigInteger, ForeignKey('organizations.id'), nullable=False)
     created_by_id = Column(ForeignKey('user_locations.id'))
 
+    # Legacy single location reference (nullable - use user_locations JSONB array instead)
+    # Kept for backward compatibility until migration is complete
+    user_location_id = Column(BigInteger, ForeignKey('user_locations.id'), nullable=True)
+
     # Many-to-many: JSONB array of user_location IDs this tag is associated with
     user_locations = Column(JSON, default=list)
 
@@ -290,4 +294,5 @@ class UserLocationTag(Base, BaseModel):
 
     # Relationships
     created_by = relationship("UserLocation", foreign_keys=[created_by_id])
+    user_location = relationship("UserLocation", foreign_keys=[user_location_id])  # Legacy relationship
     organization = relationship("Organization")
