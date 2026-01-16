@@ -500,6 +500,189 @@ class TransactionService:
                 'errors': [str(e)]
             }
 
+    def update_transaction_with_records(
+        self,
+        transaction_id: int,
+        update_data: Dict[str, Any],
+        updated_by_id: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """
+        Update an existing transaction with records management
+        Supports adding new records, updating existing records, and soft deleting removed records
+
+        Args:
+            transaction_id: The transaction ID to update
+            update_data: Dict containing:
+                - origin_id: Optional origin location ID
+                - transaction_method: Optional transaction method
+                - transaction_date: Optional transaction date
+                - notes: Optional notes
+                - images: Optional images list
+                - records_to_add: List of new records to add
+                - records_to_update: List of records to update
+                - records_to_delete: List of record IDs to soft delete
+            updated_by_id: ID of user making the update
+
+        Returns:
+            Dict with success status, updated transaction, and counts of operations
+        """
+        try:
+            # Get the existing transaction
+            transaction = self.db.query(Transaction).filter(
+                Transaction.id == transaction_id,
+                Transaction.is_active == True
+            ).first()
+
+            if not transaction:
+                return {
+                    'success': False,
+                    'message': 'Transaction not found',
+                    'errors': ['Transaction does not exist or has been deleted']
+                }
+
+            # Update transaction-level fields
+            if 'origin_id' in update_data and update_data['origin_id']:
+                transaction.origin_id = update_data['origin_id']
+            if 'transaction_method' in update_data:
+                transaction.transaction_method = update_data['transaction_method']
+            if 'transaction_date' in update_data:
+                transaction.transaction_date = update_data['transaction_date']
+            if 'notes' in update_data:
+                transaction.notes = update_data['notes']
+            if 'images' in update_data:
+                transaction.images = update_data['images']
+
+            if updated_by_id:
+                transaction.updated_by_id = updated_by_id
+            transaction.updated_date = datetime.now()
+
+            # Track operation counts
+            records_added = 0
+            records_updated = 0
+            records_deleted = 0
+
+            # Soft delete records
+            records_to_delete = update_data.get('records_to_delete', [])
+            if records_to_delete:
+                for record_id in records_to_delete:
+                    record = self.db.query(TransactionRecord).filter(
+                        TransactionRecord.id == record_id,
+                        TransactionRecord.created_transaction_id == transaction_id
+                    ).first()
+                    if record:
+                        record.is_active = False
+                        record.deleted_date = datetime.now()
+                        records_deleted += 1
+                        logger.info(f"Soft deleted transaction record {record_id}")
+
+            # Update existing records
+            records_to_update = update_data.get('records_to_update', [])
+            if records_to_update:
+                for record_data in records_to_update:
+                    record_id = record_data.get('id')
+                    if not record_id:
+                        continue
+
+                    record = self.db.query(TransactionRecord).filter(
+                        TransactionRecord.id == record_id,
+                        TransactionRecord.created_transaction_id == transaction_id,
+                        TransactionRecord.is_active == True
+                    ).first()
+
+                    if record:
+                        # Update record fields
+                        if 'material_id' in record_data:
+                            record.material_id = record_data['material_id']
+                        if 'main_material_id' in record_data:
+                            record.main_material_id = record_data['main_material_id']
+                        if 'category_id' in record_data:
+                            record.category_id = record_data['category_id']
+                        if 'unit' in record_data:
+                            record.unit = record_data['unit']
+                        if 'transaction_date' in record_data:
+                            record.transaction_date = record_data['transaction_date']
+                        if 'origin_quantity' in record_data:
+                            record.origin_quantity = Decimal(str(record_data['origin_quantity']))
+                        if 'origin_weight_kg' in record_data:
+                            record.origin_weight_kg = Decimal(str(record_data['origin_weight_kg']))
+                        if 'images' in record_data:
+                            record.images = record_data['images']
+                        if 'origin_price_per_unit' in record_data:
+                            record.origin_price_per_unit = Decimal(str(record_data['origin_price_per_unit']))
+                        if 'total_amount' in record_data:
+                            record.total_amount = Decimal(str(record_data['total_amount']))
+
+                        record.updated_date = datetime.now()
+                        records_updated += 1
+                        logger.info(f"Updated transaction record {record_id}")
+
+            # Add new records
+            records_to_add = update_data.get('records_to_add', [])
+            new_record_ids = []
+            if records_to_add:
+                for record_data in records_to_add:
+                    # Set created_by_id
+                    record_data['created_by_id'] = updated_by_id
+                    record_result = self._create_transaction_record(record_data, transaction_id)
+                    if record_result['success']:
+                        new_record_ids.append(record_result['transaction_record'].id)
+                        records_added += 1
+                        logger.info(f"Added new transaction record {record_result['transaction_record'].id}")
+
+            # Update transaction_records JSONB list
+            # Get all active record IDs for this transaction
+            active_records = self.db.query(TransactionRecord.id).filter(
+                TransactionRecord.created_transaction_id == transaction_id,
+                TransactionRecord.is_active == True
+            ).all()
+            active_record_ids = [r.id for r in active_records]
+            transaction.transaction_records = active_record_ids
+
+            # Recalculate total weight and amount from active records
+            total_weight = Decimal('0')
+            total_amount = Decimal('0')
+            for record_id in active_record_ids:
+                record = self.db.query(TransactionRecord).filter(
+                    TransactionRecord.id == record_id
+                ).first()
+                if record:
+                    total_weight += record.origin_weight_kg or Decimal('0')
+                    total_amount += record.total_amount or Decimal('0')
+
+            transaction.weight_kg = total_weight
+            transaction.total_amount = total_amount
+
+            self.db.commit()
+
+            # Get updated transaction with records
+            result = self.get_transaction(transaction_id, include_records=True)
+
+            return {
+                'success': True,
+                'message': 'Transaction updated successfully with records',
+                'transaction': result.get('transaction') if result.get('success') else self._transaction_to_dict(transaction),
+                'records_added': records_added,
+                'records_updated': records_updated,
+                'records_deleted': records_deleted
+            }
+
+        except SQLAlchemyError as e:
+            self.db.rollback()
+            logger.error(f"Database error updating transaction with records {transaction_id}: {str(e)}")
+            return {
+                'success': False,
+                'message': 'Database error occurred',
+                'errors': [str(e)]
+            }
+        except Exception as e:
+            self.db.rollback()
+            logger.error(f"Error updating transaction with records {transaction_id}: {str(e)}")
+            return {
+                'success': False,
+                'message': 'Error updating transaction with records',
+                'errors': [str(e)]
+            }
+
     def delete_transaction(self, transaction_id: int, soft_delete: bool = True) -> Dict[str, Any]:
         """
         Delete a transaction (soft delete by default)

@@ -67,6 +67,17 @@ def handle_transaction_routes(event: Dict[str, Any], data: Dict[str, Any], **par
                 current_user_organization_id
             )
 
+        elif '/api/transactions/' in path and '/with-records' in path and method == 'PUT':
+            # PUT /api/transactions/{id}/with-records - Update transaction with records
+            transaction_id = _extract_transaction_id_from_path(path)
+            return handle_update_transaction_with_records(
+                transaction_service,
+                transaction_id,
+                data,
+                current_user_id,
+                current_user_organization_id
+            )
+
         elif '/api/transactions/' in path and method == 'PUT':
             # PUT /api/transactions/{id}
             transaction_id = _extract_transaction_id_from_path(path)
@@ -360,6 +371,59 @@ def handle_update_transaction(
         if isinstance(e, (NotFoundException, UnauthorizedException, ValidationException, BadRequestException)):
             raise
         raise APIException(f'Failed to update transaction: {str(e)}')
+
+
+def handle_update_transaction_with_records(
+    transaction_service: TransactionService,
+    transaction_id: int,
+    data: Dict[str, Any],
+    current_user_id: str,
+    current_user_organization_id: int
+) -> Dict[str, Any]:
+    """
+    Handle PUT /api/transactions/{id}/with-records - Update transaction with records
+    Supports adding new records, updating existing records, and soft deleting removed records
+    """
+    try:
+        # Validate request data
+        if not data:
+            raise BadRequestException('Request body is required')
+
+        # First, check if transaction exists and user has access
+        existing_result = transaction_service.get_transaction(transaction_id, include_records=True)
+        if not existing_result['success']:
+            raise NotFoundException('Transaction not found')
+
+        transaction = existing_result['transaction']
+        if transaction['organization_id'] != current_user_organization_id:
+            raise UnauthorizedException('Access denied: Transaction belongs to different organization')
+
+        # Update transaction with records
+        result = transaction_service.update_transaction_with_records(
+            transaction_id,
+            data,
+            int(current_user_id)
+        )
+
+        if result['success']:
+            return {
+                'success': True,
+                'message': result['message'],
+                'transaction': result['transaction'],
+                'records_added': result.get('records_added', 0),
+                'records_updated': result.get('records_updated', 0),
+                'records_deleted': result.get('records_deleted', 0)
+            }
+        else:
+            raise ValidationException(
+                result['message'],
+                errors=result.get('errors', [])
+            )
+
+    except Exception as e:
+        if isinstance(e, (NotFoundException, UnauthorizedException, ValidationException, BadRequestException)):
+            raise
+        raise APIException(f'Failed to update transaction with records: {str(e)}')
 
 
 def handle_delete_transaction(
