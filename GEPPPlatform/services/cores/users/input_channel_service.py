@@ -957,6 +957,11 @@ class InputChannelService:
             if len(mat_data) != len(material_ids):
                 return {'status': 'error', 'message': 'Material data mismatch'}
 
+            # Fetch materials early to calculate quantity
+            from GEPPPlatform.models.cores.references import Material
+            materials = self.db.query(Material).filter(Material.id.in_(material_ids)).all()
+            material_map = {m.id: m for m in materials}
+
             for i, weight in enumerate(mat_data):
                 if weight and float(weight) > 0:
                     weight_decimal = Decimal(str(weight))
@@ -967,11 +972,17 @@ class InputChannelService:
                     if destination_ids and i < len(destination_ids):
                         dest_id = destination_ids[i]
 
+                    # Calculate quantity from weight_kg / unit_weight
+                    material = material_map.get(material_ids[i])
+                    quantity = Decimal('1')  # Default to 1 if material not found
+                    if material and material.unit_weight and material.unit_weight > 0:
+                        quantity = weight_decimal / Decimal(str(material.unit_weight))
+
                     transaction_records_data.append({
                         'material_id': material_ids[i],
                         'destination_id': dest_id,
                         'weight_kg': weight_decimal,
-                        'quantity': 1,
+                        'quantity': quantity,
                     })
 
         if not transaction_records_data:
