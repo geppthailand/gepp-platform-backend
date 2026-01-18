@@ -12,6 +12,7 @@ from sqlalchemy import and_, or_
 
 from GEPPPlatform.models.users.user_related import UserInputChannel
 from GEPPPlatform.models.users.user_location import UserLocation
+from GEPPPlatform.models.subscriptions.subscription_models import OrganizationRole
 from GEPPPlatform.exceptions import NotFoundException, BadRequestException
 
 
@@ -527,6 +528,46 @@ class InputChannelService:
                     display_name
                 )
                 is_valid = validated_user is not None
+            else:
+                # For legacy subusers, still need to find the user to check their role
+                validated_user = self._validate_organization_member(
+                    channel.organization_id,
+                    subuser,
+                    display_name
+                )
+
+            # Check if user has data_input role (required for access)
+            has_data_input_role = False
+            if is_valid and validated_user:
+                if validated_user.organization_role_id:
+                    organization_role = self.db.query(OrganizationRole).filter(
+                        OrganizationRole.id == validated_user.organization_role_id
+                    ).first()
+                    
+                    if organization_role:
+                        # Check if role key is 'data_input' or if 'data_input' is in role name
+                        role_key = organization_role.key or ''
+                        role_name = organization_role.name or ''
+                        has_data_input_role = (
+                            role_key.lower() == 'data_input' or 
+                            'data_input' in role_name.lower()
+                        )
+                
+                # If user doesn't have data_input role, return access denied response
+                if not has_data_input_role:
+                    return {
+                        'accessDenied': True,
+                        'message': 'You do not have permission to access this input channel. Data input role is required.',
+                        'reason': 'missing_data_input_role',
+                        'subUser': {
+                            'name': subuser,
+                            'userId': str(validated_user.id) if validated_user else None,
+                            'displayName': validated_user.display_name if validated_user else subuser
+                        }
+                    }
+            elif is_valid and not validated_user:
+                # Legacy subuser exists but we couldn't find the user - keep legacy invalid behavior
+                is_valid = False
 
             # Get saved preferences for this subuser
             preferences = channel.subuser_material_preferences or {}
