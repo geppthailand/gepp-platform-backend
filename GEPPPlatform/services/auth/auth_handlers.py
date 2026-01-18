@@ -682,7 +682,8 @@ class AuthHandlers:
                 'device': {
                     'id': device.id,
                     'device_name': device.device_name,
-                    'device_type': device.device_type
+                    'device_type': device.device_type,
+                    'organization_id': device.organization_id
                 }
             }
 

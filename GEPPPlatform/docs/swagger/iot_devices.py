@@ -233,7 +233,8 @@ def get_iot_devices_schemas() -> Dict[str, Any]:
             "properties": {
                 "id": {"type": "integer", "example": 7},
                 "device_name": {"type": "string", "example": "Scale-FrontDesk"},
-                "device_type": {"type": "string", "example": "scale"}
+                "device_type": {"type": "string", "example": "scale"},
+                "organization_id": {"type": "integer", "nullable": True, "description": "Organization ID that owns this device", "example": 123}
             }
         },
         "DeviceLoginResponse": {

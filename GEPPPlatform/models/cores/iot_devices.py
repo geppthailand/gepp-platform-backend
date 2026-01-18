@@ -2,7 +2,7 @@
 IoT devices model
 """
 
-from sqlalchemy import Column, String, Boolean
+from sqlalchemy import Column, String, Boolean, BigInteger
 from ..base import Base, BaseModel
 
 
@@ -14,5 +14,6 @@ class IoTDevice(Base, BaseModel):
     mac_address_bluetooth = Column(String(64))
     mac_address_tablet = Column(String(64))
     password = Column(String(255))
+    organization_id = Column(BigInteger)
 
 
