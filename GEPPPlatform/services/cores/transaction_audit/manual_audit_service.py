@@ -5,14 +5,14 @@ Handles manual approval/rejection of pending transactions by auditors
 
 import logging
 from typing import List, Dict, Any, Optional
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.exc import SQLAlchemyError
 from datetime import datetime, timezone
 
 from ....models.transactions.transactions import Transaction, TransactionStatus
 from ....models.transactions.transaction_records import TransactionRecord
 from ....models.transactions.transaction_audits import TransactionAudit
-from ....models.cores.references import MainMaterial
+from ....models.cores.references import MainMaterial, Material
 from ....models.users.user_location import UserLocation
 from ....models.subscriptions.organizations import Organization
 
@@ -123,8 +123,10 @@ class ManualAuditService:
         try:
             logger.info(f"Fetching transaction details for ID: {transaction_id}")
 
-            # Get transaction
-            transaction = db.query(Transaction).filter(Transaction.id == transaction_id).first()
+            # Get transaction with origin relationship loaded
+            transaction = db.query(Transaction).options(
+                joinedload(Transaction.origin)
+            ).filter(Transaction.id == transaction_id).first()
 
             if not transaction:
                 return {
@@ -138,15 +140,17 @@ class ManualAuditService:
 
             # Include records if requested
             if include_records:
-                transaction_records = db.query(TransactionRecord, MainMaterial).join(
+                transaction_records = db.query(TransactionRecord, MainMaterial, Material).join(
                     MainMaterial, TransactionRecord.main_material_id == MainMaterial.id
+                ).outerjoin(
+                    Material, TransactionRecord.material_id == Material.id
                 ).filter(
                     TransactionRecord.created_transaction_id == transaction.id
                 ).all()
 
                 records_data = []
-                for record, main_material in transaction_records:
-                    record_data = self._serialize_transaction_record(record, main_material)
+                for record, main_material, material in transaction_records:
+                    record_data = self._serialize_transaction_record(record, main_material, material)
                     records_data.append(record_data)
 
                 transaction_data['records'] = records_data
@@ -629,6 +633,126 @@ class ManualAuditService:
                 'data': None
             }
 
+    def bulk_approve_transactions(
+        self,
+        db: Session,
+        transaction_ids: List[int],
+        auditor_user_id: int,
+        notes: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Bulk approve multiple transactions
+
+        Args:
+            db: Database session
+            transaction_ids: List of transaction IDs to approve
+            auditor_user_id: ID of the user performing the audit
+            notes: Optional audit notes (applied to all transactions)
+
+        Returns:
+            Dict containing operation results with successes and errors
+        """
+        results = []
+        errors = []
+
+        for transaction_id in transaction_ids:
+            try:
+                result = self.approve_transaction(
+                    db=db,
+                    transaction_id=transaction_id,
+                    auditor_user_id=auditor_user_id,
+                    notes=notes
+                )
+                if result['success']:
+                    results.append({
+                        'transaction_id': transaction_id,
+                        'success': True,
+                        'message': result['message'],
+                        'data': result['data']
+                    })
+                else:
+                    errors.append({
+                        'transaction_id': transaction_id,
+                        'error': result.get('error', 'Failed to approve transaction')
+                    })
+            except Exception as e:
+                logger.error(f"Error approving transaction {transaction_id} in bulk operation: {str(e)}")
+                errors.append({
+                    'transaction_id': transaction_id,
+                    'error': str(e)
+                })
+
+        return {
+            'success': len(errors) == 0,
+            'results': results,
+            'errors': errors,
+            'summary': {
+                'total_requested': len(transaction_ids),
+                'successful': len(results),
+                'failed': len(errors)
+            }
+        }
+
+    def bulk_reject_transactions(
+        self,
+        db: Session,
+        transaction_ids: List[int],
+        auditor_user_id: int,
+        rejection_reason: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Bulk reject multiple transactions
+
+        Args:
+            db: Database session
+            transaction_ids: List of transaction IDs to reject
+            auditor_user_id: ID of the user performing the audit
+            rejection_reason: Optional rejection reason (applied to all transactions)
+
+        Returns:
+            Dict containing operation results with successes and errors
+        """
+        results = []
+        errors = []
+
+        for transaction_id in transaction_ids:
+            try:
+                result = self.reject_transaction(
+                    db=db,
+                    transaction_id=transaction_id,
+                    auditor_user_id=auditor_user_id,
+                    rejection_reason=rejection_reason
+                )
+                if result['success']:
+                    results.append({
+                        'transaction_id': transaction_id,
+                        'success': True,
+                        'message': result['message'],
+                        'data': result['data']
+                    })
+                else:
+                    errors.append({
+                        'transaction_id': transaction_id,
+                        'error': result.get('error', 'Failed to reject transaction')
+                    })
+            except Exception as e:
+                logger.error(f"Error rejecting transaction {transaction_id} in bulk operation: {str(e)}")
+                errors.append({
+                    'transaction_id': transaction_id,
+                    'error': str(e)
+                })
+
+        return {
+            'success': len(errors) == 0,
+            'results': results,
+            'errors': errors,
+            'summary': {
+                'total_requested': len(transaction_ids),
+                'successful': len(results),
+                'failed': len(errors)
+            }
+        }
+
     def _serialize_transactions(self, transactions: List[Transaction]) -> List[Dict[str, Any]]:
         """Serialize a list of transactions to dictionaries"""
         return [self._serialize_transaction(transaction) for transaction in transactions]
@@ -642,6 +766,9 @@ class ManualAuditService:
             'status': transaction.status.value if hasattr(transaction.status, 'value') else str(transaction.status),
             'organization_id': transaction.organization_id,
             'origin_id': transaction.origin_id,
+            'origin_name': transaction.origin.display_name if transaction.origin else None,
+            'origin_name_th': transaction.origin.name_th if transaction.origin else None,
+            'origin_name_en': transaction.origin.name_en if transaction.origin else None,
             'destination_ids': transaction.destination_ids if hasattr(transaction, 'destination_ids') else [],
             'weight_kg': float(transaction.weight_kg) if transaction.weight_kg else 0.0,
             'total_amount': float(transaction.total_amount) if transaction.total_amount else 0.0,
@@ -668,7 +795,7 @@ class ManualAuditService:
             'deleted_date': transaction.deleted_date.isoformat() if transaction.deleted_date else None
         }
 
-    def _serialize_transaction_record(self, record: TransactionRecord, main_material: MainMaterial) -> Dict[str, Any]:
+    def _serialize_transaction_record(self, record: TransactionRecord, main_material: MainMaterial, material: Optional[Material] = None) -> Dict[str, Any]:
         """Serialize a transaction record with material information to dictionary"""
         return {
             'id': record.id,
@@ -703,5 +830,6 @@ class ManualAuditService:
             # Material information from join
             'material_name_en': main_material.name_en,
             'material_name_th': main_material.name_th,
-            'material_code': main_material.code
+            'material_code': main_material.code,
+            'material_unit_weight': float(material.unit_weight) if material and material.unit_weight else None
         }
