@@ -587,6 +587,55 @@ class AuthHandlers:
         # TODO: Implement logout logic (invalidate token)
         raise APIException('Logout endpoint not implemented')
 
+    def check_email_exists(self, email: str) -> Dict[str, Any]:
+        """Check if an email already exists in user_locations table"""
+        try:
+            if not email:
+                return {
+                    'success': True,
+                    'exists': False,
+                    'valid': False,
+                    'message': 'Email is required'
+                }
+            
+            # Basic email format validation
+            import re
+            email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+            if not re.match(email_pattern, email):
+                return {
+                    'success': True,
+                    'exists': False,
+                    'valid': False,
+                    'message': 'Invalid email format'
+                }
+            
+            session = self.db_session
+            # Check if email already exists
+            existing_user = session.query(UserLocation).filter_by(email=email).first()
+            
+            if existing_user:
+                return {
+                    'success': True,
+                    'exists': True,
+                    'valid': False,
+                    'message': 'Email already registered'
+                }
+            
+            return {
+                'success': True,
+                'exists': False,
+                'valid': True,
+                'message': 'Email is available'
+            }
+            
+        except Exception as e:
+            return {
+                'success': False,
+                'exists': False,
+                'valid': False,
+                'message': str(e)
+            }
+
     def login_iot_user(self, data: Dict[str, Any], **kwargs) -> Dict[str, Any]:
         """Login user with QRCode d obj of username and password using SQLAlchemy"""
         try:
