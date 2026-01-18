@@ -104,6 +104,18 @@ class LocationTagService:
         if not name:
             raise BadRequestException('Tag name is required')
 
+        # Check for duplicate tag name in the same organization (case-insensitive)
+        existing_tag = self.db.query(UserLocationTag).filter(
+            and_(
+                func.lower(UserLocationTag.name) == func.lower(name),
+                UserLocationTag.organization_id == organization_id,
+                UserLocationTag.deleted_date.is_(None)
+            )
+        ).first()
+
+        if existing_tag:
+            raise BadRequestException('ชื่อ Tag นี้มีอยู่แล้วในองค์กร กรุณาใช้ชื่ออื่น')
+
         # Parse dates if provided
         start_date = None
         end_date = None
@@ -179,6 +191,19 @@ class LocationTagService:
 
         # Update fields
         if 'name' in data:
+            # Check for duplicate tag name in the same organization (case-insensitive), excluding current tag
+            existing_tag = self.db.query(UserLocationTag).filter(
+                and_(
+                    func.lower(UserLocationTag.name) == func.lower(data['name']),
+                    UserLocationTag.organization_id == organization_id,
+                    UserLocationTag.id != tag_id,
+                    UserLocationTag.deleted_date.is_(None)
+                )
+            ).first()
+
+            if existing_tag:
+                raise BadRequestException('ชื่อ Tag นี้มีอยู่แล้วในองค์กร กรุณาใช้ชื่ออื่น')
+
             tag.name = data['name']
 
         if 'note' in data:
