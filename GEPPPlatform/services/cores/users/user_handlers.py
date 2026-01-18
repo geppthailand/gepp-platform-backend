@@ -170,6 +170,11 @@ def handle_user_routes(event: Dict[str, Any], data: Dict[str, Any], **params) ->
         # Get user locations (is_location = True)
         return handle_get_locations(user_service, query_params, current_user, headers)
 
+    elif '/api/locations/' in path and '/check-dependencies' in path and method == 'GET':
+        # Check location dependencies: /api/locations/{location_id}/check-dependencies
+        location_id = path.split('/locations/')[1].split('/')[0]
+        return handle_check_location_dependencies(db_session, location_id, current_user_organization_id)
+
     elif '/api/locations/' in path and method == 'PUT' and '/tags/' not in path:
         # Update location: /api/locations/{location_id}
         location_id = path.split('/locations/')[1].rstrip('/')
@@ -838,6 +843,54 @@ def handle_update_location(
     except Exception as e:
         db_session.rollback()
         raise APIException(f'Failed to update location: {str(e)}')
+
+
+def handle_check_location_dependencies(
+    db_session,
+    location_id: str,
+    organization_id: int
+) -> Dict[str, Any]:
+    """Handle GET /api/locations/{location_id}/check-dependencies - Check if location has dependent transactions"""
+    try:
+        from GEPPPlatform.models.transactions.transactions import Transaction
+        from GEPPPlatform.models.users.user_location import UserLocation
+        from sqlalchemy import and_
+
+        # Verify location exists
+        location = db_session.query(UserLocation).filter(
+            and_(
+                UserLocation.id == int(location_id),
+                UserLocation.organization_id == organization_id,
+                UserLocation.deleted_date.is_(None)
+            )
+        ).first()
+
+        if not location:
+            raise NotFoundException(f'Location not found: {location_id}')
+
+        # Count transactions that use this location as origin and are not deleted
+        transaction_count = db_session.query(Transaction).filter(
+            and_(
+                Transaction.origin_id == int(location_id),
+                Transaction.deleted_date.is_(None)
+            )
+        ).count()
+
+        has_dependencies = transaction_count > 0
+
+        return {
+            'success': True,
+            'has_dependencies': has_dependencies,
+            'transaction_count': transaction_count,
+            'location_id': int(location_id),
+            'location_name': location.display_name or location.name_en or location.name_th,
+            'message': 'สถานที่นี้มีรายการที่ใช้งานอยู่' if has_dependencies else 'สถานที่นี้สามารถลบได้'
+        }
+
+    except NotFoundException:
+        raise
+    except Exception as e:
+        raise APIException(f'Failed to check location dependencies: {str(e)}')
 
 
 def handle_get_user_profile(user_service: UserService, current_user_id: str) -> Dict[str, Any]:
