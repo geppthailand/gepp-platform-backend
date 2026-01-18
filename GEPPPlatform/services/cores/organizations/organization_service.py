@@ -362,6 +362,22 @@ class OrganizationService:
 
                     # Update display_name and name_en if provided
                     if display_name:
+                        # Check for duplicate destination names if this is a hub/destination
+                        if existing_location.hub_type and display_name != existing_location.display_name:
+                            from sqlalchemy import or_
+                            duplicate = self.db.query(UserLocation).filter(
+                                UserLocation.organization_id == organization_id,
+                                UserLocation.hub_type.isnot(None),
+                                UserLocation.deleted_date.is_(None),
+                                UserLocation.id != int(node_id),  # Exclude the current location
+                                or_(
+                                    UserLocation.display_name == display_name,
+                                    UserLocation.name_en == display_name
+                                )
+                            ).first()
+                            if duplicate:
+                                raise ValueError(f'Destination name "{display_name}" already exists in this organization. Please use a different name.')
+                        
                         existing_location.display_name = display_name
                         existing_location.name_en = display_name  # Also update name_en
                         updated = True
@@ -373,6 +389,23 @@ class OrganizationService:
 
             # Only process string-based IDs (new locations)
             if to_create and not is_numeric_id:
+                # Check for duplicate destination names if this is a hub/destination
+                hub_type = location_data.get('hub_type')
+                if hub_type and display_name:
+                    # Check if a destination with the same name already exists in this organization
+                    from sqlalchemy import or_
+                    existing_destination = self.db.query(UserLocation).filter(
+                        UserLocation.organization_id == organization_id,
+                        UserLocation.hub_type.isnot(None),
+                        UserLocation.deleted_date.is_(None),
+                        or_(
+                            UserLocation.display_name == display_name,
+                            UserLocation.name_en == display_name
+                        )
+                    ).first()
+                    if existing_destination:
+                        raise ValueError(f'Destination name "{display_name}" already exists in this organization. Please use a different name.')
+                
                 # Create new location
                 new_location = UserLocation(
                     display_name=location_data.get('display_name'),
