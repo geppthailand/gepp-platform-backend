@@ -61,6 +61,26 @@ class UserService:
 
             # Validate organization inheritance for sub-users
             self._validate_organization_inheritance(user_data, created_by_id)
+            
+            # Check for duplicate destination names within the same organization
+            if user_data.get('hub_type'):  # This is a destination
+                organization_id = user_data.get('organization_id')
+                name_to_check = user_data.get('display_name') or user_data.get('name_en')
+                if organization_id and name_to_check:
+                    from ....models.users.user_location import UserLocation
+                    from sqlalchemy import or_
+                    existing = self.db.query(UserLocation).filter(
+                        UserLocation.organization_id == organization_id,
+                        UserLocation.hub_type.isnot(None),
+                        UserLocation.deleted_date.is_(None),
+                        or_(
+                            UserLocation.display_name == name_to_check,
+                            UserLocation.name_en == name_to_check
+                        )
+                    ).first()
+                    if existing:
+                        from ....exceptions import ValidationException
+                        raise ValidationException(f'Destination name "{name_to_check}" already exists in this organization')
             # print("-=-=-=-=", user_data)
             # Create user
             user = self.crud.create_user(
@@ -151,6 +171,28 @@ class UserService:
                 from ....exceptions import ValidationException
                 error_messages = '; '.join(validation_result['errors'])
                 raise ValidationException(f'User update validation failed: {error_messages}')
+
+            # Check for duplicate destination names when updating a destination
+            new_name = updates.get('display_name') or updates.get('name_en')
+            if new_name:
+                # Get the user being updated
+                user = self.crud.get_user_by_id(user_id)
+                if user and user.hub_type:  # This is a destination
+                    from ....models.users.user_location import UserLocation
+                    from sqlalchemy import or_
+                    existing = self.db.query(UserLocation).filter(
+                        UserLocation.organization_id == user.organization_id,
+                        UserLocation.hub_type.isnot(None),
+                        UserLocation.deleted_date.is_(None),
+                        UserLocation.id != int(user_id),  # Exclude the current user
+                        or_(
+                            UserLocation.display_name == new_name,
+                            UserLocation.name_en == new_name
+                        )
+                    ).first()
+                    if existing:
+                        from ....exceptions import ValidationException
+                        raise ValidationException(f'Destination name "{new_name}" already exists in this organization')
 
             # Apply updates
             user = self.crud.update_user(user_id, updates, updated_by_id)
