@@ -349,6 +349,9 @@ class AuthHandlers:
                 }
             }
 
+        except UnauthorizedException:
+            # Re-raise authentication errors directly
+            raise
         except Exception as e:
             raise APIException(str(e))
 
