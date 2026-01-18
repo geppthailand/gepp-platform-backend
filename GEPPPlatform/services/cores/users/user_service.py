@@ -969,7 +969,7 @@ class UserService:
                 ancestors = get_ancestors(loc_id)
 
                 if ancestors:
-                    location_paths[loc_id] = ' → '.join(ancestors)
+                    location_paths[loc_id] = ', '.join(ancestors)
                 else:
                     # Root node - no ancestors to show
                     location_paths[loc_id] = ''
