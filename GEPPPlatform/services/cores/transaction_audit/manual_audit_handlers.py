@@ -135,6 +135,25 @@ def handle_manual_audit_routes(event: Dict[str, Any], data: Dict[str, Any], **pa
                 current_user_id
             )
 
+        # Bulk transaction audit routes
+        elif path == '/api/audit/manual/transactions/bulk/approve' and method == 'POST':
+            return handle_bulk_approve_transactions(
+                manual_audit_service,
+                db_session,
+                data,
+                current_user_organization_id,
+                current_user_id
+            )
+
+        elif path == '/api/audit/manual/transactions/bulk/reject' and method == 'POST':
+            return handle_bulk_reject_transactions(
+                manual_audit_service,
+                db_session,
+                data,
+                current_user_organization_id,
+                current_user_id
+            )
+
         else:
             # Route not found
             raise NotFoundException(f'Manual audit route not found: {method} {path}')
@@ -563,6 +582,260 @@ def handle_reject_transaction_record(
         return {
             'success': False,
             'message': f'Failed to reject transaction record {record_id}',
+            'error': f'Internal server error: {str(e)}',
+            'data': None
+        }
+
+
+def handle_bulk_approve_transactions(
+    service: ManualAuditService,
+    db_session: Any,
+    data: Dict[str, Any],
+    organization_id: int,
+    current_user_id: int
+) -> Dict[str, Any]:
+    """
+    Handle POST /api/audit/manual/transactions/bulk/approve - Bulk approve multiple pending transactions
+
+    Expected payload:
+    {
+        "transaction_ids": [1, 2, 3],  // Required: array of transaction IDs
+        "notes": "Optional audit notes applied to all transactions"
+    }
+
+    OR with per-item notes:
+    {
+        "items": [
+            {"transaction_id": 1, "notes": "Specific notes for transaction 1"},
+            {"transaction_id": 2, "notes": "Specific notes for transaction 2"}
+        ]
+    }
+    """
+    try:
+        logger.info(f"Bulk approving transactions by user {current_user_id}")
+
+        # Parse request data - support both formats
+        transaction_ids = []
+        global_notes = data.get('notes')
+        items = data.get('items', [])
+
+        if items:
+            # Advanced format with per-item notes
+            transaction_ids = [item.get('transaction_id') for item in items if item.get('transaction_id')]
+            if not transaction_ids:
+                raise ValidationException('At least one valid transaction_id is required in items array')
+        else:
+            # Simple format with transaction_ids array
+            transaction_ids = data.get('transaction_ids', [])
+            if not transaction_ids:
+                raise ValidationException('transaction_ids array is required and cannot be empty')
+
+        # Validate transaction_ids are integers
+        try:
+            transaction_ids = [int(tid) for tid in transaction_ids]
+        except (ValueError, TypeError):
+            raise ValidationException('All transaction_ids must be valid integers')
+
+        # If using items format, process with per-item notes
+        if items and len(items) > 0:
+            results = []
+            errors = []
+            for item in items:
+                transaction_id = item.get('transaction_id')
+                if not transaction_id:
+                    continue
+                try:
+                    transaction_id = int(transaction_id)
+                    item_notes = item.get('notes') or global_notes
+                    result = service.approve_transaction(
+                        db=db_session,
+                        transaction_id=transaction_id,
+                        auditor_user_id=current_user_id,
+                        notes=item_notes
+                    )
+                    if result['success']:
+                        results.append({
+                            'transaction_id': transaction_id,
+                            'success': True,
+                            'message': result['message'],
+                            'data': result['data']
+                        })
+                    else:
+                        errors.append({
+                            'transaction_id': transaction_id,
+                            'error': result.get('error', 'Failed to approve transaction')
+                        })
+                except Exception as e:
+                    logger.error(f"Error approving transaction {transaction_id} in bulk operation: {str(e)}")
+                    errors.append({
+                        'transaction_id': transaction_id,
+                        'error': str(e)
+                    })
+
+            return {
+                'success': len(errors) == 0,
+                'message': f'Bulk approve completed: {len(results)} successful, {len(errors)} failed',
+                'data': {
+                    'results': results,
+                    'errors': errors,
+                    'summary': {
+                        'total_requested': len(items),
+                        'successful': len(results),
+                        'failed': len(errors)
+                    }
+                }
+            }
+        else:
+            # Simple format - use global notes
+            result = service.bulk_approve_transactions(
+                db=db_session,
+                transaction_ids=transaction_ids,
+                auditor_user_id=current_user_id,
+                notes=global_notes
+            )
+
+            return {
+                'success': result['success'],
+                'message': f'Bulk approve completed: {result["summary"]["successful"]} successful, {result["summary"]["failed"]} failed',
+                'data': result
+            }
+
+    except ValidationException:
+        raise  # Re-raise validation errors
+    except Exception as e:
+        logger.error(f"Error in bulk approve transactions: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+
+        return {
+            'success': False,
+            'message': 'Failed to bulk approve transactions',
+            'error': f'Internal server error: {str(e)}',
+            'data': None
+        }
+
+
+def handle_bulk_reject_transactions(
+    service: ManualAuditService,
+    db_session: Any,
+    data: Dict[str, Any],
+    organization_id: int,
+    current_user_id: int
+) -> Dict[str, Any]:
+    """
+    Handle POST /api/audit/manual/transactions/bulk/reject - Bulk reject multiple pending transactions
+
+    Expected payload:
+    {
+        "transaction_ids": [1, 2, 3],  // Required: array of transaction IDs
+        "rejection_reason": "Optional rejection reason applied to all transactions"
+    }
+
+    OR with per-item reasons:
+    {
+        "items": [
+            {"transaction_id": 1, "rejection_reason": "Specific reason for transaction 1"},
+            {"transaction_id": 2, "rejection_reason": "Specific reason for transaction 2"}
+        ]
+    }
+    """
+    try:
+        logger.info(f"Bulk rejecting transactions by user {current_user_id}")
+
+        # Parse request data - support both formats
+        transaction_ids = []
+        global_rejection_reason = data.get('rejection_reason')
+        items = data.get('items', [])
+
+        if items:
+            # Advanced format with per-item reasons
+            transaction_ids = [item.get('transaction_id') for item in items if item.get('transaction_id')]
+            if not transaction_ids:
+                raise ValidationException('At least one valid transaction_id is required in items array')
+        else:
+            # Simple format with transaction_ids array
+            transaction_ids = data.get('transaction_ids', [])
+            if not transaction_ids:
+                raise ValidationException('transaction_ids array is required and cannot be empty')
+
+        # Validate transaction_ids are integers
+        try:
+            transaction_ids = [int(tid) for tid in transaction_ids]
+        except (ValueError, TypeError):
+            raise ValidationException('All transaction_ids must be valid integers')
+
+        # If using items format, process with per-item reasons
+        if items and len(items) > 0:
+            results = []
+            errors = []
+            for item in items:
+                transaction_id = item.get('transaction_id')
+                if not transaction_id:
+                    continue
+                try:
+                    transaction_id = int(transaction_id)
+                    item_reason = item.get('rejection_reason') or global_rejection_reason
+                    result = service.reject_transaction(
+                        db=db_session,
+                        transaction_id=transaction_id,
+                        auditor_user_id=current_user_id,
+                        rejection_reason=item_reason
+                    )
+                    if result['success']:
+                        results.append({
+                            'transaction_id': transaction_id,
+                            'success': True,
+                            'message': result['message'],
+                            'data': result['data']
+                        })
+                    else:
+                        errors.append({
+                            'transaction_id': transaction_id,
+                            'error': result.get('error', 'Failed to reject transaction')
+                        })
+                except Exception as e:
+                    logger.error(f"Error rejecting transaction {transaction_id} in bulk operation: {str(e)}")
+                    errors.append({
+                        'transaction_id': transaction_id,
+                        'error': str(e)
+                    })
+
+            return {
+                'success': len(errors) == 0,
+                'message': f'Bulk reject completed: {len(results)} successful, {len(errors)} failed',
+                'data': {
+                    'results': results,
+                    'errors': errors,
+                    'summary': {
+                        'total_requested': len(items),
+                        'successful': len(results),
+                        'failed': len(errors)
+                    }
+                }
+            }
+        else:
+            # Simple format - use global rejection reason
+            result = service.bulk_reject_transactions(
+                db=db_session,
+                transaction_ids=transaction_ids,
+                auditor_user_id=current_user_id,
+                rejection_reason=global_rejection_reason
+            )
+
+            return {
+                'success': result['success'],
+                'message': f'Bulk reject completed: {result["summary"]["successful"]} successful, {result["summary"]["failed"]} failed',
+                'data': result
+            }
+
+    except ValidationException:
+        raise  # Re-raise validation errors
+    except Exception as e:
+        logger.error(f"Error in bulk reject transactions: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+
+        return {
+            'success': False,
+            'message': 'Failed to bulk reject transactions',
             'error': f'Internal server error: {str(e)}',
             'data': None
         }
