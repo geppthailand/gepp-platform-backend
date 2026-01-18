@@ -6,6 +6,7 @@ Handles CRUD operations, validation, and transaction record linking
 from typing import List, Optional, Dict, Any, Tuple
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy import cast, String
 from datetime import datetime
 from decimal import Decimal
 import logging
@@ -285,7 +286,7 @@ class TransactionService:
                 search_pattern = f'%{search}%'
                 query = query.filter(
                     (Transaction.notes.ilike(search_pattern)) |
-                    (Transaction.id == int(search) if search.isdigit() else False)
+                    (cast(Transaction.id, String).ilike(search_pattern))
                 )
 
             # Date range filters
