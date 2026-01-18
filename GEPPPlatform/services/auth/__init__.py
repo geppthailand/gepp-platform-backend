@@ -26,7 +26,9 @@ def handle_auth_routes(path: str, data: dict, **commonParams):
     internal_path = path.replace('/api/auth', '')
     
     if method == "POST":
-        if internal_path == "/register":
+        if internal_path == "/register/check-email":
+            return auth_handler.check_email(data, **commonParams)
+        elif internal_path == "/register":
             return auth_handler.register(data, **commonParams)
         elif internal_path == "/login":
             return auth_handler.login(data, **commonParams)
