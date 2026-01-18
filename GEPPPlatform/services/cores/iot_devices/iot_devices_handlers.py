@@ -35,6 +35,16 @@ def handle_get_locations_by_membership(user_service: UserService, query_params: 
             organization_id=organization_id
         )
         
+        # Build location paths using the _build_location_paths method
+        # Transform locations to have 'id' key for the method
+        location_data_for_paths = [
+            {'id': loc.get('origin_id')} for loc in locations
+        ]
+        location_paths = user_service._build_location_paths(
+            organization_id=organization_id,
+            location_data=location_data_for_paths
+        )
+        
         # Get ALL materials (active and not deleted, no organization filtering)
         # Use eager loading to fetch category and main_material relationships
         all_materials = db_session.query(Material).options(
@@ -84,12 +94,15 @@ def handle_get_locations_by_membership(user_service: UserService, query_params: 
             
             materials_list.append(material_obj)
         
-        # Remove materials from each location (keep only origin_id and display_name)
+        # Remove materials from each location (keep only origin_id, display_name, and path)
         locations_list = []
         for location in locations:
+            origin_id = location.get('origin_id')
+            location_path = location_paths.get(origin_id, '')
             locations_list.append({
-                'origin_id': location.get('origin_id'),
-                'display_name': location.get('display_name')
+                'origin_id': origin_id,
+                'display_name': location.get('display_name'),
+                'path': location_path
             })
         
         return {
