@@ -721,6 +721,64 @@ def handle_update_location(
         else:
             print(f"[DEBUG] No 'users' key in data!")
 
+        # Handle tag assignments - update location.tags JSONB array and bidirectional relationship
+        if 'tag_ids' in data:
+            new_tag_ids = data['tag_ids'] or []
+            print(f"[DEBUG] Tag IDs received: {new_tag_ids}")
+            
+            # Get current tag IDs
+            current_tag_ids = set(location.tags or [])
+            new_tag_ids_set = set(new_tag_ids)
+            
+            # Find tags to add and remove
+            tags_to_add = new_tag_ids_set - current_tag_ids
+            tags_to_remove = current_tag_ids - new_tag_ids_set
+            
+            print(f"[DEBUG] Current tags: {current_tag_ids}")
+            print(f"[DEBUG] Tags to add: {tags_to_add}")
+            print(f"[DEBUG] Tags to remove: {tags_to_remove}")
+            
+            # Update the location's tags array
+            location.tags = list(new_tag_ids)
+            flag_modified(location, 'tags')
+            
+            # Update bidirectional relationship on UserLocationTag objects
+            location_id_int = int(location_id)
+            
+            # Remove location from tags being removed
+            for tag_id in tags_to_remove:
+                tag = db_session.query(UserLocationTag).filter(
+                    and_(
+                        UserLocationTag.id == int(tag_id),
+                        UserLocationTag.organization_id == organization_id,
+                        UserLocationTag.deleted_date.is_(None)
+                    )
+                ).first()
+                if tag and tag.user_locations:
+                    tag.user_locations = [loc_id for loc_id in tag.user_locations if int(loc_id) != location_id_int]
+                    flag_modified(tag, 'user_locations')
+                    print(f"[DEBUG] Removed location {location_id_int} from tag {tag_id}")
+            
+            # Add location to tags being added
+            for tag_id in tags_to_add:
+                tag = db_session.query(UserLocationTag).filter(
+                    and_(
+                        UserLocationTag.id == int(tag_id),
+                        UserLocationTag.organization_id == organization_id,
+                        UserLocationTag.deleted_date.is_(None)
+                    )
+                ).first()
+                if tag:
+                    current_locations = tag.user_locations or []
+                    if location_id_int not in current_locations:
+                        tag.user_locations = current_locations + [location_id_int]
+                        flag_modified(tag, 'user_locations')
+                        print(f"[DEBUG] Added location {location_id_int} to tag {tag_id}")
+            
+            print(f"[DEBUG] Updated location.tags to: {location.tags}")
+        else:
+            print(f"[DEBUG] No 'tag_ids' key in data!")
+
         location.updated_date = datetime.utcnow()
 
         print(f"[DEBUG] Before commit - location.members: {location.members}")
