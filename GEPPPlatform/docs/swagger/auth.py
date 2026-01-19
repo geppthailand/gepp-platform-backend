@@ -135,6 +135,46 @@ def get_auth_paths() -> Dict[str, Any]:
                 }
             }
         },
+        "/api/auth/register/check-email": {
+            "post": {
+                "tags": ["Authentication"],
+                "summary": "Check email availability",
+                "description": "Check if an email is available for registration",
+                "requestBody": {
+                    "required": True,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "required": ["email"],
+                                "properties": {
+                                    "email": {
+                                        "type": "string",
+                                        "format": "email",
+                                        "example": "user@example.com"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Email availability check result",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/EmailAvailabilityResponse"
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "$ref": "#/components/responses/ValidationError"
+                    }
+                }
+            }
+        },
         "/api/auth/register": {
             "post": {
                 "tags": ["Authentication"],
@@ -475,6 +515,27 @@ def get_auth_schemas() -> Dict[str, Any]:
                 "organizationId": {
                     "type": "integer",
                     "example": 1
+                }
+            }
+        },
+        "EmailAvailabilityResponse": {
+            "type": "object",
+            "properties": {
+                "available": {
+                    "type": "boolean",
+                    "description": "Whether the email is available for registration",
+                    "example": True
+                },
+                "message": {
+                    "type": "string",
+                    "description": "Human-readable message",
+                    "example": "Email is available"
+                },
+                "error": {
+                    "type": "string",
+                    "description": "Error code if email is not available",
+                    "enum": ["invalid_format", "email_exists"],
+                    "example": "email_exists"
                 }
             }
         }

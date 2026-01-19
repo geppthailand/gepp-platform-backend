@@ -169,6 +169,43 @@ class AuthHandlers:
             print(f"Invalid token: {e}")
             return None
 
+    def check_email(self, data: Dict[str, Any], **kwargs) -> Dict[str, Any]:
+        """Check if an email already exists for registration"""
+        try:
+            email = data.get('email', '').strip().lower()
+
+            if not email:
+                raise ValidationException('Email is required')
+
+            # Check email format
+            if '@' not in email or '.' not in email.split('@')[-1]:
+                return {
+                    'available': False,
+                    'error': 'invalid_format',
+                    'message': 'Invalid email format'
+                }
+
+            # Check if email already exists
+            session = self.db_session
+            existing_user = session.query(UserLocation).filter_by(email=email).first()
+
+            if existing_user:
+                return {
+                    'available': False,
+                    'error': 'email_exists',
+                    'message': 'Email already registered'
+                }
+
+            return {
+                'available': True,
+                'message': 'Email is available'
+            }
+
+        except ValidationException:
+            raise
+        except Exception as e:
+            raise APIException(f'Failed to check email availability: {str(e)}')
+
     def register(self, data: Dict[str, Any], **kwargs) -> Dict[str, Any]:
         """Register a new user with organization and free subscription using SQLAlchemy"""
         try:

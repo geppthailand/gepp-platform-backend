@@ -112,6 +112,7 @@ def main(event, context):
             # Route based on path and method
             if "/api/auth" in path:
                 # Handle all auth routes through auth module (no authorization required)
+                # Includes: login, register, register/check-email, refresh, validate, etc.
                 # Support both legacy format and direct data for POST requests
                 auth_result = handle_auth_routes(path, data=body, **commonParams)
                 results = {"data": auth_result}

@@ -12,6 +12,7 @@ from sqlalchemy import and_, or_
 
 from GEPPPlatform.models.users.user_related import UserInputChannel
 from GEPPPlatform.models.users.user_location import UserLocation
+from GEPPPlatform.models.subscriptions.subscription_models import OrganizationRole
 from GEPPPlatform.exceptions import NotFoundException, BadRequestException
 
 
@@ -527,6 +528,46 @@ class InputChannelService:
                     display_name
                 )
                 is_valid = validated_user is not None
+            else:
+                # For legacy subusers, still need to find the user to check their role
+                validated_user = self._validate_organization_member(
+                    channel.organization_id,
+                    subuser,
+                    display_name
+                )
+
+            # Check if user has data_input role (required for access)
+            has_data_input_role = False
+            if is_valid and validated_user:
+                if validated_user.organization_role_id:
+                    organization_role = self.db.query(OrganizationRole).filter(
+                        OrganizationRole.id == validated_user.organization_role_id
+                    ).first()
+                    
+                    if organization_role:
+                        # Check if role key is 'data_input' or if 'data_input' is in role name
+                        role_key = organization_role.key or ''
+                        role_name = organization_role.name or ''
+                        has_data_input_role = (
+                            role_key.lower() == 'data_input' or 
+                            'data_input' in role_name.lower()
+                        )
+                
+                # If user doesn't have data_input role, return access denied response
+                if not has_data_input_role:
+                    return {
+                        'accessDenied': True,
+                        'message': 'You do not have permission to access this input channel. Data input role is required.',
+                        'reason': 'missing_data_input_role',
+                        'subUser': {
+                            'name': subuser,
+                            'userId': str(validated_user.id) if validated_user else None,
+                            'displayName': validated_user.display_name if validated_user else subuser
+                        }
+                    }
+            elif is_valid and not validated_user:
+                # Legacy subuser exists but we couldn't find the user - keep legacy invalid behavior
+                is_valid = False
 
             # Get saved preferences for this subuser
             preferences = channel.subuser_material_preferences or {}
@@ -741,6 +782,99 @@ class InputChannelService:
             })
 
         return result
+
+    def _build_location_paths(
+        self,
+        organization_id: int,
+        location_data: List[Dict[str, Any]],
+        org_setup
+    ) -> Dict[int, str]:
+        """
+        Build path traces for all locations from their branch root to the location.
+        Returns a dict mapping location_id to path string (e.g., "Branch A, Building 1, Floor 2")
+
+        Uses organization_setup.root_nodes tree structure to trace the hierarchy.
+        """
+        try:
+            if not org_setup or not org_setup.root_nodes:
+                return {}
+
+            # Fetch ALL locations in the organization to get their names
+            all_locations = self.db.query(UserLocation).filter(
+                and_(
+                    UserLocation.organization_id == organization_id,
+                    UserLocation.is_active == True,
+                    UserLocation.deleted_date.is_(None)
+                )
+            ).all()
+
+            # Create name lookup map
+            location_names = {
+                loc.id: loc.display_name or loc.name_en or loc.name_th or f"Location {loc.id}"
+                for loc in all_locations
+            }
+
+            # Build parent map from tree structure
+            # key: nodeId, value: parentId
+            parent_map: Dict[int, int] = {}
+
+            def build_parent_map(nodes: List[Dict], parent_id: Optional[int] = None):
+                """Recursively build parent map from tree structure"""
+                for node in nodes:
+                    node_id = node.get('nodeId')
+                    if node_id is not None:
+                        node_id = int(node_id) if isinstance(node_id, str) else node_id
+                        if parent_id is not None:
+                            parent_map[node_id] = parent_id
+                        # Process children
+                        children = node.get('children', [])
+                        if children:
+                            build_parent_map(children, node_id)
+
+            # Build the parent map from root_nodes
+            root_nodes = org_setup.root_nodes
+            if isinstance(root_nodes, list):
+                build_parent_map(root_nodes, None)
+
+            # Build paths for each location
+            location_paths = {}
+
+            def get_ancestors(loc_id: int, visited: set = None) -> List[str]:
+                """Get list of ancestor names from root to parent (not including current node)"""
+                if visited is None:
+                    visited = set()
+
+                # Prevent infinite loops
+                if loc_id in visited:
+                    return []
+                visited.add(loc_id)
+
+                parent_id = parent_map.get(loc_id)
+                if parent_id is None:
+                    # This is a root node, return empty (no ancestors)
+                    return []
+
+                # Get parent's ancestors recursively, then add parent
+                parent_ancestors = get_ancestors(parent_id, visited)
+                parent_name = location_names.get(parent_id, f"Location {parent_id}")
+                return parent_ancestors + [parent_name]
+
+            # Build paths only for the locations in location_data
+            for loc in location_data:
+                loc_id = int(loc['id'])
+                ancestors = get_ancestors(loc_id)
+
+                if ancestors:
+                    location_paths[loc_id] = ', '.join(ancestors)
+                else:
+                    # Root node - no ancestors to show
+                    location_paths[loc_id] = ''
+
+            return location_paths
+
+        except Exception as e:
+            print(f"Error building location paths for organization {organization_id}: {str(e)}")
+            return {}
 
     def _extract_node_ids_from_tree(self, nodes: List[Dict]) -> List[int]:
         """
