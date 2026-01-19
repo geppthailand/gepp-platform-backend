@@ -1103,61 +1103,60 @@ class InputChannelService:
 
         # Get material and weight data
         mat_data = data.get('matData', [])
+        material_ids = [m['id'] for m in mat_data if m.get('id')]
         destination_ids = channel.sub_material_destination_ids or []
 
         # Filter out zero/empty weights
         transaction_records_data = []
         total_weight = Decimal('0')
 
-        # Handle both new format (array of {id, weight} objects) and legacy format (array of weights)
-        if mat_data and isinstance(mat_data[0], dict):
-            # New format: array of {id, weight} objects from dynamic material selection
-            for item in mat_data:
-                material_id = item.get('id')
-                weight = item.get('weight', 0)
-                if material_id and weight and float(weight) > 0:
-                    weight_decimal = Decimal(str(weight))
-                    total_weight += weight_decimal
+        # Fetch materials early to calculate quantity
+        from GEPPPlatform.models.cores.references import Material
+        materials = (
+            self.db.query(Material)
+            .filter(Material.id.in_(material_ids))
+            .all()
+        )
+        material_map = {m.id: m for m in materials}
 
-                    transaction_records_data.append({
-                        'material_id': material_id,
-                        'destination_id': None,  # Dynamic selection doesn't have preset destinations
-                        'weight_kg': weight_decimal,
-                        'quantity': 1,
-                    })
-        else:
-            # Legacy format: array of weights matching channel.sub_material_ids order
-            material_ids = channel.sub_material_ids or []
-            if len(mat_data) != len(material_ids):
-                return {'status': 'error', 'message': 'Material data mismatch'}
+        for i, mat in enumerate(mat_data):
+            material_id = mat.get('id')
+            if not material_id:
+                continue
+            
+            # Try multiple field names for weight (quantity, weight, weight_kg)
+            weight = mat.get('quantity') or mat.get('weight') or mat.get('weight_kg')
+            
+            # Validate weight exists and is positive
+            if weight is None:
+                continue
+            try:
+                weight_float = float(weight)
+                if weight_float <= 0:
+                    continue
+            except (ValueError, TypeError):
+                continue
 
-            # Fetch materials early to calculate quantity
-            from GEPPPlatform.models.cores.references import Material
-            materials = self.db.query(Material).filter(Material.id.in_(material_ids)).all()
-            material_map = {m.id: m for m in materials}
+            weight_decimal = Decimal(str(weight))
+            total_weight += weight_decimal
 
-            for i, weight in enumerate(mat_data):
-                if weight and float(weight) > 0:
-                    weight_decimal = Decimal(str(weight))
-                    total_weight += weight_decimal
+            # Get destination for this material (if destinations are configured)
+            dest_id = None
+            if destination_ids and i < len(destination_ids):
+                dest_id = destination_ids[i]
 
-                    # Get destination for this material (if destinations are configured)
-                    dest_id = None
-                    if destination_ids and i < len(destination_ids):
-                        dest_id = destination_ids[i]
+            # Calculate quantity from weight_kg / unit_weight
+            material = material_map.get(material_id)
+            quantity = Decimal('1')  # Default to 1 if material not found
+            if material and material.unit_weight and material.unit_weight > 0:
+                quantity = weight_decimal / Decimal(str(material.unit_weight))
 
-                    # Calculate quantity from weight_kg / unit_weight
-                    material = material_map.get(material_ids[i])
-                    quantity = Decimal('1')  # Default to 1 if material not found
-                    if material and material.unit_weight and material.unit_weight > 0:
-                        quantity = weight_decimal / Decimal(str(material.unit_weight))
-
-                    transaction_records_data.append({
-                        'material_id': material_ids[i],
-                        'destination_id': dest_id,
-                        'weight_kg': weight_decimal,
-                        'quantity': quantity,
-                    })
+            transaction_records_data.append({
+                'material_id': material_id,
+                'destination_id': dest_id,
+                'weight_kg': weight_decimal,
+                'quantity': quantity,
+            })
 
         if not transaction_records_data:
             return {'status': 'error', 'message': 'No valid material weights provided'}
