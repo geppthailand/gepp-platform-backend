@@ -741,20 +741,22 @@ def handle_update_location(
             new_tag_ids = data['tag_ids'] or []
             print(f"[DEBUG] Tag IDs received: {new_tag_ids}")
             
-            # Get current tag IDs
-            current_tag_ids = set(location.tags or [])
-            new_tag_ids_set = set(new_tag_ids)
+            # Normalize all tag IDs to integers for consistent comparison
+            # location.tags may contain strings or ints depending on how they were added
+            current_tag_ids_raw = location.tags or []
+            current_tag_ids = set(int(tid) if isinstance(tid, str) else tid for tid in current_tag_ids_raw)
+            new_tag_ids_set = set(int(tid) if isinstance(tid, str) else tid for tid in new_tag_ids)
             
             # Find tags to add and remove
             tags_to_add = new_tag_ids_set - current_tag_ids
             tags_to_remove = current_tag_ids - new_tag_ids_set
             
-            print(f"[DEBUG] Current tags: {current_tag_ids}")
+            print(f"[DEBUG] Current tags (normalized): {current_tag_ids}")
             print(f"[DEBUG] Tags to add: {tags_to_add}")
             print(f"[DEBUG] Tags to remove: {tags_to_remove}")
             
-            # Update the location's tags array
-            location.tags = list(new_tag_ids)
+            # Update the location's tags array (store as integers for consistency)
+            location.tags = list(new_tag_ids_set)
             flag_modified(location, 'tags')
             
             # Update bidirectional relationship on UserLocationTag objects
