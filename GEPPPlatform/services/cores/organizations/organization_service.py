@@ -420,7 +420,8 @@ class OrganizationService:
                     is_user=location_data.get('is_user', False),
                     type=location_data.get('type'),  # Location type (branch, building, floor, room, hub, etc.)
                     hub_type=location_data.get('hub_type'),  # Hub type from hubData.type
-                    members=location_data.get('users', [])  # Store user assignments in members column
+                    members=location_data.get('users', []),  # Store user assignments in members column
+                    address=location_data.get('address'),  # Address of the location
                 )
 
                 print(f"  Creating new location: {display_name}")
