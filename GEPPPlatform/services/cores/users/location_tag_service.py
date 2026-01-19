@@ -168,6 +168,7 @@ class LocationTagService:
         # Update the location's tags array if initial location was provided
         if user_location_id and initial_locations:
             self._update_location_tags(user_location_id, tag.id, add=True)
+            self.db.commit()  # Commit the location's tags array update
 
         return self._serialize_tag(tag)
 
