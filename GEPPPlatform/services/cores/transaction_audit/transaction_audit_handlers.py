@@ -11,6 +11,7 @@ from sqlalchemy import and_, desc
 from .transaction_audit_service import TransactionAuditService
 from ....models.logs.transaction_audit_history import TransactionAuditHistory
 from ....models.transactions.transactions import Transaction, TransactionStatus, AIAuditStatus
+from ....models.transactions.transaction_records import TransactionRecord
 
 logger = logging.getLogger(__name__)
 from ....exceptions import (
@@ -441,8 +442,8 @@ def handle_get_audit_report(
     """
     try:
         import json
-        from datetime import datetime
-        from sqlalchemy import func, extract, String
+        from datetime import datetime, timedelta, timezone
+        from sqlalchemy import func, extract, String, exists
         from collections import Counter
         from ....models.subscriptions.organizations import OrganizationSetup
 
@@ -477,12 +478,71 @@ def handle_get_audit_report(
         if search:
             query = query.filter(Transaction.id.cast(String).contains(search))
 
-        # Date filters
-        if date_from:
-            query = query.filter(Transaction.transaction_date >= date_from)
-
-        if date_to:
-            query = query.filter(Transaction.transaction_date <= date_to)
+        # Date filters - filter by TransactionRecord.transaction_date
+        # Include transaction if any of its records fall within the date range
+        if date_from or date_to:
+            # Parse dates if they're strings
+            date_from_dt = None
+            date_to_dt = None
+            
+            if date_from:
+                if isinstance(date_from, str):
+                    try:
+                        date_from_dt = datetime.fromisoformat(date_from.replace('Z', '+00:00'))
+                    except ValueError:
+                        # Try parsing without timezone
+                        date_from_dt = datetime.fromisoformat(date_from)
+                        if date_from_dt.tzinfo is None:
+                            date_from_dt = date_from_dt.replace(tzinfo=timezone.utc)
+                else:
+                    date_from_dt = date_from
+            
+            if date_to:
+                if isinstance(date_to, str):
+                    try:
+                        date_to_dt = datetime.fromisoformat(date_to.replace('Z', '+00:00'))
+                    except ValueError:
+                        # Try parsing without timezone
+                        date_to_dt = datetime.fromisoformat(date_to)
+                        if date_to_dt.tzinfo is None:
+                            date_to_dt = date_to_dt.replace(tzinfo=timezone.utc)
+                else:
+                    date_to_dt = date_to
+            
+            # If both dates are provided and they're the same day, set date_to to end of day
+            # This ensures we include all records from that day
+            if date_from_dt and date_to_dt:
+                # Normalize to UTC for comparison if needed
+                if date_from_dt.tzinfo is None:
+                    date_from_dt = date_from_dt.replace(tzinfo=timezone.utc)
+                if date_to_dt.tzinfo is None:
+                    date_to_dt = date_to_dt.replace(tzinfo=timezone.utc)
+                
+                # Compare dates (ignoring time)
+                if date_from_dt.date() == date_to_dt.date():
+                    # Same day - set date_to to end of day to include all records
+                    date_to_dt = date_to_dt.replace(hour=23, minute=59, second=59, microsecond=999999)
+            
+            # Build EXISTS subquery to check if transaction has records in date range
+            record_date_filter = and_(
+                TransactionRecord.created_transaction_id == Transaction.id,
+                TransactionRecord.is_active == True
+            )
+            
+            if date_from_dt:
+                record_date_filter = and_(
+                    record_date_filter,
+                    TransactionRecord.transaction_date >= date_from_dt
+                )
+            
+            if date_to_dt:
+                record_date_filter = and_(
+                    record_date_filter,
+                    TransactionRecord.transaction_date <= date_to_dt
+                )
+            
+            # Use EXISTS to check if transaction has any records matching the date filter
+            query = query.filter(exists().where(record_date_filter))
 
         # District and sub-district filtering based on organization_setup
         # Skip filtering if district is 'all'

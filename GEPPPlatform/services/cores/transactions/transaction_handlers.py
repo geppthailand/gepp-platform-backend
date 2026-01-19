@@ -8,6 +8,7 @@ import traceback
 
 from .transaction_service import TransactionService
 from .presigned_url_service import TransactionPresignedUrlService
+from GEPPPlatform.services.cores.users.user_service import UserService
 
 logger = logging.getLogger(__name__)
 from ....exceptions import (
@@ -33,6 +34,7 @@ def handle_transaction_routes(event: Dict[str, Any], data: Dict[str, Any], **par
         raise APIException('Database session not provided')
 
     transaction_service = TransactionService(db_session)
+    user_service = UserService(db_session)
 
     # Extract current user info from JWT token (passed from app.py)
     current_user = params.get('current_user', {})
@@ -62,6 +64,7 @@ def handle_transaction_routes(event: Dict[str, Any], data: Dict[str, Any], **par
             include_records = query_params.get('include_records', 'false').lower() == 'true'
             return handle_get_transaction(
                 transaction_service,
+                user_service,
                 transaction_id,
                 include_records,
                 current_user_organization_id
@@ -233,6 +236,7 @@ def handle_create_transaction(
 
 def handle_get_transaction(
     transaction_service: TransactionService,
+    user_service: UserService,
     transaction_id: int,
     include_records: bool,
     current_user_organization_id: int
@@ -253,6 +257,24 @@ def handle_get_transaction(
         transaction = result['transaction']
         if transaction['organization_id'] != current_user_organization_id:
             raise UnauthorizedException('Access denied: Transaction belongs to different organization')
+
+        # Enrich origin_location with hierarchy path using UserService._build_location_paths
+        origin_id = transaction.get('origin_id')
+        if origin_id:
+            # Build location_data structure expected by _build_location_paths
+            location_data_for_paths = [{'id': origin_id}]
+            location_paths = user_service._build_location_paths(
+                organization_id=current_user_organization_id,
+                location_data=location_data_for_paths
+            )
+            origin_path = location_paths.get(origin_id)
+
+            if origin_path is not None:
+                # Ensure origin_location dict exists
+                origin_location = transaction.get('origin_location') or {}
+                origin_location.setdefault('id', origin_id)
+                origin_location['path'] = origin_path
+                transaction['origin_location'] = origin_location
 
         return {
             'success': True,
