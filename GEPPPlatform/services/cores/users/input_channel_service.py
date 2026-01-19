@@ -536,8 +536,8 @@ class InputChannelService:
                     display_name
                 )
 
-            # Check if user has data_input role (required for access)
-            has_data_input_role = False
+            # Check if user has data_input role (or admin role) - required for access
+            has_access_role = False
             if is_valid and validated_user:
                 if validated_user.organization_role_id:
                     organization_role = self.db.query(OrganizationRole).filter(
@@ -545,20 +545,21 @@ class InputChannelService:
                     ).first()
                     
                     if organization_role:
-                        # Check if role key is 'data_input' or if 'data_input' is in role name
-                        role_key = organization_role.key or ''
-                        role_name = organization_role.name or ''
-                        has_data_input_role = (
-                            role_key.lower() == 'data_input' or 
-                            'data_input' in role_name.lower()
+                        # Check if role key/name matches data_input or admin
+                        role_key = (organization_role.key or '').lower()
+                        role_name = (organization_role.name or '').lower()
+                        has_access_role = (
+                            role_key in ('data_input', 'admin') or
+                            'data_input' in role_name or
+                            'admin' in role_name
                         )
                 
-                # If user doesn't have data_input role, return access denied response
-                if not has_data_input_role:
+                # If user doesn't have required role, return access denied response
+                if not has_access_role:
                     return {
                         'accessDenied': True,
-                        'message': 'You do not have permission to access this input channel. Data input role is required.',
-                        'reason': 'missing_data_input_role',
+                        'message': 'You do not have permission to access this input channel. Data input or admin role is required.',
+                        'reason': 'missing_data_input_or_admin_role',
                         'subUser': {
                             'name': subuser,
                             'userId': str(validated_user.id) if validated_user else None,
@@ -1240,6 +1241,7 @@ class InputChannelService:
                     status='pending',
                     is_active=True,
                     created_by_id=creator_user_location_id,  # Use validated subuser's user_location_id
+                    transaction_date=transaction_date,
                 )
                 self.db.add(record)
                 self.db.flush()
