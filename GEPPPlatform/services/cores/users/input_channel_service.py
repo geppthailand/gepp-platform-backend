@@ -1241,6 +1241,7 @@ class InputChannelService:
                     status='pending',
                     is_active=True,
                     created_by_id=creator_user_location_id,  # Use validated subuser's user_location_id
+                    transaction_date=transaction_date,
                 )
                 self.db.add(record)
                 self.db.flush()
