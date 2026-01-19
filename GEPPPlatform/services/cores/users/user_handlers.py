@@ -180,6 +180,11 @@ def handle_user_routes(event: Dict[str, Any], data: Dict[str, Any], **params) ->
         location_id = path.split('/locations/')[1].split('/')[0]
         return handle_migrate_location_transactions(db_session, location_id, data, current_user_organization_id)
 
+    elif '/api/locations/' in path and '/delete-with-transactions' in path and method == 'DELETE':
+        # Delete location and all its transactions: /api/locations/{location_id}/delete-with-transactions
+        location_id = path.split('/locations/')[1].split('/')[0]
+        return handle_delete_location_with_transactions(db_session, location_id, current_user_organization_id)
+
     elif '/api/locations/' in path and method == 'PUT' and '/tags/' not in path:
         # Update location: /api/locations/{location_id}
         location_id = path.split('/locations/')[1].rstrip('/')
@@ -855,10 +860,11 @@ def handle_check_location_dependencies(
     location_id: str,
     organization_id: int
 ) -> Dict[str, Any]:
-    """Handle GET /api/locations/{location_id}/check-dependencies - Check if location has dependent transactions"""
+    """Handle GET /api/locations/{location_id}/check-dependencies - Check if location or its descendants have dependent transactions"""
     try:
         from GEPPPlatform.models.transactions.transactions import Transaction
         from GEPPPlatform.models.users.user_location import UserLocation
+        from GEPPPlatform.models.subscriptions.organizations import OrganizationSetup
         from sqlalchemy import and_
 
         # Verify location exists
@@ -873,13 +879,84 @@ def handle_check_location_dependencies(
         if not location:
             raise NotFoundException(f'Location not found: {location_id}')
 
-        # Count transactions that use this location as origin and are not deleted
-        transaction_count = db_session.query(Transaction).filter(
+        # Helper function to recursively find all descendant nodeIds from tree structure
+        def find_all_node_ids(nodes, target_id=None, found=False):
+            """
+            Find all nodeIds including target and its descendants.
+            If target_id is None, return all IDs in nodes.
+            If found is True, we're already inside target's subtree.
+            """
+            result = []
+            if not nodes:
+                return result
+            
+            for node in nodes:
+                node_id = node.get('nodeId')
+                if node_id:
+                    if found:
+                        # We're inside target's subtree, collect all
+                        result.append(node_id)
+                        result.extend(find_all_node_ids(node.get('children', []), target_id, True))
+                    elif node_id == target_id:
+                        # Found the target, collect it and all descendants
+                        result.append(node_id)
+                        result.extend(find_all_node_ids(node.get('children', []), target_id, True))
+                    else:
+                        # Keep searching
+                        result.extend(find_all_node_ids(node.get('children', []), target_id, False))
+            return result
+
+        # Get organization setup to access root_nodes tree
+        org_setup = db_session.query(OrganizationSetup).filter(
             and_(
-                Transaction.origin_id == int(location_id),
-                Transaction.deleted_date.is_(None)
+                OrganizationSetup.organization_id == organization_id,
+                OrganizationSetup.deleted_date.is_(None)
             )
-        ).count()
+        ).order_by(OrganizationSetup.id.desc()).first()
+
+        target_id = int(location_id)
+        all_location_ids = [target_id]  # At minimum, include the target
+        
+        if org_setup:
+            # Search in root_nodes
+            if org_setup.root_nodes:
+                found_ids = find_all_node_ids(org_setup.root_nodes, target_id)
+                if found_ids:
+                    all_location_ids = found_ids
+            
+            # Also search in hub_node if exists
+            if org_setup.hub_node:
+                hub_children = org_setup.hub_node.get('children', [])
+                found_ids = find_all_node_ids(hub_children, target_id)
+                if found_ids:
+                    all_location_ids = found_ids
+
+        # Get display names for all locations
+        locations_data = db_session.query(UserLocation.id, UserLocation.display_name).filter(
+            UserLocation.id.in_(all_location_ids)
+        ).all()
+        location_names = {row[0]: row[1] for row in locations_data}
+
+        # Count transactions for all locations (self + descendants)
+        transaction_count = 0
+        transactions_by_location = {}
+        
+        if all_location_ids:
+            # Get transaction counts per location
+            for loc_id in all_location_ids:
+                count = db_session.query(Transaction).filter(
+                    and_(
+                        Transaction.origin_id == loc_id,
+                        Transaction.deleted_date.is_(None)
+                    )
+                ).count()
+                if count > 0:
+                    transactions_by_location[loc_id] = {
+                        'location_id': loc_id,
+                        'location_name': location_names.get(loc_id, f'Location {loc_id}'),
+                        'transaction_count': count
+                    }
+                    transaction_count += count
 
         has_dependencies = transaction_count > 0
 
@@ -889,7 +966,10 @@ def handle_check_location_dependencies(
             'transaction_count': transaction_count,
             'location_id': int(location_id),
             'location_name': location.display_name or location.name_en or location.name_th,
-            'message': 'สถานที่นี้มีรายการที่ใช้งานอยู่' if has_dependencies else 'สถานที่นี้สามารถลบได้'
+            'affected_locations': list(transactions_by_location.values()),
+            'all_location_ids': all_location_ids,  # All IDs to be deleted
+            'descendant_count': len(all_location_ids) - 1,  # Excluding self
+            'message': 'สถานที่นี้หรือสถานที่ย่อยมีรายการที่ใช้งานอยู่' if has_dependencies else 'สถานที่นี้สามารถลบได้'
         }
 
     except NotFoundException:
@@ -967,6 +1047,120 @@ def handle_migrate_location_transactions(
     except Exception as e:
         db_session.rollback()
         raise APIException(f'Failed to migrate transactions: {str(e)}')
+
+
+def handle_delete_location_with_transactions(
+    db_session,
+    location_id: str,
+    organization_id: int
+) -> Dict[str, Any]:
+    """Handle DELETE /api/locations/{location_id}/delete-with-transactions - Soft delete location, descendants, and their transactions"""
+    try:
+        from GEPPPlatform.models.transactions.transactions import Transaction
+        from GEPPPlatform.models.users.user_location import UserLocation
+        from GEPPPlatform.models.subscriptions.organizations import OrganizationSetup
+        from sqlalchemy import and_
+        from datetime import datetime
+
+        # Verify location exists
+        location = db_session.query(UserLocation).filter(
+            and_(
+                UserLocation.id == int(location_id),
+                UserLocation.organization_id == organization_id,
+                UserLocation.deleted_date.is_(None)
+            )
+        ).first()
+
+        if not location:
+            raise NotFoundException(f'Location not found: {location_id}')
+
+        location_name = location.display_name or location.name_en or location.name_th
+
+        # Helper function to recursively find all descendant nodeIds from tree structure
+        def find_all_node_ids(nodes, target_id=None, found=False):
+            """Find all nodeIds including target and its descendants."""
+            result = []
+            if not nodes:
+                return result
+            
+            for node in nodes:
+                node_id = node.get('nodeId')
+                if node_id:
+                    if found:
+                        result.append(node_id)
+                        result.extend(find_all_node_ids(node.get('children', []), target_id, True))
+                    elif node_id == target_id:
+                        result.append(node_id)
+                        result.extend(find_all_node_ids(node.get('children', []), target_id, True))
+                    else:
+                        result.extend(find_all_node_ids(node.get('children', []), target_id, False))
+            return result
+
+        # Get organization setup to access root_nodes tree
+        org_setup = db_session.query(OrganizationSetup).filter(
+            and_(
+                OrganizationSetup.organization_id == organization_id,
+                OrganizationSetup.deleted_date.is_(None)
+            )
+        ).order_by(OrganizationSetup.id.desc()).first()
+
+        target_id = int(location_id)
+        all_location_ids = [target_id]  # At minimum, include the target
+        
+        if org_setup:
+            # Search in root_nodes
+            if org_setup.root_nodes:
+                found_ids = find_all_node_ids(org_setup.root_nodes, target_id)
+                if found_ids:
+                    all_location_ids = found_ids
+            
+            # Also search in hub_node if exists
+            if org_setup.hub_node:
+                hub_children = org_setup.hub_node.get('children', [])
+                found_ids = find_all_node_ids(hub_children, target_id)
+                if found_ids:
+                    all_location_ids = found_ids
+        
+        now = datetime.utcnow()
+        deleted_transactions_count = 0
+        
+        # Soft delete all transactions for these locations
+        if all_location_ids:
+            deleted_transactions_count = db_session.query(Transaction).filter(
+                and_(
+                    Transaction.origin_id.in_(all_location_ids),
+                    Transaction.deleted_date.is_(None)
+                )
+            ).update({
+                'deleted_date': now
+            }, synchronize_session=False)
+            
+            # Soft delete all the locations
+            db_session.query(UserLocation).filter(
+                and_(
+                    UserLocation.id.in_(all_location_ids),
+                    UserLocation.deleted_date.is_(None)
+                )
+            ).update({
+                'deleted_date': now
+            }, synchronize_session=False)
+        
+        db_session.commit()
+
+        return {
+            'success': True,
+            'deleted_locations_count': len(all_location_ids),
+            'deleted_transactions_count': deleted_transactions_count,
+            'location_id': int(location_id),
+            'location_name': location_name,
+            'message': f'Successfully deleted {len(all_location_ids)} location(s) and {deleted_transactions_count} transaction(s)'
+        }
+
+    except NotFoundException:
+        raise
+    except Exception as e:
+        db_session.rollback()
+        raise APIException(f'Failed to delete location with transactions: {str(e)}')
 
 
 def handle_get_user_profile(user_service: UserService, current_user_id: str) -> Dict[str, Any]:
