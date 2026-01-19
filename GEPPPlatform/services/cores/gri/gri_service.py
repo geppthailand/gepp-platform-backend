@@ -337,10 +337,10 @@ class GriService:
 
         # Apply year filter if provided
         if record_year:
-            # Extract year from transaction_date
+            # Extract year from transaction_record's transaction_date
             # Ensure record_year is a string for comparison with to_char result
             record_year_str = str(record_year) if record_year else None
-            query = query.filter(func.to_char(Transaction.transaction_date, 'YYYY') == record_year_str)
+            query = query.filter(func.to_char(TransactionRecord.transaction_date, 'YYYY') == record_year_str)
 
         results = query.group_by(
             TransactionRecord.material_id,
