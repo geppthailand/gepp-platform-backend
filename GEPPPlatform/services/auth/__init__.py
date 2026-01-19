@@ -50,6 +50,9 @@ def handle_auth_routes(path: str, data: dict, **commonParams):
             return auth_handler.validate_token_header(**commonParams)
         elif internal_path == "/profile":
             return auth_handler.get_profile(**commonParams)
+        elif internal_path == "/check-email":
+            email = commonParams.get('query_params', {}).get('email', '')
+            return auth_handler.check_email_exists(email)
         else:
             raise NotFoundException(f"GET endpoint not found: {internal_path}")
     

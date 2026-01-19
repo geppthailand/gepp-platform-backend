@@ -936,6 +936,36 @@ class InputChannelService:
             )
         ).all()
 
+        # Build a map of location ID -> display_name for path building
+        all_location_ids_for_path = self._extract_node_ids_from_tree(root_nodes)
+        all_locations_for_path = self.db.query(UserLocation).filter(
+            UserLocation.id.in_(all_location_ids_for_path)
+        ).all()
+        location_name_map = {loc.id: loc.display_name for loc in all_locations_for_path}
+        
+        # Build a map of nodeId -> path (list of parent node IDs with names)
+        # This will help us show the hierarchical path for each location
+        path_map = {}
+        
+        def build_path_map(nodes: List[Dict], parent_path: List[Dict] = None):
+            """Recursively build path map for all nodes"""
+            if parent_path is None:
+                parent_path = []
+            for node in nodes:
+                node_id = node.get('nodeId')
+                if node_id:
+                    node_id_int = int(node_id)
+                    # Store the path to this node (excluding itself)
+                    path_map[node_id_int] = list(parent_path)
+                    # Build path for children, including current node info
+                    # Use display_name from database, fallback to node.get('name') or node.get('display_name')
+                    node_name = location_name_map.get(node_id_int) or node.get('name') or node.get('display_name') or ''
+                    child_path = parent_path + [{'nodeId': node_id_int, 'name': node_name, 'type': node.get('type', '')}]
+                    if 'children' in node and isinstance(node['children'], list):
+                        build_path_map(node['children'], child_path)
+        
+        build_path_map(root_nodes)
+
         result = []
         for loc in locations:
             functions = []
@@ -982,21 +1012,23 @@ class InputChannelService:
                             'name': tag.name
                         })
 
-            location_dict = {
+            # Build path string from parent nodes
+            loc_path = path_map.get(loc.id, [])
+            path_names = [p.get('name', '') for p in loc_path if p.get('name')]
+            path_str = ', '.join(path_names) if path_names else ''
+            
+            # Get location type from the tree node info
+            location_type = loc.location_type if hasattr(loc, 'location_type') and loc.location_type else ''
+
+            result.append({
                 'id': str(loc.id),
                 'name_th': loc.display_name,
                 'name_en': loc.display_name,
                 'functions': functions,
                 'tags': location_tags,
-            }
-            result.append(location_dict)
-
-        # Build and add hierarchy paths for all locations
-        if result:
-            location_paths = self._build_location_paths(channel.organization_id, result, org_setup)
-            for loc in result:
-                loc_id = int(loc['id'])
-                loc['path'] = location_paths.get(loc_id, '')
+                'path': path_str,
+                'location_type': location_type,
+            })
 
         return result
 

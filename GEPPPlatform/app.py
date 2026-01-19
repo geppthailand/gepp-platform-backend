@@ -30,7 +30,7 @@ import jwt
 from GEPPPlatform.services.auth import handle_auth_routes
 from GEPPPlatform.services.auth.auth_handlers import AuthHandlers
 from GEPPPlatform.libs import authGuard
-from GEPPPlatform.exceptions import APIException
+from GEPPPlatform.exceptions import APIException, UnauthorizedException
 from GEPPPlatform.database import get_session
 
 import random
@@ -563,6 +563,18 @@ def main(event, context):
                 },
                 "body": json.dumps(results),
             }
+        
+    except UnauthorizedException as auth_error:
+        return {
+            "statusCode": 401,
+            "headers": {
+                "Content-Type": "application/json",
+            },
+            "body": json.dumps({
+                "error": "Unauthorized",
+                "message": str(auth_error)
+            })
+        }
         
     except Exception as e:
         import traceback
