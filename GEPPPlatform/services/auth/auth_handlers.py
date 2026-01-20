@@ -12,7 +12,7 @@ from typing import Dict, Any, Optional
 
 # SQLAlchemy imports
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 # Database imports
 from GEPPPlatform.models.users.user_location import UserLocation
@@ -356,8 +356,10 @@ class AuthHandlers:
             password = data.get('password')
             
             session = self.db_session
-            # Get user by email
-            user = session.query(UserLocation).filter_by(
+            # Get user by email with organization_role relationship loaded
+            user = session.query(UserLocation).options(
+                joinedload(UserLocation.organization_role)
+            ).filter_by(
                 email=email,
                 is_active=True
             ).first()
@@ -372,18 +374,29 @@ class AuthHandlers:
             # Generate JWT auth and refresh tokens
             tokens = self.generate_jwt_tokens(user.id, user.organization_id, email)
 
+            # Build user response with role information
+            user_data = {
+                'id': user.id,
+                'email': email,
+                'displayName': user.display_name,
+                'organizationId': user.organization_id
+            }
+            
+            # Add role information if available
+            if user.organization_role:
+                user_data['role'] = {
+                    'id': user.organization_role.id,
+                    'key': user.organization_role.key,
+                    'name': user.organization_role.name
+                }
+
             return {
                 'success': True,
                 'auth_token': tokens['auth_token'],
                 'refresh_token': tokens['refresh_token'],
                 'token_type': 'Bearer',
                 'expires_in': 3600,  # 60 minutes in seconds
-                'user': {
-                    'id': user.id,
-                    'email': email,
-                    'displayName': user.display_name,
-                    'organizationId': user.organization_id
-                }
+                'user': user_data
             }
 
         except UnauthorizedException:
