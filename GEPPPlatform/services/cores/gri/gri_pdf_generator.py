@@ -107,15 +107,15 @@ def _draw_rounded_rect_bottom_only(pdf: canvas.Canvas, x: float, y: float, width
 
 def _kg_to_tons_formatted(kg_value: float, use_comma: bool = False) -> str:
     """
-    Convert kg to tons and format to 2 decimal places.
+    Convert kg to tons and format to 3 decimal places.
     
     Args:
         kg_value: Weight in kg
-        use_comma: If True, use comma as thousand separator (e.g., 1,234.56)
-                   If False, use no separator (e.g., 1234.56)
+        use_comma: If True, use comma as thousand separator (e.g., 1,234.567)
+                   If False, use no separator (e.g., 1234.567)
     
     Returns:
-        Formatted string with 2 decimal places
+        Formatted string with 3 decimal places
     """
     if kg_value is None:
         kg_value = 0.0
@@ -123,14 +123,14 @@ def _kg_to_tons_formatted(kg_value: float, use_comma: bool = False) -> str:
     # Convert kg to tons (divide by 1000)
     tons_value = float(kg_value) / 1000.0
     
-    # Format to 2 decimal places
+    # Format to 3 decimal places
     if use_comma:
-        # Format with comma separator and 2 decimals
-        formatted = f"{tons_value:,.2f}"
+        # Format with comma separator and 3 decimals
+        formatted = f"{tons_value:,.3f}"
         return formatted
     else:
-        # Format without comma separator and 2 decimals
-        formatted = f"{tons_value:.2f}"
+        # Format without comma separator and 3 decimals
+        formatted = f"{tons_value:.3f}"
         return formatted
 
 def _footer(pdf: canvas.Canvas, page_width_points: float) -> None:
@@ -649,7 +649,7 @@ def _draw_full_disclosure_page(pdf: canvas.Canvas, data: dict) -> None:
         if card['unit'] == 't':
             value_text = f"{_kg_to_tons_formatted(card['value'], use_comma=False)} {card['unit']}"
         else:
-            value_text = f"{card['value']:.2f} {card['unit']}"
+            value_text = f"{card['value']:.3f} {card['unit']}"
         value_x = label_x  # Same x position as label
         value_y = label_y - 0.4 * inch  # Increased spacing from bottom
         pdf.drawString(value_x, value_y, value_text)
@@ -1594,8 +1594,8 @@ def _draw_spill_data_table(pdf: canvas.Canvas, spill_data: dict, year: str, widt
             pdf.drawString(table_title_x + 0.4 * inch, text_y, record.get("spill_type", ""))
             pdf.drawString(table_title_x + 2.5 * inch, text_y, record.get("surface_type", ""))
             pdf.drawString(table_title_x + 4.5 * inch, text_y, record.get("location", ""))
-            pdf.drawString(table_title_x + 6.5 * inch, text_y, f"{record.get('volume', 0.0):,.2f}")
-            pdf.drawString(table_title_x + 8.5 * inch, text_y, f"{record.get('cleanup_cost', 0.0):,.2f}")
+            pdf.drawString(table_title_x + 6.5 * inch, text_y, f"{record.get('volume', 0.0):,.3f}")
+            pdf.drawString(table_title_x + 8.5 * inch, text_y, f"{record.get('cleanup_cost', 0.0):,.3f}")
         
         # Draw totals row only on the last page
         if is_last_page and totals:
@@ -1625,8 +1625,8 @@ def _draw_spill_data_table(pdf: canvas.Canvas, spill_data: dict, year: str, widt
             pdf.drawString(table_title_x + 0.4 * inch, text_y, "Total")
             pdf.drawString(table_title_x + 2.5 * inch, text_y, "")  # Empty surface type
             pdf.drawString(table_title_x + 4.5 * inch, text_y, "")  # Empty location
-            pdf.drawString(table_title_x + 6.5 * inch, text_y, f"{totals.get('total_volume', 0.0):,.2f}")
-            pdf.drawString(table_title_x + 8.5 * inch, text_y, f"{totals.get('total_cleanup_cost', 0.0):,.2f}")
+            pdf.drawString(table_title_x + 6.5 * inch, text_y, f"{totals.get('total_volume', 0.0):,.3f}")
+            pdf.drawString(table_title_x + 8.5 * inch, text_y, f"{totals.get('total_cleanup_cost', 0.0):,.3f}")
     
     # Pagination: First page max 8 rows, subsequent pages max 9 rows
     if len(records) <= 7:
