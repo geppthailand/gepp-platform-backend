@@ -426,8 +426,7 @@ def handle_get_audit_report(
     - search: str - Partial match search for transaction ID
     - date_from: str (ISO date) - Filter transactions from this date
     - date_to: str (ISO date) - Filter transactions to this date
-    - district: str - Filter by district node ID (level 3)
-    - sub_district: str - Filter by sub-district node ID (level 4)
+    - district: str - Filter by origin_id (location ID used in transactions)
     - status: str - Filter by transaction status (not ai_audit_status)
     - page: int - Page number for pagination (default: 1)
     - page_size: int - Items per page (default: 100, max: 100)
@@ -446,6 +445,13 @@ def handle_get_audit_report(
         from sqlalchemy import func, extract, String, exists
         from collections import Counter
         from ....models.subscriptions.organizations import OrganizationSetup
+        
+        # Import ZoneInfo for timezone handling (Python 3.9+)
+        try:
+            from zoneinfo import ZoneInfo
+        except ImportError:
+            # Fallback for Python < 3.9
+            from backports.zoneinfo import ZoneInfo
 
         logger.info(f"Generating audit report for organization {organization_id} with filters: {query_params}")
 
@@ -467,7 +473,6 @@ def handle_get_audit_report(
         date_from = query_params.get('date_from')
         date_to = query_params.get('date_to')
         district = query_params.get('district')
-        sub_district = query_params.get('sub_district')
         status = query_params.get('status')
 
         # Ensure page is at least 1
@@ -480,48 +485,77 @@ def handle_get_audit_report(
 
         # Date filters - filter by TransactionRecord.transaction_date
         # Include transaction if any of its records fall within the date range
+        # Use Asia/Bangkok timezone (UTC+7) as default for date-only strings
         if date_from or date_to:
-            # Parse dates if they're strings
+            # Default timezone for date-only strings (Asia/Bangkok = UTC+7)
+            default_tz = ZoneInfo('Asia/Bangkok')
             date_from_dt = None
             date_to_dt = None
             
+            def parse_date_string(date_str: str, is_end_of_day: bool = False):
+                """Parse date string, treating date-only strings as Asia/Bangkok timezone"""
+                # Check if it's a date-only string (YYYY-MM-DD format)
+                is_date_only = False
+                try:
+                    # Try parsing as ISO format with timezone
+                    dt = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+                    if dt.tzinfo:
+                        return dt.astimezone(timezone.utc)
+                except ValueError:
+                    pass
+                
+                try:
+                    # Try parsing as ISO format without timezone
+                    dt = datetime.fromisoformat(date_str)
+                    if dt.tzinfo:
+                        return dt.astimezone(timezone.utc)
+                    is_date_only = True
+                except ValueError:
+                    # Try parsing as date string (YYYY-MM-DD)
+                    try:
+                        dt = datetime.strptime(date_str, '%Y-%m-%d')
+                        is_date_only = True
+                    except ValueError:
+                        raise ValueError(f"Invalid date format: {date_str}")
+                
+                # If date-only or no timezone, treat as Asia/Bangkok timezone
+                if is_date_only or dt.tzinfo is None:
+                    if is_end_of_day:
+                        dt = dt.replace(hour=23, minute=59, second=59, microsecond=999999)
+                    else:
+                        dt = dt.replace(hour=0, minute=0, second=0, microsecond=0)
+                    dt = dt.replace(tzinfo=default_tz)
+                    return dt.astimezone(timezone.utc)
+                else:
+                    return dt.astimezone(timezone.utc)
+            
             if date_from:
                 if isinstance(date_from, str):
-                    try:
-                        date_from_dt = datetime.fromisoformat(date_from.replace('Z', '+00:00'))
-                    except ValueError:
-                        # Try parsing without timezone
-                        date_from_dt = datetime.fromisoformat(date_from)
-                        if date_from_dt.tzinfo is None:
-                            date_from_dt = date_from_dt.replace(tzinfo=timezone.utc)
+                    date_from_dt = parse_date_string(date_from, is_end_of_day=False)
                 else:
                     date_from_dt = date_from
+                    if date_from_dt.tzinfo is None:
+                        date_from_dt = date_from_dt.replace(tzinfo=timezone.utc)
+                    else:
+                        date_from_dt = date_from_dt.astimezone(timezone.utc)
+                    # Ensure start of day in local timezone
+                    date_from_local = date_from_dt.astimezone(default_tz)
+                    date_from_local = date_from_local.replace(hour=0, minute=0, second=0, microsecond=0)
+                    date_from_dt = date_from_local.astimezone(timezone.utc)
             
             if date_to:
                 if isinstance(date_to, str):
-                    try:
-                        date_to_dt = datetime.fromisoformat(date_to.replace('Z', '+00:00'))
-                    except ValueError:
-                        # Try parsing without timezone
-                        date_to_dt = datetime.fromisoformat(date_to)
-                        if date_to_dt.tzinfo is None:
-                            date_to_dt = date_to_dt.replace(tzinfo=timezone.utc)
+                    date_to_dt = parse_date_string(date_to, is_end_of_day=True)
                 else:
                     date_to_dt = date_to
-            
-            # If both dates are provided and they're the same day, set date_to to end of day
-            # This ensures we include all records from that day
-            if date_from_dt and date_to_dt:
-                # Normalize to UTC for comparison if needed
-                if date_from_dt.tzinfo is None:
-                    date_from_dt = date_from_dt.replace(tzinfo=timezone.utc)
-                if date_to_dt.tzinfo is None:
-                    date_to_dt = date_to_dt.replace(tzinfo=timezone.utc)
-                
-                # Compare dates (ignoring time)
-                if date_from_dt.date() == date_to_dt.date():
-                    # Same day - set date_to to end of day to include all records
-                    date_to_dt = date_to_dt.replace(hour=23, minute=59, second=59, microsecond=999999)
+                    if date_to_dt.tzinfo is None:
+                        date_to_dt = date_to_dt.replace(tzinfo=timezone.utc)
+                    else:
+                        date_to_dt = date_to_dt.astimezone(timezone.utc)
+                    # Ensure end of day in local timezone
+                    date_to_local = date_to_dt.astimezone(default_tz)
+                    date_to_local = date_to_local.replace(hour=23, minute=59, second=59, microsecond=999999)
+                    date_to_dt = date_to_local.astimezone(timezone.utc)
             
             # Build EXISTS subquery to check if transaction has records in date range
             record_date_filter = and_(
@@ -544,64 +578,16 @@ def handle_get_audit_report(
             # Use EXISTS to check if transaction has any records matching the date filter
             query = query.filter(exists().where(record_date_filter))
 
-        # District and sub-district filtering based on organization_setup
+        # District (origin) filtering - filter by origin_id directly
         # Skip filtering if district is 'all'
-        if (district and district != 'all') or (sub_district and sub_district != 'all'):
-            # Get organization setup to access root_nodes
-            org_setup = db_session.query(OrganizationSetup).filter(
-                and_(
-                    OrganizationSetup.organization_id == organization_id,
-                    OrganizationSetup.deleted_date.is_(None)
-                )
-            ).order_by(OrganizationSetup.created_date.desc()).first()
-
-            if org_setup and org_setup.root_nodes:
-                allowed_origin_ids = []
-
-                # Convert district and sub_district to int if they're not 'all'
-                district_int = int(district) if district and district != 'all' else None
-                sub_district_int = int(sub_district) if sub_district and sub_district != 'all' else None
-
-                # Helper function to recursively extract node IDs
-                def extract_node_ids(nodes, target_level, current_level=1, parent_match=False):
-                    node_ids = []
-                    for node in nodes if isinstance(nodes, list) else []:
-                        node_id = node.get('nodeId')
-                        children = node.get('children', [])
-
-                        # If filtering by district (level 3)
-                        if district_int and current_level == 3:
-                            if node_id == district_int:
-                                # Found matching district, collect this and all children
-                                node_ids.append(node_id)
-                                node_ids.extend(extract_node_ids(children, target_level, current_level + 1, parent_match=True))
-                        # If filtering by sub_district (level 4)
-                        elif sub_district_int and current_level == 4:
-                            if node_id == sub_district_int:
-                                node_ids.append(node_id)
-                        # If parent matched and we're collecting all descendants
-                        elif parent_match:
-                            node_ids.append(node_id)
-                            if children:
-                                node_ids.extend(extract_node_ids(children, target_level, current_level + 1, parent_match=True))
-                        # Otherwise keep traversing
-                        elif children:
-                            node_ids.extend(extract_node_ids(children, target_level, current_level + 1, parent_match=False))
-
-                    return node_ids
-
-                # Extract allowed origin IDs based on filters
-                if sub_district_int:
-                    allowed_origin_ids = extract_node_ids(org_setup.root_nodes, 4)
-                elif district_int:
-                    allowed_origin_ids = extract_node_ids(org_setup.root_nodes, 3)
-
-                # Apply filter if we found matching nodes
-                if allowed_origin_ids:
-                    query = query.filter(Transaction.origin_id.in_(allowed_origin_ids))
-                else:
-                    # No matching nodes found, return empty result
-                    query = query.filter(Transaction.id == -1)
+        if district and district != 'all':
+            try:
+                # District now represents origin_id directly
+                origin_id_int = int(district)
+                query = query.filter(Transaction.origin_id == origin_id_int)
+            except (ValueError, TypeError):
+                # Invalid district value, return empty result
+                query = query.filter(Transaction.id == -1)
 
         # Status filter (transaction status, not ai_audit_status)
         if status:
@@ -760,82 +746,158 @@ def handle_get_audit_report(
             })
 
         # Build filter options for frontend
-        # Get organization setup to extract districts and sub-districts
+        # Get unique origin_ids from non-deleted transactions
         from ....models.users.user_location import UserLocation
+        from sqlalchemy import distinct
 
-        org_setup = db_session.query(OrganizationSetup).filter(
+        # Get unique origin_ids from non-deleted transactions
+        origin_ids_result = db_session.query(distinct(Transaction.origin_id)).filter(
             and_(
-                OrganizationSetup.organization_id == organization_id,
-                OrganizationSetup.deleted_date.is_(None)
+                Transaction.organization_id == organization_id,
+                Transaction.deleted_date.is_(None),
+                Transaction.origin_id.isnot(None)
             )
-        ).order_by(OrganizationSetup.created_date.desc()).first()
+        ).all()
+        
+        origin_ids = [row[0] for row in origin_ids_result if row[0] is not None]
 
         districts = []
-        sub_districts = []
 
-        if org_setup and org_setup.root_nodes:
-            # Collect all district (level 3) and sub-district (level 4) IDs from root_nodes
-            # Also maintain the parent-child relationship
-            district_ids = []
-            district_subdistrict_map = {}  # {district_id: [subdistrict_ids]}
+        if origin_ids:
+            # Fetch origin location records
+            origin_locations = db_session.query(UserLocation).filter(
+                UserLocation.id.in_(origin_ids)
+            ).all()
 
-            def extract_location_hierarchy(nodes, current_level=1, parent_district_id=None):
-                for node in nodes if isinstance(nodes, list) else []:
-                    node_id = node.get('nodeId')
-                    children = node.get('children', [])
+            # Build location paths for these origins (similar to _build_location_paths in user_service.py)
+            # Query for active organization setup first, then fallback to latest
+            org_setup = db_session.query(OrganizationSetup).filter(
+                and_(
+                    OrganizationSetup.organization_id == organization_id,
+                    OrganizationSetup.is_active == True
+                )
+            ).first()
+            
+            # If no active setup found, get the latest version
+            if not org_setup:
+                org_setup = db_session.query(OrganizationSetup).filter(
+                    OrganizationSetup.organization_id == organization_id
+                ).order_by(OrganizationSetup.created_date.desc()).first()
 
-                    if current_level == 3:  # District level
-                        district_ids.append(node_id)
-                        district_subdistrict_map[node_id] = []
-                        # Recursively process children with this district as parent
-                        if children:
-                            extract_location_hierarchy(children, current_level + 1, parent_district_id=node_id)
-                    elif current_level == 4:  # Sub-district level
-                        # Add this sub-district to its parent district's list
-                        if parent_district_id and parent_district_id in district_subdistrict_map:
-                            district_subdistrict_map[parent_district_id].append(node_id)
-                    else:
-                        # Continue traversing for other levels
-                        if children:
-                            extract_location_hierarchy(children, current_level + 1, parent_district_id)
-
-            extract_location_hierarchy(org_setup.root_nodes)
-
-            # Fetch actual district names from user_locations table
-            if district_ids:
-                district_records = db_session.query(UserLocation).filter(
-                    UserLocation.id.in_(district_ids)
+            location_paths = {}
+            if org_setup and org_setup.root_nodes:
+                # Fetch ALL locations in the organization to get their names
+                all_locations = db_session.query(UserLocation).filter(
+                    and_(
+                        UserLocation.organization_id == organization_id,
+                        UserLocation.is_active == True,
+                        UserLocation.deleted_date.is_(None)
+                    )
                 ).all()
-                districts = [
-                    {'id': str(d.id), 'name': d.name_en or d.name_th or d.display_name or str(d.id)}
-                    for d in district_records
-                ]
 
-            # Fetch all sub-district IDs
-            all_subdistrict_ids = []
-            for subdistrict_list in district_subdistrict_map.values():
-                all_subdistrict_ids.extend(subdistrict_list)
-
-            # Fetch actual sub-district names from user_locations table
-            subdistrict_records_dict = {}
-            if all_subdistrict_ids:
-                sub_district_records = db_session.query(UserLocation).filter(
-                    UserLocation.id.in_(all_subdistrict_ids)
-                ).all()
-                # Create a dict for quick lookup
-                subdistrict_records_dict = {
-                    str(sd.id): {'id': str(sd.id), 'name': sd.name_en or sd.name_th or sd.display_name or str(sd.id)}
-                    for sd in sub_district_records
+                # Create name lookup map
+                location_names = {
+                    loc.id: loc.display_name or loc.name_en or loc.name_th or f"Location {loc.id}"
+                    for loc in all_locations
                 }
 
-            # Build sub_districts structure: {district_id: [subdistrict objects]}
-            sub_districts = {}
-            for district_id, subdistrict_ids in district_subdistrict_map.items():
-                sub_districts[str(district_id)] = [
-                    subdistrict_records_dict[str(sd_id)]
-                    for sd_id in subdistrict_ids
-                    if str(sd_id) in subdistrict_records_dict
-                ]
+                # Build parent map from tree structure
+                # key: nodeId, value: parentId
+                parent_map = {}
+
+                def build_parent_map(nodes, parent_id=None):
+                    """Recursively build parent map from tree structure"""
+                    for node in nodes:
+                        node_id = node.get('nodeId')
+                        if node_id is not None:
+                            node_id = int(node_id) if isinstance(node_id, str) else node_id
+                            if parent_id is not None:
+                                parent_map[node_id] = parent_id
+                            # Process children
+                            children = node.get('children', [])
+                            if children:
+                                build_parent_map(children, node_id)
+
+                # Build the parent map from root_nodes
+                root_nodes = org_setup.root_nodes
+                if isinstance(root_nodes, list):
+                    build_parent_map(root_nodes, None)
+                
+                # Also build a set of all nodeIds in the tree for quick lookup
+                all_node_ids_in_tree = set()
+                def collect_all_node_ids(nodes):
+                    """Collect all nodeIds from the tree"""
+                    for node in nodes:
+                        node_id = node.get('nodeId')
+                        if node_id is not None:
+                            node_id = int(node_id) if isinstance(node_id, str) else node_id
+                            all_node_ids_in_tree.add(node_id)
+                        children = node.get('children', [])
+                        if children:
+                            collect_all_node_ids(children)
+                
+                if isinstance(root_nodes, list):
+                    collect_all_node_ids(root_nodes)
+                
+                logger.info(f"Built parent_map with {len(parent_map)} entries for organization {organization_id}")
+                logger.info(f"Total nodeIds in tree: {len(all_node_ids_in_tree)}")
+                logger.info(f"Origin location IDs: {[loc.id for loc in origin_locations]}")
+                logger.info(f"Origin IDs in tree: {[loc.id for loc in origin_locations if loc.id in all_node_ids_in_tree]}")
+
+                def get_ancestors(loc_id, visited=None):
+                    """Get list of ancestor names from root to parent (not including current node)"""
+                    if visited is None:
+                        visited = set()
+
+                    # Prevent infinite loops
+                    if loc_id in visited:
+                        return []
+                    visited.add(loc_id)
+
+                    parent_id = parent_map.get(loc_id)
+                    if parent_id is None:
+                        # This is a root node or not in tree, return empty (no ancestors)
+                        return []
+
+                    # Get parent's ancestors recursively, then add parent
+                    parent_ancestors = get_ancestors(parent_id, visited)
+                    parent_name = location_names.get(parent_id, f"Location {parent_id}")
+                    return parent_ancestors + [parent_name]
+
+                # Build paths only for the origin locations
+                for loc in origin_locations:
+                    loc_id = int(loc.id)  # Ensure it's an integer
+                    
+                    # Check if location is in the tree
+                    if loc_id not in all_node_ids_in_tree:
+                        logger.warning(f"Location {loc_id} ({loc.display_name or loc.name_en or loc.name_th}) is not in organization tree structure")
+                        location_paths[loc_id] = ''
+                        continue
+                    
+                    ancestors = get_ancestors(loc_id)
+
+                    if ancestors:
+                        location_paths[loc_id] = ', '.join(ancestors)
+                        logger.info(f"Built path for location {loc_id} ({loc.display_name or loc.name_en or loc.name_th}): {location_paths[loc_id]}")
+                    else:
+                        # Root node - no ancestors to show
+                        location_paths[loc_id] = ''
+                        logger.info(f"Location {loc_id} ({loc.display_name or loc.name_en or loc.name_th}) is a root node - no path")
+            else:
+                logger.warning(f"No organization setup or root_nodes found for organization {organization_id}")
+
+            # Build districts list with paths
+            districts = []
+            for loc in origin_locations:
+                loc_id = int(loc.id)  # Ensure it's an integer for lookup
+                path = location_paths.get(loc_id, '')
+                name = loc.name_en or loc.name_th or loc.display_name or str(loc.id)
+                
+                districts.append({
+                    'id': str(loc.id),
+                    'name': name,
+                    'path': path
+                })
 
         # Status options
         statuses = [
@@ -850,16 +912,8 @@ def handle_get_audit_report(
         # Add 'all' option to districts at the beginning
         districts_with_all = [{'id': 'all', 'name': 'ทั้งหมด'}] + districts_sorted
 
-        # Sort sub_districts within each district and add 'all' option
-        sub_districts_sorted = {}
-        for district_id, subdistrict_list in sub_districts.items():
-            sorted_list = sorted(subdistrict_list, key=lambda x: x['name'])
-            # Add 'all' option for each district's sub-district list
-            sub_districts_sorted[district_id] = [{'id': 'all', 'name': 'ทั้งหมด'}] + sorted_list
-
         filter_options = {
             'districts': districts_with_all,
-            'sub_districts': sub_districts_sorted,
             'statuses': statuses
         }
 
@@ -890,7 +944,6 @@ def handle_get_audit_report(
                 'date_from': date_from,
                 'date_to': date_to,
                 'district': district,
-                'sub_district': sub_district,
                 'status': status
             },
             'filter_options': filter_options
