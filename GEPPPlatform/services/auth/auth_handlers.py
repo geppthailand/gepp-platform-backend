@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session, joinedload
 # Database imports
 from GEPPPlatform.models.users.user_location import UserLocation
 from GEPPPlatform.models.users.integration_tokens import IntegrationToken
+from GEPPPlatform.models.users.user_reset_password_log import UserResetPasswordLog
 from GEPPPlatform.models.subscriptions.organizations import Organization, OrganizationInfo
 from GEPPPlatform.models.subscriptions.subscription_models import SubscriptionPlan, Subscription
 from GEPPPlatform.models.cores.iot_devices import IoTDevice
@@ -879,6 +880,62 @@ class AuthHandlers:
                 
                 reset_token = jwt.encode(reset_payload, self.jwt_secret, algorithm='HS256')
                 
+                # Extract request information from headers
+                headers = kwargs.get('headers', {})
+                # Headers can be lowercase or mixed case, check both
+                user_agent = (
+                    headers.get('User-Agent') or 
+                    headers.get('user-agent') or 
+                    headers.get('USER-AGENT') or 
+                    ''
+                )
+                ip_address = (
+                    headers.get('X-Forwarded-For') or 
+                    headers.get('x-forwarded-for') or 
+                    headers.get('X-FORWARDED-FOR') or 
+                    ''
+                )
+                # Extract first IP if X-Forwarded-For contains multiple IPs
+                if ip_address:
+                    ip_address = ip_address.split(',')[0].strip()
+                # Extract device type information from parentheses in user agent
+                device_type = 'unknown'
+                if user_agent:
+                    import re
+                    # Extract content from first set of parentheses (usually contains device/platform info)
+                    # Example: (Macintosh; Intel Mac OS X 10_15_7) -> "Macintosh; Intel Mac OS X 10_15_7"
+                    match = re.search(r'\(([^)]+)\)', user_agent)
+                    if match:
+                        device_type = match.group(1)
+                    else:
+                        # If no parentheses found, use first 100 chars of user agent
+                        device_type = user_agent[:100] if len(user_agent) > 100 else user_agent
+                
+                # Deactivate any existing active reset requests for this user (only 1 active request per user)
+                existing_logs = session.query(UserResetPasswordLog).filter_by(
+                    user_id=user.id,
+                    is_active=True
+                ).filter(
+                    UserResetPasswordLog.deleted_date.is_(None)
+                ).all()
+                
+                for existing_log in existing_logs:
+                    existing_log.is_active = False
+                    existing_log.deleted_date = datetime.now(timezone.utc)
+                
+                # Log the password reset request
+                reset_log = UserResetPasswordLog(
+                    user_id=user.id,
+                    user_agent=user_agent,
+                    jwt=reset_token,
+                    device_type=device_type,
+                    ip_address=ip_address,
+                    user_identification=email,
+                    expires=now + timedelta(hours=1)
+                )
+                session.add(reset_log)
+                session.flush()
+                
                 # Get frontend URL for reset link
                 frontend_url = 'https://geppdata.com'
                 reset_link = f"{frontend_url}/reset-password?token={reset_token}"
@@ -975,20 +1032,32 @@ class AuthHandlers:
             # Verify and decode the reset token
             try:
                 payload = jwt.decode(token, self.jwt_secret, algorithms=['HS256'])
-            except jwt.ExpiredSignatureError:
-                raise UnauthorizedException('Reset token has expired. Please request a new password reset.')
-            except jwt.InvalidTokenError as e:
-                raise UnauthorizedException('Invalid reset token')
+            except (jwt.ExpiredSignatureError, jwt.InvalidTokenError):
+                raise UnauthorizedException('Invalid request')
 
             # Check if it's a password reset token
             if payload.get('type') != 'password_reset':
-                raise UnauthorizedException('Invalid token type')
+                raise UnauthorizedException('Invalid request')
 
             user_id = payload.get('user_id')
             if not user_id:
-                raise UnauthorizedException('Invalid token payload')
+                raise UnauthorizedException('Invalid request')
 
             session = self.db_session
+            
+            # Check if the JWT and user_id match a record in user_reset_password_log
+            reset_log = session.query(UserResetPasswordLog).filter_by(
+                user_id=user_id,
+                jwt=token,
+                is_active=True
+            ).filter(
+                UserResetPasswordLog.deleted_date.is_(None),
+                UserResetPasswordLog.expires > datetime.now(timezone.utc)
+            ).first()
+
+            if not reset_log:
+                raise UnauthorizedException('Invalid request')
+
             # Find user by ID
             user = session.query(UserLocation).filter_by(
                 id=user_id,
@@ -997,13 +1066,18 @@ class AuthHandlers:
             ).first()
 
             if not user:
-                raise NotFoundException('User not found')
+                raise UnauthorizedException('Invalid request')
 
             # Hash the new password
             hashed_password = self.hash_password(password)
 
             # Update user password
             user.password = hashed_password
+            
+            # Mark the reset log as used (soft delete) to prevent reuse
+            reset_log.is_active = False
+            reset_log.deleted_date = datetime.now(timezone.utc)
+            
             session.commit()
 
             return {
