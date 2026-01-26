@@ -7,6 +7,7 @@ import jwt
 import bcrypt
 import json
 import secrets
+import boto3
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional
 
@@ -48,6 +49,57 @@ class AuthHandlers:
     def generate_secret_key(self) -> str:
         """Generate a random secret key for integration authentication (64 characters)"""
         return secrets.token_urlsafe(48)  # Generates ~64 characters
+
+    def _send_email_via_lambda(self, to_email: str, subject: str, html_content: str, text_content: str = None) -> bool:
+        """Send email via Lambda function PROD-GEPPEmailNotification"""
+        try:
+            lambda_function_name = os.environ.get('EMAIL_LAMBDA_FUNCTION', 'PROD-GEPPEmailNotification')
+            
+            # Format Mailchimp message object
+            message = {
+                "from_email": os.environ.get('EMAIL_FROM', 'noreply@gepp.me'),
+                "from_name": os.environ.get('EMAIL_FROM_NAME', 'GEPP Platform'),
+                "to": [{"email": to_email, "type": "to"}],
+                "subject": subject,
+                "html": html_content,
+            }
+            
+            if text_content:
+                message["text"] = text_content
+            
+            # Invoke Lambda function
+            lambda_client = boto3.client('lambda')
+            response = lambda_client.invoke(
+                FunctionName=lambda_function_name,
+                InvocationType='RequestResponse',
+                Payload=json.dumps({
+                    "data": {
+                        "message": message
+                    }
+                }).encode('utf-8')
+            )
+            
+            # Read response
+            response_payload = response.get('Payload').read()
+            response_data = json.loads(response_payload)
+            
+            # Check if Lambda returned success
+            if response.get('FunctionError'):
+                print(f"Lambda function error: {response.get('FunctionError')}")
+                return False
+            
+            # Check response body
+            if isinstance(response_data, dict):
+                if 'body' in response_data:
+                    body_data = json.loads(response_data.get('body', '{}'))
+                    if body_data.get('data', {}).get('status') == 'success':
+                        return True
+            
+            return False
+            
+        except Exception as e:
+            print(f"Error sending email via Lambda: {str(e)}")
+            return False
 
     def generate_jwt_tokens(self, user_id: int, organization_id: int, email: str) -> Dict[str, str]:
         """Generate JWT auth_token and refresh_token"""
@@ -791,4 +843,176 @@ class AuthHandlers:
 
         except Exception as e:
             raise APIException(str(e))
+
+    def forgot_password(self, data: Dict[str, Any], **kwargs) -> Dict[str, Any]:
+        """Handle forgot password request - generates reset token"""
+        try:
+            email = data.get('email', '').strip().lower()
+
+            if not email:
+                raise ValidationException('Email is required')
+
+            # Check email format
+            if '@' not in email or '.' not in email.split('@')[-1]:
+                raise ValidationException('Invalid email format')
+
+            session = self.db_session
+            # Find user by email
+            user = session.query(UserLocation).filter_by(
+                email=email,
+                is_active=True,
+                is_user=True
+            ).first()
+
+            # Always return success to prevent email enumeration attacks
+            # Don't reveal whether the email exists or not
+            if user:
+                # Generate password reset token (JWT with 1 hour expiration)
+                now = datetime.now(timezone.utc)
+                reset_payload = {
+                    'user_id': user.id,
+                    'email': email,
+                    'type': 'password_reset',
+                    'exp': now + timedelta(hours=1),  # Token expires in 1 hour
+                    'iat': now
+                }
+                
+                reset_token = jwt.encode(reset_payload, self.jwt_secret, algorithm='HS256')
+                
+                # Get frontend URL for reset link
+                frontend_url = 'https://geppdata.com'
+                reset_link = f"{frontend_url}/reset-password?token={reset_token}"
+                
+                # Prepare email content
+                subject = "Reset Your Password - GEPP Platform"
+                html_content = f"""
+                <html>
+                <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+                    <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
+                        <h2 style="color: #2c3e50;">Password Reset Request</h2>
+                        <p>Hello,</p>
+                        <p>We received a request to reset your password for your GEPP Platform account.</p>
+                        <p>Click the button below to reset your password:</p>
+                        <p style="text-align: center; margin: 30px 0;">
+                            <a href="{reset_link}" 
+                               style="background-color: #3498db; color: white; padding: 12px 30px; 
+                                      text-decoration: none; border-radius: 5px; display: inline-block;">
+                                Reset Password
+                            </a>
+                        </p>
+                        <p>Or copy and paste this link into your browser:</p>
+                        <p style="word-break: break-all; color: #7f8c8d; font-size: 12px;">{reset_link}</p>
+                        <p><strong>This link will expire in 1 hour.</strong></p>
+                        <p>If you didn't request a password reset, please ignore this email. Your password will remain unchanged.</p>
+                        <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+                        <p style="color: #7f8c8d; font-size: 12px;">
+                            This is an automated message, please do not reply to this email.
+                        </p>
+                    </div>
+                </body>
+                </html>
+                """
+                
+                text_content = f"""
+                    Password Reset Request
+
+                    Hello,
+
+                    We received a request to reset your password for your GEPP Platform account.
+
+                    Click the link below to reset your password:
+                    {reset_link}
+
+                    This link will expire in 1 hour.
+
+                    If you didn't request a password reset, please ignore this email. Your password will remain unchanged.
+
+                    This is an automated message, please do not reply to this email.
+                """
+                
+                # Send email via Lambda
+                email_sent = self._send_email_via_lambda(
+                    to_email=email,
+                    subject=subject,
+                    html_content=html_content,
+                    text_content=text_content
+                )
+                
+                return {
+                    'success': True,
+                    'message': 'If an account with that email exists, a password reset link has been sent.',
+                    'reset_token_sent': email_sent
+                }
+            else:
+                # User doesn't exist, but return same response for security
+                return {
+                    'success': True,
+                    'message': 'If an account with that email exists, a password reset link has been sent.',
+                    'reset_token_sent': False
+                }
+
+        except ValidationException:
+            raise
+        except Exception as e:
+            raise APIException(f'Failed to process forgot password request: {str(e)}')
+
+    def reset_password(self, data: Dict[str, Any], **kwargs) -> Dict[str, Any]:
+        """Handle password reset with token and new password"""
+        try:
+            token = data.get('token', '').strip()
+            password = data.get('password', '').strip()
+
+            if not token:
+                raise ValidationException('Token is required')
+            
+            if not password:
+                raise ValidationException('Password is required')
+            
+            # Validate password strength (basic check)
+            if len(password) < 8:
+                raise ValidationException('Password must be at least 8 characters long')
+
+            # Verify and decode the reset token
+            try:
+                payload = jwt.decode(token, self.jwt_secret, algorithms=['HS256'])
+            except jwt.ExpiredSignatureError:
+                raise UnauthorizedException('Reset token has expired. Please request a new password reset.')
+            except jwt.InvalidTokenError as e:
+                raise UnauthorizedException('Invalid reset token')
+
+            # Check if it's a password reset token
+            if payload.get('type') != 'password_reset':
+                raise UnauthorizedException('Invalid token type')
+
+            user_id = payload.get('user_id')
+            if not user_id:
+                raise UnauthorizedException('Invalid token payload')
+
+            session = self.db_session
+            # Find user by ID
+            user = session.query(UserLocation).filter_by(
+                id=user_id,
+                is_active=True,
+                is_user=True
+            ).first()
+
+            if not user:
+                raise NotFoundException('User not found')
+
+            # Hash the new password
+            hashed_password = self.hash_password(password)
+
+            # Update user password
+            user.password = hashed_password
+            session.commit()
+
+            return {
+                'success': True,
+                'message': 'Password has been reset successfully. You can now login with your new password.'
+            }
+
+        except (ValidationException, UnauthorizedException, NotFoundException):
+            raise
+        except Exception as e:
+            raise APIException(f'Failed to reset password: {str(e)}')
                 

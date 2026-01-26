@@ -42,6 +42,10 @@ def handle_auth_routes(path: str, data: dict, **commonParams):
             return auth_handler.refresh_token(data, **commonParams)
         elif internal_path == "/iot-devices/login":
             return auth_handler.login_iot_device(data, **commonParams)
+        elif internal_path == "/forgot-password":
+            return auth_handler.forgot_password(data, **commonParams)
+        elif internal_path == "/reset-password":
+            return auth_handler.reset_password(data, **commonParams)
         else:
             raise NotFoundException(f"POST endpoint not found: {internal_path}")
     
