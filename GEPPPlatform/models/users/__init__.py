@@ -6,6 +6,7 @@ from .user_location import UserLocation, user_subusers
 from .user_related import UserBank, UserSubscription, UserInputChannel, UserRole, UserRoleEnum, UserLocationTag
 from .integration_tokens import IntegrationToken
 from .user_location_materials import UserLocationMaterial
+from .user_reset_password_log import UserResetPasswordLog
 
 __all__ = [
     # Main user-location model
@@ -19,6 +20,9 @@ __all__ = [
 
     # Integration tokens
     'IntegrationToken',
+
+    # Password reset logs
+    'UserResetPasswordLog',
 
     # Associations
     'UserLocationMaterial'
