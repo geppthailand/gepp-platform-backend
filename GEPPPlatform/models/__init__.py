@@ -44,6 +44,9 @@ from .audit_rules import AuditRule, RuleType
 # Import AI audit models
 from .ai_audit_models import AiAuditRuleSet, AiAuditResponsePattern
 
+# Import custom API models
+from .custom import CustomApi, OrganizationCustomApi
+
 # Add input_channels relationship to UserLocation
 from sqlalchemy.orm import relationship
 from .users.user_location import UserLocation
@@ -124,5 +127,8 @@ __all__ = [
     'AuditRule', 'RuleType',
 
     # AI Audit models
-    'AiAuditRuleSet', 'AiAuditResponsePattern'
+    'AiAuditRuleSet', 'AiAuditResponsePattern',
+    
+    # Custom API models
+    'CustomApi', 'OrganizationCustomApi'
 ]

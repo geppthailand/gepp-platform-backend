@@ -128,12 +128,20 @@ class AuthHandlers:
         try:
             # First decode without verification to check token type
             unverified_payload = jwt.decode(token, options={"verify_signature": False})
+            
+            # Add logging for custom API paths
+            if path and "/api/userapi/" in path:
+                print(f"[CUSTOM_API_AUTH] Verifying JWT for path: {path}")
+                print(f"[CUSTOM_API_AUTH] Token type: {unverified_payload.get('type')}")
+                print(f"[CUSTOM_API_AUTH] Token payload (unverified): {unverified_payload}")
 
             # Check if this is an integration token
             if unverified_payload.get('type') == 'integration':
                 # Integration tokens must be used on /api/integration/* routes only
                 if path and not path.startswith('/api/integration'):
                     print(f"Integration token used on non-integration route: {path}")
+                    if path and "/api/userapi/" in path:
+                        print(f"[CUSTOM_API_AUTH] REJECTION: Integration token cannot be used on custom API routes")
                     return None
 
                 # Get user's secret key from database
@@ -154,19 +162,29 @@ class AuthHandlers:
             else:
                 # Regular tokens - verify with global secret
                 payload = jwt.decode(token, self.jwt_secret, algorithms=['HS256'])
+                
+                if path and "/api/userapi/" in path:
+                    print(f"[CUSTOM_API_AUTH] Token verified successfully!")
+                    print(f"[CUSTOM_API_AUTH] Verified payload: {payload}")
 
                 # Regular tokens cannot access /api/integration/* routes
                 if path and path.startswith('/api/integration'):
                     print(f"Regular token used on integration route: {path}")
+                    if path and "/api/userapi/" in path:
+                        print(f"[CUSTOM_API_AUTH] REJECTION: Should not reach here for userapi")
                     return None
 
                 return payload
 
         except jwt.ExpiredSignatureError:
             print("Token expired")
+            if path and "/api/userapi/" in path:
+                print(f"[CUSTOM_API_AUTH] REJECTION: Token expired")
             return None
         except jwt.InvalidTokenError as e:
             print(f"Invalid token: {e}")
+            if path and "/api/userapi/" in path:
+                print(f"[CUSTOM_API_AUTH] REJECTION: Invalid token - {e}")
             return None
 
     def check_email(self, data: Dict[str, Any], **kwargs) -> Dict[str, Any]:
