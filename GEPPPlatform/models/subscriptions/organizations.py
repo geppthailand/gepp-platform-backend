@@ -17,12 +17,23 @@ class Organization(Base, BaseModel):
     subscription_id = Column(BigInteger, ForeignKey('subscriptions.id'))  # Current subscription
     system_role_id = Column(BigInteger, ForeignKey('system_roles.id'))  # System permissions role
     allow_ai_audit = Column(Boolean, default=False)  # Permission to use AI for transaction auditing
-    
+
+    # AI Audit Configuration
+    ai_audit_rule_set_id = Column(BigInteger, ForeignKey('ai_audit_rule_sets.id'), default=1)
+    enable_ai_audit_response_setting = Column(Boolean, default=False)
+    enable_ai_audit_api = Column(Boolean, default=False)
+
+    # Custom API Configuration
+    api_path = Column(String(100), unique=True, nullable=True)  # Unique path for /api/userapi/{api_path}/
+
     # Relationships
     organization_info = relationship("OrganizationInfo", back_populates="organization")
     owner = relationship("UserLocation", foreign_keys=[owner_id])
     subscriptions = relationship("Subscription", foreign_keys="Subscription.organization_id")  # All subscriptions
     system_role = relationship("SystemRole")
+    ai_audit_rule_set = relationship("AiAuditRuleSet", back_populates="organizations", foreign_keys=[ai_audit_rule_set_id])
+    ai_audit_response_patterns = relationship("AiAuditResponsePattern", back_populates="organization", cascade="all, delete-orphan")
+    custom_apis = relationship("OrganizationCustomApi", back_populates="organization", cascade="all, delete-orphan")
     
     @property
     def current_subscription(self):

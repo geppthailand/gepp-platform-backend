@@ -41,6 +41,12 @@ from .logs import *
 # Import audit rules model
 from .audit_rules import AuditRule, RuleType
 
+# Import AI audit models
+from .ai_audit_models import AiAuditRuleSet, AiAuditResponsePattern
+
+# Import custom API models
+from .custom import CustomApi, OrganizationCustomApi
+
 # Add input_channels relationship to UserLocation
 from sqlalchemy.orm import relationship
 from .users.user_location import UserLocation
@@ -118,5 +124,11 @@ __all__ = [
     'KmAuditLog', 'KmConfiguration', 'KmIndexing',
 
     # Audit Rules models
-    'AuditRule', 'RuleType'
+    'AuditRule', 'RuleType',
+
+    # AI Audit models
+    'AiAuditRuleSet', 'AiAuditResponsePattern',
+    
+    # Custom API models
+    'CustomApi', 'OrganizationCustomApi'
 ]

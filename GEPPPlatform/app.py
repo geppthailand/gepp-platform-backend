@@ -35,6 +35,9 @@ from GEPPPlatform.database import get_session
 
 import random
 import string
+import logging
+
+logger = logging.getLogger(__name__)
 
 def main(event, context):
     try:
@@ -135,6 +138,129 @@ def main(event, context):
             elif path == "/health" or "/health" in path:
                 # Health check endpoint (no authorization required)
                 results = {"status": "healthy", "timestamp": datetime.now().isoformat(), "method": http_method}
+
+            elif "/api/userapi/documents/" in path:
+                # PUBLIC: Handle API documentation routes (no authentication required)
+                # Pattern: /api/userapi/documents/{service_path}
+                # Example: /api/userapi/documents/ai_audit/v1
+                try:
+                    # Extract service_path from URL
+                    parts = path.split('/api/userapi/documents/')[1].split('/')
+                    if len(parts) < 1:
+                        return {
+                            "statusCode": 400,
+                            "headers": headers,
+                            "body": json.dumps({
+                                "success": False,
+                                "message": "Invalid documentation path. Expected: /api/userapi/documents/{service_path}",
+                                "error_code": "INVALID_PATH"
+                            })
+                        }
+                    
+                    # Reconstruct service_path (e.g., "ai_audit/v1")
+                    service_path = '/'.join(parts).split('?')[0]
+                    
+                    logger.info(f"Documentation request for service_path: {service_path}")
+                    
+                    # Try to import the swagger module for the service
+                    try:
+                        # Map service_path to function module
+                        # For example: 'ai_audit/v1' -> 'ai_audit_v1'
+                        function_module_name = service_path.replace('/', '_')
+                        
+                        # Import the swagger module dynamically
+                        swagger_module = __import__(
+                            f'GEPPPlatform.services.custom.functions.{function_module_name}.swagger',
+                            fromlist=['get_swagger_spec']
+                        )
+                        
+                        # Get the swagger spec
+                        swagger_spec = swagger_module.get_swagger_spec()
+                        
+                        # Generate Swagger UI HTML page
+                        html_content = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{swagger_spec['info']['title']} - API Documentation</title>
+    <link rel="stylesheet" type="text/css" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.10.5/swagger-ui.css" />
+    <style>
+        body {{
+            margin: 0;
+            padding: 0;
+        }}
+    </style>
+</head>
+<body>
+    <div id="swagger-ui"></div>
+    
+    <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.10.5/swagger-ui-bundle.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.10.5/swagger-ui-standalone-preset.js"></script>
+    <script>
+        window.onload = function() {{
+            const spec = {json.dumps(swagger_spec)};
+            
+            SwaggerUIBundle({{
+                spec: spec,
+                dom_id: '#swagger-ui',
+                deepLinking: true,
+                presets: [
+                    SwaggerUIBundle.presets.apis,
+                    SwaggerUIStandalonePreset
+                ],
+                plugins: [
+                    SwaggerUIBundle.plugins.DownloadUrl
+                ],
+                layout: "StandaloneLayout"
+            }});
+        }};
+    </script>
+</body>
+</html>"""
+                        
+                        return {
+                            "statusCode": 200,
+                            "headers": {
+                                "Content-Type": "text/html; charset=utf-8"
+                            },
+                            "body": html_content
+                        }
+                        
+                    except ImportError as e:
+                        return {
+                            "statusCode": 404,
+                            "headers": headers,
+                            "body": json.dumps({
+                                "success": False,
+                                "message": f"Documentation not found for service: {service_path}",
+                                "error_code": "DOCS_NOT_FOUND",
+                                "detail": str(e)
+                            })
+                        }
+                    except AttributeError:
+                        return {
+                            "statusCode": 500,
+                            "headers": headers,
+                            "body": json.dumps({
+                                "success": False,
+                                "message": "Documentation module does not have get_swagger_spec function",
+                                "error_code": "INVALID_DOCS_MODULE"
+                            })
+                        }
+                        
+                except Exception as docs_err:
+                    logger.error(f"Documentation error: {docs_err}", exc_info=True)
+                    return {
+                        "statusCode": 500,
+                        "headers": headers,
+                        "body": json.dumps({
+                            "success": False,
+                            "message": "Error retrieving documentation",
+                            "error_code": "DOCS_ERROR",
+                            "detail": str(docs_err)
+                        })
+                    }
 
             elif "/api/input-channel/" in path:
                 # Public input channel access (no authorization required)
@@ -319,14 +445,25 @@ def main(event, context):
                 token = auth_header[7:]  # Remove 'Bearer ' prefix
                 # Create AuthHandlers instance for token verification
                 auth_handler = AuthHandlers(session)
+                
+                # Add logging for custom API paths
+                if "/api/userapi/" in path:
+                    logger.info(f"[CUSTOM_API_AUTH] Verifying token for path: {path}")
+                    logger.info(f"[CUSTOM_API_AUTH] Token (first 20 chars): {token[:20]}...")
+                
                 token_data = auth_handler.verify_jwt_token(token, path)
 
                 if token_data is None:
+                    if "/api/userapi/" in path:
+                        logger.error(f"[CUSTOM_API_AUTH] Token verification FAILED for path: {path}")
                     return {
                         "statusCode": 401,
                         "headers": headers,
                         "body": json.dumps({'success': False, 'message': 'Invalid token or insufficient permissions'})
                     }
+                
+                if "/api/userapi/" in path:
+                    logger.info(f"[CUSTOM_API_AUTH] Token verification SUCCESS - token_data: {token_data}")
                 if '/api/iot-devices' in path:
                     current_device = {
                         'device_id': token_data['device_id'],
@@ -508,9 +645,267 @@ def main(event, context):
                                 })
                             }
 
+                    elif "/api/userapi/" in path:
+                        # Handle custom API routes: /api/userapi/{api_path}/{service_path}/...
+                        from .services.custom.custom_api_service import CustomApiService
+                        from .services.custom import execute_custom_function
+                        
+                        try:
+                            # Extract api_path and service_path from URL
+                            # Pattern: /api/userapi/{api_path}/{service_path}/...
+                            parts = path.split('/api/userapi/')[1].split('/')
+                            if len(parts) < 2:
+                                return {
+                                    "statusCode": 400,
+                                    "headers": headers,
+                                    "body": json.dumps({
+                                        "success": False,
+                                        "message": "Invalid custom API path. Expected: /api/userapi/{api_path}/{service_path}/...",
+                                        "error_code": "INVALID_PATH"
+                                    })
+                                }
+                            
+                            api_path = parts[0]
+                            # Extract service_path and remaining_path
+                            # We need to find where the service_path ends by checking against database
+                            # Try progressively longer paths: "ai_audit", "ai_audit/v1", "ai_audit/v1/test", etc.
+                            remaining_parts = parts[1:]
+                            
+                            logger.info(f"[CUSTOM_API] Parsing URL - api_path={api_path}, remaining_parts={remaining_parts}")
+                            
+                            # Initialize service
+                            custom_api_service = CustomApiService(session)
+                            
+                            # Try to find the service by progressively building the service_path
+                            # Start with just the first segment, then first+second, etc.
+                            service_path = None
+                            remaining_path = ""
+                            custom_api = None
+                            
+                            for i in range(len(remaining_parts), 0, -1):
+                                potential_service_path = '/'.join(remaining_parts[:i]).split('?')[0]
+                                logger.info(f"[CUSTOM_API] Trying service_path: {potential_service_path}")
+                                
+                                # Try to find this service_path in the database
+                                potential_api = custom_api_service.get_custom_api_by_service_path(potential_service_path)
+                                if potential_api:
+                                    service_path = potential_service_path
+                                    remaining_path = '/'.join(remaining_parts[i:]) if i < len(remaining_parts) else ""
+                                    custom_api = potential_api
+                                    logger.info(f"[CUSTOM_API] Found service: {service_path}, remaining: {remaining_path}")
+                                    break
+                            
+                            if not service_path or not custom_api:
+                                # No matching service found
+                                attempted_paths = ['/'.join(remaining_parts[:i]).split('?')[0] for i in range(1, len(remaining_parts) + 1)]
+                                return {
+                                    "statusCode": 404,
+                                    "headers": headers,
+                                    "body": json.dumps({
+                                        "success": False,
+                                        "message": "API service not found",
+                                        "error_code": "API_NOT_FOUND",
+                                        "debug_info": {
+                                            "api_path": api_path,
+                                            "attempted_service_paths": attempted_paths
+                                        }
+                                    })
+                                }
+                            
+                            # Get the organization for this api_path
+                            organization = custom_api_service.get_organization_by_api_path(api_path)
+                            if not organization:
+                                return {
+                                    "statusCode": 404,
+                                    "headers": headers,
+                                    "body": json.dumps({
+                                        "success": False,
+                                        "message": f"Organization not found for api_path: {api_path}",
+                                        "error_code": "ORG_NOT_FOUND",
+                                        "debug_info": {
+                                            "api_path": api_path,
+                                            "service_path": service_path
+                                        }
+                                    })
+                                }
+                            
+                            # Get organization API access
+                            org_api = custom_api_service.get_organization_api_access(organization.id, custom_api.id)
+                            if not org_api:
+                                return {
+                                    "statusCode": 403,
+                                    "headers": headers,
+                                    "body": json.dumps({
+                                        "success": False,
+                                        "message": "Organization does not have access to this API",
+                                        "error_code": "API_ACCESS_DENIED",
+                                        "debug_info": {
+                                            "api_path": api_path,
+                                            "service_path": service_path,
+                                            "organization_id": organization.id,
+                                            "organization_name": organization.name
+                                        }
+                                    })
+                                }
+                            
+                            # Validate access (enabled, not expired, has quota)
+                            try:
+                                # Check if enabled
+                                if not org_api.enable:
+                                    raise APIException(
+                                        status_code=403,
+                                        message="API access is disabled for this organization",
+                                        error_code="API_DISABLED"
+                                    )
+                                
+                                # Check expiration
+                                from datetime import datetime, timezone
+                                if org_api.expired_date and org_api.expired_date < datetime.now(timezone.utc):
+                                    raise APIException(
+                                        status_code=403,
+                                        message="API access has expired",
+                                        error_code="API_EXPIRED"
+                                    )
+                                
+                                # Check API call quota
+                                if not org_api.has_api_quota():
+                                    raise APIException(
+                                        status_code=429,
+                                        message="API call quota exceeded",
+                                        error_code="QUOTA_EXCEEDED"
+                                    )
+                                    
+                                logger.info(f"[CUSTOM_API] Access validated - org_id={organization.id}, api={custom_api.name}")
+                                
+                            except APIException:
+                                raise  # Re-raise API exceptions as-is
+                            
+                            logger.info(f"[CUSTOM_API] JWT current_user: {current_user}")
+                            # This prevents users from accessing other organizations' APIs even with valid tokens
+                            token_org_id = current_user.get('organization_id')
+                            logger.info(f"[CUSTOM_API] Org match check - token_org_id={token_org_id}, api_org_id={organization.id}")
+                            
+                            if not token_org_id:
+                                logger.warning(f"[CUSTOM_API] Missing organization_id in JWT token")
+                                return {
+                                    "statusCode": 403,
+                                    "headers": headers,
+                                    "body": json.dumps({
+                                        "success": False,
+                                        "message": "JWT token does not contain organization_id claim",
+                                        "error_code": "MISSING_ORG_CLAIM",
+                                        "debug_info": {
+                                            "api_path": api_path,
+                                            "service_path": service_path,
+                                            "jwt_claims": list(current_user.keys()) if current_user else []
+                                        }
+                                    })
+                                }
+                            
+                            if token_org_id != organization.id:
+                                logger.warning(f"[CUSTOM_API] Organization mismatch: JWT token org_id={token_org_id}, api_path org_id={organization.id}")
+                                return {
+                                    "statusCode": 403,
+                                    "headers": headers,
+                                    "body": json.dumps({
+                                        "success": False,
+                                        "message": "Access denied. Your organization does not match this API path.",
+                                        "error_code": "ORG_MISMATCH",
+                                        "debug_info": {
+                                            "api_path": api_path,
+                                            "service_path": service_path,
+                                            "jwt_organization_id": token_org_id,
+                                            "api_organization_id": organization.id,
+                                            "api_organization_name": organization.name
+                                        }
+                                    })
+                                }
+                            
+                            logger.info(f"[CUSTOM_API] Organization match successful - proceeding to execute function")
+                            
+                            # Execute the custom function
+                            result = execute_custom_function(
+                                root_fn_name=custom_api.root_fn_name,
+                                db_session=session,
+                                organization_id=organization.id,
+                                method=http_method,
+                                path=remaining_path,
+                                query_params=query_params,
+                                body=body,
+                                headers=event.get("headers", {})
+                            )
+                            
+                            # Record API usage (increment counters)
+                            process_units = result.get('process_units', 0)  # Functions can report units consumed
+                            custom_api_service.record_api_call(org_api, process_units)
+                            
+                            # Return result
+                            results = {
+                                "success": True,
+                                "data": result,
+                                "quota": custom_api_service.get_quota_status(org_api)
+                            }
+                            
+                        except APIException as api_err:
+                            # Custom API validation errors (already have proper status codes)
+                            error_detail = {
+                                "success": False,
+                                "message": api_err.message,
+                                "error_code": api_err.error_code,
+                                "debug_info": {
+                                    "api_path": api_path,
+                                    "service_path": service_path,
+                                    "status_code": api_err.status_code
+                                }
+                            }
+                            logger.error(f"[CUSTOM_API] APIException: {api_err.error_code} - {api_err.message}")
+                            return {
+                                "statusCode": api_err.status_code,
+                                "headers": headers,
+                                "body": json.dumps(error_detail)
+                            }
+                        except ValueError as val_err:
+                            # Function not found in registry
+                            error_detail = {
+                                "success": False,
+                                "message": str(val_err),
+                                "error_code": "FUNCTION_NOT_FOUND",
+                                "debug_info": {
+                                    "api_path": api_path,
+                                    "service_path": service_path,
+                                    "function_registry_name": custom_api.root_fn_name if 'custom_api' in locals() else None
+                                }
+                            }
+                            logger.error(f"[CUSTOM_API] Function not found: {val_err}")
+                            return {
+                                "statusCode": 404,
+                                "headers": headers,
+                                "body": json.dumps(error_detail)
+                            }
+                        except Exception as custom_err:
+                            logger.error(f"[CUSTOM_API] Unexpected error: {custom_err}", exc_info=True)
+                            error_detail = {
+                                "success": False,
+                                "message": "Internal error processing custom API request",
+                                "error_code": "CUSTOM_API_ERROR",
+                                "error_type": type(custom_err).__name__,
+                                "detail": str(custom_err),
+                                "debug_info": {
+                                    "api_path": api_path if 'api_path' in locals() else None,
+                                    "service_path": service_path if 'service_path' in locals() else None
+                                }
+                            }
+                            return {
+                                "statusCode": 500,
+                                "headers": headers,
+                                "body": json.dumps(error_detail)
+                            }
+
+
+
                     else:
                         # Handle other future modules here
-                        available_routes = ["/api/auth/*", "/api/users/*", "/api/organizations/*", "/api/materials/*", "/api/locations/*", "/api/reports/*", "/api/transactions/*", "/api/transaction_audit/*", "/api/audit/*", "/api/debug/*", "/api/integration/*", "/health"]
+                        available_routes = ["/api/auth/*", "/api/users/*", "/api/organizations/*", "/api/materials/*", "/api/locations/*", "/api/reports/*", "/api/transactions/*", "/api/transaction_audit/*", "/api/audit/*", "/api/debug/*", "/api/integration/*", "/api/userapi/{api_path}/{service_path}/*", "/health"]
                         return {
                             "statusCode": 404,
                             "headers": headers,

@@ -106,6 +106,9 @@ class OrganizationService:
             'name': org.name,
             'description': org.description,
             'allow_ai_audit': org.allow_ai_audit if hasattr(org, 'allow_ai_audit') else False,
+            'ai_audit_rule_set_id': org.ai_audit_rule_set_id if hasattr(org, 'ai_audit_rule_set_id') else None,
+            'enable_ai_audit_response_setting': org.enable_ai_audit_response_setting if hasattr(org, 'enable_ai_audit_response_setting') else False,
+            'enable_ai_audit_api': org.enable_ai_audit_api if hasattr(org, 'enable_ai_audit_api') else False,
             'info': {
                 'company_name': org.organization_info.company_name,
                 'account_type': org.organization_info.account_type,

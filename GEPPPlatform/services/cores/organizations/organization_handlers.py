@@ -55,7 +55,10 @@ def organization_routes(event: Dict[str, Any], context: Any, **params) -> Dict[s
     # Use the provided database session
     org_service = OrganizationService(db_session)
 
-    if method == 'GET' and '/api/organizations/my-organization' in path:
+    if method == 'GET' and '/api/organizations/me' in path:
+        return handle_get_my_organization(org_service, user_id, headers)
+
+    elif method == 'GET' and '/api/organizations/my-organization' in path:
         return handle_get_my_organization(org_service, user_id, headers)
 
     elif method == 'GET' and '/api/organizations/roles' in path:
