@@ -7,6 +7,7 @@ import jwt
 import bcrypt
 import json
 import secrets
+import boto3
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional
 
@@ -17,6 +18,7 @@ from sqlalchemy.orm import Session, joinedload
 # Database imports
 from GEPPPlatform.models.users.user_location import UserLocation
 from GEPPPlatform.models.users.integration_tokens import IntegrationToken
+from GEPPPlatform.models.users.user_reset_password_log import UserResetPasswordLog
 from GEPPPlatform.models.subscriptions.organizations import Organization, OrganizationInfo
 from GEPPPlatform.models.subscriptions.subscription_models import SubscriptionPlan, Subscription
 from GEPPPlatform.models.cores.iot_devices import IoTDevice
@@ -48,6 +50,57 @@ class AuthHandlers:
     def generate_secret_key(self) -> str:
         """Generate a random secret key for integration authentication (64 characters)"""
         return secrets.token_urlsafe(48)  # Generates ~64 characters
+
+    def _send_email_via_lambda(self, to_email: str, subject: str, html_content: str, text_content: str = None) -> bool:
+        """Send email via Lambda function PROD-GEPPEmailNotification"""
+        try:
+            lambda_function_name = os.environ.get('EMAIL_LAMBDA_FUNCTION', 'PROD-GEPPEmailNotification')
+            
+            # Format Mailchimp message object
+            message = {
+                "from_email": os.environ.get('EMAIL_FROM', 'noreply@gepp.me'),
+                "from_name": os.environ.get('EMAIL_FROM_NAME', 'GEPP Platform'),
+                "to": [{"email": to_email, "type": "to"}],
+                "subject": subject,
+                "html": html_content,
+            }
+            
+            if text_content:
+                message["text"] = text_content
+            
+            # Invoke Lambda function
+            lambda_client = boto3.client('lambda')
+            response = lambda_client.invoke(
+                FunctionName=lambda_function_name,
+                InvocationType='RequestResponse',
+                Payload=json.dumps({
+                    "data": {
+                        "message": message
+                    }
+                }).encode('utf-8')
+            )
+            
+            # Read response
+            response_payload = response.get('Payload').read()
+            response_data = json.loads(response_payload)
+            
+            # Check if Lambda returned success
+            if response.get('FunctionError'):
+                print(f"Lambda function error: {response.get('FunctionError')}")
+                return False
+            
+            # Check response body
+            if isinstance(response_data, dict):
+                if 'body' in response_data:
+                    body_data = json.loads(response_data.get('body', '{}'))
+                    if body_data.get('data', {}).get('status') == 'success':
+                        return True
+            
+            return False
+            
+        except Exception as e:
+            print(f"Error sending email via Lambda: {str(e)}")
+            return False
 
     def generate_jwt_tokens(self, user_id: int, organization_id: int, email: str) -> Dict[str, str]:
         """Generate JWT auth_token and refresh_token"""
@@ -809,4 +862,249 @@ class AuthHandlers:
 
         except Exception as e:
             raise APIException(str(e))
+
+    def forgot_password(self, data: Dict[str, Any], **kwargs) -> Dict[str, Any]:
+        """Handle forgot password request - generates reset token"""
+        try:
+            email = data.get('email', '').strip().lower()
+
+            if not email:
+                raise ValidationException('Email is required')
+
+            # Check email format
+            if '@' not in email or '.' not in email.split('@')[-1]:
+                raise ValidationException('Invalid email format')
+
+            session = self.db_session
+            # Find user by email
+            user = session.query(UserLocation).filter_by(
+                email=email,
+                is_active=True,
+                is_user=True
+            ).first()
+
+            # Always return success to prevent email enumeration attacks
+            # Don't reveal whether the email exists or not
+            if user:
+                # Generate password reset token (JWT with 1 hour expiration)
+                now = datetime.now(timezone.utc)
+                reset_payload = {
+                    'user_id': user.id,
+                    'email': email,
+                    'type': 'password_reset',
+                    'exp': now + timedelta(hours=1),  # Token expires in 1 hour
+                    'iat': now
+                }
+                
+                reset_token = jwt.encode(reset_payload, self.jwt_secret, algorithm='HS256')
+                
+                # Extract request information from headers
+                headers = kwargs.get('headers', {})
+                # Headers can be lowercase or mixed case, check both
+                user_agent = (
+                    headers.get('User-Agent') or 
+                    headers.get('user-agent') or 
+                    headers.get('USER-AGENT') or 
+                    ''
+                )
+                ip_address = (
+                    headers.get('X-Forwarded-For') or 
+                    headers.get('x-forwarded-for') or 
+                    headers.get('X-FORWARDED-FOR') or 
+                    ''
+                )
+                # Extract first IP if X-Forwarded-For contains multiple IPs
+                if ip_address:
+                    ip_address = ip_address.split(',')[0].strip()
+                # Extract device type information from parentheses in user agent
+                device_type = 'unknown'
+                if user_agent:
+                    import re
+                    # Extract content from first set of parentheses (usually contains device/platform info)
+                    # Example: (Macintosh; Intel Mac OS X 10_15_7) -> "Macintosh; Intel Mac OS X 10_15_7"
+                    match = re.search(r'\(([^)]+)\)', user_agent)
+                    if match:
+                        device_type = match.group(1)
+                    else:
+                        # If no parentheses found, use first 100 chars of user agent
+                        device_type = user_agent[:100] if len(user_agent) > 100 else user_agent
+                
+                # Deactivate any existing active reset requests for this user (only 1 active request per user)
+                existing_logs = session.query(UserResetPasswordLog).filter_by(
+                    user_id=user.id,
+                    is_active=True
+                ).filter(
+                    UserResetPasswordLog.deleted_date.is_(None)
+                ).all()
+                
+                for existing_log in existing_logs:
+                    existing_log.is_active = False
+                    existing_log.deleted_date = datetime.now(timezone.utc)
+                
+                # Log the password reset request
+                reset_log = UserResetPasswordLog(
+                    user_id=user.id,
+                    user_agent=user_agent,
+                    jwt=reset_token,
+                    device_type=device_type,
+                    ip_address=ip_address,
+                    user_identification=email,
+                    expires=now + timedelta(hours=1)
+                )
+                session.add(reset_log)
+                session.flush()
+                
+                # Get frontend URL for reset link
+                frontend_url = 'https://geppdata.com'
+                reset_link = f"{frontend_url}/reset-password?token={reset_token}"
+                
+                # Prepare email content
+                subject = "Reset Your Password - GEPP Platform"
+                html_content = f"""
+                <html>
+                <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+                    <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
+                        <h2 style="color: #2c3e50;">Password Reset Request</h2>
+                        <p>Hello,</p>
+                        <p>We received a request to reset your password for your GEPP Platform account.</p>
+                        <p>Click the button below to reset your password:</p>
+                        <p style="text-align: center; margin: 30px 0;">
+                            <a href="{reset_link}" 
+                               style="background-color: #3498db; color: white; padding: 12px 30px; 
+                                      text-decoration: none; border-radius: 5px; display: inline-block;">
+                                Reset Password
+                            </a>
+                        </p>
+                        <p>Or copy and paste this link into your browser:</p>
+                        <p style="word-break: break-all; color: #7f8c8d; font-size: 12px;">{reset_link}</p>
+                        <p><strong>This link will expire in 1 hour.</strong></p>
+                        <p>If you didn't request a password reset, please ignore this email. Your password will remain unchanged.</p>
+                        <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+                        <p style="color: #7f8c8d; font-size: 12px;">
+                            This is an automated message, please do not reply to this email.
+                        </p>
+                    </div>
+                </body>
+                </html>
+                """
+                
+                text_content = f"""
+                    Password Reset Request
+
+                    Hello,
+
+                    We received a request to reset your password for your GEPP Platform account.
+
+                    Click the link below to reset your password:
+                    {reset_link}
+
+                    This link will expire in 1 hour.
+
+                    If you didn't request a password reset, please ignore this email. Your password will remain unchanged.
+
+                    This is an automated message, please do not reply to this email.
+                """
+                
+                # Send email via Lambda
+                email_sent = self._send_email_via_lambda(
+                    to_email=email,
+                    subject=subject,
+                    html_content=html_content,
+                    text_content=text_content
+                )
+                
+                return {
+                    'success': True,
+                    'message': 'If an account with that email exists, a password reset link has been sent.',
+                    'reset_token_sent': email_sent
+                }
+            else:
+                # User doesn't exist, but return same response for security
+                return {
+                    'success': True,
+                    'message': 'If an account with that email exists, a password reset link has been sent.',
+                    'reset_token_sent': False
+                }
+
+        except ValidationException:
+            raise
+        except Exception as e:
+            raise APIException(f'Failed to process forgot password request: {str(e)}')
+
+    def reset_password(self, data: Dict[str, Any], **kwargs) -> Dict[str, Any]:
+        """Handle password reset with token and new password"""
+        try:
+            token = data.get('token', '').strip()
+            password = data.get('password', '').strip()
+
+            if not token:
+                raise ValidationException('Token is required')
+            
+            if not password:
+                raise ValidationException('Password is required')
+            
+            # Validate password strength (basic check)
+            if len(password) < 8:
+                raise ValidationException('Password must be at least 8 characters long')
+
+            # Verify and decode the reset token
+            try:
+                payload = jwt.decode(token, self.jwt_secret, algorithms=['HS256'])
+            except (jwt.ExpiredSignatureError, jwt.InvalidTokenError):
+                raise UnauthorizedException('Invalid request')
+
+            # Check if it's a password reset token
+            if payload.get('type') != 'password_reset':
+                raise UnauthorizedException('Invalid request')
+
+            user_id = payload.get('user_id')
+            if not user_id:
+                raise UnauthorizedException('Invalid request')
+
+            session = self.db_session
+            
+            # Check if the JWT and user_id match a record in user_reset_password_log
+            reset_log = session.query(UserResetPasswordLog).filter_by(
+                user_id=user_id,
+                jwt=token,
+                is_active=True
+            ).filter(
+                UserResetPasswordLog.deleted_date.is_(None),
+                UserResetPasswordLog.expires > datetime.now(timezone.utc)
+            ).first()
+
+            if not reset_log:
+                raise UnauthorizedException('Invalid request')
+
+            # Find user by ID
+            user = session.query(UserLocation).filter_by(
+                id=user_id,
+                is_active=True,
+                is_user=True
+            ).first()
+
+            if not user:
+                raise UnauthorizedException('Invalid request')
+
+            # Hash the new password
+            hashed_password = self.hash_password(password)
+
+            # Update user password
+            user.password = hashed_password
+            
+            # Mark the reset log as used (soft delete) to prevent reuse
+            reset_log.is_active = False
+            reset_log.deleted_date = datetime.now(timezone.utc)
+            
+            session.commit()
+
+            return {
+                'success': True,
+                'message': 'Password has been reset successfully. You can now login with your new password.'
+            }
+
+        except (ValidationException, UnauthorizedException, NotFoundException):
+            raise
+        except Exception as e:
+            raise APIException(f'Failed to reset password: {str(e)}')
                 
