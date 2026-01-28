@@ -19,7 +19,7 @@ def get_swagger_spec() -> Dict[str, Any]:
         "info": {
             "title": "AI Audit V1 API",
             "version": "1.0.0",
-            "description": "AI-powered waste transaction audit API. Analyzes images and validates waste classification using Google Vertex AI.",
+            "description": "AI-powered waste transaction audit API. Receives household waste data, upserts transactions, and dispatches to the organisation's configured audit rule set.",
             "contact": {
                 "name": "GEPP Platform Support",
                 "url": "https://gepp.co.th"
@@ -126,29 +126,51 @@ def get_swagger_spec() -> Dict[str, Any]:
                     }
                 }
             },
-            "/analyze": {
+            "/call": {
                 "post": {
                     "tags": ["Audit"],
-                    "summary": "Analyze transaction",
-                    "description": "Run AI audit on a specific transaction by ID",
-                    "operationId": "analyzeTransaction",
+                    "summary": "Submit household waste data for audit",
+                    "description": "Receives nested household waste data, upserts transactions (using ext_id_1 + ext_id_2 as unique key), and dispatches to the organisation's configured audit rule set. The subdistrict name (แขวง) is matched against user_locations.name_en to resolve origin_id for each transaction.",
+                    "operationId": "callAudit",
                     "requestBody": {
                         "required": True,
                         "content": {
                             "application/json": {
                                 "schema": {
-                                    "$ref": "#/components/schemas/AnalyzeRequest"
+                                    "$ref": "#/components/schemas/CallRequest"
+                                },
+                                "example": {
+                                    "2025-01": {
+                                        "เขตยานนาวา": {
+                                            "แขวงช่องนนทรี": {
+                                                "0000000000001": {
+                                                    "materials": {
+                                                        "general": {"image_url": "https://storage.example.com/general_001.jpg"},
+                                                        "organic": {"image_url": "https://storage.example.com/organic_001.jpg"},
+                                                        "recyclable": {"image_url": "https://storage.example.com/recyclable_001.jpg"},
+                                                        "hazardous": {"image_url": "https://storage.example.com/hazardous_001.jpg"}
+                                                    }
+                                                },
+                                                "0000000000002": {
+                                                    "materials": {
+                                                        "general": {"image_url": "https://storage.example.com/general_002.jpg"},
+                                                        "recyclable": {"image_url": "https://storage.example.com/recyclable_002.jpg"}
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
                     },
                     "responses": {
                         "200": {
-                            "description": "Analysis completed",
+                            "description": "Call processed successfully",
                             "content": {
                                 "application/json": {
                                     "schema": {
-                                        "$ref": "#/components/schemas/AnalyzeResponse"
+                                        "$ref": "#/components/schemas/CallResponse"
                                     }
                                 }
                             }
@@ -285,39 +307,72 @@ def get_swagger_spec() -> Dict[str, Any]:
                         "enabled": {"type": "boolean", "example": True}
                     }
                 },
-                "AnalyzeRequest": {
+                "CallRequest": {
                     "type": "object",
-                    "required": ["transaction_id"],
-                    "properties": {
-                        "transaction_id": {
-                            "type": "integer",
-                            "description": "ID of the transaction to analyze",
-                            "example": 12345
-                        },
-                        "options": {
+                    "description": "Nested household waste data. Structure: { ext_id_1: { district (เขต): { subdistrict (แขวง): { household_id: { materials: { ... } } } } } }. The subdistrict name is matched against user_locations.name_en to resolve transaction.origin_id.",
+                    "additionalProperties": {
+                        "type": "object",
+                        "description": "District level (เขต), keyed by district name",
+                        "additionalProperties": {
                             "type": "object",
-                            "properties": {
-                                "detailed": {
-                                    "type": "boolean",
-                                    "description": "Return detailed analysis",
-                                    "default": True
-                                },
-                                "language": {
-                                    "type": "string",
-                                    "enum": ["thai", "english"],
-                                    "description": "Response language",
-                                    "default": "thai"
+                            "description": "Subdistrict level (แขวง), keyed by subdistrict name. Matched against user_locations.name_en to resolve origin_id.",
+                            "additionalProperties": {
+                                "type": "object",
+                                "description": "Household level, keyed by household_id (13-digit zero-padded string, e.g. '0000000000001'). Used as ext_id_2.",
+                                "properties": {
+                                    "materials": {
+                                        "type": "object",
+                                        "description": "Waste materials for this household. Only 4 keys allowed: general, organic, recyclable, hazardous",
+                                        "properties": {
+                                            "general": {"$ref": "#/components/schemas/MaterialData"},
+                                            "organic": {"$ref": "#/components/schemas/MaterialData"},
+                                            "recyclable": {"$ref": "#/components/schemas/MaterialData"},
+                                            "hazardous": {"$ref": "#/components/schemas/MaterialData"}
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
                 },
-                "AnalyzeResponse": {
+                "MaterialData": {
                     "type": "object",
                     "properties": {
-                        "success": {"type": "boolean"},
-                        "transaction_id": {"type": "integer"},
-                        "audit_result": {"type": "object"}
+                        "image_url": {
+                            "type": "string",
+                            "format": "uri",
+                            "description": "URL of the waste image",
+                            "example": "https://storage.example.com/waste_image.jpg"
+                        }
+                    }
+                },
+                "CallResponse": {
+                    "type": "object",
+                    "properties": {
+                        "success": {"type": "boolean", "example": True},
+                        "calling_id": {"type": "integer", "description": "ID of the custom_api_callings record", "example": 42},
+                        "rule_set": {"type": "string", "description": "Name of the audit rule set executed", "example": "bma_audit_rule_set"},
+                        "transactions": {
+                            "type": "object",
+                            "properties": {
+                                "created": {
+                                    "type": "array",
+                                    "items": {"type": "integer"},
+                                    "description": "IDs of newly created transactions",
+                                    "example": [101, 102]
+                                },
+                                "updated": {
+                                    "type": "array",
+                                    "items": {"type": "integer"},
+                                    "description": "IDs of updated transactions",
+                                    "example": [50]
+                                }
+                            }
+                        },
+                        "audit_result": {
+                            "type": "object",
+                            "description": "Result returned by the audit rule set"
+                        }
                     }
                 },
                 "SyncRequest": {
@@ -361,8 +416,8 @@ def get_swagger_spec() -> Dict[str, Any]:
                             "schema": {"$ref": "#/components/schemas/Error"},
                             "example": {
                                 "success": False,
-                                "message": "transaction_id is required",
-                                "error_code": "MISSING_TRANSACTION_ID"
+                                "message": "Invalid request payload",
+                                "error_code": "BAD_REQUEST"
                             }
                         }
                     }

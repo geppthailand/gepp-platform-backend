@@ -832,7 +832,11 @@ def main(event, context):
                                 path=remaining_path,
                                 query_params=query_params,
                                 body=body,
-                                headers=event.get("headers", {})
+                                headers=event.get("headers", {}),
+                                current_user=current_user,
+                                api_path=api_path,
+                                custom_api_id=custom_api.id,
+                                full_path=path
                             )
                             
                             # Record API usage (increment counters)
