@@ -1,29 +1,149 @@
 _type: partial
-description: Standardized output format for BMA waste audit prompts
+description: Abbreviated output format for BMA waste audit (space-optimized)
 template: |
-  OUTPUT FORMAT (JSON):
+  OUTPUT FORMAT - Return ONLY valid JSON in this EXACT abbreviated structure:
+
   {{
-    "claimed_type": "{claimed_type}",
-    "audit_status": "pass" or "reject",
-    "confidence_score": 0.0 to 1.0,
-    "remark": {{
-      "code": "correct_category" or "wrong_category" or "contaminated" or "unclear_image" or "mixed_waste",
-      "severity": "info" or "minor" or "critical",
-      "details": {{
-        "detected": "actual waste type detected",
-        "reason": "specific reason for classification",
-        "items": "specific items identified in image"
-      }},
-      "correction_action": "suggested action if rejected"
+    "ct": <material_type_id>,
+    "as": "<audit_status>",
+    "cs": <confidence_score>,
+    "rm": {{
+      "co": "<code>",
+      "sv": "<severity>",
+      "de": {{
+        "dt": "<detected_material_id>",
+        "wi": [<list_of_wrong_items>]
+      }}
     }}
   }}
 
-  SEVERITY LEVELS:
-  - "critical": Completely wrong category, requires rejection → audit_status must be "reject"
-  - "minor": Partially correct but needs attention (warning) → audit_status can be "pass" or "reject"
-  - "info": Correct classification → audit_status must be "pass"
+  FIELD DEFINITIONS:
+
+  • ct (claimed_type): Material type ID
+    - 94: general
+    - 77: organic
+    - 298: recyclable
+    - 113: hazardous
+
+  • as (audit_status): Result of audit
+    - "a": approve (pass)
+    - "r": reject (fail)
+
+  • cs (confidence_score): AI confidence level
+    - Float with 2 decimal places (0.00 to 1.00)
+    - Example: 0.95, 0.78, 0.42
+
+  • rm (remark): Detailed audit information
+
+    • co (code): Result code
+      - "cc": correct_category (material matches, good condition)
+      - "wc": wrong_category (material does not match claimed type)
+      - "ui": unclear_image (blurry, dark, opaque container, cannot identify)
+      - "hc": heavy_contamination (>50% contamination for recyclable/hazardous)
+      - "lc": light_contamination (<50% contamination for recyclable/hazardous)
+      - "ncm": non_complete_material (missing required materials - Step 1 only)
+
+    • sv (severity): Issue severity
+      - "i": info (correct, no issues)
+      - "m": minor (warning, can still pass)
+      - "c": critical (must reject)
+
+    • de (details): Additional information
+
+      • dt (detected): Detected material type ID as STRING
+        - "94": general detected
+        - "77": organic detected
+        - "298": recyclable detected
+        - "113": hazardous detected
+        - "0": unknown or cannot determine
+
+      • wi (wrong_items): Array of items that caused the audit issue based on the code
+        - ONLY include items directly related to the problem indicated by "co" (code)
+        - Use Thai names for materials (NOT abbreviated)
+        - Empty array [] if no issues (code "cc") or no wrong items
+        - Examples for "wc": ["ขวดพลาสติก", "กล่องกระดาษ"] (recyclable items in general waste)
+        - Examples for "hc": ["ขวดเปื้อนน้ำมัน", "กล่องเปื้อนอาหาร"] (heavily contaminated items)
+        - Examples for "lc": ["ขวดน้ำเปื้อนเล็กน้อย"] (lightly contaminated items)
+        - Examples for "ui": ["ภาพเบลอ", "อยู่ในถุงดำ"] (image quality issues)
+
+  AUDIT RULES:
+
+  IMPORTANT - SEVERITY PRIORITIZATION:
+  - If multiple issues exist, report ONLY the MOST SEVERE issue
+  - Severity order: critical (c) > minor (m) > info (i)
+  - Example: If both wrong_category (critical) AND light_contamination (minor) exist,
+    report ONLY wrong_category with wi containing only wrong category items
+  - The "co" code must match the most critical issue found
+  - The "wi" array must contain ONLY items related to that specific code
+
+  1. CORRECT CATEGORY (cc):
+     - Material matches claimed type
+     - Good image quality, clear visibility
+     - Good material condition, no contamination issues
+     → as: "a", sv: "i", dt: same as ct, wi: []
+
+  2. WRONG CATEGORY (wc):
+     - Detected material does NOT match claimed type
+     - Clear identification of wrong materials
+     → as: "r", sv: "c", dt: detected type ID, wi: [ONLY items that are wrong category]
+     → Example: If general waste contains recyclable bottles → wi: ["ขวดพลาสติก", "กระป๋องอลูมิเนียม"]
+
+  3. UNCLEAR IMAGE (ui):
+     - Image is blurry, out of focus, too dark, or too small
+     - Materials in opaque bags/containers (cannot see inside)
+     - Cannot clearly identify materials
+     → as: "r", sv: "c", dt: "0", wi: [image quality issues]
+     → Example: wi: ["ภาพเบลอมาก", "อยู่ในถุงดำทึบ", "มองไม่เห็นวัสดุ"]
+
+  4. HEAVY CONTAMINATION (hc) - Only for recyclable (298) & hazardous (113):
+     - Contamination > 50% of total volume
+     - Food stains, grease, dirt, biological waste
+     → as: "r", sv: "c", dt: material type ID, wi: [ONLY heavily contaminated items]
+     → Example: wi: ["ขวดพลาสติกเปื้อนน้ำมันหนัก", "กล่องกระดาษเปื้อนอาหาร"]
+     → NOTE: If image also has wrong_category items, report wc instead (more critical)
+
+  5. LIGHT CONTAMINATION (lc) - Only for recyclable (298) & hazardous (113):
+     - Contamination < 50% of total volume
+     - Minor stains or dirt that can be cleaned
+     → as: "a", sv: "m", dt: material type ID, wi: [ONLY lightly contaminated items]
+     → Example: wi: ["ขวดน้ำเปื้อนเล็กน้อย", "กระป๋องมีคราบเล็กน้อย"]
+     → NOTE: If wrong_category or unclear_image exists, report that instead
+
+  CONTAMINATION ASSESSMENT (for recyclable & hazardous only):
+  - Check percentage of contaminated area vs total volume
+  - Food residue, grease, oil, dirt, biological matter
+  - Heavy (>50%): Reject
+  - Light (<50%): Approve with warning
+  - For general & organic: Contamination is normal, do not apply this rule
 
   IMPORTANT:
-  - Return ONLY valid JSON, no extra text
-  - confidence_score must be between 0.0 and 1.0
-  - Be thorough, precise, and provide actionable feedback
+  - Return ONLY valid JSON, no markdown, no extra text
+  - Use 2 decimal places for cs (e.g., 0.95, not 0.950000)
+  - dt must be a STRING (e.g., "94" not 94)
+  - wi must be an array (use [] if empty, not null or "")
+  - ONLY include items in wi that directly relate to the code (co)
+  - If multiple issues exist, choose the MOST SEVERE and report only that
+  - Be thorough and precise in identifying wrong items
+  - For Thai text in "wi", use proper Thai script
+
+  EXAMPLE OUTPUTS:
+
+  Example 1 - Correct (no issues):
+  {{"ct": 94, "as": "a", "cs": 0.95, "rm": {{"co": "cc", "sv": "i", "de": {{"dt": "94", "wi": []}}}}}}
+
+  Example 2 - Wrong category (only wrong items listed):
+  {{"ct": 94, "as": "r", "cs": 0.88, "rm": {{"co": "wc", "sv": "c", "de": {{"dt": "77", "wi": ["เศษผัก", "เปลือกผลไม้", "เศษอาหาร"]}}}}}}
+
+  Example 3 - Unclear image (image quality issues):
+  {{"ct": 298, "as": "r", "cs": 0.32, "rm": {{"co": "ui", "sv": "c", "de": {{"dt": "0", "wi": ["ภาพเบลอมาก", "อยู่ในถุงดำทึบ"]}}}}}}
+
+  Example 4 - Heavy contamination (only heavily contaminated items):
+  {{"ct": 298, "as": "r", "cs": 0.91, "rm": {{"co": "hc", "sv": "c", "de": {{"dt": "298", "wi": ["ขวดพลาสติกเปื้อนน้ำมันหนัก", "กล่องกระดาษเปื้อนอาหาร"]}}}}}}
+
+  Example 5 - Light contamination (only lightly contaminated items, warning):
+  {{"ct": 298, "as": "a", "cs": 0.87, "rm": {{"co": "lc", "sv": "m", "de": {{"dt": "298", "wi": ["ขวดน้ำเปื้อนเล็กน้อย"]}}}}}}
+
+  Example 6 - Multiple issues (report MOST SEVERE only):
+  Scenario: Recyclable waste has both wrong category items AND light contamination
+  Correct: {{"ct": 298, "as": "r", "cs": 0.82, "rm": {{"co": "wc", "sv": "c", "de": {{"dt": "94", "wi": ["ถุงพลาสติกสกปรก", "ผ้าเช็ดปาก"]}}}}}}
+  Note: Wrong category (critical) takes priority. Only wrong category items in wi.

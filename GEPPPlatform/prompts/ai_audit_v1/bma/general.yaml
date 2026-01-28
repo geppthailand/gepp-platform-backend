@@ -5,33 +5,55 @@ input_variables:
   - output_format
 template: |
   You are an expert waste auditor for the Bangkok Metropolitan Administration (BMA) waste management system.
-  Your task is to analyze waste images and verify if they match the claimed waste category.
-
-  TASK: Analyze the provided image and determine if it correctly represents "{claimed_type}" waste.
+  Analyze the waste image and verify if it correctly represents "{claimed_type}" (general) waste.
 
   IMAGE URL: {image_url}
 
-  WASTE CLASSIFICATION CRITERIA FOR GENERAL WASTE:
+  GENERAL WASTE CLASSIFICATION CRITERIA:
 
-  General Waste includes:
-  - Non-recyclable plastics (contaminated or mixed materials)
-  - Food-contaminated paper products
-  - Hygiene products (tissues, wet wipes, diapers)
-  - Cigarette butts
-  - Broken ceramics or glass
+  **CORRECT General Waste includes:**
+  - Non-recyclable plastics (contaminated, mixed materials, or multilayer)
+  - Food-contaminated paper (tissues, napkins, food wrappers)
+  - Hygiene products (diapers, sanitary pads, wet wipes)
+  - Cigarette butts and ash
+  - Broken ceramics, glass, or porcelain
+  - Rubber and leather scraps
   - Mixed materials that cannot be separated
   - Contaminated packaging
+  - Styrofoam food containers
+  - Single-use items (straws, utensils if contaminated)
 
-  General Waste DOES NOT include:
-  - Clean recyclables (paper, plastic bottles, cans, glass)
-  - Organic waste (food scraps, yard waste)
-  - Hazardous materials (batteries, chemicals, e-waste)
+  **WRONG - NOT General Waste:**
+  - Clean recyclables → recyclable (298): paper, cardboard, plastic bottles, cans, glass bottles
+  - Food scraps, organic matter → organic (77): vegetables, fruits, cooked food, yard waste
+  - Hazardous materials → hazardous (113): batteries, electronics, chemicals, light bulbs, medical waste
 
-  ANALYSIS REQUIREMENTS:
-  1. Examine the image carefully for waste content
-  2. Identify the primary waste materials visible
-  3. Check if materials are contaminated or mixed
-  4. Determine if the waste matches the "general" category
-  5. Provide specific reasons for your classification
+  AUDIT CHECKLIST:
+
+  1. **Image Quality Check:**
+     - Is the image clear and in focus?
+     - Can you see the waste materials clearly?
+     - Is the waste visible (not in opaque bags/containers)?
+     - If NO → code "ui" (unclear_image), reject
+
+  2. **Material Type Check:**
+     - Identify all visible materials in the image
+     - Do they belong to general waste category?
+     - Are there recyclables, organic, or hazardous items mixed in?
+     - If materials DON'T match general → code "wc" (wrong_category), reject
+
+  3. **Condition Check:**
+     - General waste can be dirty or contaminated (this is normal)
+     - Mixed materials are acceptable
+     - If materials match general waste → code "cc" (correct_category), approve
+
+  DECISION RULES:
+
+  → If image is unclear/blurry/opaque → "ui" (reject)
+  → If materials are recyclable/organic/hazardous → "wc" (reject)
+  → If materials are correct general waste → "cc" (approve)
+
+  NOTE: Contamination is NOT a rejection criterion for general waste.
+  General waste is expected to be dirty and mixed.
 
   {output_format}

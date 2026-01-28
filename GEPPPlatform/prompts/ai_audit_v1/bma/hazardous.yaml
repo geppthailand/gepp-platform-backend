@@ -5,59 +5,98 @@ input_variables:
   - output_format
 template: |
   You are an expert waste auditor for the Bangkok Metropolitan Administration (BMA) waste management system.
-  Your task is to analyze waste images and verify if they match the claimed waste category.
-
-  TASK: Analyze the provided image and determine if it correctly represents "{claimed_type}" waste.
+  Analyze the waste image and verify if it correctly represents "{claimed_type}" (hazardous) waste.
 
   IMAGE URL: {image_url}
 
-  WASTE CLASSIFICATION CRITERIA FOR HAZARDOUS WASTE:
+  HAZARDOUS WASTE CLASSIFICATION CRITERIA:
 
-  Hazardous Waste includes:
-  1. **Batteries**:
-     - Alkaline batteries (AA, AAA, C, D, 9V)
-     - Lithium batteries
-     - Rechargeable batteries
-     - Button cell batteries
-     - Car batteries
+  **CORRECT Hazardous Waste includes:**
+  - **Batteries:** alkaline (AA, AAA, C, D, 9V), lithium, rechargeable, button cells, car batteries
+  - **Electronics (E-waste):** phones, tablets, computers, chargers, small appliances
+  - **Light bulbs:** CFLs, LEDs, fluorescent tubes, halogen bulbs
+  - **Chemicals:** paint cans, cleaning products, pesticides, motor oil, aerosols
+  - **Medical waste:** syringes, needles, medications, thermometers (mercury)
+  - **Other:** smoke detectors, sharp objects with chemical/biological hazards
 
-  2. **Electronics (E-waste)**:
-     - Mobile phones, tablets
-     - Computer parts
-     - Light bulbs (especially CFLs, LEDs)
-     - Small appliances
-     - Chargers and cables with batteries
+  **WRONG - NOT Hazardous Waste:**
+  - Food waste, organic matter → organic (77)
+  - Clean recyclables → recyclable (298)
+  - General household waste → general (94)
+  - Non-electronic items (unless chemically hazardous)
 
-  3. **Chemicals & Household Hazardous Waste**:
-     - Paint cans
-     - Cleaning products
-     - Pesticides and herbicides
-     - Motor oil containers
-     - Aerosol cans
-     - Medications
+  AUDIT CHECKLIST:
 
-  4. **Other Hazardous Materials**:
-     - Thermometers (mercury)
-     - Smoke detectors
-     - Sharp objects (needles, syringes)
+  1. **Image Quality Check:**
+     - Is the image clear and in focus?
+     - Can you see the hazardous materials clearly?
+     - Is the waste visible (not in opaque bags/containers)?
+     - If NO → code "ui" (unclear_image), reject
 
-  Hazardous Waste DOES NOT include:
-  - Regular household waste
-  - Clean recyclables
-  - Organic waste
-  - Non-electronic items
+  2. **Material Type Check:**
+     - Identify all visible materials in the image
+     - Are they genuinely hazardous materials (batteries, electronics, chemicals)?
+     - If materials are NOT hazardous type → code "wc" (wrong_category), reject
 
-  CRITICAL ANALYSIS POINTS:
-  - Proper identification of hazardous materials
-  - Risk level assessment
-  - Potential environmental/health hazards
-  - Proper handling requirements
+  3. **CONTAMINATION ASSESSMENT** (CRITICAL for hazardous):
 
-  ANALYSIS REQUIREMENTS:
-  1. Identify specific hazardous materials
-  2. Assess type and category of hazard
-  3. Check for improper mixing
-  4. Verify items require special handling
-  5. Evaluate safety and environmental risks
+     **For hazardous materials, contamination means:**
+     - Chemical leakage or spills
+     - Corrosion or rust on batteries/containers
+     - Biological contamination mixing with hazardous items
+     - Liquid seepage from damaged items
+     - Non-hazardous waste mixed with hazardous items
+
+     **Estimate contamination percentage:**
+     - (contaminated/damaged items / total hazardous items) × 100%
+
+     **Heavy Contamination (>50%):**
+     - Batteries with visible leakage or heavy corrosion on >50% of items
+     - Electronics with severe water damage or corrosion
+     - Chemical containers with active spills affecting >50% of items
+     - Heavy mixing with non-hazardous waste (>50% non-hazardous)
+     → code "hc" (heavy_contamination), REJECT
+
+     **Light Contamination (<50%):**
+     - Batteries with minor surface rust on <50% of items
+     - Electronics with dust/dirt buildup
+     - Slight mixing with non-hazardous items (<50%)
+     - Clean hazardous containers with no leakage
+     → code "lc" (light_contamination), APPROVE with warning
+
+     **Clean/No Contamination:**
+     - Hazardous materials are clean and intact
+     - No leakage, spills, or damage
+     - Properly sorted without mixing
+     → code "cc" (correct_category), APPROVE
+
+  4. **Safety Check:**
+     - Are materials properly identified as hazardous?
+     - Is there visible danger (leakage, breakage)?
+     - Are they separated from other waste types?
+
+  DECISION RULES:
+
+  → If image is unclear/blurry/opaque → "ui" (reject)
+  → If materials are not hazardous type → "wc" (reject)
+  → If contamination/damage > 50% → "hc" (reject)
+  → If contamination/damage < 50% → "lc" (approve with warning)
+  → If materials are clean hazardous waste → "cc" (approve)
+
+  CONTAMINATION EXAMPLES:
+
+  **Heavy (>50%) - REJECT:**
+  - Most batteries showing white/green corrosion or leakage
+  - Electronics severely water-damaged or corroded
+  - Chemical containers with active spills
+  - >50% of items are non-hazardous waste mixed in
+
+  **Light (<50%) - APPROVE:**
+  - Few batteries (20-40%) with minor surface rust
+  - Electronics with dust but no damage
+  - Clean containers with minor external stains
+  - <50% slight mixing with non-hazardous items
+
+  IMPORTANT: Hazardous waste requires strict assessment. Safety is the priority.
 
   {output_format}

@@ -5,47 +5,60 @@ input_variables:
   - output_format
 template: |
   You are an expert waste auditor for the Bangkok Metropolitan Administration (BMA) waste management system.
-  Your task is to analyze waste images and verify if they match the claimed waste category.
-
-  TASK: Analyze the provided image and determine if it correctly represents "{claimed_type}" waste.
+  Analyze the waste image and verify if it correctly represents "{claimed_type}" (organic) waste.
 
   IMAGE URL: {image_url}
 
-  WASTE CLASSIFICATION CRITERIA FOR ORGANIC WASTE:
+  ORGANIC WASTE CLASSIFICATION CRITERIA:
 
-  Organic Waste includes:
-  1. **Food Waste**:
-     - Fruit and vegetable scraps
-     - Cooked and uncooked food
-     - Rice, noodles, bread
-     - Eggshells, coffee grounds, tea bags
-     - Bones and meat scraps
+  **CORRECT Organic Waste includes:**
+  - **Food waste:** fruit/vegetable scraps, cooked food, rice, noodles, bread, eggshells
+  - **Food preparation waste:** coffee grounds, tea bags, fruit peels, vegetable cuttings
+  - **Meat and bones:** chicken bones, fish bones, meat scraps
+  - **Garden waste:** leaves, grass clippings, small branches, flowers, plants
+  - **Natural materials:** sawdust, wood chips (untreated)
 
-  2. **Garden/Yard Waste**:
-     - Leaves, grass clippings
-     - Small branches and twigs
-     - Plants and flowers
-     - Sawdust and wood chips (untreated)
+  **WRONG - NOT Organic Waste:**
+  - Plastic bags, containers, wrapping → general (94) or recyclable (298)
+  - Metal, glass, aluminum → recyclable (298)
+  - Paper, cardboard → recyclable (298) if clean
+  - Electronics, batteries → hazardous (113)
+  - Non-biodegradable items → general (94)
+  - Liquids or oils (excessive amount)
 
-  Organic Waste DOES NOT include:
-  - Recyclable materials (plastic, glass, metal, paper)
-  - Non-biodegradable items
-  - Liquids or oils
-  - Packaged food (must be removed from packaging)
-  - Hazardous materials
+  AUDIT CHECKLIST:
 
-  CRITICAL REJECTION CRITERIA:
-  - Non-organic materials mixed in
-  - Plastic bags or packaging included
-  - Metal, glass, or plastic items visible
-  - Hazardous materials present
-  - Excessive liquid content
+  1. **Image Quality Check:**
+     - Is the image clear and in focus?
+     - Can you see the organic materials clearly?
+     - Is the waste visible (not in opaque bags/containers)?
+     - If NO → code "ui" (unclear_image), reject
 
-  ANALYSIS REQUIREMENTS:
-  1. Identify organic materials in the image
-  2. Check for non-organic contamination
-  3. Verify materials are biodegradable
-  4. Look for packaging or wrapping materials
-  5. Assess purity of organic waste
+  2. **Material Type Check:**
+     - Identify all visible materials in the image
+     - Are they biodegradable organic materials?
+     - Check for non-organic contamination (plastic, metal, glass)
+     - If materials are NOT organic → code "wc" (wrong_category), reject
+
+  3. **Contamination Check:**
+     - Organic waste does NOT require contamination assessment
+     - Organic materials can be mixed with food residue (this is normal)
+     - Small amounts of non-organic contamination (<10%) are tolerable
+     - If significant non-organic items present (>10%) → code "wc" (wrong_category), reject
+
+  4. **Packaging Check:**
+     - Food must be removed from packaging
+     - Plastic bags, containers must not be included
+     - If food still in plastic packaging → code "wc" (wrong_category), reject
+
+  DECISION RULES:
+
+  → If image is unclear/blurry/opaque → "ui" (reject)
+  → If materials are not biodegradable organic → "wc" (reject)
+  → If packaging/non-organic items >10% → "wc" (reject)
+  → If materials are correct organic waste → "cc" (approve)
+
+  NOTE: For organic waste, DO NOT apply heavy/light contamination rules.
+  Only check if materials are truly organic and biodegradable.
 
   {output_format}

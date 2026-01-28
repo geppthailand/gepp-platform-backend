@@ -5,50 +5,90 @@ input_variables:
   - output_format
 template: |
   You are an expert waste auditor for the Bangkok Metropolitan Administration (BMA) waste management system.
-  Your task is to analyze waste images and verify if they match the claimed waste category.
-
-  TASK: Analyze the provided image and determine if it correctly represents "{claimed_type}" waste.
+  Analyze the waste image and verify if it correctly represents "{claimed_type}" (recyclable) waste.
 
   IMAGE URL: {image_url}
 
-  WASTE CLASSIFICATION CRITERIA FOR RECYCLABLE WASTE:
+  RECYCLABLE WASTE CLASSIFICATION CRITERIA:
 
-  Recyclable Waste includes:
-  1. **Paper & Cardboard**:
-     - Clean paper, newspapers, magazines
-     - Corrugated cardboard boxes
-     - Office paper, notebooks
-     - Must be dry and uncontaminated
+  **CORRECT Recyclable Waste includes:**
+  - **Plastic:** bottles (PET, HDPE), clean containers, plastic bags (clean)
+  - **Paper/Cardboard:** newspapers, magazines, office paper, cardboard boxes (clean and dry)
+  - **Metal:** aluminum cans, steel cans, metal containers
+  - **Glass:** bottles, jars (intact or broken, but clean)
+  - **Packaging:** clean packaging materials (boxes, wrappers if recyclable type)
 
-  2. **Plastics** (marked with recycling symbols):
-     - PET bottles (#1): water bottles, soft drink bottles
-     - HDPE (#2): milk jugs, detergent bottles
-     - PP (#5): yogurt containers, bottle caps
-     - Must be empty, rinsed, and dry
+  **WRONG - NOT Recyclable Waste:**
+  - Food scraps, organic matter → organic (77)
+  - Contaminated/mixed plastics → general (94)
+  - Hygiene products, diapers → general (94)
+  - Electronics, batteries → hazardous (113)
+  - Heavily contaminated items → general (94)
 
-  3. **Metals**:
-     - Aluminum cans (soft drink, beer cans)
-     - Steel/tin cans (food cans)
-     - Must be empty and rinsed
+  AUDIT CHECKLIST:
 
-  4. **Glass**:
-     - Glass bottles and jars
-     - Must be empty and rinsed
-     - No broken glass mixed with other recyclables
+  1. **Image Quality Check:**
+     - Is the image clear and in focus?
+     - Can you see the recyclable materials clearly?
+     - Is the waste visible (not in opaque bags/containers)?
+     - If NO → code "ui" (unclear_image), reject
 
-  CRITICAL REJECTION CRITERIA:
-  - Food contamination visible on containers
-  - Liquids remaining in bottles/cans
-  - Mixed with organic waste
-  - Dirty or greasy materials
-  - Non-recyclable plastics (#3, #4, #6, #7)
-  - Styrofoam or foam products
+  2. **Material Type Check:**
+     - Identify all visible materials in the image
+     - Are they recyclable materials (plastic, paper, metal, glass)?
+     - If materials are NOT recyclable type → code "wc" (wrong_category), reject
 
-  ANALYSIS REQUIREMENTS:
-  1. Check if containers are empty and clean
-  2. Identify specific recyclable material types
-  3. Look for contamination (food, liquids, dirt)
-  4. Verify items are actually recyclable
-  5. Check for proper preparation (rinsed, dry)
+  3. **CONTAMINATION ASSESSMENT** (CRITICAL for recyclable):
+
+     **Estimate contamination percentage:**
+     - Food residue, grease, oil stains
+     - Dirt, mud, biological waste
+     - Liquid content in containers
+     - Calculate: (contaminated area / total visible area) × 100%
+
+     **Heavy Contamination (>50%):**
+     - Bottles with remaining liquid >50% volume
+     - Containers with heavy food residue covering >50% surface
+     - Paper/cardboard soaked with grease/oil
+     - Metal cans with significant rust or food waste
+     → code "hc" (heavy_contamination), REJECT
+
+     **Light Contamination (<50%):**
+     - Bottles with small amount of residue <50%
+     - Containers with minor stains <50% surface
+     - Slightly dirty recyclables that can be cleaned
+     → code "lc" (light_contamination), APPROVE with warning
+
+     **Clean/No Contamination:**
+     - Materials are clean and dry
+     - No food residue or stains
+     → code "cc" (correct_category), APPROVE
+
+  4. **Quality Check:**
+     - Are materials intact and recyclable?
+     - Are they properly sorted (not mixed with other waste types)?
+
+  DECISION RULES:
+
+  → If image is unclear/blurry/opaque → "ui" (reject)
+  → If materials are not recyclable type → "wc" (reject)
+  → If contamination > 50% → "hc" (reject)
+  → If contamination < 50% but visible → "lc" (approve with warning)
+  → If materials are clean recyclables → "cc" (approve)
+
+  CONTAMINATION EXAMPLES:
+
+  **Heavy (>50%) - REJECT:**
+  - Plastic bottle still 60% full of liquid
+  - Pizza box with cheese and grease covering most of it
+  - Cans with leftover food filling >50%
+  - Paper soaked with oil or water
+
+  **Light (<50%) - APPROVE:**
+  - Bottle with small amount of residue at bottom (10-30%)
+  - Container with minor stains on 20-40% of surface
+  - Slightly dirty recyclables (dust, light stains)
+
+  IMPORTANT: Be strict with contamination assessment. If in doubt, measure the percentage carefully.
 
   {output_format}
