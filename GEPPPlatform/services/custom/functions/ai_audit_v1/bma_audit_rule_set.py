@@ -19,6 +19,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, Any, List, Optional
+from threading import Lock
 
 import yaml
 from sqlalchemy.orm import Session
@@ -47,6 +48,11 @@ MATERIAL_KEY_TO_ID: Dict[str, int] = {
 }
 
 MODEL_NAME = "gemini-2.5-flash-lite"
+
+# Configurable limits
+MAX_TRANSACTIONS_PER_CALL = 100  # Maximum household_ids per API call
+MAX_TRANSACTION_WORKERS = 10     # Max concurrent transactions
+MAX_MATERIAL_WORKERS = 4         # Max concurrent materials per transaction
 
 # ---------------------------------------------------------------------------
 # Prompt loading helpers
@@ -115,7 +121,7 @@ def _call_gemini_with_langchain(
     material_key: str
 ) -> Dict[str, Any]:
     """
-    Call Gemini 2.0 Flash Exp with LangChain using text prompt + image.
+    Call Gemini 2.5 Flash Lite with LangChain using text prompt + image.
 
     Returns parsed JSON dict or an error dict.
     """
@@ -141,7 +147,11 @@ def _call_gemini_with_langchain(
                 image_data = img_b64
             except Exception as img_err:
                 logger.warning(f"[BMA_AUDIT] Failed to download image {image_url}: {img_err}")
-                return _create_error_response(material_key, "ie", "ไม่สามารถดาวน์โหลดภาพได้")
+                return {
+                    "success": True,
+                    "result": _create_error_response(material_key, "ie", "ไม่สามารถดาวน์โหลดภาพได้"),
+                    "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+                }
 
         # Create message with text and image
         if image_data:
@@ -178,7 +188,8 @@ def _call_gemini_with_langchain(
         return {
             "success": False,
             "error": str(exc),
-            "result": _create_error_response(material_key, "pe", f"เกิดข้อผิดพลาด: {str(exc)}")
+            "result": _create_error_response(material_key, "pe", f"เกิดข้อผิดพลาด: {str(exc)}"),
+            "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
         }
 
 
@@ -242,17 +253,34 @@ def execute(
     **kwargs,
 ) -> Dict[str, Any]:
     """
-    BMA audit rule set – two-step checking.
+    BMA audit rule set – two-step checking with parallel processing.
+
+    Limits: Maximum MAX_TRANSACTIONS_PER_CALL household_ids per API call.
+    Note: User can have only 1 district/subdistrict/ext_id_1 per call.
 
     Step 1: Coverage – verify each transaction has the 3 required material
             records (general, organic, recyclable). hazardous is optional.
     Step 2: Image audit – for every material record that has an image_url,
             call Gemini with LangChain using material-specific prompt.
 
+    Parallel Processing:
+    - Transactions are processed in parallel (max MAX_TRANSACTION_WORKERS concurrent)
+    - Material records within each transaction are processed in parallel (max MAX_MATERIAL_WORKERS concurrent)
+
     Returns abbreviated JSON format for space optimization.
     """
     from GEPPPlatform.models.transactions.transactions import Transaction
     from GEPPPlatform.models.transactions.transaction_records import TransactionRecord
+
+    # Validate transaction count limit
+    if len(transaction_ids) > MAX_TRANSACTIONS_PER_CALL:
+        return {
+            "success": False,
+            "error": "TRANSACTION_LIMIT_EXCEEDED",
+            "message": f"Maximum {MAX_TRANSACTIONS_PER_CALL} household_ids allowed per API call. Received: {len(transaction_ids)}",
+            "limit": MAX_TRANSACTIONS_PER_CALL,
+            "received": len(transaction_ids)
+        }
 
     logger.info(
         f"[BMA_AUDIT] Running for org={organization_id}, "
@@ -265,22 +293,23 @@ def execute(
     # Initialize LangChain Gemini model once
     llm = _get_langchain_gemini()
 
-    results: List[Dict[str, Any]] = []
+    # Thread-safe usage accumulator
     total_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    usage_lock = Lock()
 
-    for txn_id in transaction_ids:
+    def _process_transaction(txn_id: int) -> Dict[str, Any]:
+        """Process a single transaction with parallel material audits."""
         txn = db_session.query(Transaction).filter(
             Transaction.id == txn_id,
             Transaction.deleted_date.is_(None),
         ).first()
 
         if not txn:
-            results.append({
+            return {
                 "transaction_id": txn_id,
                 "step_1": {"status": "error", "message": "Transaction not found"},
                 "step_2": [],
-            })
-            continue
+            }
 
         # Load active records for this transaction
         records = db_session.query(TransactionRecord).filter(
@@ -334,24 +363,23 @@ def execute(
             }
 
         # ------------------------------------------------------------------
-        # Step 2: Image audit per material
+        # Step 2: Image audit per material (parallel)
         # ------------------------------------------------------------------
         step_2_results: List[Dict[str, Any]] = []
 
-        if llm is None:
+        # Skip Step 2 entirely if Step 1 failed or LLM not available
+        if not has_all_required:
+            # Step 1 failed - do not run Step 2
+            pass
+        elif llm is None:
+            # LLM not available - cannot run Step 2
             step_2_results.append({
                 "material": "all",
                 "status": "skipped",
                 "reason": "Gemini LangChain model not available",
             })
-        elif not has_all_required:
-            # Skip Step 2 if Step 1 failed
-            step_2_results.append({
-                "material": "all",
-                "status": "skipped",
-                "reason": "Step 1 failed - incomplete materials",
-            })
         else:
+            # Step 1 passed - run Step 2 with parallel processing
             # Collect audit tasks for materials that have images
             audit_tasks: List[Dict[str, Any]] = []
             for mat_key in sorted(present_keys & ALL_MATERIALS):
@@ -368,15 +396,14 @@ def execute(
                         "result": _create_error_response(mat_key, "ui", "ไม่มีรูปภาพ"),
                         "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
                     })
-                    continue
+                else:
+                    audit_tasks.append({
+                        "material": mat_key,
+                        "record_id": rec.id,
+                        "image_url": image_url,
+                    })
 
-                audit_tasks.append({
-                    "material": mat_key,
-                    "record_id": rec.id,
-                    "image_url": image_url,
-                })
-
-            # Run Gemini calls in parallel (max 4 concurrent)
+            # Run Gemini calls in parallel (max MAX_MATERIAL_WORKERS concurrent)
             def _audit_one(task: Dict[str, Any]) -> Dict[str, Any]:
                 prompt = _render_prompt(task["material"], task["image_url"], output_format)
                 gemini_resp = _call_gemini_with_langchain(
@@ -389,23 +416,45 @@ def execute(
                 }
 
             if audit_tasks:
-                with ThreadPoolExecutor(max_workers=min(4, len(audit_tasks))) as pool:
+                with ThreadPoolExecutor(max_workers=min(MAX_MATERIAL_WORKERS, len(audit_tasks))) as pool:
                     futures = {pool.submit(_audit_one, t): t for t in audit_tasks}
                     for future in as_completed(futures):
                         audit_out = future.result()
                         step_2_results.append(audit_out)
-                        # Accumulate token usage
-                        usage = audit_out.get("usage", {})
-                        for k in total_usage:
-                            total_usage[k] += usage.get(k, 0)
 
-        results.append({
+                        # Accumulate token usage (thread-safe)
+                        usage = audit_out.get("usage", {})
+                        with usage_lock:
+                            for k in total_usage:
+                                total_usage[k] += usage.get(k, 0)
+
+        return {
             "transaction_id": txn_id,
             "ext_id_1": txn.ext_id_1,
             "ext_id_2": txn.ext_id_2,
             "step_1": step_1_result,
             "step_2": step_2_results,
-        })
+        }
+
+    # ------------------------------------------------------------------
+    # Process all transactions in parallel
+    # ------------------------------------------------------------------
+    results: List[Dict[str, Any]] = []
+
+    with ThreadPoolExecutor(max_workers=min(MAX_TRANSACTION_WORKERS, len(transaction_ids))) as executor:
+        futures = {executor.submit(_process_transaction, txn_id): txn_id for txn_id in transaction_ids}
+        for future in as_completed(futures):
+            try:
+                result = future.result()
+                results.append(result)
+            except Exception as exc:
+                txn_id = futures[future]
+                logger.error(f"[BMA_AUDIT] Transaction {txn_id} failed: {exc}", exc_info=True)
+                results.append({
+                    "transaction_id": txn_id,
+                    "step_1": {"status": "error", "message": str(exc)},
+                    "step_2": [],
+                })
 
     # ------------------------------------------------------------------
     # Aggregate summary
