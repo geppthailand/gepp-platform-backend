@@ -2,6 +2,7 @@ _type: prompt
 input_variables:
   - image_url
   - claimed_type
+  - output_format
 template: |
   You are an expert waste auditor for the Bangkok Metropolitan Administration (BMA) waste management system.
   Your task is to analyze waste images and verify if they match the claimed waste category.
@@ -47,26 +48,4 @@ template: |
   4. Look for packaging or wrapping materials
   5. Assess purity of organic waste
 
-  OUTPUT FORMAT (JSON):
-  {{
-    "claimed_type": "{claimed_type}",
-    "audit_status": "pass" or "reject",
-    "confidence_score": 0.0 to 1.0,
-    "remark": {{
-      "code": "correct_category" or "wrong_category" or "contaminated" or "packaging_included" or "unclear_image",
-      "severity": "info" or "minor" or "critical",
-      "details": {{
-        "detected": "actual waste type detected",
-        "reason": "specific reason (e.g., 'plastic packaging visible', 'recyclables mixed in', 'non-biodegradable items')",
-        "items": "specific items identified in image"
-      }},
-      "correction_action": "specific action needed (e.g., 'Remove plastic packaging', 'Separate recyclables from organic waste')"
-    }}
-  }}
-
-  SEVERITY LEVELS:
-  - "critical": Major contamination or wrong category → REJECT
-  - "minor": Minor issues, mostly organic → WARNING
-  - "info": Pure organic waste → PASS
-
-  Ensure all items are truly biodegradable and free from non-organic materials.
+  {output_format}

@@ -2,6 +2,7 @@ _type: prompt
 input_variables:
   - image_url
   - claimed_type
+  - output_format
 template: |
   You are an expert waste auditor for the Bangkok Metropolitan Administration (BMA) waste management system.
   Your task is to analyze waste images and verify if they match the claimed waste category.
@@ -33,25 +34,4 @@ template: |
   4. Determine if the waste matches the "general" category
   5. Provide specific reasons for your classification
 
-  OUTPUT FORMAT (JSON):
-  {{
-    "claimed_type": "{claimed_type}",
-    "audit_status": "pass" or "reject",
-    "confidence_score": 0.0 to 1.0,
-    "remark": {{
-      "code": "correct_category" or "wrong_category" or "unclear_image" or "mixed_waste",
-      "severity": "info" or "minor" or "critical",
-      "details": {{
-        "detected": "actual waste type detected",
-        "reason": "specific reason for classification"
-      }},
-      "correction_action": "suggested action if rejected"
-    }}
-  }}
-
-  SEVERITY LEVELS:
-  - "critical": Completely wrong category, requires rejection
-  - "minor": Partially correct but needs attention (warning)
-  - "info": Correct classification
-
-  Be thorough, precise, and provide actionable feedback.
+  {output_format}

@@ -1,0 +1,29 @@
+_type: partial
+description: Standardized output format for BMA waste audit prompts
+template: |
+  OUTPUT FORMAT (JSON):
+  {{
+    "claimed_type": "{claimed_type}",
+    "audit_status": "pass" or "reject",
+    "confidence_score": 0.0 to 1.0,
+    "remark": {{
+      "code": "correct_category" or "wrong_category" or "contaminated" or "unclear_image" or "mixed_waste",
+      "severity": "info" or "minor" or "critical",
+      "details": {{
+        "detected": "actual waste type detected",
+        "reason": "specific reason for classification",
+        "items": "specific items identified in image"
+      }},
+      "correction_action": "suggested action if rejected"
+    }}
+  }}
+
+  SEVERITY LEVELS:
+  - "critical": Completely wrong category, requires rejection → audit_status must be "reject"
+  - "minor": Partially correct but needs attention (warning) → audit_status can be "pass" or "reject"
+  - "info": Correct classification → audit_status must be "pass"
+
+  IMPORTANT:
+  - Return ONLY valid JSON, no extra text
+  - confidence_score must be between 0.0 and 1.0
+  - Be thorough, precise, and provide actionable feedback

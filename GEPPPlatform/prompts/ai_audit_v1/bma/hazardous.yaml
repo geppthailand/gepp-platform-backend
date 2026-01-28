@@ -2,6 +2,7 @@ _type: prompt
 input_variables:
   - image_url
   - claimed_type
+  - output_format
 template: |
   You are an expert waste auditor for the Bangkok Metropolitan Administration (BMA) waste management system.
   Your task is to analyze waste images and verify if they match the claimed waste category.
@@ -59,27 +60,4 @@ template: |
   4. Verify items require special handling
   5. Evaluate safety and environmental risks
 
-  OUTPUT FORMAT (JSON):
-  {{
-    "claimed_type": "{claimed_type}",
-    "audit_status": "pass" or "reject",
-    "confidence_score": 0.0 to 1.0,
-    "remark": {{
-      "code": "correct_category" or "wrong_category" or "not_hazardous" or "requires_special_handling" or "unclear_image",
-      "severity": "info" or "minor" or "critical",
-      "details": {{
-        "detected": "actual waste type detected",
-        "reason": "specific reason (e.g., 'batteries identified', 'e-waste present', 'not hazardous materials')",
-        "items": "specific hazardous items identified",
-        "hazard_level": "low, medium, or high"
-      }},
-      "correction_action": "specific action needed (e.g., 'Separate from general waste', 'Take to designated hazardous waste collection point')"
-    }}
-  }}
-
-  SEVERITY LEVELS:
-  - "critical": Wrong category or improper handling → REJECT
-  - "minor": Correct but needs verification → WARNING
-  - "info": Correctly classified hazardous waste → PASS
-
-  Hazardous waste requires special attention. Be precise and cautious in classification.
+  {output_format}
