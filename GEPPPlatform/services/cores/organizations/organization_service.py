@@ -4,11 +4,12 @@ Organization service for managing organization data and roles
 
 from typing import List, Optional, Dict, Any
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import and_
+from sqlalchemy import and_, text
 
 from ....models.subscriptions.organizations import Organization, OrganizationInfo, OrganizationSetup
 from ....models.subscriptions.subscription_models import OrganizationRole
 from ....models.users.user_location import UserLocation
+from ....exceptions import ValidationException
 from .organization_role_presets import OrganizationRolePresets
 
 
@@ -330,6 +331,80 @@ class OrganizationService:
             'allow_ai_audit': organization.allow_ai_audit,
             'updated_at': organization.updated_date.isoformat() if organization.updated_date else None
         }
+
+    def upsert_notification_settings(self, organization_id: int, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Create or update organization_notification_settings from a list of items.
+        Each item: organization_id, event, role (organization_roles.key), channels_mask, email_time, is_active.
+        """
+        if not items:
+            return []
+
+        created = []
+        for item in items:
+            org_id = item.get('organization_id')
+            if org_id is None:
+                raise ValidationException('organization_id is required in each item', errors=['organization_id'])
+            if int(org_id) != organization_id:
+                raise ValidationException(
+                    f'All items must belong to organization {organization_id}; got organization_id {org_id}',
+                    errors=['organization_id']
+                )
+            event = item.get('event')
+            if not event:
+                raise ValidationException('event is required in each item', errors=['event'])
+            role_key = item.get('role')
+            if not role_key:
+                raise ValidationException('role is required in each item', errors=['role'])
+
+            role_id = self.role_presets.get_role_id_by_key(organization_id, str(role_key).strip().lower())
+            if role_id is None:
+                raise ValidationException(
+                    f'Unknown role "{role_key}" for organization {organization_id}. Use organization_roles.key (e.g. admin, data_input, auditor, viewer).',
+                    errors=['role']
+                )
+
+            channels_mask = int(item.get('channels_mask', 0))
+            email_time = item.get('email_time')  # "08:00" or None
+            if email_time is not None:
+                email_time = str(email_time).strip()
+            is_active = item.get('is_active', True)
+            if isinstance(is_active, str):
+                is_active = is_active.lower() in ('true', '1', 'yes')
+            is_active = bool(is_active)
+
+            self.db.execute(
+                text("""
+                    INSERT INTO organization_notification_settings
+                        (organization_id, event, role_id, channels_mask, email_time, is_active, updated_date)
+                    VALUES (:org_id, :event, :role_id, :channels_mask, :email_time, :is_active, NOW())
+                    ON CONFLICT (organization_id, event, role_id) DO UPDATE SET
+                        channels_mask = EXCLUDED.channels_mask,
+                        email_time = EXCLUDED.email_time,
+                        is_active = EXCLUDED.is_active,
+                        updated_date = NOW(),
+                        deleted_date = NULL
+                """),
+                {
+                    'org_id': organization_id,
+                    'event': event,
+                    'role_id': role_id,
+                    'channels_mask': channels_mask,
+                    'email_time': email_time or None,
+                    'is_active': is_active,
+                }
+            )
+            created.append({
+                'organization_id': organization_id,
+                'event': event,
+                'role': role_key,
+                'role_id': role_id,
+                'channels_mask': channels_mask,
+                'email_time': email_time,
+                'is_active': is_active,
+            })
+        self.db.flush()
+        return created
 
     def _process_locations(self, organization_id: int, locations: List[Dict[str, Any]]) -> Dict[str, str]:
         """
