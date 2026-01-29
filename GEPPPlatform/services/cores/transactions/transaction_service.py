@@ -4,14 +4,17 @@ Handles CRUD operations, validation, and transaction record linking
 """
 
 from typing import List, Optional, Dict, Any, Tuple
-from sqlalchemy.orm import Session, joinedload
-from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy import cast, String
+import json
+import logging
 from datetime import datetime
 from decimal import Decimal
-import logging
+
+from sqlalchemy import cast, String, text
+from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.exc import SQLAlchemyError
 
 from ....models.transactions.transactions import Transaction, TransactionStatus, TransactionRecordStatus
+
 from ....models.transactions.transaction_records import TransactionRecord
 from ...file_upload_service import S3FileUploadService
 from ....models.users.user_location import UserLocation
@@ -157,6 +160,463 @@ class TransactionService:
                 'message': 'An unexpected error occurred',
                 'errors': [str(e)]
             }
+
+    def _send_txn_created_emails(
+        self,
+        transaction_id: int,
+        organization_id: int,
+        email_list: List[str],
+        resource: Dict[str, Any],
+    ) -> None:
+        """
+        Send TXN_CREATED notification emails to the given addresses.
+        Stub: implement actual email sending later.
+        """
+        if not email_list:
+            return
+        # TODO: Implement email sending (e.g. SES, SMTP).
+        logger.info(
+            "TXN_CREATED emails would be sent to %d address(es) for transaction_id=%s (stub)",
+            len(email_list),
+            transaction_id,
+        )
+
+    def _send_txn_updated_emails(
+        self,
+        transaction_id: int,
+        organization_id: int,
+        email_list: List[str],
+        resource: Dict[str, Any],
+    ) -> None:
+        """
+        Send TXN_UPDATED notification emails to the given addresses.
+        Stub: implement actual email sending later.
+        """
+        if not email_list:
+            return
+        # TODO: Implement email sending (e.g. SES, SMTP).
+        logger.info(
+            "TXN_UPDATED emails would be sent to %d address(es) for transaction_id=%s (stub)",
+            len(email_list),
+            transaction_id,
+        )
+
+    def create_txn_created_notifications(
+        self,
+        transaction_id: int,
+        organization_id: int,
+        created_by_id: int,
+    ) -> None:
+        """
+        Create one notification (notification_type='TXN_CREATED'), user_notifications for users
+        whose roles have BELL (channels_mask 2 or 3), and collect emails for users whose roles
+        have EMAIL (channels_mask 1 or 3) then call _send_txn_created_emails (stub).
+        """
+        try:
+            resource_dict = {'transaction_id': transaction_id}
+            resource_json = json.dumps(resource_dict)
+
+            # BELL: roles with channels_mask 2 or 3
+            r_bell = self.db.execute(
+                text("""
+                    SELECT role_id FROM organization_notification_settings
+                    WHERE organization_id = :org_id AND event = 'TXN_CREATED'
+                      AND is_active = TRUE AND deleted_date IS NULL
+                      AND (channels_mask & 2) != 0
+                """),
+                {'org_id': organization_id},
+            )
+            bell_role_ids = [row[0] for row in r_bell.fetchall()]
+
+            if bell_role_ids:
+                ins = self.db.execute(
+                    text("""
+                        INSERT INTO notifications
+                            (created_by_id, resource, notification_type, is_active, created_date, updated_date)
+                        VALUES (:created_by_id, :resource::jsonb, :notification_type, TRUE, NOW(), NOW())
+                        RETURNING id
+                    """),
+                    {
+                        'created_by_id': created_by_id,
+                        'resource': resource_json,
+                        'notification_type': 'TXN_CREATED',
+                    },
+                )
+                row = ins.fetchone()
+                if row:
+                    notif_id = row[0]
+                    users_bell = self.db.execute(
+                        text("""
+                            SELECT DISTINCT id FROM user_locations
+                            WHERE organization_id = :org_id AND organization_role_id = ANY(:role_ids)
+                              AND is_user = TRUE AND is_active = TRUE AND deleted_date IS NULL
+                        """),
+                        {'org_id': organization_id, 'role_ids': bell_role_ids},
+                    )
+                    for u in users_bell.fetchall():
+                        self.db.execute(
+                            text("""
+                                INSERT INTO user_notifications
+                                    (user_id, notification_id, is_read, is_active, created_date, updated_date)
+                                VALUES (:user_id, :notification_id, FALSE, TRUE, NOW(), NOW())
+                                ON CONFLICT (user_id, notification_id) DO NOTHING
+                            """),
+                            {'user_id': u[0], 'notification_id': notif_id},
+                        )
+
+            # EMAIL: roles with channels_mask 1 or 3; collect user emails
+            r_email = self.db.execute(
+                text("""
+                    SELECT role_id FROM organization_notification_settings
+                    WHERE organization_id = :org_id AND event = 'TXN_CREATED'
+                      AND is_active = TRUE AND deleted_date IS NULL
+                      AND (channels_mask & 1) != 0
+                """),
+                {'org_id': organization_id},
+            )
+            email_role_ids = [row[0] for row in r_email.fetchall()]
+            email_list: List[str] = []
+            if email_role_ids:
+                users_email = self.db.execute(
+                    text("""
+                        SELECT DISTINCT id, email FROM user_locations
+                        WHERE organization_id = :org_id AND organization_role_id = ANY(:role_ids)
+                          AND is_user = TRUE AND is_active = TRUE AND deleted_date IS NULL
+                          AND email IS NOT NULL AND TRIM(email) != ''
+                    """),
+                    {'org_id': organization_id, 'role_ids': email_role_ids},
+                )
+                seen: set = set()
+                for u in users_email.fetchall():
+                    em = (u[1] or '').strip()
+                    if em and em not in seen:
+                        seen.add(em)
+                        email_list.append(em)
+
+            self._send_txn_created_emails(
+                transaction_id=transaction_id,
+                organization_id=organization_id,
+                email_list=email_list,
+                resource=resource_dict,
+            )
+            self.db.flush()
+        except Exception as e:
+            logger.error(
+                "Error creating TXN_CREATED notifications for transaction_id=%s: %s",
+                transaction_id,
+                str(e),
+                exc_info=True,
+            )
+
+    def create_txn_updated_notifications(
+        self,
+        transaction_id: int,
+        organization_id: int,
+        created_by_id: int,
+    ) -> None:
+        """
+        Create one notification (notification_type='TXN_UPDATED'), user_notifications for users
+        whose roles have BELL (channels_mask 2 or 3), and collect emails for users whose roles
+        have EMAIL (channels_mask 1 or 3) then call _send_txn_updated_emails (stub).
+        """
+        try:
+            resource_dict = {'transaction_id': transaction_id}
+            resource_json = json.dumps(resource_dict)
+
+            r_bell = self.db.execute(
+                text("""
+                    SELECT role_id FROM organization_notification_settings
+                    WHERE organization_id = :org_id AND event = 'TXN_UPDATED'
+                      AND is_active = TRUE AND deleted_date IS NULL
+                      AND (channels_mask & 2) != 0
+                """),
+                {'org_id': organization_id},
+            )
+            bell_role_ids = [row[0] for row in r_bell.fetchall()]
+
+            if bell_role_ids:
+                ins = self.db.execute(
+                    text("""
+                        INSERT INTO notifications
+                            (created_by_id, resource, notification_type, is_active, created_date, updated_date)
+                        VALUES (:created_by_id, :resource::jsonb, :notification_type, TRUE, NOW(), NOW())
+                        RETURNING id
+                    """),
+                    {
+                        'created_by_id': created_by_id,
+                        'resource': resource_json,
+                        'notification_type': 'TXN_UPDATED',
+                    },
+                )
+                row = ins.fetchone()
+                if row:
+                    notif_id = row[0]
+                    users_bell = self.db.execute(
+                        text("""
+                            SELECT DISTINCT id FROM user_locations
+                            WHERE organization_id = :org_id AND organization_role_id = ANY(:role_ids)
+                              AND is_user = TRUE AND is_active = TRUE AND deleted_date IS NULL
+                        """),
+                        {'org_id': organization_id, 'role_ids': bell_role_ids},
+                    )
+                    for u in users_bell.fetchall():
+                        self.db.execute(
+                            text("""
+                                INSERT INTO user_notifications
+                                    (user_id, notification_id, is_read, is_active, created_date, updated_date)
+                                VALUES (:user_id, :notification_id, FALSE, TRUE, NOW(), NOW())
+                                ON CONFLICT (user_id, notification_id) DO NOTHING
+                            """),
+                            {'user_id': u[0], 'notification_id': notif_id},
+                        )
+
+            r_email = self.db.execute(
+                text("""
+                    SELECT role_id FROM organization_notification_settings
+                    WHERE organization_id = :org_id AND event = 'TXN_UPDATED'
+                      AND is_active = TRUE AND deleted_date IS NULL
+                      AND (channels_mask & 1) != 0
+                """),
+                {'org_id': organization_id},
+            )
+            email_role_ids = [row[0] for row in r_email.fetchall()]
+            email_list: List[str] = []
+            if email_role_ids:
+                users_email = self.db.execute(
+                    text("""
+                        SELECT DISTINCT id, email FROM user_locations
+                        WHERE organization_id = :org_id AND organization_role_id = ANY(:role_ids)
+                          AND is_user = TRUE AND is_active = TRUE AND deleted_date IS NULL
+                          AND email IS NOT NULL AND TRIM(email) != ''
+                    """),
+                    {'org_id': organization_id, 'role_ids': email_role_ids},
+                )
+                seen: set = set()
+                for u in users_email.fetchall():
+                    em = (u[1] or '').strip()
+                    if em and em not in seen:
+                        seen.add(em)
+                        email_list.append(em)
+
+            self._send_txn_updated_emails(
+                transaction_id=transaction_id,
+                organization_id=organization_id,
+                email_list=email_list,
+                resource=resource_dict,
+            )
+            self.db.flush()
+        except Exception as e:
+            logger.error(
+                "Error creating TXN_UPDATED notifications for transaction_id=%s: %s",
+                transaction_id,
+                str(e),
+                exc_info=True,
+            )
+
+    def _send_txn_approved_emails(
+        self,
+        transaction_id: int,
+        organization_id: int,
+        email_list: List[str],
+        resource: Dict[str, Any],
+    ) -> None:
+        """Send TXN_APPROVED notification emails. Stub: implement later."""
+        if not email_list:
+            return
+        logger.info(
+            "TXN_APPROVED emails would be sent to %d address(es) for transaction_id=%s (stub)",
+            len(email_list),
+            transaction_id,
+        )
+
+    def _send_txn_rejected_emails(
+        self,
+        transaction_id: int,
+        organization_id: int,
+        email_list: List[str],
+        resource: Dict[str, Any],
+    ) -> None:
+        """Send TXN_REJECTED notification emails. Stub: implement later."""
+        if not email_list:
+            return
+        logger.info(
+            "TXN_REJECTED emails would be sent to %d address(es) for transaction_id=%s (stub)",
+            len(email_list),
+            transaction_id,
+        )
+
+    def _create_txn_event_notifications(
+        self,
+        transaction_id: int,
+        organization_id: int,
+        created_by_id: int,
+        event: str,
+        send_email_fn: Any,
+        resource_override: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """
+        Shared logic: create one notification for event, user_notifications (BELL),
+        collect emails (EMAIL), call send_email_fn. Used for TXN_APPROVED, TXN_REJECTED.
+        resource_override: if set, use as notification resource (e.g. {'transaction': {'id': txn_id, 'record_id': record_id}}).
+        """
+        try:
+            resource_dict = resource_override if resource_override is not None else {'transaction_id': transaction_id}
+            resource_json = json.dumps(resource_dict)
+
+            r_bell = self.db.execute(
+                text("""
+                    SELECT role_id FROM organization_notification_settings
+                    WHERE organization_id = :org_id AND event = :event
+                      AND is_active = TRUE AND deleted_date IS NULL
+                      AND (channels_mask & 2) != 0
+                """),
+                {'org_id': organization_id, 'event': event},
+            )
+            bell_role_ids = [row[0] for row in r_bell.fetchall()]
+
+            if bell_role_ids:
+                ins = self.db.execute(
+                    text("""
+                        INSERT INTO notifications
+                            (created_by_id, resource, notification_type, is_active, created_date, updated_date)
+                        VALUES (:created_by_id, :resource::jsonb, :notification_type, TRUE, NOW(), NOW())
+                        RETURNING id
+                    """),
+                    {
+                        'created_by_id': created_by_id,
+                        'resource': resource_json,
+                        'notification_type': event,
+                    },
+                )
+                row = ins.fetchone()
+                if row:
+                    notif_id = row[0]
+                    users_bell = self.db.execute(
+                        text("""
+                            SELECT DISTINCT id FROM user_locations
+                            WHERE organization_id = :org_id AND organization_role_id = ANY(:role_ids)
+                              AND is_user = TRUE AND is_active = TRUE AND deleted_date IS NULL
+                        """),
+                        {'org_id': organization_id, 'role_ids': bell_role_ids},
+                    )
+                    for u in users_bell.fetchall():
+                        self.db.execute(
+                            text("""
+                                INSERT INTO user_notifications
+                                    (user_id, notification_id, is_read, is_active, created_date, updated_date)
+                                VALUES (:user_id, :notification_id, FALSE, TRUE, NOW(), NOW())
+                                ON CONFLICT (user_id, notification_id) DO NOTHING
+                            """),
+                            {'user_id': u[0], 'notification_id': notif_id},
+                        )
+
+            r_email = self.db.execute(
+                text("""
+                    SELECT role_id FROM organization_notification_settings
+                    WHERE organization_id = :org_id AND event = :event
+                      AND is_active = TRUE AND deleted_date IS NULL
+                      AND (channels_mask & 1) != 0
+                """),
+                {'org_id': organization_id, 'event': event},
+            )
+            email_role_ids = [row[0] for row in r_email.fetchall()]
+            email_list: List[str] = []
+            if email_role_ids:
+                users_email = self.db.execute(
+                    text("""
+                        SELECT DISTINCT id, email FROM user_locations
+                        WHERE organization_id = :org_id AND organization_role_id = ANY(:role_ids)
+                          AND is_user = TRUE AND is_active = TRUE AND deleted_date IS NULL
+                          AND email IS NOT NULL AND TRIM(email) != ''
+                    """),
+                    {'org_id': organization_id, 'role_ids': email_role_ids},
+                )
+                seen: set = set()
+                for u in users_email.fetchall():
+                    em = (u[1] or '').strip()
+                    if em and em not in seen:
+                        seen.add(em)
+                        email_list.append(em)
+
+            send_email_fn(
+                transaction_id=transaction_id,
+                organization_id=organization_id,
+                email_list=email_list,
+                resource=resource_dict,
+            )
+            self.db.flush()
+        except Exception as e:
+            logger.error(
+                "Error creating %s notifications for transaction_id=%s: %s",
+                event,
+                transaction_id,
+                str(e),
+                exc_info=True,
+            )
+
+    def create_txn_approved_notifications(
+        self,
+        transaction_id: int,
+        organization_id: int,
+        created_by_id: int,
+    ) -> None:
+        """Create notifications and email list for TXN_APPROVED (BELL + EMAIL stub)."""
+        self._create_txn_event_notifications(
+            transaction_id=transaction_id,
+            organization_id=organization_id,
+            created_by_id=created_by_id,
+            event='TXN_APPROVED',
+            send_email_fn=self._send_txn_approved_emails,
+        )
+
+    def create_txn_rejected_notifications(
+        self,
+        transaction_id: int,
+        organization_id: int,
+        created_by_id: int,
+    ) -> None:
+        """Create notifications and email list for TXN_REJECTED (BELL + EMAIL stub)."""
+        self._create_txn_event_notifications(
+            transaction_id=transaction_id,
+            organization_id=organization_id,
+            created_by_id=created_by_id,
+            event='TXN_REJECTED',
+            send_email_fn=self._send_txn_rejected_emails,
+        )
+
+    def create_txn_approved_notifications_for_record(
+        self,
+        transaction_id: int,
+        record_id: int,
+        organization_id: int,
+        created_by_id: int,
+    ) -> None:
+        """Create TXN_APPROVED notifications for a record approve; resource = { transaction: { id, record_id } }."""
+        self._create_txn_event_notifications(
+            transaction_id=transaction_id,
+            organization_id=organization_id,
+            created_by_id=created_by_id,
+            event='TXN_APPROVED',
+            send_email_fn=self._send_txn_approved_emails,
+            resource_override={'transaction': {'id': transaction_id, 'record_id': record_id}},
+        )
+
+    def create_txn_rejected_notifications_for_record(
+        self,
+        transaction_id: int,
+        record_id: int,
+        organization_id: int,
+        created_by_id: int,
+    ) -> None:
+        """Create TXN_REJECTED notifications for a record reject; resource = { transaction: { id, record_id } }."""
+        self._create_txn_event_notifications(
+            transaction_id=transaction_id,
+            organization_id=organization_id,
+            created_by_id=created_by_id,
+            event='TXN_REJECTED',
+            send_email_fn=self._send_txn_rejected_emails,
+            resource_override={'transaction': {'id': transaction_id, 'record_id': record_id}},
+        )
 
     def get_transaction(self, transaction_id: int, include_records: bool = False) -> Dict[str, Any]:
         """
