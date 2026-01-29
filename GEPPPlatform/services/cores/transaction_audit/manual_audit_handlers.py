@@ -7,6 +7,7 @@ import logging
 import traceback
 
 from .manual_audit_service import ManualAuditService
+from ..transactions.transaction_service import TransactionService
 
 logger = logging.getLogger(__name__)
 from ....exceptions import (
@@ -496,6 +497,22 @@ def handle_approve_transaction_record(
                 'data': None
             }
 
+        transaction_id = result.get('data', {}).get('transaction_id')
+        if transaction_id is not None and organization_id is not None:
+            try:
+                txn_service = TransactionService(db_session)
+                txn_service.create_txn_approved_notifications_for_record(
+                    transaction_id=int(transaction_id),
+                    record_id=record_id,
+                    organization_id=organization_id,
+                    created_by_id=int(current_user_id),
+                )
+            except Exception as e:
+                logger.warning(
+                    "TXN_APPROVED (record) notifications failed for record_id=%s: %s",
+                    record_id,
+                    str(e),
+                )
         return {
             'success': True,
             'message': result['message'],
@@ -563,6 +580,22 @@ def handle_reject_transaction_record(
                 'data': None
             }
 
+        transaction_id = result.get('data', {}).get('transaction_id')
+        if transaction_id is not None and organization_id is not None:
+            try:
+                txn_service = TransactionService(db_session)
+                txn_service.create_txn_rejected_notifications_for_record(
+                    transaction_id=int(transaction_id),
+                    record_id=record_id,
+                    organization_id=organization_id,
+                    created_by_id=int(current_user_id),
+                )
+            except Exception as e:
+                logger.warning(
+                    "TXN_REJECTED (record) notifications failed for record_id=%s: %s",
+                    record_id,
+                    str(e),
+                )
         return {
             'success': True,
             'message': result['message'],
@@ -585,6 +618,48 @@ def handle_reject_transaction_record(
             'error': f'Internal server error: {str(e)}',
             'data': None
         }
+
+
+def _create_txn_approved_notifications_for_bulk(
+    db_session: Any,
+    organization_id: int,
+    current_user_id: int,
+    transaction_ids: list,
+) -> None:
+    """Create TXN_APPROVED notifications (BELL + EMAIL stub) for each successfully approved transaction."""
+    if not transaction_ids or organization_id is None:
+        return
+    txn_service = TransactionService(db_session)
+    for tid in transaction_ids:
+        try:
+            txn_service.create_txn_approved_notifications(
+                transaction_id=int(tid),
+                organization_id=organization_id,
+                created_by_id=int(current_user_id),
+            )
+        except Exception as e:
+            logger.warning("TXN_APPROVED notifications failed for transaction_id=%s: %s", tid, str(e))
+
+
+def _create_txn_rejected_notifications_for_bulk(
+    db_session: Any,
+    organization_id: int,
+    current_user_id: int,
+    transaction_ids: list,
+) -> None:
+    """Create TXN_REJECTED notifications (BELL + EMAIL stub) for each successfully rejected transaction."""
+    if not transaction_ids or organization_id is None:
+        return
+    txn_service = TransactionService(db_session)
+    for tid in transaction_ids:
+        try:
+            txn_service.create_txn_rejected_notifications(
+                transaction_id=int(tid),
+                organization_id=organization_id,
+                created_by_id=int(current_user_id),
+            )
+        except Exception as e:
+            logger.warning("TXN_REJECTED notifications failed for transaction_id=%s: %s", tid, str(e))
 
 
 def handle_bulk_approve_transactions(
@@ -672,6 +747,10 @@ def handle_bulk_approve_transactions(
                         'error': str(e)
                     })
 
+            _create_txn_approved_notifications_for_bulk(
+                db_session, organization_id, current_user_id,
+                [r['transaction_id'] for r in results]
+            )
             return {
                 'success': len(errors) == 0,
                 'message': f'Bulk approve completed: {len(results)} successful, {len(errors)} failed',
@@ -693,7 +772,10 @@ def handle_bulk_approve_transactions(
                 auditor_user_id=current_user_id,
                 notes=global_notes
             )
-
+            _create_txn_approved_notifications_for_bulk(
+                db_session, organization_id, current_user_id,
+                [r['transaction_id'] for r in result.get('results', [])]
+            )
             return {
                 'success': result['success'],
                 'message': f'Bulk approve completed: {result["summary"]["successful"]} successful, {result["summary"]["failed"]} failed',
@@ -799,6 +881,10 @@ def handle_bulk_reject_transactions(
                         'error': str(e)
                     })
 
+            _create_txn_rejected_notifications_for_bulk(
+                db_session, organization_id, current_user_id,
+                [r['transaction_id'] for r in results]
+            )
             return {
                 'success': len(errors) == 0,
                 'message': f'Bulk reject completed: {len(results)} successful, {len(errors)} failed',
@@ -820,7 +906,10 @@ def handle_bulk_reject_transactions(
                 auditor_user_id=current_user_id,
                 rejection_reason=global_rejection_reason
             )
-
+            _create_txn_rejected_notifications_for_bulk(
+                db_session, organization_id, current_user_id,
+                [r['transaction_id'] for r in result.get('results', [])]
+            )
             return {
                 'success': result['success'],
                 'message': f'Bulk reject completed: {result["summary"]["successful"]} successful, {result["summary"]["failed"]} failed',
