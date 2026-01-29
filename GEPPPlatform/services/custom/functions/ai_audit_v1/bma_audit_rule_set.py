@@ -9,7 +9,7 @@ Two-step checking:
            call Gemini 2.5 Flash Lite with LangChain using material-specific prompt.
 
 Output format: Abbreviated JSON structure for space optimization.
-See: backend/GEPPPlatform/prompts/ai_audit_v1/bma/Document.md for full documentation.
+Results are saved directly to transactions.ai_audit_note and audit_tokens.
 """
 
 import json
@@ -20,6 +20,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from threading import Lock
+from datetime import datetime
 
 import yaml
 from sqlalchemy.orm import Session
@@ -45,6 +46,14 @@ MATERIAL_KEY_TO_ID: Dict[str, int] = {
     "organic": 77,
     "recyclable": 298,
     "hazardous": 113,
+}
+
+# Thai names for materials
+MATERIAL_ID_TO_THAI: Dict[int, str] = {
+    94: "ขยะทั่วไป",
+    77: "ขยะอินทรีย์",
+    298: "ขยะรีไซเคิล",
+    113: "ขยะอันตราย",
 }
 
 MODEL_NAME = "gemini-2.5-flash-lite"
@@ -242,6 +251,61 @@ def _create_error_response(material_key: str, code: str, message: str) -> Dict[s
 
 
 # ---------------------------------------------------------------------------
+# Custom message function
+# ---------------------------------------------------------------------------
+
+def _get_custom_message(
+    db_session: Session,
+    organization_id: int,
+    code: str,
+    detect_type_id: int,
+    claimed_type_id: int,
+    warning_items: List[str]
+) -> str:
+    """
+    Get custom message from ai_audit_response_patterns table.
+
+    Args:
+        db_session: Database session
+        organization_id: Organization ID
+        code: Audit code (cc, wc, ui, hc, lc, ncm, pe, ie)
+        detect_type_id: Detected material type ID
+        claimed_type_id: Claimed material type ID
+        warning_items: List of wrong items (Thai names)
+
+    Returns:
+        Formatted custom message string
+    """
+    from GEPPPlatform.models.ai_audit_models import AiAuditResponsePattern
+
+    # Query for pattern matching this code
+    pattern = db_session.query(AiAuditResponsePattern).filter(
+        AiAuditResponsePattern.organization_id == organization_id,
+        AiAuditResponsePattern.condition == code,
+        AiAuditResponsePattern.is_active == True,
+        AiAuditResponsePattern.deleted_date.is_(None)
+    ).first()
+
+    if not pattern:
+        # Return default message if no pattern found
+        return f"รหัสผล: {code}"
+
+    # Get material names
+    detect_type_name = MATERIAL_ID_TO_THAI.get(detect_type_id, str(detect_type_id))
+    claimed_type_name = MATERIAL_ID_TO_THAI.get(claimed_type_id, str(claimed_type_id))
+    warning_items_str = ", ".join(warning_items) if warning_items else ""
+
+    # Replace placeholders
+    message = pattern.pattern
+    message = message.replace("{{code}}", code)
+    message = message.replace("{{detect_type}}", detect_type_name)
+    message = message.replace("{{claimed_type}}", claimed_type_name)
+    message = message.replace("{{warning_items}}", warning_items_str)
+
+    return message
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -267,9 +331,10 @@ def execute(
     - Transactions are processed in parallel (max MAX_TRANSACTION_WORKERS concurrent)
     - Material records within each transaction are processed in parallel (max MAX_MATERIAL_WORKERS concurrent)
 
-    Returns abbreviated JSON format for space optimization.
+    Results are saved directly to transactions.ai_audit_note and audit_tokens.
+    Returns simplified JSON format grouped by ext_id_1/district/subdistrict/household_id.
     """
-    from GEPPPlatform.models.transactions.transactions import Transaction
+    from GEPPPlatform.models.transactions.transactions import Transaction, AIAuditStatus
     from GEPPPlatform.models.transactions.transaction_records import TransactionRecord
 
     # Validate transaction count limit
@@ -297,7 +362,10 @@ def execute(
     total_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
     usage_lock = Lock()
 
-    def _process_transaction(txn_id: int) -> Dict[str, Any]:
+    # Simplified response structure
+    simplified_response: Dict[str, Any] = {}
+
+    def _process_transaction(txn_id: int) -> Optional[Dict[str, Any]]:
         """Process a single transaction with parallel material audits."""
         txn = db_session.query(Transaction).filter(
             Transaction.id == txn_id,
@@ -305,11 +373,8 @@ def execute(
         ).first()
 
         if not txn:
-            return {
-                "transaction_id": txn_id,
-                "step_1": {"status": "error", "message": "Transaction not found"},
-                "step_2": [],
-            }
+            logger.warning(f"[BMA_AUDIT] Transaction {txn_id} not found")
+            return None
 
         # Load active records for this transaction
         records = db_session.query(TransactionRecord).filter(
@@ -331,41 +396,38 @@ def execute(
         missing = REQUIRED_MATERIALS - present_keys
         has_all_required = len(missing) == 0
 
-        step_1_result = {
-            "status": "pass" if has_all_required else "fail",
-            "required": sorted(REQUIRED_MATERIALS),
-            "present": sorted(present_keys & ALL_MATERIALS),
-            "missing": sorted(missing),
+        # Prepare transaction-level audit note
+        transaction_audit_note = {
+            "step_1": {
+                "status": "pass" if has_all_required else "fail",
+                "required": sorted(REQUIRED_MATERIALS),
+                "present": sorted(present_keys & ALL_MATERIALS),
+                "missing": sorted(missing),
+            },
+            "step_2": {}
         }
 
-        # If Step 1 fails, create non-complete material response
+        # Initialize transaction tokens
+        transaction_tokens = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+
+        # Determine overall transaction status
+        transaction_status = "approve"
+        transaction_message = ""
+
         if not has_all_required:
+            transaction_status = "reject"
             missing_thai = {
                 "general": "ขยะทั่วไป",
                 "organic": "ขยะอินทรีย์",
                 "recyclable": "ขยะรีไซเคิล",
-                "hazardous": "ขยะอันตราย"
             }
-            missing_items = [f"ไม่มี{missing_thai.get(m, m)}" for m in missing]
-
-            step_1_result["audit"] = {
-                "ct": 0,
-                "as": "r",
-                "cs": 0.00,
-                "rm": {
-                    "co": "ncm",
-                    "sv": "c",
-                    "de": {
-                        "dt": "0",
-                        "wi": missing_items
-                    }
-                }
-            }
+            missing_items = [missing_thai.get(m, m) for m in missing]
+            transaction_message = f"รูปภาพประเภทวัสดุไม่ครบถ้วนขาด {', '.join(missing_items)}"
 
         # ------------------------------------------------------------------
         # Step 2: Image audit per material (parallel)
         # ------------------------------------------------------------------
-        step_2_results: List[Dict[str, Any]] = []
+        materials_data: Dict[str, Any] = {}
 
         # Skip Step 2 entirely if Step 1 failed or LLM not available
         if not has_all_required:
@@ -373,11 +435,7 @@ def execute(
             pass
         elif llm is None:
             # LLM not available - cannot run Step 2
-            step_2_results.append({
-                "material": "all",
-                "status": "skipped",
-                "reason": "Gemini LangChain model not available",
-            })
+            logger.warning("[BMA_AUDIT] Gemini LangChain model not available")
         else:
             # Step 1 passed - run Step 2 with parallel processing
             # Collect audit tasks for materials that have images
@@ -389,13 +447,26 @@ def execute(
 
                 if not image_url:
                     # No image provided - create error response
-                    step_2_results.append({
-                        "material": mat_key,
-                        "record_id": rec.id,
-                        "success": True,
-                        "result": _create_error_response(mat_key, "ui", "ไม่มีรูปภาพ"),
-                        "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
-                    })
+                    audit_result = _create_error_response(mat_key, "ui", "ไม่มีรูปภาพ")
+                    transaction_audit_note["step_2"][mat_key] = audit_result
+
+                    # Get custom message
+                    custom_msg = _get_custom_message(
+                        db_session, organization_id, "ui",
+                        MATERIAL_KEY_TO_ID.get(mat_key, 0),
+                        MATERIAL_KEY_TO_ID.get(mat_key, 0),
+                        ["ไม่มีรูปภาพ"]
+                    )
+
+                    materials_data[mat_key] = {
+                        "image_url": "",
+                        "detect": "unknown",
+                        "status": "reject",
+                        "message": custom_msg
+                    }
+
+                    if transaction_status == "approve":
+                        transaction_status = "reject"
                 else:
                     audit_tasks.append({
                         "material": mat_key,
@@ -412,6 +483,7 @@ def execute(
                 return {
                     "material": task["material"],
                     "record_id": task["record_id"],
+                    "image_url": task["image_url"],
                     **gemini_resp,
                 }
 
@@ -420,62 +492,134 @@ def execute(
                     futures = {pool.submit(_audit_one, t): t for t in audit_tasks}
                     for future in as_completed(futures):
                         audit_out = future.result()
-                        step_2_results.append(audit_out)
+                        mat_key = audit_out["material"]
+                        result = audit_out.get("result", {})
+
+                        # Save to transaction audit note
+                        transaction_audit_note["step_2"][mat_key] = result
 
                         # Accumulate token usage (thread-safe)
                         usage = audit_out.get("usage", {})
+                        for k in transaction_tokens:
+                            transaction_tokens[k] += usage.get(k, 0)
+
                         with usage_lock:
                             for k in total_usage:
                                 total_usage[k] += usage.get(k, 0)
 
+                        # Extract data for simplified response
+                        audit_status = result.get("as", "r")  # a=approve, r=reject
+                        code = result.get("rm", {}).get("co", "")
+                        detect_type_id = int(result.get("rm", {}).get("de", {}).get("dt", "0"))
+                        claimed_type_id = result.get("ct", 0)
+                        warning_items = result.get("rm", {}).get("de", {}).get("wi", [])
+
+                        # Get custom message
+                        custom_msg = _get_custom_message(
+                            db_session, organization_id, code,
+                            detect_type_id, claimed_type_id, warning_items
+                        )
+
+                        # Determine detect material key
+                        detect_key = MATERIAL_ID_TO_KEY.get(detect_type_id, "unknown")
+
+                        materials_data[mat_key] = {
+                            "image_url": audit_out.get("image_url", ""),
+                            "detect": detect_key,
+                            "status": "approve" if audit_status == "a" else "reject",
+                            "message": custom_msg
+                        }
+
+                        # Update transaction status if any material is rejected
+                        if audit_status == "r" and transaction_status == "approve":
+                            transaction_status = "reject"
+
+        # ------------------------------------------------------------------
+        # Save to database
+        # ------------------------------------------------------------------
+        try:
+            # Update transaction with audit results
+            txn.ai_audit_note = transaction_audit_note
+            txn.audit_tokens = transaction_tokens
+            txn.ai_audit_status = AIAuditStatus.approved if transaction_status == "approve" else AIAuditStatus.rejected
+            txn.ai_audit_date = datetime.utcnow()
+
+            db_session.commit()
+            logger.info(f"[BMA_AUDIT] Saved audit results for transaction {txn_id}")
+        except Exception as e:
+            logger.error(f"[BMA_AUDIT] Failed to save audit results for transaction {txn_id}: {e}", exc_info=True)
+            db_session.rollback()
+
+        # ------------------------------------------------------------------
+        # Build simplified response
+        # ------------------------------------------------------------------
+        # Extract location info
+        ext_id_1 = txn.ext_id_1 or "unknown"
+        ext_id_2 = txn.ext_id_2 or "unknown"
+
+        # TODO: Extract district and subdistrict from transaction
+        # For now, use placeholder values
+        district = "เขตยานนาวา"  # Placeholder
+        subdistrict = "แขวงช่องนนทรี"  # Placeholder
+
         return {
-            "transaction_id": txn_id,
-            "ext_id_1": txn.ext_id_1,
-            "ext_id_2": txn.ext_id_2,
-            "step_1": step_1_result,
-            "step_2": step_2_results,
+            "ext_id_1": ext_id_1,
+            "district": district,
+            "subdistrict": subdistrict,
+            "household_id": ext_id_2,
+            "status": transaction_status,
+            "message": transaction_message,
+            "materials": materials_data
         }
 
     # ------------------------------------------------------------------
     # Process all transactions in parallel
     # ------------------------------------------------------------------
-    results: List[Dict[str, Any]] = []
+    results: List[Optional[Dict[str, Any]]] = []
 
     with ThreadPoolExecutor(max_workers=min(MAX_TRANSACTION_WORKERS, len(transaction_ids))) as executor:
         futures = {executor.submit(_process_transaction, txn_id): txn_id for txn_id in transaction_ids}
         for future in as_completed(futures):
             try:
                 result = future.result()
-                results.append(result)
+                if result:
+                    results.append(result)
             except Exception as exc:
                 txn_id = futures[future]
                 logger.error(f"[BMA_AUDIT] Transaction {txn_id} failed: {exc}", exc_info=True)
-                results.append({
-                    "transaction_id": txn_id,
-                    "step_1": {"status": "error", "message": str(exc)},
-                    "step_2": [],
-                })
 
     # ------------------------------------------------------------------
-    # Aggregate summary
+    # Build simplified nested response
     # ------------------------------------------------------------------
-    passed_step1 = sum(1 for r in results if r.get("step_1", {}).get("status") == "pass")
-    total_audited = sum(
-        1 for r in results
-        for s in r.get("step_2", [])
-        if s.get("success") is True
-    )
+    for result in results:
+        if not result:
+            continue
+
+        ext_id_1 = result["ext_id_1"]
+        district = result["district"]
+        subdistrict = result["subdistrict"]
+        household_id = result["household_id"]
+
+        # Initialize nested structure
+        if ext_id_1 not in simplified_response:
+            simplified_response[ext_id_1] = {}
+        if district not in simplified_response[ext_id_1]:
+            simplified_response[ext_id_1][district] = {}
+        if subdistrict not in simplified_response[ext_id_1][district]:
+            simplified_response[ext_id_1][district][subdistrict] = {}
+
+        # Add household data
+        simplified_response[ext_id_1][district][subdistrict][household_id] = {
+            "status": result["status"],
+            "message": result["message"],
+            "materials": result["materials"]
+        }
 
     return {
         "success": True,
         "rule_set": "bma_audit_rule_set",
         "organization_id": organization_id,
         "total_transactions": len(transaction_ids),
-        "summary": {
-            "step_1_passed": passed_step1,
-            "step_1_failed": len(transaction_ids) - passed_step1,
-            "step_2_materials_audited": total_audited,
-        },
         "token_usage": total_usage,
-        "results": results,
+        "results": simplified_response
     }

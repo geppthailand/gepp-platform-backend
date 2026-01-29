@@ -31,6 +31,11 @@ def handle_transaction_audit_routes(event: Dict[str, Any], data: Dict[str, Any],
     method = params.get('method', 'GET')
     query_params = params.get('query_params', {})
 
+    # Check if this is a response pattern route
+    if path.startswith('/api/transaction_audit/responses'):
+        from .audit_response_handlers import handle_audit_response_routes
+        return handle_audit_response_routes(event, data, **params)
+
     # Get database session from commonParams
     db_session = params.get('db_session')
     if not db_session:
