@@ -185,7 +185,7 @@ def handle_user_routes(event: Dict[str, Any], data: Dict[str, Any], **params) ->
         location_id = path.split('/locations/')[1].split('/')[0]
         return handle_delete_location_with_transactions(db_session, location_id, current_user_organization_id)
 
-    elif '/api/locations/' in path and method == 'PUT' and '/tags/' not in path:
+    elif '/api/locations/' in path and method == 'PUT' and '/tags/' not in path and '/tenants/' not in path:
         # Update location: /api/locations/{location_id}
         location_id = path.split('/locations/')[1].rstrip('/')
         return handle_update_location(db_session, location_id, data, current_user_organization_id)
@@ -229,6 +229,38 @@ def handle_user_routes(event: Dict[str, Any], data: Dict[str, Any], **params) ->
     elif '/api/locations/tags' == path and method == 'POST':
         # Create tag: /api/locations/tags
         return handle_create_location_tag(db_session, data, current_user_organization_id, current_user_id)
+
+    # ==================== Tenants routes (same as location tags) ====================
+
+    elif '/api/locations/tenants/' in path and '/attach' in path and method == 'POST':
+        tenant_id = path.split('/tenants/')[1].split('/')[0]
+        return handle_attach_tenant_to_location(db_session, tenant_id, data, current_user_organization_id)
+
+    elif '/api/locations/tenants/' in path and '/detach' in path and method == 'POST':
+        tenant_id = path.split('/tenants/')[1].split('/')[0]
+        return handle_detach_tenant_from_location(db_session, tenant_id, data, current_user_organization_id)
+
+    elif '/api/locations/tenants/' in path and '/members' in path and method == 'PUT':
+        tenant_id = path.split('/tenants/')[1].split('/')[0]
+        return handle_update_tenant_members(db_session, tenant_id, data, current_user_organization_id)
+
+    elif '/api/locations/tenants/' in path and method == 'GET':
+        tenant_id = path.split('/tenants/')[1].rstrip('/')
+        return handle_get_tenant(db_session, tenant_id, current_user_organization_id)
+
+    elif '/api/locations/tenants/' in path and method == 'PUT':
+        tenant_id = path.split('/tenants/')[1].rstrip('/')
+        return handle_update_tenant(db_session, tenant_id, data, current_user_organization_id)
+
+    elif '/api/locations/tenants/' in path and method == 'DELETE':
+        tenant_id = path.split('/tenants/')[1].rstrip('/')
+        return handle_delete_tenant(db_session, tenant_id, current_user_organization_id)
+
+    elif '/api/locations/tenants' == path and method == 'GET':
+        return handle_list_tenants(db_session, query_params, current_user_organization_id)
+
+    elif '/api/locations/tenants' == path and method == 'POST':
+        return handle_create_tenant(db_session, data, current_user_organization_id, current_user_id)
 
     else:
         raise NotFoundException(f'Route not found: {path} [{method}]')
@@ -1650,3 +1682,221 @@ def handle_update_tag_members(
         raise
     except Exception as e:
         raise APIException(f'Failed to update tag members: {str(e)}')
+
+
+# ==================== Tenants Handlers (same as location tags) ====================
+
+def handle_list_tenants(
+    db_session,
+    query_params: Dict[str, Any],
+    organization_id: int
+) -> Dict[str, Any]:
+    """Handle GET /api/locations/tenants - List tenants"""
+    try:
+        from .tenant_service import TenantService
+        service = TenantService(db_session)
+
+        user_location_id = query_params.get('user_location_id')
+        include_inactive = query_params.get('include_inactive', '').lower() == 'true'
+
+        if user_location_id:
+            tenants = service.get_tenants_by_location(
+                user_location_id=int(user_location_id),
+                organization_id=organization_id,
+                include_inactive=include_inactive
+            )
+        else:
+            tenants = service.get_tenants_by_organization(
+                organization_id=organization_id,
+                include_inactive=include_inactive
+            )
+
+        return {
+            'tenants': tenants,
+            'total': len(tenants)
+        }
+
+    except Exception as e:
+        raise APIException(f'Failed to list tenants: {str(e)}')
+
+
+def handle_get_tenant(
+    db_session,
+    tenant_id: str,
+    organization_id: int
+) -> Dict[str, Any]:
+    """Handle GET /api/locations/tenants/{tenant_id} - Get tenant by ID"""
+    try:
+        from .tenant_service import TenantService
+        service = TenantService(db_session)
+
+        result = service.get_tenant_by_id(int(tenant_id), organization_id)
+        if not result:
+            raise NotFoundException('Tenant not found')
+
+        return {'tenant': result}
+
+    except NotFoundException:
+        raise
+    except Exception as e:
+        raise APIException(f'Failed to get tenant: {str(e)}')
+
+
+def handle_create_tenant(
+    db_session,
+    data: Dict[str, Any],
+    organization_id: int,
+    current_user_id: Optional[str]
+) -> Dict[str, Any]:
+    """Handle POST /api/locations/tenants - Create tenant (organization-level, optionally linked to location)"""
+    try:
+        from .tenant_service import TenantService
+        service = TenantService(db_session)
+
+        user_location_id = data.get('user_location_id')
+
+        result = service.create_tenant(
+            organization_id=organization_id,
+            data=data,
+            created_by_id=int(current_user_id) if current_user_id else None,
+            user_location_id=int(user_location_id) if user_location_id else None
+        )
+
+        return {'tenant': result, 'message': 'Tenant created successfully'}
+
+    except (NotFoundException, BadRequestException, ValidationException):
+        raise
+    except Exception as e:
+        raise APIException(f'Failed to create tenant: {str(e)}')
+
+
+def handle_update_tenant(
+    db_session,
+    tenant_id: str,
+    data: Dict[str, Any],
+    organization_id: int
+) -> Dict[str, Any]:
+    """Handle PUT /api/locations/tenants/{tenant_id} - Update tenant"""
+    try:
+        from .tenant_service import TenantService
+        service = TenantService(db_session)
+
+        result = service.update_tenant(
+            tenant_id=int(tenant_id),
+            organization_id=organization_id,
+            data=data
+        )
+
+        return {'tenant': result, 'message': 'Tenant updated successfully'}
+
+    except NotFoundException:
+        raise
+    except Exception as e:
+        raise APIException(f'Failed to update tenant: {str(e)}')
+
+
+def handle_delete_tenant(
+    db_session,
+    tenant_id: str,
+    organization_id: int
+) -> Dict[str, Any]:
+    """Handle DELETE /api/locations/tenants/{tenant_id} - Delete tenant"""
+    try:
+        from .tenant_service import TenantService
+        service = TenantService(db_session)
+
+        success = service.delete_tenant(int(tenant_id), organization_id)
+        if success:
+            return {'message': 'Tenant deleted successfully'}
+        else:
+            raise NotFoundException('Tenant not found')
+
+    except NotFoundException:
+        raise
+    except Exception as e:
+        raise APIException(f'Failed to delete tenant: {str(e)}')
+
+
+def handle_attach_tenant_to_location(
+    db_session,
+    tenant_id: str,
+    data: Dict[str, Any],
+    organization_id: int
+) -> Dict[str, Any]:
+    """Handle POST /api/locations/tenants/{tenant_id}/attach - Attach tenant to location"""
+    try:
+        from .tenant_service import TenantService
+        service = TenantService(db_session)
+
+        user_location_id = data.get('user_location_id')
+        if not user_location_id:
+            raise ValidationException('user_location_id is required')
+
+        result = service.attach_tenant_to_location(
+            tenant_id=int(tenant_id),
+            user_location_id=int(user_location_id),
+            organization_id=organization_id
+        )
+
+        return {'tenant': result, 'message': 'Tenant attached to location successfully'}
+
+    except (NotFoundException, ValidationException):
+        raise
+    except Exception as e:
+        raise APIException(f'Failed to attach tenant to location: {str(e)}')
+
+
+def handle_detach_tenant_from_location(
+    db_session,
+    tenant_id: str,
+    data: Dict[str, Any],
+    organization_id: int
+) -> Dict[str, Any]:
+    """Handle POST /api/locations/tenants/{tenant_id}/detach - Detach tenant from location"""
+    try:
+        from .tenant_service import TenantService
+        service = TenantService(db_session)
+
+        user_location_id = data.get('user_location_id')
+        if not user_location_id:
+            raise ValidationException('user_location_id is required')
+
+        result = service.detach_tenant_from_location(
+            tenant_id=int(tenant_id),
+            user_location_id=int(user_location_id),
+            organization_id=organization_id
+        )
+
+        return {'tenant': result, 'message': 'Tenant detached from location successfully'}
+
+    except (NotFoundException, ValidationException):
+        raise
+    except Exception as e:
+        raise APIException(f'Failed to detach tenant from location: {str(e)}')
+
+
+def handle_update_tenant_members(
+    db_session,
+    tenant_id: str,
+    data: Dict[str, Any],
+    organization_id: int
+) -> Dict[str, Any]:
+    """Handle PUT /api/locations/tenants/{tenant_id}/members - Update tenant members"""
+    try:
+        from .tenant_service import TenantService
+        service = TenantService(db_session)
+
+        member_ids = data.get('member_ids', [])
+
+        result = service.assign_members_to_tenant(
+            tenant_id=int(tenant_id),
+            organization_id=organization_id,
+            member_ids=member_ids
+        )
+
+        return {'tenant': result, 'message': 'Tenant members updated successfully'}
+
+    except NotFoundException:
+        raise
+    except Exception as e:
+        raise APIException(f'Failed to update tenant members: {str(e)}')

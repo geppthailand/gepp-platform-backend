@@ -296,3 +296,38 @@ class UserLocationTag(Base, BaseModel):
     created_by = relationship("UserLocation", foreign_keys=[created_by_id])
     user_location = relationship("UserLocation", foreign_keys=[user_location_id])  # Legacy relationship
     organization = relationship("Organization")
+
+
+class UserTenant(Base, BaseModel):
+    """
+    Tenant tags for categorizing and grouping locations (same pattern as location tags).
+    Tenants are organization-level and can be mapped to multiple locations (many-to-many).
+    Works exactly like UserLocationTag.
+    """
+    __tablename__ = 'user_tenants'
+
+    # Basic info
+    name = Column(String(255), nullable=False)
+    note = Column(Text)
+
+    # Organization ownership
+    organization_id = Column(BigInteger, ForeignKey('organizations.id'), nullable=False)
+    created_by_id = Column(ForeignKey('user_locations.id'))
+
+    # Legacy single location reference (nullable - use user_locations JSONB array instead)
+    user_location_id = Column(BigInteger, ForeignKey('user_locations.id'), nullable=True)
+
+    # Many-to-many: JSONB array of user_location IDs this tenant is associated with
+    user_locations = Column(JSON, default=list)
+
+    # Members (JSONB array of user_location IDs assigned to this tenant)
+    members = Column(JSON, default=list)
+
+    # Event date range (optional)
+    start_date = Column(DateTime(timezone=True))
+    end_date = Column(DateTime(timezone=True))
+
+    # Relationships
+    created_by = relationship("UserLocation", foreign_keys=[created_by_id])
+    user_location = relationship("UserLocation", foreign_keys=[user_location_id])
+    organization = relationship("Organization")
