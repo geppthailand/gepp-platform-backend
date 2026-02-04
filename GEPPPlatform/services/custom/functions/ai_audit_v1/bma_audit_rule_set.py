@@ -59,7 +59,7 @@ MATERIAL_ID_TO_THAI: Dict[int, str] = {
 MODEL_NAME = "gemini-2.5-flash-lite"
 
 # Configurable limits
-MAX_TRANSACTIONS_PER_CALL = 100  # Maximum household_ids per API call
+MAX_TRANSACTIONS_PER_CALL = 1000  # Maximum household_ids per API call
 MAX_TRANSACTION_WORKERS = 10     # Max concurrent transactions
 MAX_MATERIAL_WORKERS = 4         # Max concurrent materials per transaction
 
@@ -278,6 +278,9 @@ def _get_custom_message(
     """
     from GEPPPlatform.models.ai_audit_models import AiAuditResponsePattern
 
+    # Debug logging
+    logger.info(f"[BMA_AUDIT] _get_custom_message called with: org_id={organization_id}, code='{code}', detect_type={detect_type_id}, claimed_type={claimed_type_id}")
+
     # Query for pattern matching this code
     pattern = db_session.query(AiAuditResponsePattern).filter(
         AiAuditResponsePattern.organization_id == organization_id,
@@ -286,13 +289,17 @@ def _get_custom_message(
         AiAuditResponsePattern.deleted_date.is_(None)
     ).first()
 
+    logger.info(f"[BMA_AUDIT] Pattern found: {pattern is not None}, pattern_id={pattern.id if pattern else 'None'}, pattern_text={pattern.pattern[:50] if pattern else 'None'}...")
+
     if not pattern:
         # Return default message if no pattern found
+        logger.warning(f"[BMA_AUDIT] No pattern found for org_id={organization_id}, code='{code}', returning fallback")
         return f"รหัสผล: {code}"
 
     # Get material names
-    detect_type_name = MATERIAL_ID_TO_THAI.get(detect_type_id, str(detect_type_id))
-    claimed_type_name = MATERIAL_ID_TO_THAI.get(claimed_type_id, str(claimed_type_id))
+    # If ID is 0, use empty string (for transaction-level messages where material type is not applicable)
+    detect_type_name = "" if detect_type_id == 0 else MATERIAL_ID_TO_THAI.get(detect_type_id, str(detect_type_id))
+    claimed_type_name = "" if claimed_type_id == 0 else MATERIAL_ID_TO_THAI.get(claimed_type_id, str(claimed_type_id))
     warning_items_str = ", ".join(warning_items) if warning_items else ""
 
     # Replace placeholders
@@ -348,8 +355,9 @@ def execute(
         }
 
     logger.info(
-        f"[BMA_AUDIT] Running for org={organization_id}, "
-        f"txn_count={len(transaction_ids)}"
+        f"[BMA_AUDIT] Starting audit for org={organization_id}, "
+        f"transaction_count={len(transaction_ids)}, "
+        f"transaction_ids_sample={transaction_ids[:5]}..." if len(transaction_ids) > 5 else f"transaction_ids={transaction_ids}"
     )
 
     # Load shared output format once
@@ -373,8 +381,17 @@ def execute(
         ).first()
 
         if not txn:
-            logger.warning(f"[BMA_AUDIT] Transaction {txn_id} not found")
-            return None
+            logger.warning(f"[BMA_AUDIT] Transaction {txn_id} not found in database")
+            # Return error response instead of None to ensure all transaction_ids get a result
+            return {
+                "ext_id_1": "unknown",
+                "district": "unknown",
+                "subdistrict": "unknown",
+                "household_id": str(txn_id),
+                "status": "error",
+                "message": f"Transaction {txn_id} not found",
+                "materials": {}
+            }
 
         # Load active records for this transaction
         records = db_session.query(TransactionRecord).filter(
@@ -422,7 +439,19 @@ def execute(
                 "recyclable": "ขยะรีไซเคิล",
             }
             missing_items = [missing_thai.get(m, m) for m in missing]
-            transaction_message = f"รูปภาพประเภทวัสดุไม่ครบถ้วนขาด {', '.join(missing_items)}"
+
+            # Use custom message pattern for ncm (non-complete material)
+            # For transaction-level message:
+            # - code: "ncm"
+            # - detect_type_id: 0 (empty string for {{detect_type}})
+            # - claimed_type_id: 0 (empty string for {{claimed_type}})
+            # - warning_items: list of missing material types in Thai
+            transaction_message = _get_custom_message(
+                db_session, organization_id, "ncm",
+                detect_type_id=0,
+                claimed_type_id=0,
+                warning_items=missing_items
+            )
 
         # ------------------------------------------------------------------
         # Step 2: Image audit per material (parallel)
@@ -514,6 +543,9 @@ def execute(
                         claimed_type_id = result.get("ct", 0)
                         warning_items = result.get("rm", {}).get("de", {}).get("wi", [])
 
+                        # Debug: log extracted values
+                        logger.info(f"[BMA_AUDIT] Extracted from Gemini result - mat_key={mat_key}, code='{code}', status={audit_status}, detect_type={detect_type_id}, claimed_type={claimed_type_id}")
+
                         # Get custom message
                         custom_msg = _get_custom_message(
                             db_session, organization_id, code,
@@ -535,7 +567,7 @@ def execute(
                             transaction_status = "reject"
 
         # ------------------------------------------------------------------
-        # Save to database
+        # Update transaction with audit results (do not commit here - will commit after all threads complete)
         # ------------------------------------------------------------------
         try:
             # Update transaction with audit results
@@ -544,11 +576,9 @@ def execute(
             txn.ai_audit_status = AIAuditStatus.approved if transaction_status == "approve" else AIAuditStatus.rejected
             txn.ai_audit_date = datetime.utcnow()
 
-            db_session.commit()
-            logger.info(f"[BMA_AUDIT] Saved audit results for transaction {txn_id}")
+            logger.info(f"[BMA_AUDIT] Prepared audit results for transaction {txn_id}")
         except Exception as e:
-            logger.error(f"[BMA_AUDIT] Failed to save audit results for transaction {txn_id}: {e}", exc_info=True)
-            db_session.rollback()
+            logger.error(f"[BMA_AUDIT] Failed to prepare audit results for transaction {txn_id}: {e}", exc_info=True)
 
         # ------------------------------------------------------------------
         # Build simplified response
@@ -576,17 +606,41 @@ def execute(
     # Process all transactions in parallel
     # ------------------------------------------------------------------
     results: List[Optional[Dict[str, Any]]] = []
+    failed_transactions: List[int] = []
 
     with ThreadPoolExecutor(max_workers=min(MAX_TRANSACTION_WORKERS, len(transaction_ids))) as executor:
         futures = {executor.submit(_process_transaction, txn_id): txn_id for txn_id in transaction_ids}
         for future in as_completed(futures):
+            txn_id = futures[future]
             try:
                 result = future.result()
                 if result:
                     results.append(result)
+                else:
+                    logger.warning(f"[BMA_AUDIT] Transaction {txn_id} returned None/empty result")
+                    failed_transactions.append(txn_id)
             except Exception as exc:
-                txn_id = futures[future]
-                logger.error(f"[BMA_AUDIT] Transaction {txn_id} failed: {exc}", exc_info=True)
+                logger.error(f"[BMA_AUDIT] Transaction {txn_id} failed with exception: {exc}", exc_info=True)
+                failed_transactions.append(txn_id)
+
+    # ------------------------------------------------------------------
+    # Commit all audit results to database
+    # ------------------------------------------------------------------
+    try:
+        db_session.commit()
+        logger.info(f"[BMA_AUDIT] Committed audit results for {len(results)} transactions")
+    except Exception as e:
+        logger.error(f"[BMA_AUDIT] Failed to commit audit results: {e}", exc_info=True)
+        db_session.rollback()
+        return {
+            "success": False,
+            "error": "COMMIT_FAILED",
+            "message": f"Failed to save audit results: {str(e)}",
+            "organization_id": organization_id,
+            "total_transactions": len(transaction_ids),
+            "processed_transactions": len(results),
+            "failed_transactions": len(failed_transactions)
+        }
 
     # ------------------------------------------------------------------
     # Build simplified nested response
@@ -615,11 +669,19 @@ def execute(
             "materials": result["materials"]
         }
 
+    # Log summary
+    logger.info(f"[BMA_AUDIT] Completed: {len(results)}/{len(transaction_ids)} transactions processed successfully")
+    if failed_transactions:
+        logger.warning(f"[BMA_AUDIT] Failed transactions: {failed_transactions}")
+
     return {
         "success": True,
         "rule_set": "bma_audit_rule_set",
         "organization_id": organization_id,
         "total_transactions": len(transaction_ids),
+        "processed_transactions": len(results),
+        "failed_transactions": len(failed_transactions),
+        "failed_transaction_ids": failed_transactions if failed_transactions else [],
         "token_usage": total_usage,
         "results": simplified_response
     }

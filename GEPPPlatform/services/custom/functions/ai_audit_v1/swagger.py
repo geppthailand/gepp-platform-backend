@@ -7,6 +7,41 @@ This module contains the OpenAPI 3.0 specification for the AI Audit V1 custom AP
 from typing import Dict, Any
 
 
+def _generate_example_households(count: int = 100) -> Dict[str, Any]:
+    """
+    Generate example household data with complete materials for all households.
+
+    Args:
+        count: Number of households to generate (default 100)
+
+    Returns:
+        Example data structure with specified number of households
+    """
+    households = {}
+
+    for i in range(1, count + 1):
+        # Zero-pad household ID to 13 digits
+        household_id = str(i).zfill(13)
+
+        # Each household has all 4 material types with complete image URLs
+        households[household_id] = {
+            "materials": {
+                "general": {"image_url": f"https://storage.example.com/general_{household_id}.jpg"},
+                "organic": {"image_url": f"https://storage.example.com/organic_{household_id}.jpg"},
+                "recyclable": {"image_url": f"https://storage.example.com/recyclable_{household_id}.jpg"},
+                "hazardous": {"image_url": f"https://storage.example.com/hazardous_{household_id}.jpg"}
+            }
+        }
+
+    return {
+        "2025-01": {
+            "เขตยานนาวา": {
+                "แขวงช่องนนทรี": households
+            }
+        }
+    }
+
+
 def get_swagger_spec() -> Dict[str, Any]:
     """
     Returns the OpenAPI 3.0 specification for AI Audit V1 API.
@@ -139,28 +174,7 @@ def get_swagger_spec() -> Dict[str, Any]:
                                 "schema": {
                                     "$ref": "#/components/schemas/CallRequest"
                                 },
-                                "example": {
-                                    "2025-01": {
-                                        "เขตยานนาวา": {
-                                            "แขวงช่องนนทรี": {
-                                                "0000000000001": {
-                                                    "materials": {
-                                                        "general": {"image_url": "https://storage.example.com/general_001.jpg"},
-                                                        "organic": {"image_url": "https://storage.example.com/organic_001.jpg"},
-                                                        "recyclable": {"image_url": "https://storage.example.com/recyclable_001.jpg"},
-                                                        "hazardous": {"image_url": "https://storage.example.com/hazardous_001.jpg"}
-                                                    }
-                                                },
-                                                "0000000000002": {
-                                                    "materials": {
-                                                        "general": {"image_url": "https://storage.example.com/general_002.jpg"},
-                                                        "recyclable": {"image_url": "https://storage.example.com/recyclable_002.jpg"}
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
+                                "example": _generate_example_households(100)
                             }
                         }
                     },

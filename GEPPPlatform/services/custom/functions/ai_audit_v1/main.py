@@ -355,6 +355,8 @@ def _upsert_transactions(
                         created_ids.append(txn.id)
 
     db_session.flush()
+    # Commit here to ensure transactions are visible to parallel audit threads
+    db_session.commit()
     return created_ids, updated_ids
 
 
