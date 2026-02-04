@@ -842,12 +842,21 @@ def main(event, context):
                             # Record API usage (increment counters)
                             process_units = result.get('process_units', 0)  # Functions can report units consumed
                             custom_api_service.record_api_call(org_api, process_units)
-                            
+
+                            # Check if result contains quota error in audit_result
+                            require_quota = None
+                            if isinstance(result, dict) and 'audit_result' in result:
+                                audit_result = result['audit_result']
+                                if isinstance(audit_result, dict) and audit_result.get('error') == 'PROCESS_QUOTA_EXCEEDED':
+                                    # Extract require_quota_for_this_call from audit_result.process_units
+                                    if 'process_units' in audit_result and isinstance(audit_result['process_units'], dict):
+                                        require_quota = audit_result['process_units'].get('require_quota_for_this_call')
+
                             # Return result
                             results = {
                                 "success": True,
                                 "data": result,
-                                "quota": custom_api_service.get_quota_status(org_api)
+                                "quota": custom_api_service.get_quota_status(org_api, require_quota)
                             }
                             
                         except APIException as api_err:

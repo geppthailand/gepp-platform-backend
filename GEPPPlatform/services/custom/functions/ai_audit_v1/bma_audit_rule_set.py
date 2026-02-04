@@ -338,11 +338,18 @@ def execute(
     - Transactions are processed in parallel (max MAX_TRANSACTION_WORKERS concurrent)
     - Material records within each transaction are processed in parallel (max MAX_MATERIAL_WORKERS concurrent)
 
+    Quota Management:
+    - Checks api_call_quota and process_quota before processing
+    - 1 API call = 1 unit of api_call_quota
+    - 1 process unit = 1 material image to be audited
+    - Updates quota usage after successful processing
+
     Results are saved directly to transactions.ai_audit_note and audit_tokens.
     Returns simplified JSON format grouped by ext_id_1/district/subdistrict/household_id.
     """
     from GEPPPlatform.models.transactions.transactions import Transaction, AIAuditStatus
     from GEPPPlatform.models.transactions.transaction_records import TransactionRecord
+    from GEPPPlatform.models.custom.custom_apis import CustomApi, OrganizationCustomApi
 
     # Validate transaction count limit
     if len(transaction_ids) > MAX_TRANSACTIONS_PER_CALL:
@@ -354,9 +361,81 @@ def execute(
             "received": len(transaction_ids)
         }
 
+    # ------------------------------------------------------------------
+    # Check quota limits
+    # ------------------------------------------------------------------
+    # Get organization's custom API quota record
+    org_custom_api = db_session.query(OrganizationCustomApi).join(CustomApi).filter(
+        OrganizationCustomApi.organization_id == organization_id,
+        CustomApi.service_path == 'ai_audit/v1',
+        OrganizationCustomApi.deleted_date.is_(None)
+    ).first()
+
+    if not org_custom_api:
+        logger.error(f"[BMA_AUDIT] No custom API access found for organization {organization_id}")
+        return {
+            "success": False,
+            "error": "NO_API_ACCESS",
+            "message": "Organization does not have AI Audit API access configured"
+        }
+
+    # Check API call quota
+    if not org_custom_api.has_api_quota():
+        logger.warning(f"[BMA_AUDIT] API call quota exceeded for org {organization_id}")
+        return {
+            "success": False,
+            "error": "API_CALL_QUOTA_EXCEEDED",
+            "message": "API call quota exceeded",
+            "quota": {
+                "api_call_quota": org_custom_api.api_call_quota,
+                "api_call_used": org_custom_api.api_call_used,
+                "remaining": (org_custom_api.api_call_quota or 0) - (org_custom_api.api_call_used or 0)
+            }
+        }
+
+    # Count images in all transaction records for process quota check
+    num_images = 0
+    for txn_id in transaction_ids:
+        records = db_session.query(TransactionRecord).filter(
+            TransactionRecord.created_transaction_id == txn_id,
+            TransactionRecord.deleted_date.is_(None)
+        ).all()
+        for rec in records:
+            # Count images in this record
+            if rec.images and len(rec.images) > 0:
+                # Each record uses its first image for audit (1 process unit per record with image)
+                num_images += 1
+
+    logger.info(f"[BMA_AUDIT] Total images to process: {num_images}")
+
+    # Check process quota
+    if not org_custom_api.has_process_quota(num_images):
+        logger.warning(
+            f"[BMA_AUDIT] Process quota exceeded for org {organization_id}: "
+            f"used={org_custom_api.process_used}, quota={org_custom_api.process_quota}, "
+            f"require_quota_for_this_call={num_images}, "
+            f"remaining={(org_custom_api.process_quota or 0) - (org_custom_api.process_used or 0)}"
+        )
+        return {
+            "success": False,
+            "error": "PROCESS_QUOTA_EXCEEDED",
+            "message": "Process quota exceeded",
+            "process_units": {
+                "used": org_custom_api.process_used or 0,
+                "quota": org_custom_api.process_quota,
+                "remaining": (org_custom_api.process_quota or 0) - (org_custom_api.process_used or 0),
+                "require_quota_for_this_call": num_images
+            }
+        }
+
+    # Increment API call usage (will be committed later)
+    org_custom_api.increment_api_call()
+    logger.info(f"[BMA_AUDIT] API call quota: {org_custom_api.api_call_used}/{org_custom_api.api_call_quota}")
+
     logger.info(
         f"[BMA_AUDIT] Starting audit for org={organization_id}, "
         f"transaction_count={len(transaction_ids)}, "
+        f"images_to_process={num_images}, "
         f"transaction_ids_sample={transaction_ids[:5]}..." if len(transaction_ids) > 5 else f"transaction_ids={transaction_ids}"
     )
 
@@ -624,11 +703,18 @@ def execute(
                 failed_transactions.append(txn_id)
 
     # ------------------------------------------------------------------
-    # Commit all audit results to database
+    # Update process usage quota and commit all audit results to database
     # ------------------------------------------------------------------
+    # Increment process usage by the number of images actually processed
+    org_custom_api.increment_process_usage(num_images)
+    logger.info(
+        f"[BMA_AUDIT] Updated process quota: {org_custom_api.process_used}/{org_custom_api.process_quota} "
+        f"(+{num_images} for this call)"
+    )
+
     try:
         db_session.commit()
-        logger.info(f"[BMA_AUDIT] Committed audit results for {len(results)} transactions")
+        logger.info(f"[BMA_AUDIT] Committed audit results for {len(results)} transactions and updated quota usage")
     except Exception as e:
         logger.error(f"[BMA_AUDIT] Failed to commit audit results: {e}", exc_info=True)
         db_session.rollback()

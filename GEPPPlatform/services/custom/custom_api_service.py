@@ -154,24 +154,34 @@ class CustomApiService:
             org_api.increment_process_usage(process_units)
         self.db.commit()
     
-    def get_quota_status(self, org_api: OrganizationCustomApi) -> Dict[str, Any]:
+    def get_quota_status(self, org_api: OrganizationCustomApi, require_quota_for_this_call: int = None) -> Dict[str, Any]:
         """
         Get current quota status for an organization's API access.
-        
+
+        Args:
+            org_api: The organization API access record
+            require_quota_for_this_call: Optional number of process units required for current call
+
         Returns:
             Dict with quota information
         """
+        process_units = {
+            "used": org_api.process_used or 0,
+            "quota": org_api.process_quota,
+            "remaining": (org_api.process_quota or 0) - (org_api.process_used or 0) if org_api.process_quota else None
+        }
+
+        # Add require_quota_for_this_call if provided
+        if require_quota_for_this_call is not None:
+            process_units["require_quota_for_this_call"] = require_quota_for_this_call
+
         return {
             "api_calls": {
                 "used": org_api.api_call_used or 0,
                 "quota": org_api.api_call_quota,
                 "remaining": (org_api.api_call_quota or 0) - (org_api.api_call_used or 0) if org_api.api_call_quota else None
             },
-            "process_units": {
-                "used": org_api.process_used or 0,
-                "quota": org_api.process_quota,
-                "remaining": (org_api.process_quota or 0) - (org_api.process_used or 0) if org_api.process_quota else None
-            },
+            "process_units": process_units,
             "expired_date": org_api.expired_date.isoformat() if org_api.expired_date else None,
             "is_valid": org_api.is_valid()
         }
