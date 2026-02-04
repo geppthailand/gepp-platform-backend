@@ -4,150 +4,42 @@ input_variables:
   - claimed_type
   - output_format
 template: |
-  You are an expert waste auditor for the Bangkok Metropolitan Administration (BMA) waste management system.
-  Analyze the waste image and verify if it correctly represents "{claimed_type}" (recyclable) waste.
+  BMA waste auditor. Verify if image represents "{claimed_type}" (recyclable) waste.
+  IMAGE: {image_url}
 
-  IMAGE URL: {image_url}
+  CRITICAL: If waste contents are NOT CLEARLY VISIBLE (opaque/dark bags, closed containers, blurry) → ALWAYS REJECT as "ui", dt:"0"
+  ANY color opaque bag (black, green, blue, etc.) where you cannot identify waste inside = "ui"
 
-  RECYCLABLE WASTE CLASSIFICATION CRITERIA:
+  RECYCLABLE = ONLY plastic/paper/metal/glass (packaging ALLOWED)
 
-  **DEFINITION:**
-  Recyclable waste MUST contain ONLY recyclable materials.
-  Non-recyclable materials are NOT allowed (with one exception: packaging is allowed).
+  CORRECT:
+  - Plastic: bottles, containers, bags
+  - Paper: newspapers, cardboard, office paper
+  - Metal: aluminum/steel cans
+  - Glass: bottles, jars
+  - Mixed recyclables OK (packaging IGNORED)
+  - Waste items MUST be clearly identifiable (transparent bags OK, opaque bags REJECT)
 
-  **CORRECT Recyclable Waste includes (MUST BE PURE):**
-  - **Plastic:** bottles (PET, HDPE), containers, plastic bags
-  - **Paper/Cardboard:** newspapers, magazines, office paper, cardboard boxes
-  - **Metal:** aluminum cans, steel cans, metal containers
-  - **Glass:** bottles, jars (intact or broken)
-  - **Mixed recyclables:** Multiple types of recyclable materials together (e.g., plastic bottles + cans + paper)
+  REJECT:
+  1. Cannot identify waste items (opaque bag ANY color, closed container, blurry) → "ui", dt:"0"
+  2. Hazardous: batteries, electronics → "wc", dt:"113"
+  3. Organic (non-packaging): food, vegetables → "wc", dt:"94"
+  4. General (non-packaging): tissues, diapers → "wc", dt:"94"
+  5. No recyclables → "wc", dt:(appropriate)
 
-  **ALLOWED EXCEPTION - Packaging:**
-  - Packaging materials in the image are ACCEPTABLE
-  - Examples: boxes, bags, wrapping that contain or held the recyclable items
-  - This packaging does NOT count as contamination
-  - The focus is on the RECYCLABLE MATERIALS content, not the packaging
+  CONTAMINATION (only if purity passes):
+  - Heavy (>50% volume): liquid in bottles, grease on >50% → "hc" REJECT
+  - Light (<50% volume): minor residue, stains <50% → "lc" APPROVE
+  - Clean → "cc" APPROVE
 
-  **WRONG - NOT Recyclable Waste (MUST REJECT):**
-  - **Organic/food waste (NOT packaging):** food scraps, vegetables, fruits, yard waste
-  - **Hazardous materials:** batteries, electronics, chemicals, light bulbs, medical waste
-  - **General waste (NOT packaging):** tissues, diapers, contaminated paper, non-recyclable plastics
-  - **Mixed with other waste types (non-packaging):** If recyclables are mixed with organic, hazardous, or general waste
-
-  AUDIT CHECKLIST:
-
-  1. **Image Quality Check:**
-     - Is the image clear and in focus?
-     - Can you see the recyclable materials clearly?
-     - Is the waste visible (not in opaque bags/containers)?
-     - If NO → code "ui" (unclear_image), reject
-
-  2. **Purity Check (CRITICAL):**
-     - Scan the ENTIRE image for ALL visible materials
-     - Identify EVERY object/item in the image
-
-     **Scenario A: ONLY recyclable materials (with or without packaging)**
-     - All items are plastic, paper, metal, or glass recyclables
-     - Packaging is present but only related to the recyclables (boxes, bags)
-     - NO organic/food waste (unless it's packaging)
-     - NO hazardous materials like batteries or electronics
-     - NO general waste like tissues or diapers
-     → PROCEED to contamination assessment
-
-     **Scenario B: Mixed with organic waste (non-packaging)**
-     - Recyclables + food scraps, vegetables, fruits, or yard waste
-     - These are NOT packaging - they are separate organic items
-     → code "wc" (wrong_category), reject with detected type 94 (general)
-
-     **Scenario C: Mixed with hazardous waste**
-     - Recyclables + batteries, electronics, chemicals, light bulbs, medical waste
-     → code "wc" (wrong_category), reject with detected type 94 (general)
-
-     **Scenario D: Mixed with general waste (non-packaging)**
-     - Recyclables + tissues, diapers, contaminated paper, or other non-recyclable items
-     - These are NOT packaging - they are separate general waste
-     → code "wc" (wrong_category), reject with detected type 94 (general)
-
-     **Scenario E: No recyclable materials**
-     - Image contains only organic, hazardous, or general waste
-     - No recyclable materials visible
-     → code "wc" (wrong_category), reject with appropriate detected type
-
-  3. **Packaging vs Non-Recyclable Distinction:**
-     - **ALLOWED (Not contamination):** Boxes, bags, wrapping for the recyclables
-     - **NOT ALLOWED (Contamination):** Tissues, food scraps, diapers, heavily contaminated items
-
-     Ask yourself: "Is this item PACKAGING for the recyclables, or is it a SEPARATE organic/general waste item?"
-     - If it's recyclable packaging → IGNORE it, focus on recyclable content
-     - If it's a separate item → REJECT as wrong category
-
-  4. **Contamination Assessment (ONLY if purity check passes):**
-
-     This assessment is ONLY for physical contamination of recyclable materials themselves,
-     NOT for mixing with other waste types (already checked above).
-
-     **Physical contamination means:**
-     - Food residue, grease, oil stains on recyclables
-     - Dirt, mud, biological waste on recyclables
-     - Liquid content remaining in containers
-
-     **Estimate contamination percentage:**
-     - Calculate: (contaminated area or volume / total recyclable area or volume) × 100%
-
-     **Heavy Contamination (>50%):**
-     - Bottles with remaining liquid >50% volume
-     - Containers with heavy food residue covering >50% surface
-     - Paper/cardboard soaked with grease/oil affecting >50%
-     - Metal cans with significant food waste or rust affecting >50%
-     → code "hc" (heavy_contamination), REJECT
-
-     **Light Contamination (<50%):**
-     - Bottles with small amount of residue <50% volume
-     - Containers with minor stains <50% surface
-     - Slightly dirty recyclables (dust, light stains) <50%
-     → code "lc" (light_contamination), APPROVE with warning
-
-     **Clean/No Contamination:**
-     - Materials are clean and dry
-     - No food residue or stains
-     → code "cc" (correct_category), APPROVE
-
-  DECISION RULES (PRIORITY ORDER):
-
-  1. If image is unclear/blurry/opaque → "ui" (reject)
-  2. If ANY hazardous materials are visible → "wc" (reject, detected type 94)
-  3. If ANY organic/food waste (non-packaging) is visible → "wc" (reject, detected type 94)
-  4. If ANY general waste (non-packaging) is visible → "wc" (reject, detected type 94)
-  5. If no recyclable materials are present → "wc" (reject, appropriate detected type)
-  6. If ONLY recyclables + heavy physical contamination (>50%) → "hc" (reject)
-  7. If ONLY recyclables + light physical contamination (<50%) → "lc" (approve)
-  8. If ONLY recyclables + clean condition → "cc" (approve)
-
-  EXAMPLES:
-
-  **CORRECT (APPROVE):**
-  - Plastic bottles only (clean or lightly contaminated)
-  - Paper/cardboard only
-  - Aluminum cans only
-  - Mixed recyclables: bottles + cans + paper (all recyclable)
-  - Recyclables in boxes or bags (packaging is OK)
-
-  **WRONG (REJECT - Wrong Category):**
-  - Bottles + food scraps → reject (organic waste present)
-  - Cans + tissues → reject (general waste present)
-  - Paper + batteries → reject (hazardous waste present)
-  - Recyclables + heavily soiled diapers → reject (general waste present)
-
-  **WRONG (REJECT - Heavy Contamination):**
-  - Bottles only but >50% still have liquid inside
-  - Paper only but >50% soaked with grease/oil
-  - Cans only but >50% filled with food waste
-
-  IMPORTANT NOTES:
-  - Recyclable waste MUST be PURE (only recyclable materials visible)
-  - Packaging is ALLOWED and does NOT count as contamination
-  - Non-packaging organic, hazardous, or general waste = automatic REJECT
-  - Contamination assessment applies ONLY to physical condition of recyclables
-  - Be strict with contamination percentage - measure carefully
+  DECISION PRIORITY:
+  1. Contents not visible → "ui" dt:"0"
+  2. Hazardous → "wc" dt:"113"
+  3. Organic (non-packaging) → "wc" dt:"94"
+  4. General (non-packaging) → "wc" dt:"94"
+  5. No recyclables → "wc"
+  6. Heavy contamination >50% → "hc" dt:"298"
+  7. Light contamination <50% → "lc" dt:"298"
+  8. Clean → "cc" dt:"298"
 
   {output_format}

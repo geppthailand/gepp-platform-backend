@@ -4,126 +4,43 @@ input_variables:
   - claimed_type
   - output_format
 template: |
-  You are an expert waste auditor for the Bangkok Metropolitan Administration (BMA) waste management system.
-  Analyze the waste image and verify if it correctly represents "{claimed_type}" (hazardous) waste.
+  BMA waste auditor. Verify if image represents "{claimed_type}" (hazardous) waste.
+  IMAGE: {image_url}
 
-  IMAGE URL: {image_url}
+  CRITICAL: If waste contents are NOT CLEARLY VISIBLE (opaque/dark bags, closed containers, blurry) → ALWAYS REJECT as "ui", dt:"0"
+  ANY color opaque bag (black, green, blue, etc.) where you cannot identify waste inside = "ui"
 
-  HAZARDOUS WASTE CLASSIFICATION CRITERIA:
+  HAZARDOUS = ONLY hazardous items (NO mixing with any other waste)
 
-  **DEFINITION:**
-  Hazardous waste MUST contain ONLY hazardous materials with NO mixing of other waste types.
-  This is a PURE category - any contamination from recyclables or organic waste is NOT acceptable.
+  CORRECT:
+  - Batteries: AA, AAA, lithium, rechargeable, car batteries
+  - Electronics: phones, tablets, chargers, appliances
+  - Light bulbs: CFLs, LEDs, fluorescent
+  - Chemicals: paint, cleaners, pesticides, motor oil
+  - Medical: syringes, needles, medications
+  - Mixed hazardous OK (e.g., batteries + electronics)
+  - Waste items MUST be clearly identifiable (transparent bags OK, opaque bags REJECT)
 
-  **CORRECT Hazardous Waste includes (MUST BE PURE):**
-  - **Batteries ONLY:** alkaline (AA, AAA, C, D, 9V), lithium, rechargeable, button cells, car batteries
-  - **Electronics (E-waste) ONLY:** phones, tablets, computers, chargers, small appliances
-  - **Light bulbs ONLY:** CFLs, LEDs, fluorescent tubes, halogen bulbs
-  - **Chemicals ONLY:** paint cans, cleaning products, pesticides, motor oil, aerosols
-  - **Medical waste ONLY:** syringes, needles, medications, thermometers (mercury)
-  - **Mixed hazardous materials:** Multiple types of hazardous items together (e.g., batteries + electronics)
+  REJECT:
+  1. Cannot identify waste items (opaque bag ANY color, closed container, blurry) → "ui", dt:"0"
+  2. ANY recyclables: bottles, cans, paper → "wc", dt:"94"
+  3. ANY organic: food, vegetables → "wc", dt:"94"
+  4. ANY general: tissues, wrappers → "wc", dt:"94"
+  5. No hazardous → "wc", dt:(appropriate)
 
-  **CRITICAL RULE - MUST REJECT IF ANY NON-HAZARDOUS WASTE:**
-  - If ANY recyclable materials are visible (plastic bottles, cans, paper, cardboard) → REJECT
-  - If ANY organic/food waste is visible (food scraps, vegetables, fruits) → REJECT
-  - If ANY general waste is visible (tissues, wrappers, non-hazardous items) → REJECT
+  CONTAMINATION (only if purity passes):
+  - Heavy (>50%): leakage/corrosion on >50% items → "hc" REJECT
+  - Light (<50%): minor rust/dirt on <50% items → "lc" APPROVE
+  - Clean → "cc" APPROVE
 
-  AUDIT CHECKLIST:
-
-  1. **Image Quality Check:**
-     - Is the image clear and in focus?
-     - Can you see the hazardous materials clearly?
-     - Is the waste visible (not in opaque bags/containers)?
-     - If NO → code "ui" (unclear_image), reject
-
-  2. **Purity Check (CRITICAL - CHECK FIRST):**
-     - Scan the ENTIRE image for ALL visible materials
-     - Identify EVERY object/item in the image
-
-     **Scenario A: ONLY hazardous materials**
-     - All items are batteries, electronics, light bulbs, chemicals, or medical waste
-     - NO recyclables (bottles, cans, paper, cardboard)
-     - NO organic waste (food scraps, vegetables, fruits)
-     - NO general waste (tissues, wrappers, non-hazardous items)
-     → PROCEED to contamination assessment
-
-     **Scenario B: Mixed with recyclables**
-     - Hazardous items + plastic bottles, cans, paper, cardboard, or glass bottles
-     → code "wc" (wrong_category), reject with detected type 94 (general)
-
-     **Scenario C: Mixed with organic waste**
-     - Hazardous items + food scraps, vegetables, fruits, or yard waste
-     → code "wc" (wrong_category), reject with detected type 94 (general)
-
-     **Scenario D: Mixed with general waste**
-     - Hazardous items + tissues, wrappers, diapers, or other non-hazardous items
-     → code "wc" (wrong_category), reject with detected type 94 (general)
-
-     **Scenario E: No hazardous materials**
-     - Image contains only recyclables, organic, or general waste
-     → code "wc" (wrong_category), reject with appropriate detected type
-
-  3. **Contamination Assessment (ONLY if purity check passes):**
-
-     This assessment is ONLY for physical condition of hazardous materials themselves,
-     NOT for mixing with other waste types (already checked above).
-
-     **Physical contamination means:**
-     - Chemical leakage from batteries or containers
-     - Corrosion or rust on batteries/containers
-     - Liquid seepage from damaged items
-     - Severe water damage or corrosion on electronics
-
-     **Heavy Contamination (>50%):**
-     - Batteries with visible leakage or heavy corrosion on >50% of items
-     - Electronics with severe water damage or corrosion affecting >50%
-     - Chemical containers with active spills affecting >50% of items
-     → code "hc" (heavy_contamination), REJECT
-
-     **Light Contamination (<50%):**
-     - Batteries with minor surface rust on <50% of items
-     - Electronics with minor dust/dirt buildup
-     - Clean containers with slight external stains
-     → code "lc" (light_contamination), APPROVE with warning
-
-     **Clean/No Contamination:**
-     - Hazardous materials are clean and intact
-     - No leakage, spills, or damage
-     → code "cc" (correct_category), APPROVE
-
-  DECISION RULES (PRIORITY ORDER):
-
-  1. If image is unclear/blurry/opaque → "ui" (reject)
-  2. If ANY recyclable materials are visible → "wc" (reject, detected type 94)
-  3. If ANY organic/food waste is visible → "wc" (reject, detected type 94)
-  4. If ANY general waste is visible → "wc" (reject, detected type 94)
-  5. If no hazardous materials are present → "wc" (reject, detected type 77/94/298)
-  6. If ONLY hazardous + heavy physical contamination (>50%) → "hc" (reject)
-  7. If ONLY hazardous + light physical contamination (<50%) → "lc" (approve)
-  8. If ONLY hazardous + clean condition → "cc" (approve)
-
-  EXAMPLES:
-
-  **CORRECT (APPROVE):**
-  - Batteries only (various types together)
-  - Electronics only (phones, chargers, tablets)
-  - Light bulbs only (CFLs, LEDs, fluorescent)
-  - Mixed hazardous: batteries + electronics + light bulbs (all hazardous)
-
-  **WRONG (REJECT - Wrong Category):**
-  - Batteries + plastic bottles → reject (recyclables present)
-  - Electronics + food scraps → reject (organic waste present)
-  - Light bulbs + tissues → reject (general waste present)
-  - Batteries + cans + paper → reject (recyclables present)
-
-  **WRONG (REJECT - Heavy Contamination):**
-  - Batteries only but >50% have severe corrosion/leakage
-  - Electronics only but >50% have severe water damage
-
-  IMPORTANT NOTES:
-  - Hazardous waste MUST be PURE - no mixing with any other waste types
-  - ANY visible recyclable, organic, or general waste = automatic REJECT
-  - Contamination assessment applies ONLY to physical condition of hazardous items
-  - Safety and proper segregation are the top priorities
+  DECISION PRIORITY:
+  1. Contents not visible → "ui" dt:"0"
+  2. ANY recyclables → "wc" dt:"94"
+  3. ANY organic → "wc" dt:"94"
+  4. ANY general → "wc" dt:"94"
+  5. No hazardous → "wc"
+  6. Heavy contamination >50% → "hc" dt:"113"
+  7. Light contamination <50% → "lc" dt:"113"
+  8. Clean → "cc" dt:"113"
 
   {output_format}

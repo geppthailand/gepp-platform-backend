@@ -56,7 +56,7 @@ MATERIAL_ID_TO_THAI: Dict[int, str] = {
     113: "ขยะอันตราย",
 }
 
-MODEL_NAME = "gemini-2.5-flash-lite"
+MODEL_NAME = "gemini-2.5-flash-lite-001"
 
 # Configurable limits
 MAX_TRANSACTIONS_PER_CALL = 1000  # Maximum household_ids per API call
@@ -115,6 +115,7 @@ def _get_langchain_gemini():
         logger.error("[BMA_AUDIT] GEMINI_API_KEY not set")
         return None
 
+    logger.info(f"[BMA_AUDIT] Initializing ChatGoogleGenerativeAI with model: {MODEL_NAME}")
     return ChatGoogleGenerativeAI(
         model=MODEL_NAME,
         temperature=0.1,
@@ -645,6 +646,19 @@ def execute(
                                     f"Correcting to '{expected_status}'."
                                 )
                                 audit_status = expected_status
+
+                        # CRITICAL: Validate that detected type matches claimed type
+                        # If AI detected a different category (and it's not unclear/error), force reject as "wc"
+                        if detect_type_id != 0 and detect_type_id != claimed_type_id:
+                            # Only override if AI incorrectly approved
+                            if audit_status == "a" or code == "cc":
+                                logger.warning(
+                                    f"[BMA_AUDIT] Type mismatch for transaction {txn_id}, material {mat_key}: "
+                                    f"claimed_type={claimed_type_id} but detected_type={detect_type_id}. "
+                                    f"Forcing reject with code 'wc' (was status='{audit_status}', code='{code}')."
+                                )
+                                audit_status = "r"  # Force reject
+                                code = "wc"  # Wrong category
 
                         # Debug: log extracted values
                         logger.info(f"[BMA_AUDIT] Extracted from Gemini result - mat_key={mat_key}, code='{code}', status={audit_status}, detect_type={detect_type_id}, claimed_type={claimed_type_id}")
