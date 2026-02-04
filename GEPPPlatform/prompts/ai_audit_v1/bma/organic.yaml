@@ -11,20 +11,28 @@ template: |
 
   ORGANIC WASTE CLASSIFICATION CRITERIA:
 
-  **CORRECT Organic Waste includes:**
+  **DEFINITION:**
+  Organic waste MUST contain ONLY organic/biodegradable materials.
+  Non-organic materials are NOT allowed (with one exception: packaging is allowed).
+
+  **CORRECT Organic Waste includes (MUST BE PURE):**
   - **Food waste:** fruit/vegetable scraps, cooked food, rice, noodles, bread, eggshells
   - **Food preparation waste:** coffee grounds, tea bags, fruit peels, vegetable cuttings
   - **Meat and bones:** chicken bones, fish bones, meat scraps
   - **Garden waste:** leaves, grass clippings, small branches, flowers, plants
   - **Natural materials:** sawdust, wood chips (untreated)
 
-  **WRONG - NOT Organic Waste:**
-  - Plastic bags, containers, wrapping → general (94) or recyclable (298)
-  - Metal, glass, aluminum → recyclable (298)
-  - Paper, cardboard → recyclable (298) if clean
-  - Electronics, batteries → hazardous (113)
-  - Non-biodegradable items → general (94)
-  - Liquids or oils (excessive amount)
+  **ALLOWED EXCEPTION - Packaging:**
+  - Food packaging materials in the image are ACCEPTABLE
+  - Examples: plastic containers, bags, wrapping, boxes that contain or held the food
+  - This packaging does NOT count as contamination
+  - The focus is on the FOOD/ORGANIC content, not the packaging
+
+  **WRONG - NOT Organic Waste (MUST REJECT):**
+  - **Recyclable materials (NOT packaging):** plastic bottles, cans, glass bottles, clean paper, cardboard
+  - **Hazardous materials:** batteries, electronics, chemicals, light bulbs, medical waste
+  - **General waste (NOT packaging):** tissues, diapers, wrappers, non-food items
+  - **Mixed with other waste types (non-packaging):** If organic waste is mixed with recyclables, hazardous, or general waste
 
   AUDIT CHECKLIST:
 
@@ -34,31 +42,75 @@ template: |
      - Is the waste visible (not in opaque bags/containers)?
      - If NO → code "ui" (unclear_image), reject
 
-  2. **Material Type Check:**
-     - Identify all visible materials in the image
-     - Are they biodegradable organic materials?
-     - Check for non-organic contamination (plastic, metal, glass)
-     - If materials are NOT organic → code "wc" (wrong_category), reject
+  2. **Purity Check (CRITICAL):**
+     - Scan the ENTIRE image for ALL visible materials
+     - Identify EVERY object/item in the image
 
-  3. **Contamination Check:**
-     - Organic waste does NOT require contamination assessment
-     - Organic materials can be mixed with food residue (this is normal)
-     - Small amounts of non-organic contamination (<10%) are tolerable
-     - If significant non-organic items present (>10%) → code "wc" (wrong_category), reject
+     **Scenario A: ONLY organic waste (with or without packaging)**
+     - All food/organic materials are visible
+     - Packaging is present but only related to the food (containers, bags)
+     - NO recyclables like bottles, cans, or clean paper (unless they're food packaging)
+     - NO hazardous materials like batteries or electronics
+     - NO general waste like tissues or non-food wrappers
+     → code "cc" (correct_category), approve
 
-  4. **Packaging Check:**
-     - Food must be removed from packaging
-     - Plastic bags, containers must not be included
-     - If food still in plastic packaging → code "wc" (wrong_category), reject
+     **Scenario B: Mixed with recyclables (non-packaging)**
+     - Organic waste + plastic bottles, aluminum cans, glass bottles, or clean paper
+     - These are NOT food packaging - they are separate recyclable items
+     → code "wc" (wrong_category), reject with detected type 94 (general)
 
-  DECISION RULES:
+     **Scenario C: Mixed with hazardous waste**
+     - Organic waste + batteries, electronics, chemicals, light bulbs, medical waste
+     → code "wc" (wrong_category), reject with detected type 94 (general)
 
-  → If image is unclear/blurry/opaque → "ui" (reject)
-  → If materials are not biodegradable organic → "wc" (reject)
-  → If packaging/non-organic items >10% → "wc" (reject)
-  → If materials are correct organic waste → "cc" (approve)
+     **Scenario D: Mixed with general waste (non-packaging)**
+     - Organic waste + tissues, diapers, wrappers, or other non-food items
+     - These are NOT food packaging - they are separate general waste
+     → code "wc" (wrong_category), reject with detected type 94 (general)
 
-  NOTE: For organic waste, DO NOT apply heavy/light contamination rules.
-  Only check if materials are truly organic and biodegradable.
+     **Scenario E: No organic materials**
+     - Image contains only recyclables, hazardous, or general waste
+     - No food or organic materials visible
+     → code "wc" (wrong_category), reject with appropriate detected type
+
+  3. **Packaging vs Non-Organic Distinction:**
+     - **ALLOWED (Not contamination):** Food containers, food bags, food wrapping
+     - **NOT ALLOWED (Contamination):** Plastic bottles (drink), aluminum cans (drink), glass bottles, tissues, wrappers
+
+     Ask yourself: "Is this item PACKAGING for the organic waste, or is it a SEPARATE recyclable/general waste item?"
+     - If it's food packaging → IGNORE it, focus on organic content
+     - If it's a separate item → REJECT as wrong category
+
+  DECISION RULES (PRIORITY ORDER):
+
+  1. If image is unclear/blurry/opaque → "ui" (reject)
+  2. If ANY hazardous materials are visible → "wc" (reject, detected type 94)
+  3. If ANY recyclables (non-packaging) are visible → "wc" (reject, detected type 94)
+  4. If ANY general waste (non-packaging) is visible → "wc" (reject, detected type 94)
+  5. If no organic materials are present → "wc" (reject, appropriate detected type)
+  6. If ONLY organic materials (packaging allowed) → "cc" (approve)
+
+  EXAMPLES:
+
+  **CORRECT (APPROVE):**
+  - Food scraps only
+  - Vegetable peels only
+  - Food waste in plastic containers (packaging is OK)
+  - Organic waste in plastic bags (packaging is OK)
+  - Garden waste (leaves, branches)
+
+  **WRONG (REJECT):**
+  - Food scraps + plastic water bottles → reject (bottles are NOT food packaging)
+  - Vegetable peels + aluminum drink cans → reject (cans are NOT food packaging)
+  - Food waste + tissues → reject (tissues are NOT food packaging)
+  - Organic waste + batteries → reject (hazardous materials)
+  - Food waste + clean paper/cardboard (not food packaging) → reject
+
+  IMPORTANT NOTES:
+  - Organic waste MUST be PURE (only organic materials visible)
+  - Food packaging is ALLOWED and does NOT count as contamination
+  - Non-packaging recyclables, hazardous, or general waste = automatic REJECT
+  - Do NOT apply contamination percentage rules for organic waste
+  - Focus on whether materials are biodegradable organic or not
 
   {output_format}

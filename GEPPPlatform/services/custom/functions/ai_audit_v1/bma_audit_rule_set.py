@@ -428,9 +428,9 @@ def execute(
             }
         }
 
-    # Increment API call usage (will be committed later)
-    org_custom_api.increment_api_call()
-    logger.info(f"[BMA_AUDIT] API call quota: {org_custom_api.api_call_used}/{org_custom_api.api_call_quota}")
+    # Note: API call quota is incremented by app.py's record_api_call() after this function returns
+    # We only check quota here and update process usage at the end
+    logger.info(f"[BMA_AUDIT] API call quota check passed: {org_custom_api.api_call_used}/{org_custom_api.api_call_quota}")
 
     logger.info(
         f"[BMA_AUDIT] Starting audit for org={organization_id}, "
@@ -621,6 +621,30 @@ def execute(
                         detect_type_id = int(result.get("rm", {}).get("de", {}).get("dt", "0"))
                         claimed_type_id = result.get("ct", 0)
                         warning_items = result.get("rm", {}).get("de", {}).get("wi", [])
+
+                        # Fix: Infer correct status from code if there's a contradiction
+                        # cc (correct_category) and lc (light_contamination) should ALWAYS be approve
+                        # wc (wrong_category), ui (unclear_image), hc (heavy_contamination) should ALWAYS be reject
+                        expected_status_by_code = {
+                            "cc": "a",  # correct_category -> approve
+                            "lc": "a",  # light_contamination -> approve with warning
+                            "wc": "r",  # wrong_category -> reject
+                            "ui": "r",  # unclear_image -> reject
+                            "hc": "r",  # heavy_contamination -> reject
+                            "ncm": "r", # non_complete_material -> reject
+                            "pe": "r",  # parse_error -> reject
+                            "ie": "r",  # image_error -> reject
+                        }
+
+                        if code in expected_status_by_code:
+                            expected_status = expected_status_by_code[code]
+                            if audit_status != expected_status:
+                                logger.warning(
+                                    f"[BMA_AUDIT] Status mismatch for transaction {txn_id}, material {mat_key}: "
+                                    f"code='{code}' expects status='{expected_status}' but got '{audit_status}'. "
+                                    f"Correcting to '{expected_status}'."
+                                )
+                                audit_status = expected_status
 
                         # Debug: log extracted values
                         logger.info(f"[BMA_AUDIT] Extracted from Gemini result - mat_key={mat_key}, code='{code}', status={audit_status}, detect_type={detect_type_id}, claimed_type={claimed_type_id}")
