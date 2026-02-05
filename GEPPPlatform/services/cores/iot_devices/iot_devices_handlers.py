@@ -11,6 +11,7 @@ from GEPPPlatform.services.auth.auth_handlers import AuthHandlers
 from GEPPPlatform.services.cores.transactions.transaction_service import TransactionService
 from GEPPPlatform.services.cores.users.user_service import UserService
 from GEPPPlatform.models.users.user_location import UserLocation
+from GEPPPlatform.models.users.user_related import UserLocationTag, UserTenant
 from GEPPPlatform.models.cores.references import Material
 from GEPPPlatform.models.cores.iot_devices import IoTDevice
 
@@ -94,15 +95,79 @@ def handle_get_locations_by_membership(user_service: UserService, query_params: 
             
             materials_list.append(material_obj)
         
-        # Remove materials from each location (keep only origin_id, display_name, and path)
+        # Load tags and tenants per location (id, name, members)
+        origin_ids = [loc.get('origin_id') for loc in locations if loc.get('origin_id') is not None]
+        origin_to_loc = {}
+        tag_ids_all = set()
+        tenant_ids_all = set()
+        if origin_ids:
+            locations_orm = db_session.query(UserLocation).filter(
+                UserLocation.id.in_(origin_ids),
+                UserLocation.is_active == True
+            ).all()
+            origin_to_loc = {loc.id: loc for loc in locations_orm}
+            for loc in locations_orm:
+                for tid in (loc.tags or []):
+                    tag_ids_all.add(int(tid) if isinstance(tid, str) and tid.isdigit() else tid)
+                for tid in (loc.tenants or []):
+                    tenant_ids_all.add(int(tid) if isinstance(tid, str) and tid.isdigit() else tid)
+        tag_ids_all = [x for x in tag_ids_all if x is not None]
+        tenant_ids_all = [x for x in tenant_ids_all if x is not None]
+        tag_by_id = {}
+        tenant_by_id = {}
+        if tag_ids_all:
+            tags_orm = db_session.query(UserLocationTag).filter(
+                UserLocationTag.id.in_(tag_ids_all),
+                UserLocationTag.organization_id == organization_id,
+                UserLocationTag.is_active == True,
+                UserLocationTag.deleted_date.is_(None)
+            ).all()
+            tag_by_id = {t.id: t for t in tags_orm}
+        if tenant_ids_all:
+            tenants_orm = db_session.query(UserTenant).filter(
+                UserTenant.id.in_(tenant_ids_all),
+                UserTenant.organization_id == organization_id,
+                UserTenant.is_active == True,
+                UserTenant.deleted_date.is_(None)
+            ).all()
+            tenant_by_id = {t.id: t for t in tenants_orm}
+        # Build locations_list with tags and tenants (id, name, members)
         locations_list = []
         for location in locations:
             origin_id = location.get('origin_id')
             location_path = location_paths.get(origin_id, '')
+            loc_orm = origin_to_loc.get(origin_id)
+            tags_list = []
+            tenants_list = []
+            if loc_orm:
+                for tid in (loc_orm.tags or []):
+                    tid_int = int(tid) if isinstance(tid, str) and tid.isdigit() else tid
+                    t = tag_by_id.get(tid_int)
+                    if t:
+                        tags_list.append({
+                            'id': t.id,
+                            'name': t.name or f'Tag {t.id}',
+                            'members': t.members or [],
+                            'start_date': t.start_date.isoformat() if t.start_date else None,
+                            'end_date': t.end_date.isoformat() if t.end_date else None
+                        })
+                for tid in (loc_orm.tenants or []):
+                    tid_int = int(tid) if isinstance(tid, str) and tid.isdigit() else tid
+                    t = tenant_by_id.get(tid_int)
+                    if t:
+                        tenants_list.append({
+                            'id': t.id,
+                            'name': t.name or f'Tenant {t.id}',
+                            'members': t.members or [],
+                            'start_date': t.start_date.isoformat() if t.start_date else None,
+                            'end_date': t.end_date.isoformat() if t.end_date else None
+                        })
             locations_list.append({
                 'origin_id': origin_id,
                 'display_name': location.get('display_name'),
-                'path': location_path
+                'path': location_path,
+                'tags': tags_list,
+                'tenants': tenants_list
             })
         
         return {
