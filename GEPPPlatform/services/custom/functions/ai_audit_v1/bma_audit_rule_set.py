@@ -56,10 +56,11 @@ MATERIAL_ID_TO_THAI: Dict[int, str] = {
     113: "ขยะอันตราย",
 }
 
-MODEL_NAME = "gemini-2.5-flash-lite-001"
+# MODEL_NAME = "gemini-2.5-flash"
+MODEL_NAME = "gemini-2.5-flash-lite"
 
 # Configurable limits
-MAX_TRANSACTIONS_PER_CALL = 1000  # Maximum household_ids per API call
+MAX_TRANSACTIONS_PER_CALL = 25  # Maximum household_ids per API call
 MAX_TRANSACTION_WORKERS = 10     # Max concurrent transactions
 MAX_MATERIAL_WORKERS = 4         # Max concurrent materials per transaction
 
@@ -121,6 +122,13 @@ def _get_langchain_gemini():
         temperature=0.1,
         max_output_tokens=2048,
         google_api_key=api_key,
+        generation_config={
+            "candidate_count": 1,
+            "temperature": 0.7,
+            "thinking_config": {
+                "thinking_budget": 1000,
+            }
+        }
     )
 
 
@@ -495,6 +503,7 @@ def execute(
 
         # Prepare transaction-level audit note
         transaction_audit_note = {
+            "type": "bma",
             "step_1": {
                 "status": "pass" if has_all_required else "fail",
                 "required": sorted(REQUIRED_MATERIALS),
@@ -620,7 +629,8 @@ def execute(
                         audit_status = result.get("as", "r")  # a=approve, r=reject
                         code = result.get("rm", {}).get("co", "")
                         detect_type_id = int(result.get("rm", {}).get("de", {}).get("dt", "0"))
-                        claimed_type_id = result.get("ct", 0)
+                        # claimed_type comes from the material_id of the record, not from AI response
+                        claimed_type_id = MATERIAL_KEY_TO_ID.get(mat_key, 0)
                         warning_items = result.get("rm", {}).get("de", {}).get("wi", [])
 
                         # Fix: Infer correct status from code if there's a contradiction

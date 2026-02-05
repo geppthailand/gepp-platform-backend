@@ -10,29 +10,54 @@ template: |
   CRITICAL: If waste contents are NOT CLEARLY VISIBLE (opaque/dark bags, closed containers, blurry) → ALWAYS REJECT as "ui", dt:"0"
   ANY color opaque bag (black, green, blue, etc.) where you cannot identify waste inside = "ui"
 
-  ORGANIC = ONLY biodegradable materials (food packaging ALLOWED)
+  FOCUS AREA: Analyze the CENTER 60-80% of the image where actual waste is located. Ignore bag/container edges and surrounding environment.
 
-  CORRECT:
-  - Food: vegetables, fruits, rice, noodles, bread, eggshells, meat, bones
-  - Garden: leaves, grass, branches, flowers
-  - With food packaging: containers, bags, boxes (IGNORE packaging)
+  ORGANIC = Biodegradable materials ONLY (minimum 90% purity by VOLUME in focus area)
+
+  PURITY REQUIREMENT - Calculate percentage by VOLUME in FOCUS AREA:
+  - Count ALL visible non-organic items (bottles, cans, foam boxes, plastic bags, containers, packaging)
+  - VERY STRICT counting:
+    • 1 TINY piece (sticker, tiny plastic) AND 10+ organic items → <10% → APPROVE "lc"
+    • 1 SMALL non-organic item (small plastic piece) AND 8+ organic items → ~10-12% → BORDERLINE → REJECT "wc" dt:"94"
+    • 1 MEDIUM/LARGE non-organic item (bottle, foam box, container) → >10% → REJECT "wc" dt:"94"
+    • 2+ non-organic items of ANY size → >10% → REJECT "wc" dt:"94"
+    • Multiple different contamination types → ALWAYS REJECT "wc" dt:"94"
+
+  BE VERY STRICT: Calculate actual volume ratio
+  - Large bottles/containers = 15-30% of volume → REJECT
+  - Foam boxes = 15-25% each → REJECT
+  - Any recyclable waste visible = count it ALL
+
+  EXAMPLES:
+  - 10+ food scraps with 1 tiny sticker → <10% → APPROVE "lc" dt:"77"
+  - 8+ banana leaves with 1 tiny plastic → <10% → APPROVE "lc" dt:"77"
+  - Banana leaves + large foam box (visible) → >10% → REJECT "wc" dt:"94"
+  - Food scraps + plastic bottles (visible) → >10% → REJECT "wc" dt:"94"
+  - Vegetables + foam boxes + bottles → >10% (multiple recyclable) → REJECT "wc" dt:"94"
+  - 5 banana leaves + 1 large bottle → 15-20% recyclable → REJECT "wc" dt:"94"
+
+  CORRECT (≥90% organic in focus area):
+  - Food waste: vegetables, fruits, rice, noodles, bread, eggshells, meat, bones
+  - Garden waste: leaves, grass, branches, flowers, banana leaves
+  - With minor contamination: small stickers, tiny plastic pieces (<10%)
   - Waste items MUST be clearly identifiable (transparent bags OK, opaque bags REJECT)
 
   REJECT:
   1. Cannot identify waste items (opaque bag ANY color, closed container, blurry) → "ui", dt:"0"
-  2. Hazardous: batteries, electronics, chemicals → "wc", dt:"113"
-  3. Recyclables (non-packaging): bottles, cans, clean paper → "wc", dt:"94"
-  4. General waste (non-packaging): tissues, diapers → "wc", dt:"94"
-  5. No organic materials visible → "wc", dt:(appropriate)
+  2. Hazardous items present → "wc", dt:"113"
+  3. MAJOR contamination in FOCUS AREA (>10%: bottles, cans, foam boxes, plastic bags) → "wc", dt:"94"
+  4. No organic materials visible → "wc", dt:(appropriate)
 
-  KEY: Food packaging OK, other non-organic items = REJECT
+  CONTAMINATION LEVELS (for organic waste):
+  - Clean or minor (<10%): small sticker, tiny plastic → "cc" or "lc" APPROVE
+  - Major (>10%): visible bottles, cans, foam boxes → "wc" dt:"94" REJECT
 
   DECISION PRIORITY:
   1. Contents not visible → "ui" dt:"0"
-  2. Hazardous → "wc" dt:"113"
-  3. Recyclables (non-packaging) → "wc" dt:"94"
-  4. General waste (non-packaging) → "wc" dt:"94"
-  5. No organic → "wc"
-  6. ONLY organic (packaging OK) → "cc" dt:"77"
+  2. Hazardous items → "wc" dt:"113"
+  3. Major contamination in focus area (>10%) → "wc" dt:"94"
+  4. No organic → "wc"
+  5. Organic with minor contamination (<10%) → "lc" dt:"77"
+  6. Pure organic (0-5%) → "cc" dt:"77"
 
   {output_format}

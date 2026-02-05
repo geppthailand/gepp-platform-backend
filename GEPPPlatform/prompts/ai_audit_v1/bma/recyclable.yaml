@@ -10,36 +10,60 @@ template: |
   CRITICAL: If waste contents are NOT CLEARLY VISIBLE (opaque/dark bags, closed containers, blurry) → ALWAYS REJECT as "ui", dt:"0"
   ANY color opaque bag (black, green, blue, etc.) where you cannot identify waste inside = "ui"
 
-  RECYCLABLE = ONLY plastic/paper/metal/glass (packaging ALLOWED)
+  FOCUS AREA: Analyze the CENTER 60-80% of the image where actual waste is located. Ignore bag/container edges and surrounding environment.
 
-  CORRECT:
-  - Plastic: bottles, containers, bags
-  - Paper: newspapers, cardboard, office paper
-  - Metal: aluminum/steel cans
-  - Glass: bottles, jars
-  - Mixed recyclables OK (packaging IGNORED)
+  RECYCLABLE = Plastic/paper/metal/glass (minimum 90% purity, allow up to 10% contamination)
+
+  PURITY REQUIREMENT - Calculate percentage by VOLUME in FOCUS AREA:
+  - Count ALL visible non-recyclable items (food scraps, banana leaves, tissues, organic waste, food containers with food inside)
+  - VERY STRICT counting:
+    • 1 TINY piece (sticker, small residue) AND 10+ recyclables → <10% → APPROVE "lc"
+    • 1 SMALL organic item (small banana leaf piece) AND 8+ recyclables → ~10-12% → BORDERLINE → REJECT "wc" dt:"94"
+    • 1 MEDIUM/LARGE organic item (large banana leaf, food box with food) → >10% → REJECT "wc" dt:"94"
+    • 2+ non-recyclable items of ANY size → >10% → REJECT "wc" dt:"94"
+    • Multiple different contamination types → ALWAYS REJECT "wc" dt:"94"
+
+  BE VERY STRICT: Calculate actual volume ratio
+  - Large banana leaves = 15-30% of volume → REJECT
+  - Food containers with food inside = 10-25% each → REJECT
+  - Any organic waste visible = count it ALL
+
+  EXAMPLES:
+  - 10+ bottles with 1 tiny sticker → <10% → APPROVE "lc" dt:"298"
+  - 8+ cans with 1 small grease stain → <10% → APPROVE "lc" dt:"298"
+  - Bottles + large banana leaves (visible) → >10% → REJECT "wc" dt:"94"
+  - Bottles + food containers with food inside → >10% → REJECT "wc" dt:"94"
+  - Containers + banana leaves + food scraps → >10% (multiple organic) → REJECT "wc" dt:"94"
+  - 5 bottles + 1 large banana leaf → 15-20% organic → REJECT "wc" dt:"94"
+
+  CORRECT (≥90% recyclable in focus area):
+  - Plastic: bottles, containers, bags (clean or with minor food residue)
+  - Paper: newspapers, cardboard, office paper (clean or minor stains)
+  - Metal: aluminum/steel cans (empty or minor food residue)
+  - Glass: bottles, jars (empty or minor residue)
+  - Mixed recyclables OK if ALL items are recyclable types
+  - With minor contamination: small food residue, tiny food pieces (<10%)
   - Waste items MUST be clearly identifiable (transparent bags OK, opaque bags REJECT)
 
   REJECT:
   1. Cannot identify waste items (opaque bag ANY color, closed container, blurry) → "ui", dt:"0"
-  2. Hazardous: batteries, electronics → "wc", dt:"113"
-  3. Organic (non-packaging): food, vegetables → "wc", dt:"94"
-  4. General (non-packaging): tissues, diapers → "wc", dt:"94"
-  5. No recyclables → "wc", dt:(appropriate)
+  2. Hazardous items present → "wc", dt:"113"
+  3. MAJOR organic/general waste in FOCUS AREA (>10%: food scraps, banana leaves, tissues) → "wc" dt:"94"
+  4. No recyclables → "wc", dt:(appropriate)
 
-  CONTAMINATION (only if purity passes):
-  - Heavy (>50% volume): liquid in bottles, grease on >50% → "hc" REJECT
-  - Light (<50% volume): minor residue, stains <50% → "lc" APPROVE
-  - Clean → "cc" APPROVE
+  CONTAMINATION LEVELS (for recyclable items):
+  - Heavy (>50% volume): liquid in bottles, heavy grease on >50% → "hc" REJECT
+  - Light (10-50% volume): food residue, stains on 10-50% → "lc" APPROVE
+  - Minor (<10% volume): tiny food residue, small stains → "lc" APPROVE
+  - Clean (0-5%) → "cc" APPROVE
 
   DECISION PRIORITY:
   1. Contents not visible → "ui" dt:"0"
-  2. Hazardous → "wc" dt:"113"
-  3. Organic (non-packaging) → "wc" dt:"94"
-  4. General (non-packaging) → "wc" dt:"94"
-  5. No recyclables → "wc"
-  6. Heavy contamination >50% → "hc" dt:"298"
-  7. Light contamination <50% → "lc" dt:"298"
-  8. Clean → "cc" dt:"298"
+  2. Hazardous items → "wc" dt:"113"
+  3. Major organic/general waste in focus area (>10%) → "wc" dt:"94"
+  4. No recyclables → "wc"
+  5. Heavy contamination (>50%) → "hc" dt:"298"
+  6. Light/minor contamination (≤50%) → "lc" dt:"298"
+  7. Clean recyclables (0-5%) → "cc" dt:"298"
 
   {output_format}
