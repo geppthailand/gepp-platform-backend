@@ -17,14 +17,14 @@ template: |
 
   RULES:
   - dt = STRING ("94" not 94)
-  - wi = array, Thai names, empty [] if cc
+  - wi = array, Thai names, MAX 3 items, use shortest words, empty [] if cc
   - cs = 2 decimals
   - Multiple issues → choose most severe
   - No markdown, no extra text
 
   EXAMPLES:
   Correct: {"ct":94,"as":"a","cs":0.95,"rm":{"co":"cc","sv":"i","de":{"dt":"94","wi":[]}}}
-  Wrong: {"ct":94,"as":"r","cs":0.88,"rm":{"co":"wc","sv":"c","de":{"dt":"77","wi":["เศษผัก","เศษอาหาร"]}}}
-  Unclear: {"ct":298,"as":"r","cs":0.32,"rm":{"co":"ui","sv":"c","de":{"dt":"0","wi":["ภาพเบลอมาก"]}}}
-  Heavy: {"ct":298,"as":"r","cs":0.91,"rm":{"co":"hc","sv":"c","de":{"dt":"298","wi":["ขวดเปื้อนน้ำมันหนัก"]}}}
-  Light: {"ct":298,"as":"a","cs":0.87,"rm":{"co":"lc","sv":"m","de":{"dt":"298","wi":["ขวดเปื้อนเล็กน้อย"]}}}
+  Wrong: {"ct":94,"as":"r","cs":0.88,"rm":{"co":"wc","sv":"c","de":{"dt":"77","wi":["ผัก","อาหาร"]}}}
+  Unclear: {"ct":298,"as":"r","cs":0.32,"rm":{"co":"ui","sv":"c","de":{"dt":"0","wi":["เบลอ"]}}}
+  Heavy: {"ct":298,"as":"r","cs":0.91,"rm":{"co":"hc","sv":"c","de":{"dt":"298","wi":["ขวดเปื้อนหนัก"]}}}
+  Light: {"ct":298,"as":"a","cs":0.87,"rm":{"co":"lc","sv":"m","de":{"dt":"298","wi":["ขวดเปื้อน"]}}}
