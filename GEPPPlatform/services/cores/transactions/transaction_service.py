@@ -6,7 +6,7 @@ Handles CRUD operations, validation, and transaction record linking
 from typing import List, Optional, Dict, Any, Tuple
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy import cast, String
+from sqlalchemy import cast, String, exists, and_
 from datetime import datetime
 from decimal import Decimal
 import logging
@@ -15,9 +15,28 @@ from ....models.transactions.transactions import Transaction, TransactionStatus,
 from ....models.transactions.transaction_records import TransactionRecord
 from ...file_upload_service import S3FileUploadService
 from ....models.users.user_location import UserLocation
+from ....models.users.user_related import UserLocationTag, UserTenant
 from ....models.subscriptions.organizations import Organization, OrganizationSetup
 
 logger = logging.getLogger(__name__)
+
+# Two decimal places for all weight, quantity, and amount values
+TWO_PLACES = Decimal('0.01')
+
+
+def _round_decimal(value) -> Decimal:
+    """Round a numeric value to 2 decimal places as Decimal."""
+    if value is None:
+        return Decimal('0')
+    d = value if isinstance(value, Decimal) else Decimal(str(value))
+    return d.quantize(TWO_PLACES)
+
+
+def _round_float(value) -> float:
+    """Round a numeric value to 2 decimal places as float (for API output)."""
+    if value is None:
+        return 0.0
+    return round(float(value), 2)
 
 
 class TransactionService:
@@ -55,13 +74,18 @@ class TransactionService:
                     'errors': validation_errors
                 }
 
-            # Create transaction
+            # Create transaction (tag_id / tenant_id from request map to location_tag_id / tenant_id)
+            location_tag_id = transaction_data.get('tag_id') or transaction_data.get('location_tag_id')
+            tenant_id = transaction_data.get('tenant_id')
+
             transaction = Transaction(
                 transaction_method=transaction_data.get('transaction_method', 'origin'),
                 status=TransactionStatus(transaction_data.get('status', 'pending')),
                 organization_id=transaction_data.get('organization_id'),
                 origin_id=transaction_data.get('origin_id'),
                 destination_ids=[],  # Will be populated from transaction records
+                location_tag_id=location_tag_id,
+                tenant_id=tenant_id,
                 transaction_date=transaction_data.get('transaction_date', datetime.now()),
                 arrival_date=transaction_data.get('arrival_date'),
                 origin_coordinates=transaction_data.get('origin_coordinates'),
@@ -188,6 +212,35 @@ class TransactionService:
 
             transaction_dict = self._transaction_to_dict(transaction)
 
+            # Enrich with location_tag and tenant (id, name) only; do not expose raw IDs
+            location_tag_id = transaction_dict.pop('location_tag_id', None)
+            transaction_dict.pop('tag_id', None)  # alias, remove
+            tenant_id = transaction_dict.pop('tenant_id', None)
+            if location_tag_id:
+                tag = self.db.query(UserLocationTag).filter(
+                    UserLocationTag.id == location_tag_id,
+                    UserLocationTag.is_active == True,
+                    UserLocationTag.deleted_date.is_(None)
+                ).first()
+                if tag:
+                    transaction_dict['location_tag'] = {'id': tag.id, 'name': tag.name or f"Tag {tag.id}"}
+                else:
+                    transaction_dict['location_tag'] = {'id': location_tag_id, 'name': None}
+            else:
+                transaction_dict['location_tag'] = None
+            if tenant_id:
+                tenant = self.db.query(UserTenant).filter(
+                    UserTenant.id == tenant_id,
+                    UserTenant.is_active == True,
+                    UserTenant.deleted_date.is_(None)
+                ).first()
+                if tenant:
+                    transaction_dict['tenant'] = {'id': tenant.id, 'name': tenant.name or f"Tenant {tenant.id}"}
+                else:
+                    transaction_dict['tenant'] = {'id': tenant_id, 'name': None}
+            else:
+                transaction_dict['tenant'] = None
+
             if include_records:
                 # Get transaction records with eager loading of material, category, and destination
                 records = self.db.query(TransactionRecord).options(
@@ -229,7 +282,10 @@ class TransactionService:
         date_from: Optional[str] = None,
         date_to: Optional[str] = None,
         district: Optional[int] = None,
-        sub_district: Optional[int] = None
+        sub_district: Optional[int] = None,
+        location_tag_id: Optional[int] = None,
+        tenant_id: Optional[int] = None,
+        material_id: Optional[int] = None
     ) -> Dict[str, Any]:
         """
         List transactions with filtering and pagination
@@ -249,6 +305,9 @@ class TransactionService:
             date_to: Filter transactions to this date (YYYY-MM-DD)
             district: Filter by district (user_location level 3)
             sub_district: Filter by sub-district (user_location level 4)
+            location_tag_id: Filter by location tag (when using composite origin filter)
+            tenant_id: Filter by tenant (when using composite origin filter)
+            material_id: Filter by material (transactions that have at least one record with this material_id)
 
         Returns:
             Dict with success status, transactions list, and pagination info
@@ -277,9 +336,25 @@ class TransactionService:
                 query = query.filter(Transaction.status == status)
             if origin_id:
                 query = query.filter(Transaction.origin_id == origin_id)
+            if location_tag_id is not None:
+                query = query.filter(Transaction.location_tag_id == location_tag_id)
+            if tenant_id is not None:
+                query = query.filter(Transaction.tenant_id == tenant_id)
             if destination_id:
                 # Filter by destination_id in the destination_ids array
                 query = query.filter(Transaction.destination_ids.any(destination_id))
+
+            # Material filter - transactions that have at least one record with this material_id
+            if material_id is not None:
+                query = query.filter(
+                    exists().where(
+                        and_(
+                            TransactionRecord.created_transaction_id == Transaction.id,
+                            TransactionRecord.is_active == True,
+                            TransactionRecord.material_id == material_id
+                        )
+                    )
+                )
 
             # Search filter - search in notes and transaction ID
             if search:
@@ -457,11 +532,12 @@ class TransactionService:
                     'errors': validation_errors
                 }
 
-            # Update allowed fields
+            # Update allowed fields (tag_id maps to location_tag_id)
             updatable_fields = [
                 'transaction_method', 'status', 'destination_ids', 'arrival_date',
                 'destination_coordinates', 'notes', 'images', 'vehicle_info',
-                'driver_info', 'hazardous_level', 'treatment_method', 'disposal_method'
+                'driver_info', 'hazardous_level', 'treatment_method', 'disposal_method',
+                'location_tag_id', 'tenant_id'
             ]
 
             for field in updatable_fields:
@@ -470,6 +546,9 @@ class TransactionService:
                         setattr(transaction, field, TransactionStatus(update_data[field]))
                     else:
                         setattr(transaction, field, update_data[field])
+
+            if 'tag_id' in update_data:
+                transaction.location_tag_id = update_data['tag_id']
 
             if updated_by_id:
                 transaction.updated_by_id = updated_by_id
@@ -544,6 +623,12 @@ class TransactionService:
             # Update transaction-level fields
             if 'origin_id' in update_data and update_data['origin_id']:
                 transaction.origin_id = update_data['origin_id']
+            if 'tag_id' in update_data:
+                transaction.location_tag_id = update_data['tag_id']
+            if 'location_tag_id' in update_data:
+                transaction.location_tag_id = update_data['location_tag_id']
+            if 'tenant_id' in update_data:
+                transaction.tenant_id = update_data['tenant_id']
             if 'transaction_method' in update_data:
                 transaction.transaction_method = update_data['transaction_method']
             if 'transaction_date' in update_data:
@@ -603,15 +688,15 @@ class TransactionService:
                         if 'transaction_date' in record_data:
                             record.transaction_date = record_data['transaction_date']
                         if 'origin_quantity' in record_data:
-                            record.origin_quantity = Decimal(str(record_data['origin_quantity']))
+                            record.origin_quantity = _round_decimal(record_data['origin_quantity'])
                         if 'origin_weight_kg' in record_data:
-                            record.origin_weight_kg = Decimal(str(record_data['origin_weight_kg']))
+                            record.origin_weight_kg = _round_decimal(record_data['origin_weight_kg'])
                         if 'images' in record_data:
                             record.images = record_data['images']
                         if 'origin_price_per_unit' in record_data:
-                            record.origin_price_per_unit = Decimal(str(record_data['origin_price_per_unit']))
+                            record.origin_price_per_unit = _round_decimal(record_data['origin_price_per_unit'])
                         if 'total_amount' in record_data:
-                            record.total_amount = Decimal(str(record_data['total_amount']))
+                            record.total_amount = _round_decimal(record_data['total_amount'])
 
                         record.updated_date = datetime.now()
                         records_updated += 1
@@ -639,7 +724,7 @@ class TransactionService:
             active_record_ids = [r.id for r in active_records]
             transaction.transaction_records = active_record_ids
 
-            # Recalculate total weight and amount from active records
+            # Recalculate total weight and amount from active records (2 decimal places)
             total_weight = Decimal('0')
             total_amount = Decimal('0')
             for record_id in active_record_ids:
@@ -650,8 +735,8 @@ class TransactionService:
                     total_weight += record.origin_weight_kg or Decimal('0')
                     total_amount += record.total_amount or Decimal('0')
 
-            transaction.weight_kg = total_weight
-            transaction.total_amount = total_amount
+            transaction.weight_kg = _round_decimal(total_weight)
+            transaction.total_amount = _round_decimal(total_amount)
 
             self.db.commit()
 
@@ -804,10 +889,10 @@ class TransactionService:
                 category_id=record_data.get('category_id'),
                 tags=record_data.get('tags', []),
                 unit=record_data.get('unit'),
-                origin_quantity=Decimal(str(record_data.get('origin_quantity', 0))),
-                origin_weight_kg=Decimal(str(record_data.get('origin_weight_kg', 0))),
-                origin_price_per_unit=Decimal(str(record_data.get('origin_price_per_unit', 0))),
-                total_amount=Decimal(str(record_data.get('total_amount', 0))),
+                origin_quantity=_round_decimal(record_data.get('origin_quantity', 0)),
+                origin_weight_kg=_round_decimal(record_data.get('origin_weight_kg', 0)),
+                origin_price_per_unit=_round_decimal(record_data.get('origin_price_per_unit', 0)),
+                total_amount=_round_decimal(record_data.get('total_amount', 0)),
                 currency_id=record_data.get('currency_id'),
                 notes=record_data.get('notes'),
                 images=record_data.get('images', []),
@@ -821,9 +906,10 @@ class TransactionService:
                 created_by_id=record_data.get('created_by_id')
             )
 
-            # Calculate total amount if not provided
+            # Calculate total amount if not provided (then round to 2 decimals)
             if not transaction_record.total_amount:
                 transaction_record.calculate_total_value()
+            transaction_record.total_amount = _round_decimal(transaction_record.total_amount)
 
             self.db.add(transaction_record)
             self.db.flush()  # Get the ID
@@ -977,8 +1063,8 @@ class TransactionService:
             total_weight = sum((record.origin_weight_kg or Decimal('0') for record in records), Decimal('0'))
             total_amount = sum((record.total_amount or Decimal('0') for record in records), Decimal('0'))
 
-            transaction.weight_kg = total_weight
-            transaction.total_amount = total_amount
+            transaction.weight_kg = _round_decimal(total_weight)
+            transaction.total_amount = _round_decimal(total_amount)
 
     def _transaction_to_dict(self, transaction: Transaction) -> Dict[str, Any]:
         """Convert Transaction object to dictionary"""
@@ -1008,9 +1094,12 @@ class TransactionService:
             'organization_id': transaction.organization_id,
             'origin_id': transaction.origin_id,
             'destination_ids': transaction.destination_ids if hasattr(transaction, 'destination_ids') else [],
+            'location_tag_id': transaction.location_tag_id,
+            'tag_id': transaction.location_tag_id,  # Alias for API
+            'tenant_id': getattr(transaction, 'tenant_id', None),
             'origin_location': origin_location,
-            'weight_kg': float(transaction.weight_kg) if transaction.weight_kg else 0,
-            'total_amount': float(transaction.total_amount) if transaction.total_amount else 0,
+            'weight_kg': _round_float(transaction.weight_kg),
+            'total_amount': _round_float(transaction.total_amount),
             'transaction_date': transaction.transaction_date.isoformat() if transaction.transaction_date else None,
             'arrival_date': transaction.arrival_date.isoformat() if transaction.arrival_date else None,
             'origin_coordinates': transaction.origin_coordinates,
@@ -1078,10 +1167,10 @@ class TransactionService:
             'category': category,
             'tags': record.tags,
             'unit': record.unit,
-            'origin_quantity': float(record.origin_quantity) if record.origin_quantity else 0,
-            'origin_weight_kg': float(record.origin_weight_kg) if record.origin_weight_kg else 0,
-            'origin_price_per_unit': float(record.origin_price_per_unit) if record.origin_price_per_unit else 0,
-            'total_amount': float(record.total_amount) if record.total_amount else 0,
+            'origin_quantity': _round_float(record.origin_quantity),
+            'origin_weight_kg': _round_float(record.origin_weight_kg),
+            'origin_price_per_unit': _round_float(record.origin_price_per_unit),
+            'total_amount': _round_float(record.total_amount),
             'currency_id': record.currency_id,
             'notes': record.notes,
             'images': record.images,

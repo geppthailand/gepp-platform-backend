@@ -103,6 +103,9 @@ class UserLocation(Base, BaseModel):
     # Tags (JSONB array of tag IDs associated with this location - many-to-many)
     tags = Column(JSONB, default=list)  # JSONB array of user_location_tag IDs
 
+    # Tenants (JSONB array of tenant IDs associated with this location - many-to-many)
+    tenants = Column(JSONB, default=list)  # JSONB array of user_tenant IDs
+
     # Localization
     locale = Column(String(15), default='TH')
     nationality_id = Column(ForeignKey('nationalities.id'))

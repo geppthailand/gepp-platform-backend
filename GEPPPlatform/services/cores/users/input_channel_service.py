@@ -900,7 +900,7 @@ class InputChannelService:
         Only returns locations from root_nodes in organization_setup (not hub_node).
         Also includes tags for each location where the user is a member.
         """
-        from GEPPPlatform.models.users.user_related import UserLocationTag
+        from GEPPPlatform.models.users.user_related import UserLocationTag, UserTenant
         from GEPPPlatform.models.subscriptions.organizations import OrganizationSetup
 
         # Get the latest active organization setup
@@ -1013,6 +1013,35 @@ class InputChannelService:
                             'name': tag.name
                         })
 
+            # Get tenants for this location (same pattern as tags)
+            location_tenant_ids = loc.tenants or []
+            location_tenants = []
+            if location_tenant_ids:
+                tenant_ids_int = [int(tid) if isinstance(tid, str) else tid for tid in location_tenant_ids]
+                tenants = self.db.query(UserTenant).filter(
+                    and_(
+                        UserTenant.id.in_(tenant_ids_int),
+                        UserTenant.organization_id == channel.organization_id,
+                        UserTenant.is_active == True,
+                        UserTenant.deleted_date.is_(None)
+                    )
+                ).all()
+                for tenant in tenants:
+                    if validated_user:
+                        tenant_members = tenant.members or []
+                        user_id_int = validated_user.id
+                        user_id_str = str(validated_user.id)
+                        if user_id_int in tenant_members or user_id_str in tenant_members:
+                            location_tenants.append({
+                                'id': str(tenant.id),
+                                'name': tenant.name
+                            })
+                    else:
+                        location_tenants.append({
+                            'id': str(tenant.id),
+                            'name': tenant.name
+                        })
+
             # Build path string from parent nodes
             loc_path = path_map.get(loc.id, [])
             path_names = [p.get('name', '') for p in loc_path if p.get('name')]
@@ -1027,6 +1056,7 @@ class InputChannelService:
                 'name_en': loc.display_name,
                 'functions': functions,
                 'tags': location_tags,
+                'tenants': location_tenants,
                 'path': path_str,
                 'location_type': location_type,
             })
@@ -1047,7 +1077,8 @@ class InputChannelService:
                 - subUser: Sub-user identifier
                 - origin: Origin location ID
                 - matData: Array of weights matching material order
-                - tags: Optional location tag ID
+                - tag_id: Location tag ID (optional)
+                - tenant_id: Tenant ID (optional)
                 - consent: User consent boolean
                 - transactionDate: Transaction date
                 - b64image: Array of base64 images (optional)
@@ -1187,14 +1218,23 @@ class InputChannelService:
             if validated_user and validated_user.display_name:
                 subuser_display = f"{validated_user.display_name} ({subuser})"
 
-            # Parse location_tag_id from tags field (if selected and not empty)
+            # Parse location_tag_id from tag_id or legacy tags field
             location_tag_id = None
-            tags_value = data.get('tags')
-            if tags_value and tags_value != '':
+            tag_id_value = data.get('tag_id') or data.get('tags')
+            if tag_id_value is not None and tag_id_value != '':
                 try:
-                    location_tag_id = int(tags_value)
+                    location_tag_id = int(tag_id_value)
                 except (ValueError, TypeError):
-                    pass  # Invalid tag ID, skip
+                    pass
+
+            # Parse tenant_id from request body
+            tenant_id = None
+            tenant_id_value = data.get('tenant_id')
+            if tenant_id_value is not None and tenant_id_value != '':
+                try:
+                    tenant_id = int(tenant_id_value)
+                except (ValueError, TypeError):
+                    pass
 
             transaction = Transaction(
                 transaction_method='qr_input',
@@ -1203,11 +1243,12 @@ class InputChannelService:
                 origin_id=int(data.get('origin')) if data.get('origin') else None,
                 destination_ids=[],  # No destination for QR input transactions
                 transaction_date=transaction_date,
-                notes=f"QR Input by {subuser_display}. Location Tag: {data.get('tags', 'N/A')}",
+                notes=f"QR Input by {subuser_display}. Location Tag: {data.get('tag_id') or data.get('tags') or 'N/A'}. Tenant: {data.get('tenant_id') or 'N/A'}",
                 weight_kg=total_weight,
                 total_amount=Decimal('0'),
-                created_by_id=creator_user_location_id,  # Use validated subuser's user_location_id
-                location_tag_id=location_tag_id,  # Set location tag if selected
+                created_by_id=creator_user_location_id,
+                location_tag_id=location_tag_id,
+                tenant_id=tenant_id,
                 is_active=True,
             )
 
