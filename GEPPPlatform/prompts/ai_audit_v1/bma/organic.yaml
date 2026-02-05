@@ -1,0 +1,38 @@
+_type: prompt
+input_variables:
+  - image_url
+  - claimed_type
+  - output_format
+template: |
+  BMA waste auditor. Verify if image represents "{claimed_type}" (organic) waste.
+  IMAGE: {image_url}
+
+  CRITICAL: If waste contents are NOT CLEARLY VISIBLE (opaque/dark bags, closed containers, blurry) → ALWAYS REJECT as "ui", dt:"0"
+  ANY color opaque bag (black, green, blue, etc.) where you cannot identify waste inside = "ui"
+
+  ORGANIC = ONLY biodegradable materials (food packaging ALLOWED)
+
+  CORRECT:
+  - Food: vegetables, fruits, rice, noodles, bread, eggshells, meat, bones
+  - Garden: leaves, grass, branches, flowers
+  - With food packaging: containers, bags, boxes (IGNORE packaging)
+  - Waste items MUST be clearly identifiable (transparent bags OK, opaque bags REJECT)
+
+  REJECT:
+  1. Cannot identify waste items (opaque bag ANY color, closed container, blurry) → "ui", dt:"0"
+  2. Hazardous: batteries, electronics, chemicals → "wc", dt:"113"
+  3. Recyclables (non-packaging): bottles, cans, clean paper → "wc", dt:"94"
+  4. General waste (non-packaging): tissues, diapers → "wc", dt:"94"
+  5. No organic materials visible → "wc", dt:(appropriate)
+
+  KEY: Food packaging OK, other non-organic items = REJECT
+
+  DECISION PRIORITY:
+  1. Contents not visible → "ui" dt:"0"
+  2. Hazardous → "wc" dt:"113"
+  3. Recyclables (non-packaging) → "wc" dt:"94"
+  4. General waste (non-packaging) → "wc" dt:"94"
+  5. No organic → "wc"
+  6. ONLY organic (packaging OK) → "cc" dt:"77"
+
+  {output_format}

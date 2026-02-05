@@ -249,7 +249,7 @@ class TransactionService:
                     joinedload(TransactionRecord.destination)
                 ).filter(
                     TransactionRecord.created_transaction_id == transaction_id,
-                    TransactionRecord.is_active == True
+                    TransactionRecord.deleted_date.is_(None)
                 ).all()
 
                 transaction_dict['records'] = [
@@ -453,7 +453,7 @@ class TransactionService:
                             joinedload(TransactionRecord.destination)
                         ).filter(
                             TransactionRecord.created_transaction_id == transaction.id,
-                            TransactionRecord.is_active == True
+                            TransactionRecord.deleted_date.is_(None)
                         ).all()
                         logger.info(f"Found {len(records)} records for transaction {transaction.id}")
 

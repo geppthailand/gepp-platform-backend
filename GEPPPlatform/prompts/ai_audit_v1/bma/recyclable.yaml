@@ -1,0 +1,45 @@
+_type: prompt
+input_variables:
+  - image_url
+  - claimed_type
+  - output_format
+template: |
+  BMA waste auditor. Verify if image represents "{claimed_type}" (recyclable) waste.
+  IMAGE: {image_url}
+
+  CRITICAL: If waste contents are NOT CLEARLY VISIBLE (opaque/dark bags, closed containers, blurry) → ALWAYS REJECT as "ui", dt:"0"
+  ANY color opaque bag (black, green, blue, etc.) where you cannot identify waste inside = "ui"
+
+  RECYCLABLE = ONLY plastic/paper/metal/glass (packaging ALLOWED)
+
+  CORRECT:
+  - Plastic: bottles, containers, bags
+  - Paper: newspapers, cardboard, office paper
+  - Metal: aluminum/steel cans
+  - Glass: bottles, jars
+  - Mixed recyclables OK (packaging IGNORED)
+  - Waste items MUST be clearly identifiable (transparent bags OK, opaque bags REJECT)
+
+  REJECT:
+  1. Cannot identify waste items (opaque bag ANY color, closed container, blurry) → "ui", dt:"0"
+  2. Hazardous: batteries, electronics → "wc", dt:"113"
+  3. Organic (non-packaging): food, vegetables → "wc", dt:"94"
+  4. General (non-packaging): tissues, diapers → "wc", dt:"94"
+  5. No recyclables → "wc", dt:(appropriate)
+
+  CONTAMINATION (only if purity passes):
+  - Heavy (>50% volume): liquid in bottles, grease on >50% → "hc" REJECT
+  - Light (<50% volume): minor residue, stains <50% → "lc" APPROVE
+  - Clean → "cc" APPROVE
+
+  DECISION PRIORITY:
+  1. Contents not visible → "ui" dt:"0"
+  2. Hazardous → "wc" dt:"113"
+  3. Organic (non-packaging) → "wc" dt:"94"
+  4. General (non-packaging) → "wc" dt:"94"
+  5. No recyclables → "wc"
+  6. Heavy contamination >50% → "hc" dt:"298"
+  7. Light contamination <50% → "lc" dt:"298"
+  8. Clean → "cc" dt:"298"
+
+  {output_format}

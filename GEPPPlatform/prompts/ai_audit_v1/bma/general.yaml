@@ -1,0 +1,33 @@
+_type: prompt
+input_variables:
+  - image_url
+  - claimed_type
+  - output_format
+template: |
+  BMA waste auditor. Verify if image represents "{claimed_type}" (general) waste.
+  IMAGE: {image_url}
+
+  CRITICAL: If waste contents are NOT CLEARLY VISIBLE (opaque/dark bags, closed containers, blurry) → ALWAYS REJECT as "ui", dt:"0"
+  ANY color opaque bag (black, green, blue, etc.) where you cannot identify waste inside = "ui"
+
+  GENERAL = Mixed non-hazardous waste (2+ types OR non-recyclable items)
+
+  CORRECT:
+  - Mixed: food+recyclables, food+paper, recyclables+tissues
+  - Non-recyclable: contaminated plastics/paper, diapers, styrofoam, cigarettes, broken ceramics
+  - Waste items MUST be clearly identifiable (transparent bags OK, opaque bags REJECT)
+
+  REJECT:
+  1. Cannot identify waste items (opaque bag ANY color, closed container, blurry) → "ui", dt:"0"
+  2. ANY hazardous (batteries, electronics, chemicals, bulbs) → "wc", dt:"113"
+  3. ONLY organic (food/yard waste, no other types) → "wc", dt:"77"
+  4. ONLY recyclables (clean bottles/cans/paper, no mixing) → "wc", dt:"298"
+
+  DECISION PRIORITY:
+  1. Contents not visible → "ui" dt:"0"
+  2. Hazardous present → "wc" dt:"113"
+  3. ONLY organic → "wc" dt:"77"
+  4. ONLY recyclables → "wc" dt:"298"
+  5. Mixed (2+ types) OR non-recyclable → "cc" dt:"94"
+
+  {output_format}
