@@ -285,12 +285,14 @@ def _simple_bar_chart(pdf, x, y, w, h, chart_series, allowed_months: set[int] | 
         except Exception:
             series_keys = list(chart_series.keys())[-3:]
     values_by_series = {}
+    months_with_data: set[int] = set()
     for key in series_keys:
         arr = [0.0] * 12
         for pt in chart_series.get(key, []):
             m = str(pt.get("month", ""))
             if m in months:
                 idx = months.index(m)
+                months_with_data.add(idx + 1)  # 1-based month number
                 try:
                     arr[idx] = float(pt.get("value", 0) or 0.0)
                 except Exception:
@@ -326,13 +328,18 @@ def _simple_bar_chart(pdf, x, y, w, h, chart_series, allowed_months: set[int] | 
         pdf.setFont("IBMPlexSansThai-Regular", 10)
         lw_lbl = stringWidth(lbl, "IBMPlexSansThai-Regular", 10)
         pdf.drawString(gx - 6 - lw_lbl, y_tick - 3, lbl)
-    # Determine which months to render based on allowed_months (1..12)
-    if allowed_months:
-        month_numbers = sorted([m for m in allowed_months if 1 <= int(m) <= 12])
+    # Only show months that have data (and optionally restrict to date range)
+    month_numbers = []
+    if months_with_data:
+        if allowed_months:
+            month_numbers = sorted([m for m in months_with_data if m in allowed_months and 1 <= int(m) <= 12])
+        else:
+            month_numbers = sorted([m for m in months_with_data if 1 <= int(m) <= 12])
+    if not month_numbers:
+        if allowed_months:
+            month_numbers = sorted([m for m in allowed_months if 1 <= int(m) <= 12])
         if not month_numbers:
             month_numbers = list(range(1, 13))
-    else:
-        month_numbers = list(range(1, 13))
     n_months = len(month_numbers)
     gap = 10
     slot_w = (gw - (n_months + 1) * gap) / max(1, n_months)
@@ -1376,7 +1383,16 @@ def draw_comparison(pdf, page_width_points: float, page_height_points: float, da
     def _month_label(k):
         idx = _month_index(k)
         return _months_short[idx] if 0 <= idx < 12 else str(k)
-    month_keys = sorted(set(list(left_months.keys()) + list(right_months.keys())), key=_month_index)
+    all_month_keys = sorted(set(list(left_months.keys()) + list(right_months.keys())), key=_month_index)
+    # Only show months that have data (non-zero in left or right)
+    month_keys = []
+    for mk in all_month_keys:
+        lv = float(left_months.get(mk, 0) or 0)
+        rv = float(right_months.get(mk, 0) or 0)
+        if lv > 0 or rv > 0:
+            month_keys.append(mk)
+    if not month_keys:
+        month_keys = all_month_keys
     pad2 = 16
     title_y2 = card_y2 + card_h2 - 20
     chart_left2 = x_left + 44

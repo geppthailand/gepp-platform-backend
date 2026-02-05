@@ -59,15 +59,61 @@ def _build_filters_from_query_params(query_params: Dict[str, Any], timezone_name
             # Single ID
             filters['material_ids'] = [int(material_ids_str)]
     
-    # Handle origin_id (comma-separated)
+    # Handle origin_id (comma-separated, or composite "origin_id|tag_id|tenant_id", or multiple composites "2507||1,2507|46|")
     if query_params.get('origin_id'):
-        origin_ids_str = query_params['origin_id']
-        if ',' in origin_ids_str:
-            # Multiple IDs
+        origin_ids_str = query_params['origin_id'].strip()
+        if ',' in origin_ids_str and '|' in origin_ids_str:
+            # Multiple composites: "2507||1,2507|46|" -> [(2507, None, 1), (2507, 46, None)]
+            try:
+                combos = []
+                for segment in origin_ids_str.split(','):
+                    segment = segment.strip()
+                    if not segment:
+                        continue
+                    if '|' in segment:
+                        parts = segment.split('|')
+                        oid = int(parts[0]) if parts[0] else None
+                        tag_id = int(parts[1]) if len(parts) > 1 and parts[1] and str(parts[1]).strip() else None
+                        tenant_id = int(parts[2]) if len(parts) > 2 and parts[2] and str(parts[2]).strip() else None
+                        if oid is not None:
+                            combos.append((oid, tag_id, tenant_id))
+                    else:
+                        oid = int(segment)
+                        combos.append((oid, None, None))
+                if combos:
+                    filters['origin_combos'] = combos
+                    filters.pop('origin_ids', None)
+                    filters.pop('location_tag_id', None)
+                    filters.pop('tenant_id', None)
+            except (ValueError, TypeError):
+                pass
+        elif '|' in origin_ids_str:
+            # Single composite: origin_id|tag_id|tenant_id (e.g. "2507|46|1" or "3878||")
+            try:
+                parts = origin_ids_str.split('|')
+                oid = int(parts[0]) if parts[0] else None
+                tag_id = int(parts[1]) if len(parts) > 1 and parts[1] and str(parts[1]).strip() else None
+                tenant_id = int(parts[2]) if len(parts) > 2 and parts[2] and str(parts[2]).strip() else None
+                if oid is not None:
+                    filters['origin_ids'] = [oid]
+                if tag_id is not None:
+                    filters['location_tag_id'] = tag_id
+                else:
+                    filters.pop('location_tag_id', None)
+                if tenant_id is not None:
+                    filters['tenant_id'] = tenant_id
+                else:
+                    filters.pop('tenant_id', None)
+            except (ValueError, TypeError):
+                pass
+        elif ',' in origin_ids_str:
+            # Multiple origin IDs (no composite)
             filters['origin_ids'] = [int(oid.strip()) for oid in origin_ids_str.split(',') if oid.strip()]
         else:
-            # Single ID
-            filters['origin_ids'] = [int(origin_ids_str)]
+            try:
+                filters['origin_ids'] = [int(origin_ids_str)]
+            except (ValueError, TypeError):
+                pass
     
     # Handle date filters (preserve provided times; apply local day bounds for date-only)
     date_from_input = query_params.get('date_from') or query_params.get('datefrom')
@@ -371,10 +417,12 @@ def _handle_overview_report(
     if top_origin_ids:
         try:
             origins_result = reports_service.get_origin_by_organization(organization_id=organization_id)
-            origin_names_map = {
-                o.get('id'): (o.get('display_name') or o.get('name_en') or o.get('name_th'))
-                for o in origins_result.get('data', [])
-            }
+            origin_names_map = {}
+            for o in origins_result.get('data', []):
+                oid = o.get('origin_id')
+                name = o.get('display_name') or o.get('name_en') or o.get('name_th') or o.get('name')
+                if oid is not None and oid not in origin_names_map:
+                    origin_names_map[oid] = name
         except Exception:
             origin_names_map = {}
         
@@ -1125,11 +1173,17 @@ def _handle_comparison_report(
         if date_to:
             side_filters['date_to'] = date_to
         
-        # Apply other filters (material_ids, origin_ids) to both sides
+        # Apply other filters (material_ids, origin_ids, origin_combos, location_tag_id, tenant_id) to both sides
         if filters.get('material_ids'):
             side_filters['material_ids'] = filters['material_ids']
-        if filters.get('origin_ids'):
+        if filters.get('origin_combos'):
+            side_filters['origin_combos'] = filters['origin_combos']
+        elif filters.get('origin_ids'):
             side_filters['origin_ids'] = filters['origin_ids']
+            if filters.get('location_tag_id') is not None:
+                side_filters['location_tag_id'] = filters['location_tag_id']
+            if filters.get('tenant_id') is not None:
+                side_filters['tenant_id'] = filters['tenant_id']
         
         return reports_service.get_transaction_records_by_organization(
             organization_id=organization_id,
@@ -2011,10 +2065,12 @@ def _handle_export_pdf_report(
             return "all"
         try:
             origins_result = reports_service.get_origin_by_organization(organization_id=organization_id)
-            name_map = {
-                o.get('id'): (o.get('display_name') or o.get('name_en') or o.get('name_th'))
-                for o in origins_result.get('data', [])
-            }
+            name_map = {}
+            for o in origins_result.get('data', []):
+                oid = o.get('origin_id')
+                name = o.get('display_name') or o.get('name_en') or o.get('name_th') or o.get('name')
+                if oid is not None and oid not in name_map:
+                    name_map[oid] = name
             names = [name_map.get(oid, f"Location {oid}") for oid in origin_ids]
             names = [n for n in names if n]
             return names or "all"

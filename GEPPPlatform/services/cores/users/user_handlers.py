@@ -7,6 +7,8 @@ from typing import Dict, Any, Optional
 from datetime import datetime
 
 from .user_service import UserService
+from .location_tag_service import LocationTagService
+from .tenant_service import TenantService
 from ....exceptions import (
     APIException,
     UnauthorizedException,
@@ -168,7 +170,7 @@ def handle_user_routes(event: Dict[str, Any], data: Dict[str, Any], **params) ->
 
     elif '/api/locations' == path and method == 'GET':
         # Get user locations (is_location = True)
-        return handle_get_locations(user_service, query_params, current_user, headers)
+        return handle_get_locations(db_session, user_service, query_params, current_user, headers)
 
     elif '/api/locations/' in path and '/check-dependencies' in path and method == 'GET':
         # Check location dependencies: /api/locations/{location_id}/check-dependencies
@@ -691,8 +693,8 @@ def handle_get_organization_users(
         raise APIException(f'Failed to get organization users: {str(e)}')
 
 
-def handle_get_locations(user_service: UserService, query_params: Dict[str, Any], current_user: Dict[str, Any], headers: Dict[str, str]) -> Dict[str, Any]:
-    """Handle GET /api/locations - Get user locations (is_location = True)"""
+def handle_get_locations(db_session, user_service: UserService, query_params: Dict[str, Any], current_user: Dict[str, Any], headers: Dict[str, str]) -> Dict[str, Any]:
+    """Handle GET /api/locations - Get user locations (is_location = True) with tags and tenants for each location."""
     try:
         # Get current user's organization ID for filtering
         organization_id = current_user.get('organization_id') if current_user else None
@@ -708,6 +710,29 @@ def handle_get_locations(user_service: UserService, query_params: Dict[str, Any]
             organization_id=organization_id,
             include_all=include_all
         )
+
+        # Enrich each location with tag and tenant info (id, name, start_date, end_date, members)
+        def _trim_tag_or_tenant(item: Dict[str, Any]) -> Dict[str, Any]:
+            return {
+                'id': item.get('id'),
+                'name': item.get('name'),
+                'start_date': item.get('start_date'),
+                'end_date': item.get('end_date'),
+                'members': item.get('members') or [],
+            }
+
+        tag_service = LocationTagService(db_session)
+        tenant_service = TenantService(db_session)
+        for loc in locations:
+            loc_id = loc.get('id')
+            if loc_id is not None:
+                tags_full = tag_service.get_tags_by_location(loc_id, organization_id)
+                tenants_full = tenant_service.get_tenants_by_location(loc_id, organization_id)
+                loc['tags'] = [_trim_tag_or_tenant(t) for t in tags_full]
+                loc['tenants'] = [_trim_tag_or_tenant(t) for t in tenants_full]
+            else:
+                loc['tags'] = []
+                loc['tenants'] = []
 
         return {
             'success': True,
