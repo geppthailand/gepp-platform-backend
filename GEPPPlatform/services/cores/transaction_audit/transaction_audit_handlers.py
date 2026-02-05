@@ -578,16 +578,29 @@ def handle_get_audit_report(
             # Use EXISTS to check if transaction has any records matching the date filter
             query = query.filter(exists().where(record_date_filter))
 
-        # District (origin) filtering - filter by origin_id directly
-        # Skip filtering if district is 'all'
+        # District (origin) filtering - supports composite "origin_id|tag_id|tenant_id"
+        # Skip filtering if district is '' or 'all'
         if district and district != 'all':
-            try:
-                # District now represents origin_id directly
-                origin_id_int = int(district)
-                query = query.filter(Transaction.origin_id == origin_id_int)
-            except (ValueError, TypeError):
-                # Invalid district value, return empty result
-                query = query.filter(Transaction.id == -1)
+            if '|' in district:
+                try:
+                    parts = district.split('|')
+                    origin_id_int = int(parts[0]) if parts[0] else None
+                    tag_id_int = int(parts[1]) if len(parts) > 1 and parts[1] else None
+                    tenant_id_int = int(parts[2]) if len(parts) > 2 and parts[2] else None
+                    if origin_id_int is not None:
+                        query = query.filter(Transaction.origin_id == origin_id_int)
+                    if tag_id_int is not None:
+                        query = query.filter(Transaction.location_tag_id == tag_id_int)
+                    if tenant_id_int is not None:
+                        query = query.filter(Transaction.tenant_id == tenant_id_int)
+                except (ValueError, TypeError):
+                    query = query.filter(Transaction.id == -1)
+            else:
+                try:
+                    origin_id_int = int(district)
+                    query = query.filter(Transaction.origin_id == origin_id_int)
+                except (ValueError, TypeError):
+                    query = query.filter(Transaction.id == -1)
 
         # Status filter (transaction status, not ai_audit_status)
         if status:
@@ -745,23 +758,44 @@ def handle_get_audit_report(
                 'audit_details': audit_details
             })
 
-        # Build filter options for frontend
-        # Get unique origin_ids from non-deleted transactions
+        # Build filter options for frontend (origin, origin+tag, origin+tenant, origin+tag+tenant, materials)
         from ....models.users.user_location import UserLocation
-        from sqlalchemy import distinct
+        from ....models.users.user_related import UserLocationTag, UserTenant
+        from ....models.cores.references import Material
 
-        # Get unique origin_ids from non-deleted transactions
-        origin_ids_result = db_session.query(distinct(Transaction.origin_id)).filter(
+        # Get distinct (origin_id, location_tag_id, tenant_id) from non-deleted transactions
+        combos_result = db_session.query(
+            Transaction.origin_id,
+            Transaction.location_tag_id,
+            Transaction.tenant_id
+        ).filter(
             and_(
                 Transaction.organization_id == organization_id,
                 Transaction.deleted_date.is_(None),
                 Transaction.origin_id.isnot(None)
             )
-        ).all()
-        
-        origin_ids = [row[0] for row in origin_ids_result if row[0] is not None]
+        ).distinct().all()
+
+        origin_ids = list({row[0] for row in combos_result if row[0] is not None})
+        tag_ids = list({row[1] for row in combos_result if row[1] is not None})
+        tenant_ids = list({row[2] for row in combos_result if row[2] is not None})
+        # Per-origin: only tags/tenants that actually appear with that origin (for filter options)
+        tags_by_origin = {}   # origin_id -> set of tag_ids
+        tenants_by_origin = {}  # origin_id -> set of tenant_ids
+        for origin_id, tag_id, tenant_id in combos_result:
+            if origin_id is None:
+                continue
+            if origin_id not in tags_by_origin:
+                tags_by_origin[origin_id] = set()
+            if tag_id is not None:
+                tags_by_origin[origin_id].add(tag_id)
+            if origin_id not in tenants_by_origin:
+                tenants_by_origin[origin_id] = set()
+            if tenant_id is not None:
+                tenants_by_origin[origin_id].add(tenant_id)
 
         districts = []
+        origin_options = []  # Composite options: location, location·tag, location·tenant, location·tag·tenant
 
         if origin_ids:
             # Fetch origin location records
@@ -886,18 +920,87 @@ def handle_get_audit_report(
             else:
                 logger.warning(f"No organization setup or root_nodes found for organization {organization_id}")
 
-            # Build districts list with paths
+            # Build districts list with paths (legacy/origin-only)
             districts = []
+            origin_name_by_id = {}
             for loc in origin_locations:
-                loc_id = int(loc.id)  # Ensure it's an integer for lookup
+                loc_id = int(loc.id)
                 path = location_paths.get(loc_id, '')
                 name = loc.name_en or loc.name_th or loc.display_name or str(loc.id)
-                
+                origin_name_by_id[loc_id] = name
                 districts.append({
                     'id': str(loc.id),
                     'name': name,
                     'path': path
                 })
+
+            # Load tag and tenant names for composite filter labels
+            tag_name_by_id = {}
+            if tag_ids:
+                tags = db_session.query(UserLocationTag).filter(
+                    and_(
+                        UserLocationTag.id.in_(tag_ids),
+                        UserLocationTag.deleted_date.is_(None)
+                    )
+                ).all()
+                tag_name_by_id = {t.id: (t.name or f"Tag {t.id}") for t in tags}
+
+            tenant_name_by_id = {}
+            if tenant_ids:
+                tenants = db_session.query(UserTenant).filter(
+                    and_(
+                        UserTenant.id.in_(tenant_ids),
+                        UserTenant.deleted_date.is_(None)
+                    )
+                ).all()
+                tenant_name_by_id = {t.id: (t.name or f"Tenant {t.id}") for t in tenants}
+
+            # Build options: location, location·tag, location·tenant, location·tag·tenant
+            # Per origin: show all 4 types using tags/tenants that appear with that origin.
+            # Only show location·tag·tenant when that exact combo exists in combos_result.
+            combos_set = {(r[0], r[1], r[2]) for r in combos_result}
+            seen_option_ids = set()
+            for origin_id in origin_ids:
+                origin_name = origin_name_by_id.get(origin_id, f"Location {origin_id}")
+                path = location_paths.get(int(origin_id), '') if origin_id else ''
+                origin_tag_ids = list(tags_by_origin.get(origin_id, []))
+                origin_tenant_ids = list(tenants_by_origin.get(origin_id, []))
+                # 1) Location only
+                oid = f"{origin_id}||"
+                if oid not in seen_option_ids:
+                    seen_option_ids.add(oid)
+                    origin_options.append({'id': oid, 'name': origin_name, 'path': path})
+                # 2) Location · tag
+                for tag_id in origin_tag_ids:
+                    tname = tag_name_by_id.get(tag_id)
+                    if tname:
+                        oid = f"{origin_id}|{tag_id}|"
+                        if oid not in seen_option_ids:
+                            seen_option_ids.add(oid)
+                            origin_options.append({'id': oid, 'name': f"{origin_name} · {tname}", 'path': path})
+                # 3) Location · tenant
+                for tenant_id in origin_tenant_ids:
+                    tname = tenant_name_by_id.get(tenant_id)
+                    if tname:
+                        oid = f"{origin_id}||{tenant_id}"
+                        if oid not in seen_option_ids:
+                            seen_option_ids.add(oid)
+                            origin_options.append({'id': oid, 'name': f"{origin_name} · {tname}", 'path': path})
+                # 4) Location · tag · tenant - only when that combo exists in data
+                for tag_id in origin_tag_ids:
+                    for tenant_id in origin_tenant_ids:
+                        if (origin_id, tag_id, tenant_id) in combos_set:
+                            tname = tag_name_by_id.get(tag_id)
+                            tnt = tenant_name_by_id.get(tenant_id)
+                            if tname and tnt:
+                                oid = f"{origin_id}|{tag_id}|{tenant_id}"
+                                if oid not in seen_option_ids:
+                                    seen_option_ids.add(oid)
+                                    origin_options.append({
+                                        'id': oid,
+                                        'name': f"{origin_name} · {tname} · {tnt}",
+                                        'path': path
+                                    })
 
         # Status options
         statuses = [
@@ -906,15 +1009,42 @@ def handle_get_audit_report(
             {'value': 'rejected', 'label': 'ไม่อนุมัติ'}
         ]
 
-        # Sort districts by name
-        districts_sorted = sorted(districts, key=lambda x: x['name'])
+        # Material options: distinct material_id from transaction records (same org, non-deleted)
+        material_ids = [
+            row[0] for row in db_session.query(TransactionRecord.material_id)
+            .join(Transaction, TransactionRecord.created_transaction_id == Transaction.id)
+            .filter(
+                and_(
+                    Transaction.organization_id == organization_id,
+                    Transaction.deleted_date.is_(None),
+                    TransactionRecord.is_active == True,
+                    TransactionRecord.material_id.isnot(None)
+                )
+            ).distinct().all()
+        ]
+        materials_options = []
+        if material_ids:
+            materials = db_session.query(Material).filter(
+                Material.id.in_(material_ids),
+                Material.is_active == True
+            ).all()
+            materials_options = [
+                {
+                    'id': m.id,
+                    'name': m.name_en or m.name_th or f"Material {m.id}",
+                    'name_en': m.name_en or '',
+                    'name_th': m.name_th or ''
+                }
+                for m in materials
+            ]
 
-        # Add 'all' option to districts at the beginning
-        districts_with_all = [{'id': 'all', 'name': 'ทั้งหมด'}] + districts_sorted
+        # Sort composite options by name (building 1, building 1 · tag, building 2, ...)
+        origin_options_sorted = sorted(origin_options, key=lambda x: x['name'])
 
         filter_options = {
-            'districts': districts_with_all,
-            'statuses': statuses
+            'districts': origin_options_sorted,
+            'statuses': statuses,
+            'materials': materials_options
         }
 
         # Compile final report

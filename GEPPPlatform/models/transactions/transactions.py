@@ -77,7 +77,8 @@ class Transaction(Base, BaseModel):
     organization_id = Column(BigInteger, ForeignKey('organizations.id'), nullable=True)
     origin_id = Column(BigInteger, ForeignKey('user_locations.id'), nullable=True)
     destination_ids = Column(ARRAY(BigInteger), nullable=False, default=[])  # Array of destination IDs matching transaction_records positions
-    location_tag_id = Column(BigInteger, nullable=True)
+    location_tag_id = Column(BigInteger, nullable=True)  # user_location_tags.id
+    tenant_id = Column(BigInteger, nullable=True)  # user_tenants.id
     ext_id_1 = Column(String(50), nullable=True)
     ext_id_2 = Column(String(50), nullable=True)
 
