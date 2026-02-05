@@ -128,7 +128,7 @@ def get_iot_devices_paths() -> Dict[str, Any]:
             "post": {
                 "tags": ["IOT Devices"],
                 "summary": "List locations where current user is a dataInput member",
-                "description": "Requires Bearer device token. Provide user JWT token in body via `user_token` to resolve memberships. Returns locations and all materials separately. Materials include category and main_material as objects.",
+                "description": "Requires Bearer device token. Provide user JWT token in body via `user_token` to resolve memberships. Returns locations (with path, tags, and tenants per location) and all materials separately. Each location includes tags and tenants with id, name, and members. Materials include category and main_material as objects.",
                 "security": [{"BearerAuth": []}],
                 "parameters": [
                     {
@@ -149,7 +149,7 @@ def get_iot_devices_paths() -> Dict[str, Any]:
                 },
                 "responses": {
                     "200": {
-                        "description": "List of member locations and all materials",
+                        "description": "List of member locations (with path, tags, tenants) and all materials",
                         "content": {
                             "application/json": {
                                 "schema": {
@@ -363,11 +363,52 @@ def get_iot_devices_schemas() -> Dict[str, Any]:
                 "unit_weight": {"type": "number", "format": "float", "nullable": True, "example": 1.0}
             }
         },
+        "LocationTagItem": {
+            "type": "object",
+            "description": "Tag associated with a location (e.g. collection point, event)",
+            "properties": {
+                "id": {"type": "integer", "example": 46, "description": "Tag ID"},
+                "name": {"type": "string", "example": "Front desk", "description": "Tag name"},
+                "members": {
+                    "type": "array",
+                    "items": {"oneOf": [{"type": "integer"}, {"type": "string"}]},
+                    "description": "User location IDs assigned to this tag"
+                },
+                "start_date": {"type": "string", "format": "date-time", "nullable": True, "description": "Tag event start date (optional)"},
+                "end_date": {"type": "string", "format": "date-time", "nullable": True, "description": "Tag event end date (optional)"}
+            }
+        },
+        "LocationTenantItem": {
+            "type": "object",
+            "description": "Tenant associated with a location",
+            "properties": {
+                "id": {"type": "integer", "example": 1, "description": "Tenant ID"},
+                "name": {"type": "string", "example": "Building A", "description": "Tenant name"},
+                "members": {
+                    "type": "array",
+                    "items": {"oneOf": [{"type": "integer"}, {"type": "string"}]},
+                    "description": "User location IDs assigned to this tenant"
+                },
+                "start_date": {"type": "string", "format": "date-time", "nullable": True, "description": "Tenant event start date (optional)"},
+                "end_date": {"type": "string", "format": "date-time", "nullable": True, "description": "Tenant event end date (optional)"}
+            }
+        },
         "LocationReduced": {
             "type": "object",
             "properties": {
-                "origin_id": {"type": "integer", "example": 123},
-                "display_name": {"type": "string", "example": "Main Branch"}
+                "origin_id": {"type": "integer", "example": 123, "description": "Location (origin) ID"},
+                "display_name": {"type": "string", "example": "Main Branch", "description": "Location display name"},
+                "path": {"type": "string", "example": "Region > District > Branch", "description": "Hierarchy path string"},
+                "tags": {
+                    "type": "array",
+                    "items": {"$ref": "#/components/schemas/LocationTagItem"},
+                    "description": "Tags linked to this location (id, name, members)"
+                },
+                "tenants": {
+                    "type": "array",
+                    "items": {"$ref": "#/components/schemas/LocationTenantItem"},
+                    "description": "Tenants linked to this location (id, name, members)"
+                }
             }
         },
         "LocationsByMembershipResponse": {
