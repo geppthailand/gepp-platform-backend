@@ -20,6 +20,24 @@ from ....models.subscriptions.organizations import Organization, OrganizationSet
 
 logger = logging.getLogger(__name__)
 
+# Two decimal places for all weight, quantity, and amount values
+TWO_PLACES = Decimal('0.01')
+
+
+def _round_decimal(value) -> Decimal:
+    """Round a numeric value to 2 decimal places as Decimal."""
+    if value is None:
+        return Decimal('0')
+    d = value if isinstance(value, Decimal) else Decimal(str(value))
+    return d.quantize(TWO_PLACES)
+
+
+def _round_float(value) -> float:
+    """Round a numeric value to 2 decimal places as float (for API output)."""
+    if value is None:
+        return 0.0
+    return round(float(value), 2)
+
 
 class TransactionService:
     """
@@ -670,15 +688,15 @@ class TransactionService:
                         if 'transaction_date' in record_data:
                             record.transaction_date = record_data['transaction_date']
                         if 'origin_quantity' in record_data:
-                            record.origin_quantity = Decimal(str(record_data['origin_quantity']))
+                            record.origin_quantity = _round_decimal(record_data['origin_quantity'])
                         if 'origin_weight_kg' in record_data:
-                            record.origin_weight_kg = Decimal(str(record_data['origin_weight_kg']))
+                            record.origin_weight_kg = _round_decimal(record_data['origin_weight_kg'])
                         if 'images' in record_data:
                             record.images = record_data['images']
                         if 'origin_price_per_unit' in record_data:
-                            record.origin_price_per_unit = Decimal(str(record_data['origin_price_per_unit']))
+                            record.origin_price_per_unit = _round_decimal(record_data['origin_price_per_unit'])
                         if 'total_amount' in record_data:
-                            record.total_amount = Decimal(str(record_data['total_amount']))
+                            record.total_amount = _round_decimal(record_data['total_amount'])
 
                         record.updated_date = datetime.now()
                         records_updated += 1
@@ -706,7 +724,7 @@ class TransactionService:
             active_record_ids = [r.id for r in active_records]
             transaction.transaction_records = active_record_ids
 
-            # Recalculate total weight and amount from active records
+            # Recalculate total weight and amount from active records (2 decimal places)
             total_weight = Decimal('0')
             total_amount = Decimal('0')
             for record_id in active_record_ids:
@@ -717,8 +735,8 @@ class TransactionService:
                     total_weight += record.origin_weight_kg or Decimal('0')
                     total_amount += record.total_amount or Decimal('0')
 
-            transaction.weight_kg = total_weight
-            transaction.total_amount = total_amount
+            transaction.weight_kg = _round_decimal(total_weight)
+            transaction.total_amount = _round_decimal(total_amount)
 
             self.db.commit()
 
@@ -871,10 +889,10 @@ class TransactionService:
                 category_id=record_data.get('category_id'),
                 tags=record_data.get('tags', []),
                 unit=record_data.get('unit'),
-                origin_quantity=Decimal(str(record_data.get('origin_quantity', 0))),
-                origin_weight_kg=Decimal(str(record_data.get('origin_weight_kg', 0))),
-                origin_price_per_unit=Decimal(str(record_data.get('origin_price_per_unit', 0))),
-                total_amount=Decimal(str(record_data.get('total_amount', 0))),
+                origin_quantity=_round_decimal(record_data.get('origin_quantity', 0)),
+                origin_weight_kg=_round_decimal(record_data.get('origin_weight_kg', 0)),
+                origin_price_per_unit=_round_decimal(record_data.get('origin_price_per_unit', 0)),
+                total_amount=_round_decimal(record_data.get('total_amount', 0)),
                 currency_id=record_data.get('currency_id'),
                 notes=record_data.get('notes'),
                 images=record_data.get('images', []),
@@ -888,9 +906,10 @@ class TransactionService:
                 created_by_id=record_data.get('created_by_id')
             )
 
-            # Calculate total amount if not provided
+            # Calculate total amount if not provided (then round to 2 decimals)
             if not transaction_record.total_amount:
                 transaction_record.calculate_total_value()
+            transaction_record.total_amount = _round_decimal(transaction_record.total_amount)
 
             self.db.add(transaction_record)
             self.db.flush()  # Get the ID
@@ -1044,8 +1063,8 @@ class TransactionService:
             total_weight = sum((record.origin_weight_kg or Decimal('0') for record in records), Decimal('0'))
             total_amount = sum((record.total_amount or Decimal('0') for record in records), Decimal('0'))
 
-            transaction.weight_kg = total_weight
-            transaction.total_amount = total_amount
+            transaction.weight_kg = _round_decimal(total_weight)
+            transaction.total_amount = _round_decimal(total_amount)
 
     def _transaction_to_dict(self, transaction: Transaction) -> Dict[str, Any]:
         """Convert Transaction object to dictionary"""
@@ -1079,8 +1098,8 @@ class TransactionService:
             'tag_id': transaction.location_tag_id,  # Alias for API
             'tenant_id': getattr(transaction, 'tenant_id', None),
             'origin_location': origin_location,
-            'weight_kg': float(transaction.weight_kg) if transaction.weight_kg else 0,
-            'total_amount': float(transaction.total_amount) if transaction.total_amount else 0,
+            'weight_kg': _round_float(transaction.weight_kg),
+            'total_amount': _round_float(transaction.total_amount),
             'transaction_date': transaction.transaction_date.isoformat() if transaction.transaction_date else None,
             'arrival_date': transaction.arrival_date.isoformat() if transaction.arrival_date else None,
             'origin_coordinates': transaction.origin_coordinates,
@@ -1148,10 +1167,10 @@ class TransactionService:
             'category': category,
             'tags': record.tags,
             'unit': record.unit,
-            'origin_quantity': float(record.origin_quantity) if record.origin_quantity else 0,
-            'origin_weight_kg': float(record.origin_weight_kg) if record.origin_weight_kg else 0,
-            'origin_price_per_unit': float(record.origin_price_per_unit) if record.origin_price_per_unit else 0,
-            'total_amount': float(record.total_amount) if record.total_amount else 0,
+            'origin_quantity': _round_float(record.origin_quantity),
+            'origin_weight_kg': _round_float(record.origin_weight_kg),
+            'origin_price_per_unit': _round_float(record.origin_price_per_unit),
+            'total_amount': _round_float(record.total_amount),
             'currency_id': record.currency_id,
             'notes': record.notes,
             'images': record.images,
