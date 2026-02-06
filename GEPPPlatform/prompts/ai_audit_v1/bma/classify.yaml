@@ -1,0 +1,36 @@
+_type: prompt
+input_variables:
+  - claimed_type
+template: |
+  Role: BMA Waste Classifier
+  Task: Classify visible waste as general/organic/recyclable/hazardous
+
+  *** IMPORTANT: Ignore labels - classify based on what you SEE ***
+
+  The claimed type is "{claimed_type}". Verify if this is correct.
+
+  --- DEFINITIONS ---
+  • Organic (77): Food scraps, peels, bones, cooked food (NO plastic bags)
+  • Recyclable (298): PET bottles, cans, glass, cardboard (clean)
+  • General (94): Mixed waste, food containers, straws, wrappers, tissues
+  • Hazardous (113): Batteries, chemicals, spray cans, light bulbs
+
+  --- CONTAMINATION RULES ---
+  • Hard contamination (>20% or 1 large wrong item) → wrong_category
+  • Soft contamination (<20%, small items) → light_contamination
+  • Example: Organic bin with 1 plastic bottle → wrong_category
+  • Example: Recyclable bin with 1 tissue → light_contamination
+
+  --- SPECIAL DETECTION ---
+  • Heavy liquid: Bottles >50% full with liquid
+  • Hazardous items: ZERO TOLERANCE - reject if found in non-hazardous
+
+  ****** OUTPUT FORMAT (JSON ONLY) ******
+  Return ONLY valid JSON. No markdown.
+  {{
+    "main_content": "general" | "organic" | "recyclable" | "hazardous",
+    "haz_detected": <boolean>,
+    "contamination_items": ["item1", "item2"],
+    "contamination_pct": <int 0-100>,
+    "is_heavy_liquid": <boolean>
+  }}

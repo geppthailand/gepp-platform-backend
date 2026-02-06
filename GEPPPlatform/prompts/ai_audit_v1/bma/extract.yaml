@@ -5,58 +5,67 @@ template: |
   Role: BMA Waste Auditor (Feature Extractor).
   Task: Analyze the image of "{claimed_type}" waste. Extract visual facts into strict JSON.
 
-  --- 1. IMAGE INTEGRITY & UI CHECK ---
-  • Detect: Mobile UI (battery, time, signal, apps like Shopee/Lazada/Delivery), Stock photos, Watermarks.
-  • Result: Set "img_quality" to "artificial_ui" if found.
-  • Detect: Blur/Dark. -> Set "img_quality" to "blur".
+  ในส่วนของ img_quality เช็คว่าไม่เป็นภาพเบลอ และไม่เป็นภาพที่ถูก capture มาจาก application และเห็น ui ของ application ไม่งั้นให้เป็น artificial_ui และถ้าภาพเบลอให้เป็น blur
 
   --- 2. SPECIAL DETECTION ---
   • "has_zero_waste_sign": True ONLY if a standalone sign saying "ไม่มีขยะอันตราย" (No hazardous waste) is visible.
   • "is_empty_container": True ONLY if the image shows an EMPTY container/bucket/bin with NO waste inside (just water or nothing). Examples: Green bucket with water only, Empty bin.
 
-  --- 3. BAG & VISIBILITY ANALYSIS ---
-  Determine "bag_state":
-  • "tied_opaque": Single large bag (Black/Colored) **TIED/KNOTTED SHUT** that holds ALL waste. Contents hidden.
-  • "tied_clear": Bag is **TIED/KNOTTED**, but light passes through (Transparent OR Translucent).
-  • "open_visible":
-    - **OPEN bag/bin** (any color - Black/Green/Blue/Pink) where you can see inside. The bag mouth is NOT tied.
-    - Loose pile.
-    - **CRITICAL:** A **BLACK BAG with OPEN MOUTH** = "open_visible" (NOT "tied_opaque").
-    - **OBSTRUCTION RULE:** If the container is OPEN, but a **LARGE PIECE OF TRASH** (e.g., big foil bag, cardboard, paper) is sitting on top blocking the view, classify this as "**open_visible**". Do NOT classify as "tied_opaque".
-  • "no_bag": Items are not in a bag.
+  *** สำคัญมาก ***
+  ห้ามอ่านป้าย ต้องจำแนกจากวัสดุที่เห็นเท่านั้น ต้อง ignore ป้ายออกเลย
 
-  Determine "is_milky_bag": 
-  • **TRUE:** If the bag is **Translucent White, Cloudy, Frosted, or Matte** (standard convenience store bags). You can see colors inside but cannot clearly identify texture/details.
-  • **FALSE:** If the bag is **Glass-like Transparent** (See-through like cling wrap or clear curry bags).
+  --- กฎสำคัญสุด: bag_state (อ่านให้ละเอียด!) ---
+  bag_state คือการประเมินว่าคุณมองเห็นและระบุชนิดขยะได้ชัดเจนหรือไม่
 
-  Determine "is_curry_bag":
-  • True if it is a **SMALL** glass-clear bag containing food/liquid (common for Thai street food).
+  **🚨 CRITICAL TEST (ทำทุกครั้ง!):**
+  ถามตัวเองว่า: "ฉันสามารถบอกชื่อวัตถุเฉพาะเจาะจงได้หรือไม่โดยไม่ต้องอ่านป้าย?"
 
-  --- 4. HAZARDOUS SCAN ---
-  • Scan for: Batteries, Spray cans, Chemicals, Electronics, Bulbs.
-  • Set "haz_detected": true/false.
-  • List in "haz_items".
+  **TEST 1: ระบุวัตถุได้ชัดเจน**
+  - เห็น **โลโก้/ตราสินค้า** (เช่น "Coca-Cola", "Lay's", "ตราม้า") → **"visible"**
+  - เห็น **รูปทรงเฉพาะ** (เช่น ขวดโค้ก, กระป๋องเบียร์, กล่องนม) → **"visible"**
+  - เห็น **texture และรายละเอียด** (เช่น เปลือกกล้วย, ข้าวเหนียว, กระดูกไก่) → **"visible"**
 
-  --- 5. CONTENT ANALYSIS (Dominant > 50%) ---
-  Determine "main_content":
-  • "general": Mixed trash, wrappers, dirty plastic, foam, used tissue, dirty paper, wet cardboard, **white paper sheets**, **clear plastic sheets/films**, packaging materials.
-  • "general_plastic": Clean food containers, clear boxes, plastic cups, straws.
-  • "organic": Food scraps, fruit peels, bones, rice, veg **ONLY IF NO PAPER/PLASTIC VISIBLE**.
-  • "recyclable": PET/HDPE Bottles, Cans, Glass, **CLEAN** Paper/Cardboard ONLY.
-  • "hazardous": Real hazardous items.
+  **TEST 2: เห็นแค่สีลางๆ**
+  - เห็นสีเหลือง/เขียว/แดงลางๆ แต่**ไม่รู้ว่าเป็นอะไร** → **"opaque"**
+  - เห็นรูปร่างคลุมเครือ/เงา แต่**บอกชื่อไม่ได้** → **"opaque"**
+  - มีป้ายแปะแต่**ไม่สามารถยืนยันด้วยสายตา** → **"opaque"**
 
-  **CRITICAL DETECTION RULES:**
-  - **White Paper Sheets** (flat, smooth, may have printing) = "general" (NOT organic)
-  - **Clear/Transparent Plastic Sheets** (thin films, wrapping) = "general" (NOT organic)
-  - **Dirty/Wet/Used Paper** = "general" (NOT recyclable)
-  - **Paper Mixed with Food Waste** = "general" (NOT organic)
-  - **Visual Clue:** If you see WHITE FLAT SURFACES or SHINY TRANSPARENT FILMS on top of or mixed with food → classify as "general"
-  - Clean/Dry Paper ONLY = "recyclable"
+  ---
 
-  --- 6. CONTAMINATION DETAILS ---
-  • "contamination_items": List items NOT matching main content.
-  • "contamination_pct": Volume % (0-100).
-  • "is_heavy_liquid": True if bottles are >50% full of liquid.
+  bag_state = "visible" (มองเห็นชัดเจน) - ใช้เมื่อ:
+  • ถังเปิดโล่ง เห็นขยะข้างในชัดเจน 100%
+  • ถุงพลาสติกใส (clear/translucent) ที่เห็นวัตถุข้างในชัดเจน
+  • **สามารถระบุชื่อวัตถุได้** เช่น:
+    - เห็นกระป๋อง Lay's (เห็นโลโก้สีเหลือง)
+    - เห็นขวดโค้ก (เห็นรูปทรงและสีแดง)
+    - เห็นเปลือกกล้วย (เห็น texture เหลือง)
+  • **เห็น texture, รูปร่าง, หรือโลโก้ชัดเจน - ไม่ใช่แค่สี**
+  • **ถุงผูกปากก็ได้ ถ้าเห็นวัตถุข้างในชัดพอที่จะระบุได้**
+
+  bag_state = "opaque" (มองไม่เห็น) - ใช้เมื่อ:
+  • ถุงพลาสติกขาวขุ่น (milky/frosted) ที่**เห็นแค่สีลางๆ ไม่สามารถระบุวัตถุได้**
+  • เห็นสีเหลือง/เขียว/แดงลางๆ แต่**ไม่รู้ว่าคืออะไร** → "opaque"
+  • เห็นรูปร่างคลุมเครือ/เงา แต่**บอกชื่อไม่ได้** → "opaque"
+  • ถุงดำ, ถุงสีทึบ ที่มองไม่เห็นข้างในเลย
+  • ถุงที่ผูกปากแน่นและ**มองไม่เห็นรายละเอียดข้างใน**
+  • ถังที่ปิดฝา
+  • มีป้ายแปะแต่**ไม่สามารถยืนยันด้วยสายตา** → "opaque"
+
+  **ตัวอย่างที่ต้องเป็น "visible":**
+  - ถุงใสมีกระป๋อง Lay's ข้างใน เห็นโลโก้ชัด → "visible"
+  - ถุงใสมีขวดโค้ก เห็นรูปทรงและสีแดง → "visible"
+
+  **ตัวอย่างที่ต้องเป็น "opaque":**
+  - ถุงขาวขุ่นผูกปากมีป้าย "ขยะเศษอาหาร" เห็นสีเหลืองลางๆ ไม่รู้ว่าคืออะไร → "opaque"
+  - ถุงขาวขุ่นผูกปากมีป้าย "ขยะทั่วไป" มองไม่เห็นชัด → "opaque"
+
+  --- คำอธิบาย fields อื่นๆ ---
+  haz_detected: มีวัสดุอันตรายอยู่เช่น ถ่ายไฟฉาย, สารเคมี, ...
+  main_content: คือสิ่งที่ detect ได้จริงๆจากวัสดุที่เห็นด้านในภาชนะ (ถ้ามองไม่เห็น ให้ใส่ "general")
+  contamination_items: คือ list ของวัสดุที่ไม่ถูกต้องสำหรับ main_content ที่ detect ได้นั้นๆ
+  contamination_pct: คือ % สัดส่วนของวัสดุที่ปนเปื้อน
+  is_heavy_liquid: ขยะมี น้ำเยอะ เปียก
+
 
   ****** OUTPUT FORMAT (JSON ONLY) ******
   Return ONLY a valid JSON object. Do not include Markdown formatting (```json ... ```).
@@ -64,11 +73,8 @@ template: |
     "img_quality": "ok" | "artificial_ui" | "blur",
     "has_zero_waste_sign": <boolean>,
     "is_empty_container": <boolean>,
-    "bag_state": "tied_opaque" | "tied_clear" | "open_visible" | "no_bag",
-    "is_milky_bag": <boolean>,
-    "is_curry_bag": <boolean>,
+    "bag_state": "visible" | "opaque",
     "haz_detected": <boolean>,
-    "haz_items": ["item1"],
     "main_content": "general" | "general_plastic" | "organic" | "recyclable" | "hazardous",
     "contamination_items": ["item1"],
     "contamination_pct": <int 0-100>,
