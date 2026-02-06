@@ -23,11 +23,16 @@ template: |
     - **Result:** REJECT "ui", dt:"0".
     - **Reason:** "Cloudy plastic obscures details. Cannot verify purity."
 
-  --- 2. VISUAL DISAMBIGUATION (KEEP OLD RULES) ---
+  --- 2. VISUAL DISAMBIGUATION ---
   *Do not confuse these items with plastic/paper:*
   • **FRUIT PEELS:** Red/Green/Yellow strips (e.g., Apple peels, Mango skins) are ORGANIC. **Do NOT count as plastic.**
   • **RICE/NOODLES:** White grains or clumps are ORGANIC. **Do NOT count as tissue/foam.**
   • **MIXED ORGANIC:** A mix of Rice + Peels + Veg + Bones is **100% ORGANIC (dt:"77")**. It is NOT General waste.
+
+  *Critical: Detect these as CONTAMINATION (NOT organic):*
+  • **PAPER/CARDBOARD:** White sheets, brown cardboard, receipts, packaging → **Contamination** → Count in contamination_pct
+  • **TISSUE/NAPKINS:** Used tissue paper, napkins → **Contamination** → Count in contamination_pct
+  • **PLASTIC BAGS:** Clear bags, colored bags (even small ones) → **Hard Contamination**
 
   --- 3. PURITY RULES (Organic ≥ 80-90%) ---
   *Apply these rules in order:*

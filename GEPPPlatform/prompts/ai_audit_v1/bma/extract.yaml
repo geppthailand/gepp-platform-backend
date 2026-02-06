@@ -12,13 +12,16 @@ template: |
 
   --- 2. SPECIAL DETECTION ---
   • "has_zero_waste_sign": True ONLY if a standalone sign saying "ไม่มีขยะอันตราย" (No hazardous waste) is visible.
+  • "is_empty_container": True ONLY if the image shows an EMPTY container/bucket/bin with NO waste inside (just water or nothing). Examples: Green bucket with water only, Empty bin.
 
   --- 3. BAG & VISIBILITY ANALYSIS ---
   Determine "bag_state":
-  • "tied_opaque": Single large bag (Black/Colored) tied shut that holds ALL waste. Contents hidden.
-  • "tied_clear": Bag is tied, but light passes through (Transparent OR Translucent).
-  • "open_visible": 
-    - Open bag/bin or loose pile.
+  • "tied_opaque": Single large bag (Black/Colored) **TIED/KNOTTED SHUT** that holds ALL waste. Contents hidden.
+  • "tied_clear": Bag is **TIED/KNOTTED**, but light passes through (Transparent OR Translucent).
+  • "open_visible":
+    - **OPEN bag/bin** (any color - Black/Green/Blue/Pink) where you can see inside. The bag mouth is NOT tied.
+    - Loose pile.
+    - **CRITICAL:** A **BLACK BAG with OPEN MOUTH** = "open_visible" (NOT "tied_opaque").
     - **OBSTRUCTION RULE:** If the container is OPEN, but a **LARGE PIECE OF TRASH** (e.g., big foil bag, cardboard, paper) is sitting on top blocking the view, classify this as "**open_visible**". Do NOT classify as "tied_opaque".
   • "no_bag": Items are not in a bag.
 
@@ -36,11 +39,19 @@ template: |
 
   --- 5. CONTENT ANALYSIS (Dominant > 50%) ---
   Determine "main_content":
-  • "general": Mixed trash, wrappers, dirty plastic, foam, used tissue.
+  • "general": Mixed trash, wrappers, dirty plastic, foam, used tissue, dirty paper, wet cardboard, **white paper sheets**, **clear plastic sheets/films**, packaging materials.
   • "general_plastic": Clean food containers, clear boxes, plastic cups, straws.
-  • "organic": Food scraps, fruit peels, bones, rice, veg.
-  • "recyclable": PET/HDPE Bottles, Cans, Glass, Paper.
+  • "organic": Food scraps, fruit peels, bones, rice, veg **ONLY IF NO PAPER/PLASTIC VISIBLE**.
+  • "recyclable": PET/HDPE Bottles, Cans, Glass, **CLEAN** Paper/Cardboard ONLY.
   • "hazardous": Real hazardous items.
+
+  **CRITICAL DETECTION RULES:**
+  - **White Paper Sheets** (flat, smooth, may have printing) = "general" (NOT organic)
+  - **Clear/Transparent Plastic Sheets** (thin films, wrapping) = "general" (NOT organic)
+  - **Dirty/Wet/Used Paper** = "general" (NOT recyclable)
+  - **Paper Mixed with Food Waste** = "general" (NOT organic)
+  - **Visual Clue:** If you see WHITE FLAT SURFACES or SHINY TRANSPARENT FILMS on top of or mixed with food → classify as "general"
+  - Clean/Dry Paper ONLY = "recyclable"
 
   --- 6. CONTAMINATION DETAILS ---
   • "contamination_items": List items NOT matching main content.
@@ -52,6 +63,7 @@ template: |
   {{
     "img_quality": "ok" | "artificial_ui" | "blur",
     "has_zero_waste_sign": <boolean>,
+    "is_empty_container": <boolean>,
     "bag_state": "tied_opaque" | "tied_clear" | "open_visible" | "no_bag",
     "is_milky_bag": <boolean>,
     "is_curry_bag": <boolean>,

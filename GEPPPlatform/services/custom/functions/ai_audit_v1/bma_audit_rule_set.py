@@ -265,6 +265,7 @@ def _parse_json_response(text: str, material_key: str) -> Dict[str, Any]:
         return {
             "img_quality": "blur",
             "has_zero_waste_sign": False,
+            "is_empty_container": False,
             "bag_state": "no_bag",
             "is_milky_bag": False,
             "haz_detected": False,
@@ -321,6 +322,7 @@ def process_decision(claimed_type: str, ai_json: Dict[str, Any]) -> Dict[str, An
             {
                 "img_quality": "ok" | "artificial_ui" | "blur",
                 "has_zero_waste_sign": boolean,
+                "is_empty_container": boolean,
                 "bag_state": "tied_opaque" | "tied_clear" | "open_visible" | "no_bag",
                 "is_milky_bag": boolean,
                 "haz_detected": boolean,
@@ -341,6 +343,11 @@ def process_decision(claimed_type: str, ai_json: Dict[str, Any]) -> Dict[str, An
 
     if ai_json.get("img_quality") == "blur":
         return {"code": "ui", "status": "reject", "dt": "0", "wi": ["ภาพเบลอ/มองไม่เห็น"]}
+
+    # --- 1.5. EMPTY CONTAINER CHECK ---
+    # ถ้าเป็นถังเปล่า/มีแต่น้ำ -> ไม่ใช่ขยะ -> Reject UI
+    if ai_json.get("is_empty_container"):
+        return {"code": "ui", "status": "reject", "dt": "0", "wi": ["ไม่พบขยะ (ภาชนะเปล่า)"]}
 
     # --- 2. EXTRACT VARIABLES ---
     bag_state = ai_json.get("bag_state", "no_bag")
@@ -373,6 +380,12 @@ def process_decision(claimed_type: str, ai_json: Dict[str, Any]) -> Dict[str, An
     # CASE 1: GENERAL WASTE (94)
     # ==================================================
     if claimed_type == "general":
+        # *** NEW RULE: MILKY BAG CHECK FOR GENERAL ***
+        # ถ้าถุงมัดปาก (tied_clear) และเป็นถุงขุ่น (milky) -> UI
+        # เพราะมองไม่เห็นข้างใน ไม่สามารถยืนยันได้ว่าเป็นขยะทั่วไปจริง
+        if bag_state == "tied_clear" and is_milky:
+            return {"code": "ui", "status": "reject", "dt": "0", "wi": ["ถุงขุ่นมัดปาก (ตรวจสอบไม่ได้)"]}
+
         # Rule: Pure Recyclable (Bottle pile) -> WC 298
         if main == "recyclable" and pct < 20:
              return {"code": "wc", "status": "reject", "dt": "298", "wi": ["ขยะรีไซเคิล"]}
@@ -436,6 +449,7 @@ def process_decision(claimed_type: str, ai_json: Dict[str, Any]) -> Dict[str, An
         # ที่นี่จะเหลือแค่: open_visible, no_bag, หรือ tied_clear ที่เป็น curry bag ใส
 
         # Rule: Content Logic
+        # ถ้าเห็นกระดาษ/พลาสติกใส ใน organic bin -> AI จะ detect เป็น "general" -> reject
         if main == "recyclable" or main == "general" or main == "general_plastic":
              return {"code": "wc", "status": "reject", "dt": "94", "wi": ["ขยะทั่วไป"]}
 
