@@ -150,6 +150,7 @@ def handle_list_response_patterns(
                 'priority': pattern.priority,
                 'pattern': pattern.pattern,
                 'organization_id': pattern.organization_id,
+                'material_id': pattern.material_id,
                 'created_date': pattern.created_date.isoformat() if pattern.created_date else None,
                 'updated_date': pattern.updated_date.isoformat() if pattern.updated_date else None
             })
@@ -187,6 +188,7 @@ def handle_create_response_pattern(
         # Validate required fields
         condition = data.get('condition')
         pattern = data.get('pattern')
+        material_id = data.get('material_id')  # Optional: NULL = applies to all materials
 
         if not condition:
             raise ValidationException('Condition (code) is required')
@@ -199,18 +201,28 @@ def handle_create_response_pattern(
         if condition not in valid_codes:
             raise ValidationException(f'Invalid code. Must be one of: {", ".join(valid_codes)}')
 
-        # Check if pattern already exists for this code and organization
+        # Check if pattern already exists for this code, material_id, and organization
+        # Same condition can exist multiple times if material_id is different
+        query_conditions = [
+            AiAuditResponsePattern.organization_id == organization_id,
+            AiAuditResponsePattern.condition == condition,
+            AiAuditResponsePattern.is_active == True,
+            AiAuditResponsePattern.deleted_date.is_(None)
+        ]
+
+        # Add material_id check - must match exactly (NULL = NULL, or specific ID = specific ID)
+        if material_id is None:
+            query_conditions.append(AiAuditResponsePattern.material_id.is_(None))
+        else:
+            query_conditions.append(AiAuditResponsePattern.material_id == material_id)
+
         existing = db_session.query(AiAuditResponsePattern).filter(
-            and_(
-                AiAuditResponsePattern.organization_id == organization_id,
-                AiAuditResponsePattern.condition == condition,
-                AiAuditResponsePattern.is_active == True,
-                AiAuditResponsePattern.deleted_date.is_(None)
-            )
+            and_(*query_conditions)
         ).first()
 
         if existing:
-            raise ValidationException(f'Response pattern for code "{condition}" already exists. Please edit the existing one.')
+            material_desc = 'all materials' if material_id is None else f'material ID {material_id}'
+            raise ValidationException(f'Response pattern for code "{condition}" and {material_desc} already exists. Please edit the existing one.')
 
         # Create new pattern
         # Use code as name
@@ -219,7 +231,8 @@ def handle_create_response_pattern(
             condition=condition,
             priority=1000,  # Fixed priority
             pattern=pattern,
-            organization_id=organization_id
+            organization_id=organization_id,
+            material_id=material_id
         )
 
         db_session.add(new_pattern)
@@ -238,6 +251,7 @@ def handle_create_response_pattern(
                 'priority': new_pattern.priority,
                 'pattern': new_pattern.pattern,
                 'organization_id': new_pattern.organization_id,
+                'material_id': new_pattern.material_id,
                 'created_date': new_pattern.created_date.isoformat() if new_pattern.created_date else None
             }
         }
@@ -283,6 +297,7 @@ def handle_get_response_pattern(
                 'priority': pattern.priority,
                 'pattern': pattern.pattern,
                 'organization_id': pattern.organization_id,
+                'material_id': pattern.material_id,
                 'created_date': pattern.created_date.isoformat() if pattern.created_date else None,
                 'updated_date': pattern.updated_date.isoformat() if pattern.updated_date else None
             }
@@ -308,7 +323,8 @@ def handle_update_response_pattern(
 
     Request body:
     {
-        "pattern": "updated pattern text"  // Only pattern can be updated
+        "pattern": "updated pattern text",  // Required: pattern text
+        "material_id": 77  // Optional: can update material_id
     }
 
     Note: Condition (code) cannot be changed after creation
@@ -334,6 +350,34 @@ def handle_update_response_pattern(
         else:
             raise ValidationException('Pattern text is required')
 
+        # Update material_id if provided (can be NULL or a specific ID)
+        if 'material_id' in data:
+            new_material_id = data.get('material_id')
+
+            # Check if another pattern exists with same condition + new material_id combination
+            query_conditions = [
+                AiAuditResponsePattern.organization_id == organization_id,
+                AiAuditResponsePattern.condition == pattern.condition,
+                AiAuditResponsePattern.is_active == True,
+                AiAuditResponsePattern.deleted_date.is_(None),
+                AiAuditResponsePattern.id != pattern_id  # Exclude current pattern
+            ]
+
+            if new_material_id is None:
+                query_conditions.append(AiAuditResponsePattern.material_id.is_(None))
+            else:
+                query_conditions.append(AiAuditResponsePattern.material_id == new_material_id)
+
+            existing = db_session.query(AiAuditResponsePattern).filter(
+                and_(*query_conditions)
+            ).first()
+
+            if existing:
+                material_desc = 'all materials' if new_material_id is None else f'material ID {new_material_id}'
+                raise ValidationException(f'Response pattern for code "{pattern.condition}" and {material_desc} already exists.')
+
+            pattern.material_id = new_material_id
+
         db_session.commit()
         db_session.refresh(pattern)
 
@@ -349,6 +393,7 @@ def handle_update_response_pattern(
                 'priority': pattern.priority,
                 'pattern': pattern.pattern,
                 'organization_id': pattern.organization_id,
+                'material_id': pattern.material_id,
                 'updated_date': pattern.updated_date.isoformat() if pattern.updated_date else None
             }
         }

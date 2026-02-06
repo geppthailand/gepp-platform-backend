@@ -7,92 +7,43 @@ template: |
   BMA waste auditor. Verify if image represents "{claimed_type}" (general) waste.
   IMAGE: {image_url}
 
-  CRITICAL: If waste contents are NOT CLEARLY VISIBLE (opaque/dark bags, closed containers, blurry) → ALWAYS REJECT as "ui", dt:"0"
-  ANY color opaque bag (black, green, blue, etc.) where you cannot identify waste inside = "ui"
+  --- 1. VISIBILITY CHECK (CRITICAL - EXECUTE FIRST) ---
+  • TIED/CLOSED BAGS: Is the waste inside a tied or closed bag (striped, colored, or translucent) where you cannot clearly see 100% of the individual items?
+    → YES: REJECT as "ui", dt:"0". (Do NOT guess contents based on bag shape).
+  • OPAQUE: Black/Dark bags holding the waste → REJECT "ui", dt:"0".
+  • BLUR: Cannot identify material texture → REJECT "ui", dt:"0".
 
-  GENERAL = Mixed non-hazardous waste (MUST have 2+ different waste types OR non-recyclable items)
+  --- 2. CONTAINER EXCLUSION ---
+  • BIN LINERS: Ignore the black/green garbage bag lining the bin. Look ONLY at what is thrown INSIDE.
 
-  STOP AND CHECK FIRST - Before approving as general:
+  --- 3. DEFINITIONS ---
+  • ORGANIC (77): Food, rice, peels, meat, veg, fruit.
+  • RECYCLABLE (298): Bottles (Plastic/Glass/Energy Drink), cans, paper, boxes.
+  • GENERAL (94):
+    - Non-recyclable Synthetics: Tissues, foam, dirty plastic wrappers, rubber.
+    - Mixed Organic + Synthetic: Food mixed with plastic spoons/wrappers.
+    *NOTE: A mix of ONLY recyclables (e.g., Glass bottles + Plastic bottles) is RECYCLABLE, NOT General.*
 
-  Question 1: Are there ANY non-organic items visible? (bottles, cans, plastic bags, foam boxes, paper, etc.)
-  - If NO (only food/organic) → REJECT "wc", dt:"77" - This is ORGANIC waste, NOT general
+  --- 4. DECISION LOGIC ---
+  Step 1: Check Visibility. Is it a tied bag?
+  - YES → REJECT "ui", dt:"0".
 
-  Question 2: Are there ANY non-recyclable items visible? (organic waste, tissues, etc.)
-  - If NO (only recyclables) → REJECT "wc", dt:"298" - This is RECYCLABLE waste, NOT general
+  Step 2: Is there ANY Hazardous item?
+  - YES → REJECT "wc", dt:"113".
 
-  Question 3: Are there ANY hazardous items visible?
-  - If YES → REJECT "wc", dt:"113" - This is HAZARDOUS waste, NOT general
+  Step 3: Analyze the pile. Is it composed ENTIRELY of Recyclables?
+  - YES (e.g., Pile of bottles, cans, paper, energy drink bottles) → REJECT "wc", dt:"298".
+  - NO (Proceed to Step 4).
 
-  CRITICAL RULE FOR ORGANIC WASTE:
-  - Noodles, vegetables, rice, meat, banana leaves, food scraps → ALL are ORGANIC
-  - Even if you see MANY DIFFERENT types of food (noodles + vegetables + meat) → Still 100% ORGANIC → NOT GENERAL
-  - Mixed organic items ≠ general waste
-  - ONLY organic = dt:"77", NOT dt:"94"
+  Step 4: Is there any Non-Recyclable or Organic item?
+  - ONLY Organic (Food/Peels) → REJECT "wc", dt:"77".
+  - ONLY Recyclables (Bottles/Cans) → REJECT "wc", dt:"298".
+  - Mixed (Food + Plastic) OR Non-Recyclable (Tissue/Foam) → APPROVE "cc", dt:"94".
 
-  CORRECT for GENERAL (must have at least ONE):
-  - Mixed types: food+recyclables visible, food+paper visible, organic+plastic bags visible
-  - Non-recyclable items: contaminated plastics, diapers, styrofoam, cigarettes, broken ceramics
-  - Heavily mixed waste with 2+ different types clearly visible
-
-  BE EXTREMELY STRICT - READ THIS CAREFULLY:
-  - If ALL items are organic (food, vegetables, noodles, rice, meat, etc.) = NOT general → REJECT "wc", dt:"77"
-  - If ALL items are recyclables (bottles, cans, paper, containers) = NOT general → REJECT "wc", dt:"298"
-  - To be general, you MUST see BOTH organic AND non-organic items, OR see non-recyclable items
-
-  STEP-BY-STEP ANALYSIS:
-  Step 1: Identify EVERY item in the image
-  Step 2: Classify each item:
-    - Is it organic? (food, vegetables, noodles, rice, meat, banana leaves) → mark as ORGANIC
-    - Is it recyclable? (bottle, can, paper, plastic bag, container) → mark as RECYCLABLE
-    - Is it hazardous? (battery, electronics, chemical) → mark as HAZARDOUS
-    - Is it non-recyclable general? (tissue, diaper, styrofoam, cigarette) → mark as GENERAL
-
-  Step 3: Count categories:
-    - If ALL items are ORGANIC → "wc", dt:"77" (NOT general)
-    - If ALL items are RECYCLABLE → "wc", dt:"298" (NOT general)
-    - If ANY item is HAZARDOUS → "wc", dt:"113" (NOT general)
-    - If 2+ categories present (e.g., ORGANIC + RECYCLABLE) → "cc", dt:"94" (IS general)
-    - If GENERAL items present → "cc", dt:"94" (IS general)
-
-  EXAMPLES WITH STEP-BY-STEP:
-
-  Example 1: Container with noodles + vegetables + meat
-  - Step 1: Identify → noodles, vegetables, meat
-  - Step 2: Classify → ALL are ORGANIC
-  - Step 3: Count → Only 1 category (ORGANIC)
-  - Result: "wc", dt:"77" (NOT general)
-
-  Example 2: Bin with bottles + cans + paper
-  - Step 1: Identify → bottles, cans, paper
-  - Step 2: Classify → ALL are RECYCLABLE
-  - Step 3: Count → Only 1 category (RECYCLABLE)
-  - Result: "wc", dt:"298" (NOT general)
-
-  Example 3: Image with food scraps + visible plastic bottles
-  - Step 1: Identify → food scraps, plastic bottles
-  - Step 2: Classify → food scraps = ORGANIC, bottles = RECYCLABLE
-  - Step 3: Count → 2 categories (ORGANIC + RECYCLABLE)
-  - Result: "cc", dt:"94" (IS general)
-
-  Example 4: Banana leaves + plastic bags visible
-  - Step 1: Identify → banana leaves, plastic bags
-  - Step 2: Classify → banana leaves = ORGANIC, bags = RECYCLABLE
-  - Step 3: Count → 2 categories (ORGANIC + RECYCLABLE)
-  - Result: "cc", dt:"94" (IS general)
-
-  REJECT:
-  1. Cannot identify waste items (opaque bag ANY color, closed container, blurry) → "ui", dt:"0"
-  2. ANY hazardous (batteries, electronics, chemicals, bulbs) → "wc", dt:"113"
-  3. ONLY organic (food/yard waste, NO other types visible) → "wc", dt:"77"
-  4. ONLY recyclables (bottles/cans/paper, NO other types visible) → "wc", dt:"298"
-
-  DECISION PRIORITY - FOLLOW THIS ORDER:
-  1. Contents not visible (opaque bag, blur) → "ui" dt:"0"
-  2. Hazardous items present → "wc" dt:"113"
-  3. ALL items are organic/food (noodles, vegetables, rice, meat, food scraps) → "wc" dt:"77"
-  4. ALL items are recyclables (bottles, cans, paper) → "wc" dt:"298"
-  5. Mixed waste (2+ different types visible) OR non-recyclable items → "cc" dt:"94"
-
-  REMEMBER: Pure organic food waste = NOT GENERAL = "wc", dt:"77"
+  --- EXAMPLES ---
+  1. [Tied Red/White Striped Bag] → Contents hidden → REJECT "ui" dt:"0".
+  2. [Pile of M-150 bottles + Water bottles] → All Recyclable → REJECT "wc" dt:"298".
+  3. [Rice + Plastic Spoon] → Mixed → APPROVE "cc" dt:"94".
+  4. [Used Tissues + Foam] → Non-recyclable → APPROVE "cc" dt:"94".
 
   {output_format}

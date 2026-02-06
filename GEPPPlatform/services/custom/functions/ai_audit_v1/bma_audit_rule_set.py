@@ -56,8 +56,8 @@ MATERIAL_ID_TO_THAI: Dict[int, str] = {
     113: "ขยะอันตราย",
 }
 
-# MODEL_NAME = "gemini-2.5-flash"
-MODEL_NAME = "gemini-2.5-flash-lite"
+MODEL_NAME = "gemini-2.5-flash"
+# MODEL_NAME = "gemini-2.5-flash-lite"
 
 # Configurable limits
 MAX_TRANSACTIONS_PER_CALL = 25  # Maximum household_ids per API call
@@ -274,6 +274,9 @@ def _get_custom_message(
     """
     Get custom message from ai_audit_response_patterns table.
 
+    Checks material-specific patterns first (WHERE material_id = claimed_type_id),
+    then falls back to default patterns (WHERE material_id IS NULL).
+
     Args:
         db_session: Database session
         organization_id: Organization ID
@@ -290,15 +293,33 @@ def _get_custom_message(
     # Debug logging
     logger.info(f"[BMA_AUDIT] _get_custom_message called with: org_id={organization_id}, code='{code}', detect_type={detect_type_id}, claimed_type={claimed_type_id}")
 
-    # Query for pattern matching this code
-    pattern = db_session.query(AiAuditResponsePattern).filter(
-        AiAuditResponsePattern.organization_id == organization_id,
-        AiAuditResponsePattern.condition == code,
-        AiAuditResponsePattern.is_active == True,
-        AiAuditResponsePattern.deleted_date.is_(None)
-    ).first()
+    pattern = None
 
-    logger.info(f"[BMA_AUDIT] Pattern found: {pattern is not None}, pattern_id={pattern.id if pattern else 'None'}, pattern_text={pattern.pattern[:50] if pattern else 'None'}...")
+    # First: Try to find material-specific pattern (material_id = claimed_type_id)
+    if claimed_type_id > 0:
+        pattern = db_session.query(AiAuditResponsePattern).filter(
+            AiAuditResponsePattern.organization_id == organization_id,
+            AiAuditResponsePattern.condition == code,
+            AiAuditResponsePattern.material_id == claimed_type_id,
+            AiAuditResponsePattern.is_active == True,
+            AiAuditResponsePattern.deleted_date.is_(None)
+        ).first()
+
+        if pattern:
+            logger.info(f"[BMA_AUDIT] Material-specific pattern found: pattern_id={pattern.id}, material_id={claimed_type_id}")
+
+    # Second: Fall back to default pattern (material_id IS NULL)
+    if not pattern:
+        pattern = db_session.query(AiAuditResponsePattern).filter(
+            AiAuditResponsePattern.organization_id == organization_id,
+            AiAuditResponsePattern.condition == code,
+            AiAuditResponsePattern.material_id.is_(None),
+            AiAuditResponsePattern.is_active == True,
+            AiAuditResponsePattern.deleted_date.is_(None)
+        ).first()
+
+        if pattern:
+            logger.info(f"[BMA_AUDIT] Default pattern found: pattern_id={pattern.id}, material_id=NULL")
 
     if not pattern:
         # Return default message if no pattern found

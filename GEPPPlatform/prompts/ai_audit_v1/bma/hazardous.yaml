@@ -7,40 +7,40 @@ template: |
   BMA waste auditor. Verify if image represents "{claimed_type}" (hazardous) waste.
   IMAGE: {image_url}
 
-  CRITICAL: If waste contents are NOT CLEARLY VISIBLE (opaque/dark bags, closed containers, blurry) → ALWAYS REJECT as "ui", dt:"0"
-  ANY color opaque bag (black, green, blue, etc.) where you cannot identify waste inside = "ui"
+  --- 1. FALSE FRIENDS (NOT HAZARDOUS) ---
+  *CRITICAL RULE: The following are RECYCLABLE (dt:298), NOT Hazardous:*
+  • Energy Drink Bottles (Small brown glass e.g., M-150, Red Bull, Lipovitan).
+  • Water/Soda Bottles (Plastic or Glass).
+  • Empty Cosmetic/Spray Bottles (Plastic).
 
-  HAZARDOUS = ONLY hazardous items (NO mixing with any other waste)
+  --- 2. HAZARDOUS DEFINITION (ONLY THESE) ---
+  • Batteries: AA, AAA, car batteries, lithium.
+  • Electronics: Phones, wires, chargers, PCBs.
+  • Lamps: Fluorescent tubes, light bulbs.
+  • Chemicals: Motor oil, pesticides, paints, solvents (in chemical containers).
+  • Aerosol Cans: Metal spray cans.
+  • Medical: Syringes, needles.
 
-  CORRECT:
-  - Batteries: AA, AAA, lithium, rechargeable, car batteries
-  - Electronics: phones, tablets, chargers, appliances
-  - Light bulbs: CFLs, LEDs, fluorescent
-  - Chemicals: paint, cleaners, pesticides, motor oil
-  - Medical: syringes, needles, medications
-  - Mixed hazardous OK (e.g., batteries + electronics)
-  - Waste items MUST be clearly identifiable (transparent bags OK, opaque bags REJECT)
+  --- 3. DECISION LOGIC ---
+  Step 1: VISIBILITY CHECK
+  - Is the waste inside a tied/opaque bag? → REJECT "ui", dt:"0".
 
-  REJECT:
-  1. Cannot identify waste items (opaque bag ANY color, closed container, blurry) → "ui", dt:"0"
-  2. ANY recyclables: bottles, cans, paper → "wc", dt:"94"
-  3. ANY organic: food, vegetables → "wc", dt:"94"
-  4. ANY general: tissues, wrappers → "wc", dt:"94"
-  5. No hazardous → "wc", dt:(appropriate)
+  Step 2: IDENTIFY ITEMS
+  - Do you see ONLY "False Friends" (Energy drink bottles, water bottles)?
+    → YES: REJECT "wc", dt:"298".
+  - Do you see Recyclables (Paper, Cans)?
+    → YES: REJECT "wc", dt:"298".
+  - Do you see Organic (Food)?
+    → YES: REJECT "wc", dt:"77".
 
-  CONTAMINATION (only if purity passes):
-  - Heavy (>50%): leakage/corrosion on >50% items → "hc" REJECT
-  - Light (<50%): minor rust/dirt on <50% items → "lc" APPROVE
-  - Clean → "cc" APPROVE
+  Step 3: VERIFY HAZARDOUS
+  - Do you see actual hazardous items (Batteries, Bulbs, Chemicals)?
+    → YES: APPROVE "cc", dt:"113".
+    → NO (No hazardous items found): REJECT "wc", dt:"94" (Default to general if unclear but not hazardous).
 
-  DECISION PRIORITY:
-  1. Contents not visible → "ui" dt:"0"
-  2. ANY recyclables → "wc" dt:"94"
-  3. ANY organic → "wc" dt:"94"
-  4. ANY general → "wc" dt:"94"
-  5. No hazardous → "wc"
-  6. Heavy contamination >50% → "hc" dt:"113"
-  7. Light contamination <50% → "lc" dt:"113"
-  8. Clean → "cc" dt:"113"
+  --- EXAMPLES ---
+  1. [Pile of M-150/Red Bull bottles] → Recyclable → REJECT "wc", dt:"298".
+  2. [Spray can + Batteries] → Hazardous → APPROVE "cc", dt:"113".
+  3. [Tied Bag] → Unclear → REJECT "ui", dt:"0".
 
   {output_format}
