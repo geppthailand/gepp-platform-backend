@@ -1,49 +1,47 @@
 _type: prompt
 input_variables:
-  - image_url
   - claimed_type
   - output_format
 template: |
   BMA waste auditor. Verify if image represents "{claimed_type}" (general) waste.
-  IMAGE: {image_url}
 
-  --- 1. VISIBILITY CHECK (CRITICAL - EXECUTE FIRST) ---
-  • TIED/CLOSED BAGS: Is the waste inside a tied or closed bag (striped, colored, or translucent) where you cannot clearly see 100% of the individual items?
-    → YES: REJECT as "ui", dt:"0". (Do NOT guess contents based on bag shape).
-  • OPAQUE: Black/Dark bags holding the waste → REJECT "ui", dt:"0".
-  • BLUR: Cannot identify material texture → REJECT "ui", dt:"0".
+  --- 0. ARTIFICIAL / INTERNET CHECK ---
+  • DETECT: Stock photos, watermarks, professional studio lighting. → REPORT "ai", as:"p".
 
-  --- 2. CONTAINER EXCLUSION ---
-  • BIN LINERS: Ignore the black/green garbage bag lining the bin. Look ONLY at what is thrown INSIDE.
+  --- 1. VISIBILITY CHECK (NUANCED RULE) ---
+  • SINGLE LARGE TIED BAG = UI:
+    - Is the image showing JUST ONE large tied garbage bag (Black/White/Striped) where you cannot see inside?
+    - YES → REJECT "ui", dt:"0".
 
-  --- 3. DEFINITIONS ---
-  • ORGANIC (77): Food, rice, peels, meat, veg, fruit.
-  • RECYCLABLE (298): Bottles (Plastic/Glass/Energy Drink), cans, paper, boxes.
+  • MULTIPLE SMALL BAGS = OK (GENERAL WASTE):
+    - Is the image showing an OPEN BIN containing MULTIPLE smaller items (e.g., small tied plastic bags/curry bags, snack wrappers, foam boxes, tissues) piled together?
+    - YES → This is typical GENERAL WASTE. Proceed to audit.
+    - DO NOT REJECT just because individual small bags are tied.
+
+  • LABEL TRAP: Ignore cardboard labels. Look at the pile structure as described above.
+
+  --- 2. DEFINITIONS ---
   • GENERAL (94):
-    - Non-recyclable Synthetics: Tissues, foam, dirty plastic wrappers, rubber.
-    - Mixed Organic + Synthetic: Food mixed with plastic spoons/wrappers.
-    *NOTE: A mix of ONLY recyclables (e.g., Glass bottles + Plastic bottles) is RECYCLABLE, NOT General.*
+    - Mixed Waste: A pile containing multiple types (wrappers + tissues + small plastic bags).
+    - "Curry Bags" (ถุงแกง): Small tied plastic bags with liquid/food inside = General (if mixed with other trash).
+    - Packaging: Snack bags, foil, foam, courier bags.
+  • ORGANIC (77): Pure food/peels (No plastic bags).
+  • RECYCLABLE (298): Pure clean bottles/cans.
 
-  --- 4. DECISION LOGIC ---
-  Step 1: Check Visibility. Is it a tied bag?
-  - YES → REJECT "ui", dt:"0".
-
-  Step 2: Is there ANY Hazardous item?
-  - YES → REJECT "wc", dt:"113".
-
-  Step 3: Analyze the pile. Is it composed ENTIRELY of Recyclables?
-  - YES (e.g., Pile of bottles, cans, paper, energy drink bottles) → REJECT "wc", dt:"298".
-  - NO (Proceed to Step 4).
-
-  Step 4: Is there any Non-Recyclable or Organic item?
-  - ONLY Organic (Food/Peels) → REJECT "wc", dt:"77".
-  - ONLY Recyclables (Bottles/Cans) → REJECT "wc", dt:"298".
-  - Mixed (Food + Plastic) OR Non-Recyclable (Tissue/Foam) → APPROVE "cc", dt:"94".
+  --- 3. DECISION LOGIC ---
+  Step 1: AI Check? → "ai".
+  Step 2: Is it a SINGLE Large Tied Bag (Hidden contents)? → REJECT "ui".
+  Step 3: Is it a BIN full of mixed small bags/items? → PROCEED.
+  Step 4: Analyze Contents:
+    - Pure Recyclables (Bottle pile)? → "wc" dt:"298".
+    - Pure Organic (Loose food only)? → "wc" dt:"77".
+    - Mixed/General (Small bags + Wrappers + Foam)? → APPROVE "cc", dt:"94".
 
   --- EXAMPLES ---
-  1. [Tied Red/White Striped Bag] → Contents hidden → REJECT "ui" dt:"0".
-  2. [Pile of M-150 bottles + Water bottles] → All Recyclable → REJECT "wc" dt:"298".
-  3. [Rice + Plastic Spoon] → Mixed → APPROVE "cc" dt:"94".
-  4. [Used Tissues + Foam] → Non-recyclable → APPROVE "cc" dt:"94".
+  1. [Blue bin with mixed small tied bags and wrappers] → Mixed General → APPROVE "cc", dt:"94".
+  2. [Single large black bag tied shut] → Hidden → REJECT "ui", dt:"0".
+  3. [Tied white bag with label] → Hidden → REJECT "ui", dt:"0".
+
+  ****** OUTPUT MUST BE BRIEF WORDS NOT TOO LONG ******
 
   {output_format}

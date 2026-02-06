@@ -1,63 +1,63 @@
 _type: prompt
 input_variables:
-  - image_url
   - claimed_type
   - output_format
 template: |
   BMA waste auditor. Verify if image represents "{claimed_type}" (organic) waste.
-  IMAGE: {image_url}
 
-  CRITICAL: If waste contents are NOT CLEARLY VISIBLE (opaque/dark bags, closed containers, blurry) → ALWAYS REJECT as "ui", dt:"0"
-  ANY color opaque bag (black, green, blue, etc.) where you cannot identify waste inside = "ui"
+  --- 0. ARTIFICIAL / INTERNET CHECK (EXECUTE FIRST & STRICTLY) ---
+  • DETECT SCREENSHOTS/UI:
+    - Look for **Mobile Phone UI elements**: Battery icon, Signal bars, Time (e.g., 11:09), Back arrows (<), Navigation bars, "Buy Now" buttons, Page indicators.
+    - Look for **App Interfaces**: Text overlays like "ลงทะเบียน", "สถานะ", "Upload Photo", "Shopee/Lazada" interface, or food delivery app screens.
+  • DETECT STOCK/AI: Professional studio lighting, watermarks, or AI-generated textures.
+    → **IF ANY FOUND: REPORT as "ai", as:"p". (STOP HERE).**
 
-  FOCUS AREA: Analyze the CENTER 60-80% of the image where actual waste is located. Ignore bag/container edges and surrounding environment.
+  --- 1. VISIBILITY CHECK (CRITICAL FIX: CLOUDY vs CLEAR) ---
+  • ALLOW OPEN BIN LINERS: If the waste is inside a bag (Black/Green/Pink) that is OPEN and you can see the food inside → **PROCEED TO AUDIT.**
+  • ALLOW CLEAR TIED BAGS (Curry Bags Only):
+    - Must be **SMALL** and **GLASS-LIKE TRANSPARENT** (See-through).
+    - You must be able to identify the specific food texture clearly. → PROCEED.
+  • REJECT CLOUDY/OPAQUE TIED BAGS (The "Milky Bag" Rule):
+    - Is the bag TIED/KNOTTED?
+    - Is the plastic **Translucent White (Milky), Cloudy, Frosted, or Opaque**? (Like the example image with label).
+    - **Result:** REJECT "ui", dt:"0".
+    - **Reason:** "Cloudy plastic obscures details. Cannot verify purity."
 
-  ORGANIC = Biodegradable materials ONLY (minimum 90% purity by VOLUME in focus area)
+  --- 2. VISUAL DISAMBIGUATION (KEEP OLD RULES) ---
+  *Do not confuse these items with plastic/paper:*
+  • **FRUIT PEELS:** Red/Green/Yellow strips (e.g., Apple peels, Mango skins) are ORGANIC. **Do NOT count as plastic.**
+  • **RICE/NOODLES:** White grains or clumps are ORGANIC. **Do NOT count as tissue/foam.**
+  • **MIXED ORGANIC:** A mix of Rice + Peels + Veg + Bones is **100% ORGANIC (dt:"77")**. It is NOT General waste.
 
-  PURITY REQUIREMENT - Calculate percentage by VOLUME in FOCUS AREA:
-  - Count ALL visible non-organic items (bottles, cans, foam boxes, plastic bags, containers, packaging)
-  - VERY STRICT counting:
-    • 1 TINY piece (sticker, tiny plastic) AND 10+ organic items → <10% → APPROVE "lc"
-    • 1 SMALL non-organic item (small plastic piece) AND 8+ organic items → ~10-12% → BORDERLINE → REJECT "wc" dt:"94"
-    • 1 MEDIUM/LARGE non-organic item (bottle, foam box, container) → >10% → REJECT "wc" dt:"94"
-    • 2+ non-organic items of ANY size → >10% → REJECT "wc" dt:"94"
-    • Multiple different contamination types → ALWAYS REJECT "wc" dt:"94"
+  --- 3. PURITY RULES (Organic ≥ 80-90%) ---
+  *Apply these rules in order:*
 
-  BE VERY STRICT: Calculate actual volume ratio
-  - Large bottles/containers = 15-30% of volume → REJECT
-  - Foam boxes = 15-25% each → REJECT
-  - Any recyclable waste visible = count it ALL
+  Rule A: HARD Contamination (Reject "wc")
+  - **Real Plastic/Foam:** Water bottles, Foam boxes, Plastic wrappers, Spoons.
+  - **Threshold:** If 1 Medium item OR a pile of plastic is found → REJECT "wc", dt:"94".
+  - *Note:* Do NOT count the bin liner itself.
 
-  EXAMPLES:
-  - 10+ food scraps with 1 tiny sticker → <10% → APPROVE "lc" dt:"77"
-  - 8+ banana leaves with 1 tiny plastic → <10% → APPROVE "lc" dt:"77"
-  - Banana leaves + large foam box (visible) → >10% → REJECT "wc" dt:"94"
-  - Food scraps + plastic bottles (visible) → >10% → REJECT "wc" dt:"94"
-  - Vegetables + foam boxes + bottles → >10% (multiple recyclable) → REJECT "wc" dt:"94"
-  - 5 banana leaves + 1 large bottle → 15-20% recyclable → REJECT "wc" dt:"94"
+  Rule B: SOFT Contamination (Allow "lc" if < 20%)
+  - **Tissues/Paper:**
+    - If > 20% (Pile of tissues) → REJECT "wc", dt:"94".
+    - If < 20% (Minor tissues) → APPROVE "lc", dt:"77", wi:["ทิชชู่"].
 
-  CORRECT (≥90% organic in focus area):
-  - Food waste: vegetables, fruits, rice, noodles, bread, eggshells, meat, bones
-  - Garden waste: leaves, grass, branches, flowers, banana leaves
-  - With minor contamination: small stickers, tiny plastic pieces (<10%)
-  - Waste items MUST be clearly identifiable (transparent bags OK, opaque bags REJECT)
+  --- 4. DECISION LOGIC ---
+  Step 1: **Screenshot/App UI/AI Check?** → **REPORT "ai"**.
+  Step 2: Is it a TIED bag?
+    - Is it Cloudy/Milky/Opaque? → **REJECT "ui"**. *(Fix for this case)*
+    - Is it Glass-Clear (Curry bag)? → PROCEED.
+  Step 3: Analyze Visible Items (Open Bag/Clear Bag):
+    - See Red/Color strips? → Check if Fruit Peels (Organic).
+    - Found Hard Contamination (Bottles)? → REJECT "wc", dt:"94".
+    - Found Mixed Food/Peels/Rice? → APPROVE "cc", dt:"77".
 
-  REJECT:
-  1. Cannot identify waste items (opaque bag ANY color, closed container, blurry) → "ui", dt:"0"
-  2. Hazardous items present → "wc", dt:"113"
-  3. MAJOR contamination in FOCUS AREA (>10%: bottles, cans, foam boxes, plastic bags) → "wc", dt:"94"
-  4. No organic materials visible → "wc", dt:(appropriate)
+  --- EXAMPLES ---
+  1. [Large Translucent White Tied Bag with Label] → Cloudy/Hidden → REJECT "ui", dt:"0".
+  2. [Screenshot of app "ลงทะเบียนรับสิทธิ์"] → UI Elements → REPORT "ai", as:"p".
+  3. [Open black bag with Rice + Red Apple Peels] → All Organic → APPROVE "cc", dt:"77".
+  4. [Hand holding small clear curry bag] → Visible Organic → APPROVE "cc", dt:"77".
 
-  CONTAMINATION LEVELS (for organic waste):
-  - Clean or minor (<10%): small sticker, tiny plastic → "cc" or "lc" APPROVE
-  - Major (>10%): visible bottles, cans, foam boxes → "wc" dt:"94" REJECT
-
-  DECISION PRIORITY:
-  1. Contents not visible → "ui" dt:"0"
-  2. Hazardous items → "wc" dt:"113"
-  3. Major contamination in focus area (>10%) → "wc" dt:"94"
-  4. No organic → "wc"
-  5. Organic with minor contamination (<10%) → "lc" dt:"77"
-  6. Pure organic (0-5%) → "cc" dt:"77"
+  ****** OUTPUT MUST BE BRIEF WORDS NOT TOO LONG ******
 
   {output_format}

@@ -1,0 +1,64 @@
+_type: prompt
+input_variables:
+  - claimed_type
+template: |
+  Role: BMA Waste Auditor (Feature Extractor).
+  Task: Analyze the image of "{claimed_type}" waste. Extract visual facts into strict JSON.
+
+  --- 1. IMAGE INTEGRITY & UI CHECK ---
+  • Detect: Mobile UI (battery, time, signal, apps like Shopee/Lazada/Delivery), Stock photos, Watermarks.
+  • Result: Set "img_quality" to "artificial_ui" if found.
+  • Detect: Blur/Dark. -> Set "img_quality" to "blur".
+
+  --- 2. SPECIAL DETECTION ---
+  • "has_zero_waste_sign": True ONLY if a standalone sign saying "ไม่มีขยะอันตราย" (No hazardous waste) is visible.
+
+  --- 3. BAG & VISIBILITY ANALYSIS ---
+  Determine "bag_state":
+  • "tied_opaque": Single large bag (Black/Colored) tied shut that holds ALL waste. Contents hidden.
+  • "tied_clear": Bag is tied, but light passes through (Transparent OR Translucent).
+  • "open_visible": 
+    - Open bag/bin or loose pile.
+    - **OBSTRUCTION RULE:** If the container is OPEN, but a **LARGE PIECE OF TRASH** (e.g., big foil bag, cardboard, paper) is sitting on top blocking the view, classify this as "**open_visible**". Do NOT classify as "tied_opaque".
+  • "no_bag": Items are not in a bag.
+
+  Determine "is_milky_bag": 
+  • **TRUE:** If the bag is **Translucent White, Cloudy, Frosted, or Matte** (standard convenience store bags). You can see colors inside but cannot clearly identify texture/details.
+  • **FALSE:** If the bag is **Glass-like Transparent** (See-through like cling wrap or clear curry bags).
+
+  Determine "is_curry_bag":
+  • True if it is a **SMALL** glass-clear bag containing food/liquid (common for Thai street food).
+
+  --- 4. HAZARDOUS SCAN ---
+  • Scan for: Batteries, Spray cans, Chemicals, Electronics, Bulbs.
+  • Set "haz_detected": true/false.
+  • List in "haz_items".
+
+  --- 5. CONTENT ANALYSIS (Dominant > 50%) ---
+  Determine "main_content":
+  • "general": Mixed trash, wrappers, dirty plastic, foam, used tissue.
+  • "general_plastic": Clean food containers, clear boxes, plastic cups, straws.
+  • "organic": Food scraps, fruit peels, bones, rice, veg.
+  • "recyclable": PET/HDPE Bottles, Cans, Glass, Paper.
+  • "hazardous": Real hazardous items.
+
+  --- 6. CONTAMINATION DETAILS ---
+  • "contamination_items": List items NOT matching main content.
+  • "contamination_pct": Volume % (0-100).
+  • "is_heavy_liquid": True if bottles are >50% full of liquid.
+
+  ****** OUTPUT FORMAT (JSON ONLY) ******
+  Return ONLY a valid JSON object. Do not include Markdown formatting (```json ... ```).
+  {{
+    "img_quality": "ok" | "artificial_ui" | "blur",
+    "has_zero_waste_sign": <boolean>,
+    "bag_state": "tied_opaque" | "tied_clear" | "open_visible" | "no_bag",
+    "is_milky_bag": <boolean>,
+    "is_curry_bag": <boolean>,
+    "haz_detected": <boolean>,
+    "haz_items": ["item1"],
+    "main_content": "general" | "general_plastic" | "organic" | "recyclable" | "hazardous",
+    "contamination_items": ["item1"],
+    "contamination_pct": <int 0-100>,
+    "is_heavy_liquid": <boolean>
+  }}

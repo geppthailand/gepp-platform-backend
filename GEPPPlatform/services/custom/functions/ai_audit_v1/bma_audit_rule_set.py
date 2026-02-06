@@ -56,11 +56,11 @@ MATERIAL_ID_TO_THAI: Dict[int, str] = {
     113: "ขยะอันตราย",
 }
 
-MODEL_NAME = "gemini-2.5-flash"
-# MODEL_NAME = "gemini-2.5-flash-lite"
+# MODEL_NAME = "gemini-2.5-flash"
+MODEL_NAME = "gemini-2.5-flash-lite"
 
 # Configurable limits
-MAX_TRANSACTIONS_PER_CALL = 25  # Maximum household_ids per API call
+MAX_TRANSACTIONS_PER_CALL = 50  # Maximum household_ids per API call
 MAX_TRANSACTION_WORKERS = 10     # Max concurrent transactions
 MAX_MATERIAL_WORKERS = 4         # Max concurrent materials per transaction
 
@@ -68,35 +68,23 @@ MAX_MATERIAL_WORKERS = 4         # Max concurrent materials per transaction
 # Prompt loading helpers
 # ---------------------------------------------------------------------------
 # From: backend/GEPPPlatform/services/custom/functions/ai_audit_v1/bma_audit_rule_set.py
-# To:   backend/GEPPPlatform/prompts/ai_audit_v1/bma/
+# To:   backend/GEPPPlatform/prompts/ai_audit_v1/bma/extract.yaml (single unified file)
 # Go up 5 levels to reach GEPPPlatform, then down to prompts
 _PROMPT_DIR = Path(__file__).resolve().parent.parent.parent.parent.parent / "prompts" / "ai_audit_v1" / "bma"
 
 
-def _load_output_format() -> str:
-    """Load the shared output_format.yaml template text."""
-    path = _PROMPT_DIR / "output_format.yaml"
+def _load_extract_prompt() -> str:
+    """Load the unified extract.yaml prompt template."""
+    path = _PROMPT_DIR / "extract.yaml"
     with open(path, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f)
     return data.get("template", "")
 
 
-def _load_material_prompt(material_key: str) -> str:
-    """Load a material-specific prompt template string."""
-    path = _PROMPT_DIR / f"{material_key}.yaml"
-    with open(path, "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f)
-    return data.get("template", "")
-
-
-def _render_prompt(material_key: str, image_url: str, output_format: str) -> str:
-    """Render the final prompt by injecting claimed_type, image_url and output_format."""
-    template = _load_material_prompt(material_key)
-    return template.format(
-        claimed_type=material_key,
-        image_url=image_url,
-        output_format=output_format,
-    )
+def _render_prompt(claimed_type: str) -> str:
+    """Render the final prompt by injecting claimed_type."""
+    template = _load_extract_prompt()
+    return template.format(claimed_type=claimed_type)
 
 
 # ---------------------------------------------------------------------------
@@ -119,8 +107,8 @@ def _get_langchain_gemini():
     logger.info(f"[BMA_AUDIT] Initializing ChatGoogleGenerativeAI with model: {MODEL_NAME}")
     return ChatGoogleGenerativeAI(
         model=MODEL_NAME,
-        temperature=0.1,
-        max_output_tokens=2048,
+        temperature=0.7,
+        max_output_tokens=4096,
         google_api_key=api_key,
         generation_config={
             "candidate_count": 1,
@@ -158,6 +146,21 @@ def _call_gemini_with_langchain(
                 resp.raise_for_status()
                 img = Image.open(BytesIO(resp.content))
 
+                # Resize image if needed (max 600px width or height, maintain aspect ratio)
+                max_dimension = 512
+                width, height = img.size
+
+                if width > max_dimension or height > max_dimension:
+                    if width > height:
+                        new_width = max_dimension
+                        new_height = int((max_dimension / width) * height)
+                    else:
+                        new_height = max_dimension
+                        new_width = int((max_dimension / height) * width)
+
+                    img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+                    logger.info(f"[BMA_AUDIT] Resized image from {width}x{height} to {new_width}x{new_height}")
+
                 # Convert to base64
                 buffered = BytesIO()
                 img.save(buffered, format="PNG")
@@ -168,7 +171,7 @@ def _call_gemini_with_langchain(
                 return {
                     "success": True,
                     "result": _create_error_response(material_key, "ie", "ไม่สามารถดาวน์โหลดภาพได้"),
-                    "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+                    "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "thinking_tokens": 0}
                 }
 
         # Create message with text and image
@@ -193,10 +196,28 @@ def _call_gemini_with_langchain(
         parsed = _parse_json_response(raw_text, material_key)
 
         # Extract token usage if available
+        usage_metadata = getattr(response, "usage_metadata", {})
+
+        # Log usage_metadata for debugging
+        logger.info(f"[BMA_AUDIT] Raw usage_metadata: {usage_metadata}")
+        logger.info(f"[BMA_AUDIT] usage_metadata type: {type(usage_metadata)}")
+        logger.info(f"[BMA_AUDIT] usage_metadata keys: {usage_metadata.keys() if hasattr(usage_metadata, 'keys') else 'N/A'}")
+
+        # Try to extract thinking tokens from various possible field names
+        thinking_tokens = 0
+        if hasattr(usage_metadata, 'get'):
+            thinking_tokens = (
+                usage_metadata.get("thinking_tokens") or
+                usage_metadata.get("cached_content_token_count") or
+                usage_metadata.get("candidates_token_count") or
+                0
+            )
+
         usage = {
-            "input_tokens": getattr(response, "usage_metadata", {}).get("input_tokens", 0),
-            "output_tokens": getattr(response, "usage_metadata", {}).get("output_tokens", 0),
-            "total_tokens": getattr(response, "usage_metadata", {}).get("total_tokens", 0),
+            "input_tokens": usage_metadata.get("input_tokens", 0) if hasattr(usage_metadata, 'get') else 0,
+            "output_tokens": usage_metadata.get("output_tokens", 0) if hasattr(usage_metadata, 'get') else 0,
+            "total_tokens": usage_metadata.get("total_tokens", 0) if hasattr(usage_metadata, 'get') else 0,
+            "thinking_tokens": thinking_tokens,
         }
 
         return {"success": True, "result": parsed, "usage": usage}
@@ -207,7 +228,7 @@ def _call_gemini_with_langchain(
             "success": False,
             "error": str(exc),
             "result": _create_error_response(material_key, "pe", f"เกิดข้อผิดพลาด: {str(exc)}"),
-            "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+            "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "thinking_tokens": 0}
         }
 
 
@@ -221,42 +242,249 @@ def _parse_json_response(text: str, material_key: str) -> Dict[str, Any]:
     try:
         parsed = json.loads(cleaned)
 
-        # Validate abbreviated structure
+        # Validate extraction structure
         if not isinstance(parsed, dict):
             raise ValueError("Response is not a JSON object")
 
-        # Ensure required fields exist
-        required_fields = ["ct", "as", "cs", "rm"]
+        # Ensure required extraction fields exist
+        required_fields = ["img_quality", "bag_state", "main_content"]
         for field in required_fields:
             if field not in parsed:
-                raise ValueError(f"Missing required field: {field}")
-
-        # Validate confidence score format (2 decimal places)
-        if isinstance(parsed.get("cs"), float):
-            parsed["cs"] = round(parsed["cs"], 2)
+                logger.warning(f"[BMA_AUDIT] Missing field {field}, setting default")
+                if field == "img_quality":
+                    parsed[field] = "ok"
+                elif field == "bag_state":
+                    parsed[field] = "no_bag"
+                elif field == "main_content":
+                    parsed[field] = "general"
 
         return parsed
 
     except (json.JSONDecodeError, ValueError) as e:
         logger.warning(f"[BMA_AUDIT] Failed to parse JSON response: {e}\nRaw text: {text}")
-        return _create_error_response(material_key, "pe", "ไม่สามารถแปลงผลลัพธ์จาก AI ได้")
+        return {
+            "img_quality": "blur",
+            "has_zero_waste_sign": False,
+            "bag_state": "no_bag",
+            "is_milky_bag": False,
+            "haz_detected": False,
+            "haz_items": [],
+            "main_content": "general",
+            "contamination_items": ["parse_error"],
+            "contamination_pct": 0,
+            "is_curry_bag": False,
+            "is_heavy_liquid": False
+        }
 
 
-def _create_error_response(material_key: str, code: str, message: str) -> Dict[str, Any]:
-    """Create standardized error response in abbreviated format."""
+def _create_abbreviated_response(
+    material_key: str,
+    code: str,
+    status: str,
+    dt: str,
+    wi: List[str],
+    confidence: float = 0.95
+) -> Dict[str, Any]:
+    """Create standardized abbreviated response format."""
+    status_map = {
+        "approve": "a",
+        "reject": "r",
+        "pending": "p"
+    }
     return {
         "ct": MATERIAL_KEY_TO_ID.get(material_key, 0),
-        "as": "r",
-        "cs": 0.00,
+        "as": status_map.get(status, "r"),
+        "cs": round(confidence, 2),
         "rm": {
             "co": code,
             "sv": "c",
             "de": {
-                "dt": "0",
-                "wi": [message]
+                "dt": dt,
+                "wi": wi
             }
         }
     }
+
+
+# ---------------------------------------------------------------------------
+# Decision Processing Function
+# ---------------------------------------------------------------------------
+
+def process_decision(claimed_type: str, ai_json: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Decides BMA audit result based on extracted AI features.
+    Matches strict rules for General, Hazardous, Organic, and Recyclable.
+
+    Args:
+        claimed_type: "general" | "organic" | "recyclable" | "hazardous"
+        ai_json: Extracted features from Gemini with structure:
+            {
+                "img_quality": "ok" | "artificial_ui" | "blur",
+                "has_zero_waste_sign": boolean,
+                "bag_state": "tied_opaque" | "tied_clear" | "open_visible" | "no_bag",
+                "is_milky_bag": boolean,
+                "haz_detected": boolean,
+                "haz_items": ["item1"],
+                "main_content": "general" | "general_plastic" | "organic" | "recyclable" | "hazardous",
+                "contamination_items": ["item1"],
+                "contamination_pct": int (0-100),
+                "is_curry_bag": boolean,
+                "is_heavy_liquid": boolean
+            }
+
+    Returns:
+        {"code": str, "status": "approve/reject", "dt": str, "wi": list}
+    """
+    # --- 1. PRE-CHECKS (AI/Screen Capture/Blur) ---
+    if ai_json.get("img_quality") == "artificial_ui":
+        return {"code": "ai", "status": "pending", "dt": "0", "wi": []}
+
+    if ai_json.get("img_quality") == "blur":
+        return {"code": "ui", "status": "reject", "dt": "0", "wi": ["ภาพเบลอ/มองไม่เห็น"]}
+
+    # --- 2. EXTRACT VARIABLES ---
+    bag_state = ai_json.get("bag_state", "no_bag")
+    is_milky = ai_json.get("is_milky_bag", False)
+    haz_detected = ai_json.get("haz_detected", False)
+    haz_items = ai_json.get("haz_items", [])
+    main = ai_json.get("main_content", "general")
+    items = ai_json.get("contamination_items", [])
+    pct = ai_json.get("contamination_pct", 0)
+    is_curry = ai_json.get("is_curry_bag", False)
+    is_heavy_liquid = ai_json.get("is_heavy_liquid", False)
+
+    # --- 3. SPECIAL BYPASS: HAZARDOUS SIGN ---
+    # ถ้า Claim Hazardous แล้วเจอป้าย "ไม่มีขยะอันตราย" -> ให้ผ่านทันที (กฎข้อ 0.5)
+    if claimed_type == "hazardous" and ai_json.get("has_zero_waste_sign"):
+        return {"code": "cc", "status": "approve", "dt": "113", "wi": []}
+
+    # --- 4. GLOBAL HAZARDOUS CHECK (ZERO TOLERANCE) ---
+    # ถ้าเจอของอันตรายจริง แต่ไม่ได้ Claim ว่าเป็น Hazardous -> Reject WC 113
+    if claimed_type != "hazardous" and haz_detected:
+        return {"code": "wc", "status": "reject", "dt": "113", "wi": haz_items}
+
+    # --- 5. VISIBILITY CHECKS (GLOBAL) ---
+    # ถุงทึบมัดปาก = UI เสมอ (ยกเว้น General ที่อาจจะเป็นกองขยะผสม แต่กฎหลักคือ UI)
+    if bag_state == "tied_opaque":
+        return {"code": "ui", "status": "reject", "dt": "0", "wi": ["ถุงมัดปากมองไม่เห็น"]}
+
+
+    # ==================================================
+    # CASE 1: GENERAL WASTE (94)
+    # ==================================================
+    if claimed_type == "general":
+        # Rule: Pure Recyclable (Bottle pile) -> WC 298
+        if main == "recyclable" and pct < 20:
+             return {"code": "wc", "status": "reject", "dt": "298", "wi": ["ขยะรีไซเคิล"]}
+
+        # Rule: Pure Organic (Loose food) -> WC 77
+        if main == "organic" and pct < 20:
+             return {"code": "wc", "status": "reject", "dt": "77", "wi": ["ขยะเศษอาหาร"]}
+
+        # *** SIMPLIFIED: General Plastic (Food containers/Straws) = General (94)
+        # ไม่แยก Branch เพราะทั้ง general และ general_plastic ถือเป็นขยะทั่วไป
+        # Mixed/General -> CC 94
+        return {"code": "cc", "status": "approve", "dt": "94", "wi": []}
+
+
+    # ==================================================
+    # CASE 2: HAZARDOUS (113)
+    # ==================================================
+    elif claimed_type == "hazardous":
+        # Rule: Visibility Check (Label Trap)
+        # ถ้าถุงมัดปาก แม้จะมีป้ายบอกว่าอันตราย ก็ต้องเป็น UI (Prompt ข้อ 1)
+        if bag_state in ["tied_opaque", "tied_clear"] and not haz_detected:
+             return {"code": "ui", "status": "reject", "dt": "0", "wi": ["มองไม่เห็นขยะข้างใน"]}
+
+        # Rule: False Friends (M-150/Water bottles) -> WC 298
+        # ถ้าไม่เจอ Haz จริงๆ แต่เจอขวดน้ำ/ขวดแก้วเยอะๆ
+        if not haz_detected and (main == "recyclable" or "ขวด" in str(items)):
+             return {"code": "wc", "status": "reject", "dt": "298", "wi": ["ขยะรีไซเคิล (ขวด)"]}
+
+        # Rule: Real Hazardous Items Visible
+        if haz_detected:
+             # เช็ค Contamination
+             if pct > 20: return {"code": "hc", "status": "reject", "dt": "113", "wi": items}
+             if pct > 0:  return {"code": "lc", "status": "approve", "dt": "113", "wi": items}
+             return {"code": "cc", "status": "approve", "dt": "113", "wi": []}
+
+        # ถ้าไม่เจออะไรเลย
+        return {"code": "ui", "status": "reject", "dt": "0", "wi": ["ไม่พบขยะอันตราย"]}
+
+
+    # ==================================================
+    # CASE 3: ORGANIC (77)
+    # ==================================================
+    elif claimed_type == "organic":
+        # *** STRICT RULE FOR ORGANIC BAGS ***
+        # อนุญาตแค่:
+        # 1. ถุงเปิด/กองเปิด (open_visible)
+        # 2. ถุงแกงใสใบเล็ก (is_curry=True AND NOT milky)
+
+        # เช็คกรณีถุงมัด (Tied Clear)
+        if bag_state == "tied_clear":
+            # ถ้าขุ่น (Milky) -> UI ทันที (เคสถุงขาวในรูป)
+            if is_milky:
+                return {"code": "ui", "status": "reject", "dt": "0", "wi": ["ถุงขุ่นมัดปาก (ตรวจสอบไม่ได้)"]}
+
+            # ถ้าใสแต่ไม่ใช่ถุงแกง (เช่นถุงใหญ่) -> UI (เพราะ Prompt บอก Curry Only)
+            if not is_curry:
+                return {"code": "ui", "status": "reject", "dt": "0", "wi": ["ถุงมัดปาก (อนุญาตเฉพาะถุงแกงใส)"]}
+
+        # ถ้าถึงจุดนี้ แปลว่าผ่าน Bag Check แล้ว
+        # tied_opaque จะถูกจัดการใน Visibility ด้านบน (artificial_ui/blur)
+        # ที่นี่จะเหลือแค่: open_visible, no_bag, หรือ tied_clear ที่เป็น curry bag ใส
+
+        # Rule: Content Logic
+        if main == "recyclable" or main == "general" or main == "general_plastic":
+             return {"code": "wc", "status": "reject", "dt": "94", "wi": ["ขยะทั่วไป"]}
+
+        # Rule: Purity Rules
+        if pct > 20: # Soft Contam > 20%
+             return {"code": "wc", "status": "reject", "dt": "94", "wi": items}
+        elif pct > 0: # Soft Contam < 20%
+             return {"code": "lc", "status": "approve", "dt": "77", "wi": items}
+
+        return {"code": "cc", "status": "approve", "dt": "77", "wi": []}
+
+
+    # ==================================================
+    # CASE 4: RECYCLABLE (298)
+    # ==================================================
+    elif claimed_type == "recyclable":
+        # Rule: Visibility (Bulk Rule)
+        # Recyclable อนุญาตถุงขุ่น/ขาว (Milky) ถ้าเห็นขวดข้างนอก (Prompt ข้อ 1)
+        # ดังนั้น bag_state == 'tied_clear' (รวม milky) ให้ผ่านได้เลย ไม่ต้องเช็ค is_milky แบบ Organic
+
+        # Rule: Definition Check (General Plastic vs Recyclable)
+        if main == "general_plastic":
+             # Food containers, Straws, Spoons -> WC 94
+             return {"code": "wc", "status": "reject", "dt": "94", "wi": ["พลาสติกกำพร้า/กล่องอาหาร"]}
+
+        if main == "organic":
+             return {"code": "wc", "status": "reject", "dt": "94", "wi": ["ขยะเศษอาหาร"]}
+
+        if main == "general":
+             return {"code": "wc", "status": "reject", "dt": "94", "wi": ["ขยะทั่วไป"]}
+
+        # Rule: Hard Contamination (Heavy Liquid)
+        if is_heavy_liquid:
+             return {"code": "hc", "status": "reject", "dt": "298", "wi": ["ขวดมีน้ำเหลือ"]}
+
+        # Rule: Purity & Tolerance
+        if pct > 50:
+             return {"code": "hc", "status": "reject", "dt": "298", "wi": items}
+        elif pct > 20:
+             # Prompt Rule B: > 20% (Messy/Dirty) -> WC 94
+             return {"code": "wc", "status": "reject", "dt": "94", "wi": items}
+        elif pct > 0:
+             # Prompt Rule B: < 20% -> LC 298
+             return {"code": "lc", "status": "approve", "dt": "298", "wi": items}
+
+        return {"code": "cc", "status": "approve", "dt": "298", "wi": []}
+
+    # Fallback
+    return {"code": "ui", "status": "reject", "dt": "0", "wi": ["ระบุประเภทไม่ได้"]}
 
 
 # ---------------------------------------------------------------------------
@@ -469,14 +697,11 @@ def execute(
         f"transaction_ids_sample={transaction_ids[:5]}..." if len(transaction_ids) > 5 else f"transaction_ids={transaction_ids}"
     )
 
-    # Load shared output format once
-    output_format = _load_output_format()
-
     # Initialize LangChain Gemini model once
     llm = _get_langchain_gemini()
 
     # Thread-safe usage accumulator
-    total_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    total_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "thinking_tokens": 0}
     usage_lock = Lock()
 
     # Simplified response structure
@@ -585,8 +810,10 @@ def execute(
                 image_url = images[0] if images else None
 
                 if not image_url:
-                    # No image provided - create error response
-                    audit_result = _create_error_response(mat_key, "ui", "ไม่มีรูปภาพ")
+                    # No image provided - create abbreviated response
+                    audit_result = _create_abbreviated_response(
+                        mat_key, "ui", "reject", "0", ["ไม่มีรูปภาพ"]
+                    )
                     transaction_audit_note["step_2"][mat_key] = audit_result
 
                     # Get custom message
@@ -615,10 +842,34 @@ def execute(
 
             # Run Gemini calls in parallel (max MAX_MATERIAL_WORKERS concurrent)
             def _audit_one(task: Dict[str, Any]) -> Dict[str, Any]:
-                prompt = _render_prompt(task["material"], task["image_url"], output_format)
+                prompt = _render_prompt(task["material"])
                 gemini_resp = _call_gemini_with_langchain(
                     llm, prompt, task["image_url"], task["material"]
                 )
+
+                # Process decision with hierarchical logic
+                if gemini_resp.get("success") and "result" in gemini_resp:
+                    extraction = gemini_resp["result"]
+                    decision = process_decision(task["material"], extraction)
+
+                    # Convert decision to abbreviated format
+                    audit_result = _create_abbreviated_response(
+                        task["material"],
+                        decision["code"],
+                        decision["status"],
+                        decision["dt"],
+                        decision["wi"]
+                    )
+
+                    logger.info(f"[BMA_AUDIT] Decision for {task['material']}: {decision}")
+                    gemini_resp["result"] = audit_result
+                else:
+                    # If extraction failed, create error response
+                    audit_result = _create_abbreviated_response(
+                        task["material"], "pe", "reject", "0", ["ไม่สามารถแปลงผลลัพธ์จาก AI ได้"]
+                    )
+                    gemini_resp["result"] = audit_result
+
                 return {
                     "material": task["material"],
                     "record_id": task["record_id"],
@@ -647,9 +898,16 @@ def execute(
                                 total_usage[k] += usage.get(k, 0)
 
                         # Extract data for simplified response
-                        audit_status = result.get("as", "r")  # a=approve, r=reject
+                        audit_status = result.get("as", "r")  # a=approve, r=reject, p=pending
                         code = result.get("rm", {}).get("co", "")
-                        detect_type_id = int(result.get("rm", {}).get("de", {}).get("dt", "0"))
+                        dt_str = result.get("rm", {}).get("de", {}).get("dt", "0")
+                        # Handle dt: can be int (material_id) or "p" (pending) or "0" (error)
+                        if dt_str == "p":
+                            detect_type_id = 0  # pending = no specific type detected
+                        elif dt_str.isdigit():
+                            detect_type_id = int(dt_str)
+                        else:
+                            detect_type_id = 0  # default to error
                         # claimed_type comes from the material_id of the record, not from AI response
                         claimed_type_id = MATERIAL_KEY_TO_ID.get(mat_key, 0)
                         warning_items = result.get("rm", {}).get("de", {}).get("wi", [])
@@ -657,6 +915,7 @@ def execute(
                         # Fix: Infer correct status from code if there's a contradiction
                         # cc (correct_category) and lc (light_contamination) should ALWAYS be approve
                         # wc (wrong_category), ui (unclear_image), hc (heavy_contamination) should ALWAYS be reject
+                        # ai (artificial/screenshot) should be pending
                         expected_status_by_code = {
                             "cc": "a",  # correct_category -> approve
                             "lc": "a",  # light_contamination -> approve with warning
@@ -666,6 +925,7 @@ def execute(
                             "ncm": "r", # non_complete_material -> reject
                             "pe": "r",  # parse_error -> reject
                             "ie": "r",  # image_error -> reject
+                            "ai": "p",  # artificial/screenshot -> pending
                         }
 
                         if code in expected_status_by_code:

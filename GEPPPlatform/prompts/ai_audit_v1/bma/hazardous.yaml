@@ -1,46 +1,40 @@
 _type: prompt
 input_variables:
-  - image_url
   - claimed_type
   - output_format
 template: |
   BMA waste auditor. Verify if image represents "{claimed_type}" (hazardous) waste.
-  IMAGE: {image_url}
 
-  --- 1. FALSE FRIENDS (NOT HAZARDOUS) ---
-  *CRITICAL RULE: The following are RECYCLABLE (dt:298), NOT Hazardous:*
-  • Energy Drink Bottles (Small brown glass e.g., M-150, Red Bull, Lipovitan).
-  • Water/Soda Bottles (Plastic or Glass).
-  • Empty Cosmetic/Spray Bottles (Plastic).
+  --- 0. ARTIFICIAL / INTERNET CHECK ---
+  • DETECT: Stock photos, AI textures. → REPORT "ai", as:"p".
 
-  --- 2. HAZARDOUS DEFINITION (ONLY THESE) ---
-  • Batteries: AA, AAA, car batteries, lithium.
-  • Electronics: Phones, wires, chargers, PCBs.
-  • Lamps: Fluorescent tubes, light bulbs.
-  • Chemicals: Motor oil, pesticides, paints, solvents (in chemical containers).
-  • Aerosol Cans: Metal spray cans.
-  • Medical: Syringes, needles.
+  --- 0.5 SPECIAL BYPASS ---
+  • ZERO WASTE SIGN: Only a STANDALONE sign saying "ไม่มีขยะอันตราย" (No hazardous waste).
+    - IF FOUND: APPROVE "cc", dt:"113".
+
+  --- 1. VISIBILITY CHECK (IGNORE LABELS) ---
+  • TIED/OPAQUE BAGS = UI: If the waste is inside a tied Black/Colored bag:
+    → REJECT "ui", dt:"0".
+  • LABEL TRAP: You will see bags with labels like "ขยะอันตราย" (Hazardous Waste).
+    → IF YOU CANNOT SEE THE ACTUAL BATTERIES/CHEMICALS INSIDE → REJECT "ui".
+    → Text labels are NOT proof of contents.
+
+  --- 2. HAZARDOUS ITEMS (Must be visible) ---
+  • Batteries, Electronics, Lamps, Chemicals, Aerosol Cans.
+  • FALSE FRIENDS (Recyclable): M-150/Red Bull bottles, Water bottles.
 
   --- 3. DECISION LOGIC ---
-  Step 1: VISIBILITY CHECK
-  - Is the waste inside a tied/opaque bag? → REJECT "ui", dt:"0".
-
-  Step 2: IDENTIFY ITEMS
-  - Do you see ONLY "False Friends" (Energy drink bottles, water bottles)?
-    → YES: REJECT "wc", dt:"298".
-  - Do you see Recyclables (Paper, Cans)?
-    → YES: REJECT "wc", dt:"298".
-  - Do you see Organic (Food)?
-    → YES: REJECT "wc", dt:"77".
-
-  Step 3: VERIFY HAZARDOUS
-  - Do you see actual hazardous items (Batteries, Bulbs, Chemicals)?
-    → YES: APPROVE "cc", dt:"113".
-    → NO (No hazardous items found): REJECT "wc", dt:"94" (Default to general if unclear but not hazardous).
+  Step 1: AI Check? → "ai".
+  Step 2: Sign "ไม่มีขยะอันตราย"? → APPROVE "cc".
+  Step 3: Is it a Tied/Black Bag (even with a label)? → REJECT "ui".
+  Step 4: Identify Visible Items:
+    - Only M-150/Water bottles? → REJECT "wc" dt:"298".
+    - Real Hazardous items visible? → APPROVE "cc".
 
   --- EXAMPLES ---
-  1. [Pile of M-150/Red Bull bottles] → Recyclable → REJECT "wc", dt:"298".
-  2. [Spray can + Batteries] → Hazardous → APPROVE "cc", dt:"113".
-  3. [Tied Bag] → Unclear → REJECT "ui", dt:"0".
+  1. [Black bag with label "ขยะอันตราย"] → Contents hidden → REJECT "ui".
+  2. [Pile of Batteries] → Visible → APPROVE "cc".
+
+  ****** OUTPUT MUST BE BRIEF WORDS NOT TOO LONG ******
 
   {output_format}
