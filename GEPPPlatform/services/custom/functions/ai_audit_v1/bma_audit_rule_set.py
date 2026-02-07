@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import re
+import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, Any, List, Optional
@@ -26,6 +27,15 @@ import yaml
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
+
+# Force logging to flush immediately (important for Lambda)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+for handler in logger.handlers:
+    handler.flush = lambda: sys.stdout.flush()
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -57,11 +67,11 @@ MATERIAL_ID_TO_THAI: Dict[int, str] = {
 }
 
 # MODEL_NAME = "gemini-2.5-flash"
-MODEL_NAME = "gemini-2.5-flash-lite"
+MODEL_NAME = "gemini-2.0-flash"
 
 # Configurable limits
-MAX_TRANSACTIONS_PER_CALL = 50  # Maximum household_ids per API call
-MAX_TRANSACTION_WORKERS = 10     # Max concurrent transactions
+MAX_TRANSACTIONS_PER_CALL = 100  # Maximum household_ids per API call
+MAX_TRANSACTION_WORKERS = 25     # Max concurrent transactions
 MAX_MATERIAL_WORKERS = 4         # Max concurrent materials per transaction
 
 # ---------------------------------------------------------------------------
@@ -130,6 +140,11 @@ def _call_gemini_single(llm, prompt: str, image_data: str) -> Dict[str, Any]:
     try:
         from langchain_core.messages import HumanMessage
 
+        # Debug: Log request details
+        prompt_length = len(prompt)
+        image_size = len(image_data) if image_data else 0
+        logger.info(f"[BMA_AUDIT] Calling Gemini - prompt_length={prompt_length}, image_b64_length={image_size}")
+
         if image_data:
             message = HumanMessage(
                 content=[
@@ -144,9 +159,14 @@ def _call_gemini_single(llm, prompt: str, image_data: str) -> Dict[str, Any]:
         raw_text = response.content.strip()
         usage_metadata = getattr(response, "usage_metadata", {})
 
+        logger.info(f"[BMA_AUDIT] Gemini response received - response_length={len(raw_text)}")
         return {"raw_text": raw_text, "usage": usage_metadata}
     except Exception as exc:
-        logger.error(f"[BMA_AUDIT] Gemini call failed: {exc}")
+        logger.error(f"[BMA_AUDIT] Gemini call failed: {exc}", exc_info=True)
+        # Log more details about the error
+        error_type = type(exc).__name__
+        error_msg = str(exc)
+        logger.error(f"[BMA_AUDIT] Error details - type={error_type}, message={error_msg}")
         raise
 
 
@@ -171,12 +191,17 @@ def _call_gemini_with_langchain(
         image_data = None
         if image_url:
             try:
+                logger.info(f"[BMA_AUDIT] Downloading image: {image_url[:100]}...")
                 resp = http_requests.get(image_url, timeout=15)
                 resp.raise_for_status()
+
+                original_size = len(resp.content)
+                logger.info(f"[BMA_AUDIT] Downloaded {original_size} bytes")
+
                 img = Image.open(BytesIO(resp.content))
 
                 # Resize image if needed
-                max_dimension = 512
+                max_dimension = 384
                 width, height = img.size
                 if width > max_dimension or height > max_dimension:
                     if width > height:
@@ -191,10 +216,13 @@ def _call_gemini_with_langchain(
                 # Convert to base64
                 buffered = BytesIO()
                 img.save(buffered, format="PNG")
-                img_b64 = base64.b64encode(buffered.getvalue()).decode()
+                img_bytes = buffered.getvalue()
+                img_b64 = base64.b64encode(img_bytes).decode()
                 image_data = img_b64
+
+                logger.info(f"[BMA_AUDIT] Encoded image - final_bytes={len(img_bytes)}, b64_length={len(img_b64)}")
             except Exception as img_err:
-                logger.warning(f"[BMA_AUDIT] Failed to download image {image_url}: {img_err}")
+                logger.error(f"[BMA_AUDIT] Failed to download/process image {image_url}: {img_err}", exc_info=True)
                 return {
                     "success": True,
                     "result": _create_error_response(material_key, "ie", "ไม่สามารถดาวน์โหลดภาพได้"),
@@ -649,6 +677,15 @@ def execute(
     from GEPPPlatform.models.transactions.transaction_records import TransactionRecord
     from GEPPPlatform.models.custom.custom_apis import CustomApi, OrganizationCustomApi
 
+    # Log entry point
+    logger.info(f"[BMA_AUDIT] ========================================")
+    logger.info(f"[BMA_AUDIT] 🔵 Execute function called")
+    logger.info(f"[BMA_AUDIT] Organization ID: {organization_id}")
+    logger.info(f"[BMA_AUDIT] Transaction IDs count: {len(transaction_ids)}")
+    logger.info(f"[BMA_AUDIT] Transaction IDs: {transaction_ids[:20]}{'...' if len(transaction_ids) > 20 else ''}")
+    logger.info(f"[BMA_AUDIT] Body keys: {list(body.keys()) if body else 'None'}")
+    logger.info(f"[BMA_AUDIT] ========================================")
+
     # Validate transaction count limit
     if len(transaction_ids) > MAX_TRANSACTIONS_PER_CALL:
         return {
@@ -731,10 +768,14 @@ def execute(
     logger.info(f"[BMA_AUDIT] API call quota check passed: {org_custom_api.api_call_used}/{org_custom_api.api_call_quota}")
 
     logger.info(
-        f"[BMA_AUDIT] Starting audit for org={organization_id}, "
-        f"transaction_count={len(transaction_ids)}, "
-        f"images_to_process={num_images}, "
-        f"transaction_ids_sample={transaction_ids[:5]}..." if len(transaction_ids) > 5 else f"transaction_ids={transaction_ids}"
+        f"[BMA_AUDIT] ========================================\n"
+        f"[BMA_AUDIT] 🚀 Starting Batch Audit\n"
+        f"[BMA_AUDIT] Organization: {organization_id}\n"
+        f"[BMA_AUDIT] Transactions: {len(transaction_ids)}\n"
+        f"[BMA_AUDIT] Images to process: {num_images}\n"
+        f"[BMA_AUDIT] Quota: {org_custom_api.process_used}/{org_custom_api.process_quota}\n"
+        f"[BMA_AUDIT] Transaction IDs: {transaction_ids[:10]}{'...' if len(transaction_ids) > 10 else ''}\n"
+        f"[BMA_AUDIT] ========================================"
     )
 
     # Initialize LangChain Gemini model once
@@ -882,33 +923,48 @@ def execute(
 
             # Run Gemini calls in parallel (max MAX_MATERIAL_WORKERS concurrent)
             def _audit_one(task: Dict[str, Any]) -> Dict[str, Any]:
-                # 2-step audit: visibility check → classification
-                gemini_resp = _call_gemini_with_langchain(
-                    llm, task["material"], task["image_url"], task["material"]
-                )
+                try:
+                    logger.info(f"[BMA_AUDIT] Starting audit for transaction={txn_id}, material={task['material']}, image_url={task['image_url'][:100]}...")
 
-                # Process decision with hierarchical logic
-                if gemini_resp.get("success") and "result" in gemini_resp:
-                    extraction = gemini_resp["result"]
-                    decision = process_decision(task["material"], extraction)
-
-                    # Convert decision to abbreviated format
-                    audit_result = _create_abbreviated_response(
-                        task["material"],
-                        decision["code"],
-                        decision["status"],
-                        decision["dt"],
-                        decision["wi"]
+                    # 2-step audit: visibility check → classification
+                    gemini_resp = _call_gemini_with_langchain(
+                        llm, task["material"], task["image_url"], task["material"]
                     )
 
-                    logger.info(f"[BMA_AUDIT] Decision for {task['material']}: {decision}")
-                    gemini_resp["result"] = audit_result
-                else:
-                    # If extraction failed, create error response
-                    audit_result = _create_abbreviated_response(
-                        task["material"], "pe", "reject", "0", ["ไม่สามารถแปลงผลลัพธ์จาก AI ได้"]
-                    )
-                    gemini_resp["result"] = audit_result
+                    # Process decision with hierarchical logic
+                    if gemini_resp.get("success") and "result" in gemini_resp:
+                        extraction = gemini_resp["result"]
+                        decision = process_decision(task["material"], extraction)
+
+                        # Convert decision to abbreviated format
+                        audit_result = _create_abbreviated_response(
+                            task["material"],
+                            decision["code"],
+                            decision["status"],
+                            decision["dt"],
+                            decision["wi"]
+                        )
+
+                        logger.info(f"[BMA_AUDIT] ✅ Success - txn={txn_id}, material={task['material']}, decision={decision}")
+                        gemini_resp["result"] = audit_result
+                    else:
+                        # If extraction failed, create error response
+                        logger.error(f"[BMA_AUDIT] ❌ Extraction failed - txn={txn_id}, material={task['material']}, resp={gemini_resp}")
+                        audit_result = _create_abbreviated_response(
+                            task["material"], "pe", "reject", "0", ["ไม่สามารถแปลงผลลัพธ์จาก AI ได้"]
+                        )
+                        gemini_resp["result"] = audit_result
+                except Exception as audit_exc:
+                    logger.error(f"[BMA_AUDIT] ❌ Audit exception - txn={txn_id}, material={task['material']}: {audit_exc}", exc_info=True)
+                    # Return error response
+                    gemini_resp = {
+                        "success": False,
+                        "error": str(audit_exc),
+                        "result": _create_abbreviated_response(
+                            task["material"], "pe", "reject", "0", [f"เกิดข้อผิดพลาด: {str(audit_exc)[:50]}"]
+                        ),
+                        "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+                    }
 
                 return {
                     "material": task["material"],
@@ -1125,10 +1181,17 @@ def execute(
         }
 
     # Log summary
-    logger.info(f"[BMA_AUDIT] Completed: {len(results)}/{len(transaction_ids)} transactions processed successfully")
-    if failed_transactions:
-        logger.warning(f"[BMA_AUDIT] Failed transactions: {failed_transactions}")
+    logger.info(
+        f"[BMA_AUDIT] ========================================\n"
+        f"[BMA_AUDIT] ✅ Batch Audit Completed\n"
+        f"[BMA_AUDIT] Processed: {len(results)}/{len(transaction_ids)} transactions\n"
+        f"[BMA_AUDIT] Failed: {len(failed_transactions)} transactions\n"
+        f"[BMA_AUDIT] Token usage: input={total_usage['input_tokens']}, output={total_usage['output_tokens']}, total={total_usage['total_tokens']}\n"
+        f"[BMA_AUDIT] {'⚠️  Failed IDs: ' + str(failed_transactions) if failed_transactions else '✓ All transactions successful'}\n"
+        f"[BMA_AUDIT] ========================================"
+    )
 
+    sys.stdout.flush()  # Force flush all logs before returning
     return {
         "success": True,
         "rule_set": "bma_audit_rule_set",

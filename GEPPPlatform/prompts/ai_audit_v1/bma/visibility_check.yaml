@@ -10,46 +10,68 @@ template: |
   --- CRITICAL TEST ---
   Ask yourself: "If I remove the label, can I NAME specific objects inside?"
 
-  **IMPORTANT**: You don't need to see brand names/logos. You just need to identify:
-  - Material type (plastic, paper, organic matter)
-  - Waste category (bags, bottles, food scraps, etc.)
-  - Specific object shapes (even without text/logos)
+  **CRITICAL RULE**: You must be able to NAME at least 2-3 SPECIFIC objects inside.
 
-  ✅ YES = "visible" - Examples:
-  - "I see a Lay's can" (logo visible)
-  - "I see banana peels" (texture visible)
-  - "I see a Coca-Cola bottle" (shape + color visible)
-  - "I see chicken bones" (specific object)
-  - "I see plastic bags/waste inside a bin" (can identify waste type)
-  - "I see tissue/paper/plastic scraps" (can identify material type)
+  ✅ YES = "visible" - You can NAME specific objects:
+  - "I see a Lay's can and plastic bottle" (2 specific items named)
+  - "I see banana peels and rice" (2 specific items named)
+  - "I see a Coca-Cola bottle and paper cup" (2 specific items named)
+  - "I see chicken bones and vegetable scraps" (2 specific items named)
 
-  ❌ NO = "opaque" - Examples:
-  - "I see yellow color but don't know what it is"
-  - "I see something green and blurry"
-  - "I see vague shapes through cloudy plastic"
-  - "There's a label but I can't verify the contents"
-  - "I see colors but cannot identify any specific waste items"
+  ❌ NO = "opaque" - You CANNOT name specific objects:
+  - "I see yellow/green colors but can't identify what items they are" → OPAQUE
+  - "I see vague shapes through cloudy plastic" → OPAQUE
+  - "I see something that might be food but can't tell what" → OPAQUE
+  - "There's a label but I can't verify specific contents inside" → OPAQUE
+  - "I see general waste materials but can't name specific items" → OPAQUE
+  - "Tied/closed white bag with vague colors inside" → OPAQUE
 
   --- SPECIAL CASES ---
   • Empty container (no waste) → "empty"
   • Screenshot/App UI visible → "artificial"
   • Photo too blurry → "blur"
+  • **WASTE SIGN ONLY**: If you ONLY see a sign (like "ไม่มีขยะอันตราย" or waste category signs) with NO actual waste items visible → "artificial"
+
+  --- GENERAL WASTE EXCEPTION ---
+  **If claimed_type is "general" (ขยะทั่วไป):**
+
+  ✅ Accept "visible" if container is OPENED (lid removed/opened):
+  - Open bin/bucket showing opaque bags inside → "visible"
+  - Opened container with visible waste bags (even if bags are opaque) → "visible"
+  - Example: Pink/blue/white bin with LID REMOVED, showing garbage bags inside → "visible"
+
+  ❌ Still reject "opaque" if:
+  - Bag is TIED and photographed from OUTSIDE (not opened) → "opaque"
+  - Container is CLOSED (lid on, not visible inside) → "opaque"
+  - Single tied bag on ground/floor (not in opened container) → "opaque"
 
   --- EXAMPLES ---
-  1. White cloudy bag with label "ขยะเศษอาหาร", see yellow/green vague colors
-     → Cannot name what's inside → "opaque"
+  ❌ OPAQUE Examples (MUST reject):
+  1. Tied white cloudy bag with label "ขยะเศษอาหาร", see yellow/green vague colors inside
+     → Cannot name specific objects (just colors) → "opaque"
 
-  2. Clear bag with Lay's cans, see logo clearly
-     → Can identify "Lay's cans" → "visible"
+  2. Closed translucent bag showing blurry shapes, can't identify what items
+     → Cannot name specific objects (just shapes) → "opaque"
 
-  3. Open bin with rice and banana peels visible
-     → Can identify "rice" and "banana peels" → "visible"
+  3. Milky white bag with orange/brown colors visible but unclear what items
+     → Cannot name specific objects (just colors) → "opaque"
 
-  4. Pink bin with plastic liner, white plastic bag inside with visible plastic/paper scraps
-     → Can identify "plastic bags" and "waste scraps" → "visible"
+  ✅ VISIBLE Examples (OK to accept):
+  4. Clear bag with Lay's cans and plastic bottles - see logos and shapes clearly
+     → Can name "Lay's cans" and "plastic bottles" → "visible"
 
-  5. Container with plastic bag, can see waste material type (plastic/paper/organic)
-     → Can identify waste category → "visible"
+  5. Open bin with rice grains and banana peels clearly visible
+     → Can name "rice" and "banana peels" → "visible"
+
+  6. Transparent bag with tissue papers and plastic wrapper - can see items clearly
+     → Can name "tissue" and "plastic wrapper" → "visible"
+
+  7. **GENERAL - OPENED BIN**: Pink/blue bucket with LID REMOVED, showing white/black bags inside
+     → Container is opened, can see waste bags exist → "visible" ✅
+
+  ❌ vs ✅ CRITICAL DISTINCTION:
+  - Tied white bag on ground (photo from outside) → "opaque" ❌
+  - Same bag BUT inside OPENED pink bin (lid removed) → "visible" ✅ (general exception)
 
   ****** OUTPUT FORMAT (JSON ONLY) ******
   Return ONLY valid JSON. No markdown.
