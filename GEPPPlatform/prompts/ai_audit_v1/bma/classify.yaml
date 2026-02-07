@@ -15,28 +15,36 @@ template: |
   **When there's an outer container (bin/bag holding waste inside):**
   • Ignore the outer bin/bag - classify the CONTENTS inside
   • Food scraps in a bag → "organic" (chicken, fish, rice, peels, bones)
-  • Clean recyclables in a bag → "recyclable" (PET bottles, cans, glass)
+  • Clean recyclables in a bag → "recyclable" (PET bottles, cans, glass, cardboard boxes)
+  • **CLEAN plastic containers in bag → "recyclable"** (food containers without residue)
   • Used packaging in a bag → "general" (food wrappers, dirty plastic)
 
   **When the item itself IS the waste (no outer container):**
   • Classify the item directly
-  • Used food container/tray with residue → "general"
+  • **CLEAN plastic food container → "recyclable"** (no visible food residue)
+  • Used food container/tray WITH visible residue → "general"
   • Plastic packaging with food stuck → "general"
-  • Empty clean bottle (no bag) → "recyclable"
+  • Empty clean bottle → "recyclable"
+
+  **🔍 CRITICAL: Plastic Container Classification**
+  • **If container looks CLEAN/EMPTY/WASHED → "recyclable"** ✅
+  • If container has VISIBLE food/grease/residue → "general" ❌
 
   Examples:
   - Clear bag with chicken bones + fish + rice → "organic" ✅
   - Clear bag with PET bottles (clean) → "recyclable" ✅
   - Cardboard box with newspapers/calendar/documents inside → "recyclable" ✅
+  - **Bag with clean plastic food containers + cardboard boxes → "recyclable"** ✅
+  - **Photo inside bag showing clean plastic containers (no residue) → "recyclable"** ✅
   - Black bin with plastic food packaging/bags inside → "general" ✅
   - Bin with meatball skewer bag (empty packaging) → "general" ✅
   - Clear plastic food container with food residue stuck inside → "general" ✅
-  - Used takeout box/tray (the container IS the waste) → "general" ✅
+  - Used takeout box/tray with visible food stains → "general" ✅
 
   --- DEFINITIONS ---
   • Organic (77): Food scraps, peels, bones, cooked food
-  • Recyclable (298): PET bottles, cans, glass, cardboard (clean)
-  • General (94): Mixed waste, food containers, straws, wrappers, tissues
+  • Recyclable (298): PET bottles, cans, glass, cardboard, **CLEAN plastic containers** (no food residue)
+  • General (94): Mixed waste, DIRTY food containers (with residue), straws, wrappers, tissues
   • Hazardous (113): Batteries, chemicals, spray cans, light bulbs
 
   --- CONTAMINATION RULES ---
