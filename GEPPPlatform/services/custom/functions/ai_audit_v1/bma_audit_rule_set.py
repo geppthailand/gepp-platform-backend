@@ -231,10 +231,13 @@ def _call_gemini_with_langchain(
 
         # --- STEP 1: Visibility Check ---
         visibility_prompt = _render_visibility_prompt(claimed_type)
+        logger.info(f"[BMA_AUDIT] 🔍 Step 1 - Visibility Check for material_key={material_key}, claimed_type={claimed_type}")
+        logger.info(f"[BMA_AUDIT] 📸 Image URL: {image_url[:100]}...")
+
         step1 = _call_gemini_single(llm, visibility_prompt, image_data)
 
         raw_text = step1["raw_text"].strip()
-        logger.info(f"[BMA_AUDIT] Step 1 raw response: {raw_text[:200]}")
+        logger.info(f"[BMA_AUDIT] 📤 Step 1 raw response (first 500 chars): {raw_text[:500]}")
 
         # Clean markdown fences
         raw_text = re.sub(r"^```(?:json)?\s*", "", raw_text, flags=re.MULTILINE)
@@ -246,12 +249,12 @@ def _call_gemini_with_langchain(
             visibility_status = visibility_result.get("visibility_status", "opaque")
             reason = visibility_result.get("reason", "")
         except json.JSONDecodeError as e:
-            logger.error(f"[BMA_AUDIT] Step 1 JSON parse error: {e}. Raw text: {raw_text}")
+            logger.error(f"[BMA_AUDIT] ❌ Step 1 JSON parse error: {e}. Raw text: {raw_text}")
             # Fallback: treat as opaque if we can't parse
             visibility_status = "opaque"
             reason = "ไม่สามารถวิเคราะห์การมองเห็นได้"
 
-        logger.info(f"[BMA_AUDIT] Step 1 - Visibility: {visibility_status}, Reason: {reason}")
+        logger.info(f"[BMA_AUDIT] ✅ Step 1 Result - visibility_status='{visibility_status}', reason='{reason}'")
 
         # If not visible, return early
         if visibility_status != "visible":
@@ -263,7 +266,17 @@ def _call_gemini_with_langchain(
                 "contamination_items": [reason] if reason else [],
                 "contamination_pct": 0,
                 "haz_detected": False,
-                "is_heavy_liquid": False
+                "is_heavy_liquid": False,
+                # Debug info
+                "_debug": {
+                    "claimed_type": claimed_type,
+                    "material_key": material_key,
+                    "visibility_raw": raw_text[:200],
+                    "visibility_status": visibility_status,
+                    "visibility_reason": reason,
+                    "step2_skipped": True,
+                    "reason": "visibility_check_failed"
+                }
             }
 
             usage1 = step1["usage"]
@@ -278,10 +291,12 @@ def _call_gemini_with_langchain(
 
         # --- STEP 2: Classification (only if visible) ---
         classify_prompt = _render_classify_prompt(claimed_type)
+        logger.info(f"[BMA_AUDIT] 🔍 Step 2 - Classification for material_key={material_key}, claimed_type={claimed_type}")
+
         step2 = _call_gemini_single(llm, classify_prompt, image_data)
 
         raw_text2 = step2["raw_text"].strip()
-        logger.info(f"[BMA_AUDIT] Step 2 raw response: {raw_text2[:200]}")
+        logger.info(f"[BMA_AUDIT] 📤 Step 2 raw response (first 500 chars): {raw_text2[:500]}")
 
         # Clean markdown fences
         raw_text2 = re.sub(r"^```(?:json)?\s*", "", raw_text2, flags=re.MULTILINE)
@@ -290,9 +305,9 @@ def _call_gemini_with_langchain(
 
         try:
             classify_result = json.loads(raw_text2)
-            logger.info(f"[BMA_AUDIT] Step 2 - Classification: {classify_result}")
+            logger.info(f"[BMA_AUDIT] ✅ Step 2 - Classification parsed: {classify_result}")
         except json.JSONDecodeError as e:
-            logger.error(f"[BMA_AUDIT] Step 2 JSON parse error: {e}. Raw text: {raw_text2}")
+            logger.error(f"[BMA_AUDIT] ❌ Step 2 JSON parse error: {e}. Raw text: {raw_text2}")
             # Fallback: treat as general waste with contamination note
             classify_result = {
                 "main_content": "general",
@@ -302,7 +317,7 @@ def _call_gemini_with_langchain(
                 "is_heavy_liquid": False
             }
 
-        # Combine results
+        # Combine results with debug info
         result = {
             "bag_state": "visible",
             "img_quality": "ok",
@@ -311,7 +326,17 @@ def _call_gemini_with_langchain(
             "contamination_items": classify_result.get("contamination_items", []),
             "contamination_pct": classify_result.get("contamination_pct", 0),
             "haz_detected": classify_result.get("haz_detected", False),
-            "is_heavy_liquid": classify_result.get("is_heavy_liquid", False)
+            "is_heavy_liquid": classify_result.get("is_heavy_liquid", False),
+            # Debug info
+            "_debug": {
+                "claimed_type": claimed_type,
+                "material_key": material_key,
+                "visibility_raw": raw_text[:200],
+                "visibility_status": visibility_status,
+                "visibility_reason": reason,
+                "classify_raw": raw_text2[:200],
+                "classify_parsed": classify_result
+            }
         }
 
         # Combine usage
@@ -433,16 +458,22 @@ def process_decision(claimed_type: str, ai_json: Dict[str, Any]) -> Dict[str, An
     Returns:
         {"code": str, "status": "approve/reject", "dt": str, "wi": list}
     """
+    logger.info(f"[BMA_AUDIT] 🧠 process_decision called: claimed_type='{claimed_type}'")
+    logger.info(f"[BMA_AUDIT] 📊 AI extraction result: {ai_json}")
+
     # --- 1. PRE-CHECKS (AI/Screen Capture/Blur) ---
     if ai_json.get("img_quality") == "artificial_ui":
+        logger.info(f"[BMA_AUDIT] ⚠️  Decision: artificial_ui detected → pending")
         return {"code": "ai", "status": "pending", "dt": "0", "wi": ["ภาพจากแอปพลิเคชัน/UI"]}
 
     if ai_json.get("img_quality") == "blur":
+        logger.info(f"[BMA_AUDIT] ⚠️  Decision: blur detected → reject")
         return {"code": "ui", "status": "reject", "dt": "0", "wi": ["ภาพเบลอ/มองไม่เห็น"]}
 
     # --- 1.5. EMPTY CONTAINER CHECK ---
     # ถ้าเป็นถังเปล่า/มีแต่น้ำ -> ไม่ใช่ขยะ -> Reject UI
     if ai_json.get("is_empty_container"):
+        logger.info(f"[BMA_AUDIT] ⚠️  Decision: empty_container detected → reject")
         return {"code": "ui", "status": "reject", "dt": "0", "wi": ["ไม่พบขยะ (ภาชนะเปล่า)"]}
 
     # --- 2. EXTRACT VARIABLES ---
@@ -453,14 +484,18 @@ def process_decision(claimed_type: str, ai_json: Dict[str, Any]) -> Dict[str, An
     pct = ai_json.get("contamination_pct", 0)
     is_heavy_liquid = ai_json.get("is_heavy_liquid", False)
 
+    logger.info(f"[BMA_AUDIT] 📊 Extracted: bag_state={bag_state}, haz_detected={haz_detected}, main={main}, pct={pct}, items={items}")
+
     # --- 3. GLOBAL HAZARDOUS CHECK (ZERO TOLERANCE) ---
     # ถ้าเจอของอันตรายจริง แต่ไม่ได้ Claim ว่าเป็น Hazardous -> Reject WC 113
     if claimed_type != "hazardous" and haz_detected:
+        logger.info(f"[BMA_AUDIT] ⚠️  Decision: hazardous detected in non-hazardous bin → reject WC 113")
         return {"code": "wc", "status": "reject", "dt": "113", "wi": items}
 
     # --- 4. VISIBILITY CHECKS (GLOBAL) ---
     # ถุงทึบ/มัดปาก/มองไม่เห็น = UI เสมอ
     if bag_state == "opaque":
+        logger.info(f"[BMA_AUDIT] ⚠️  Decision: opaque bag_state → reject UI")
         return {"code": "ui", "status": "reject", "dt": "0", "wi": ["มองไม่เห็นขยะข้างใน"]}
 
 
@@ -468,17 +503,22 @@ def process_decision(claimed_type: str, ai_json: Dict[str, Any]) -> Dict[str, An
     # CASE 1: GENERAL WASTE (94)
     # ==================================================
     if claimed_type == "general":
+        logger.info(f"[BMA_AUDIT] 🗑️  CASE 1: GENERAL WASTE - main={main}, pct={pct}")
+
         # Rule: Pure Recyclable (Bottle pile) -> WC 298
         if main == "recyclable" and pct < 20:
+             logger.info(f"[BMA_AUDIT] ✅ Decision: Pure recyclable in general bin → reject WC 298")
              return {"code": "wc", "status": "reject", "dt": "298", "wi": ["ขยะรีไซเคิล"]}
 
         # Rule: Pure Organic (Loose food) -> WC 77
         if main == "organic" and pct < 20:
+             logger.info(f"[BMA_AUDIT] ✅ Decision: Pure organic in general bin → reject WC 77")
              return {"code": "wc", "status": "reject", "dt": "77", "wi": ["ขยะเศษอาหาร"]}
 
         # *** SIMPLIFIED: General Plastic (Food containers/Straws) = General (94)
         # ไม่แยก Branch เพราะทั้ง general และ general_plastic ถือเป็นขยะทั่วไป
         # Mixed/General -> CC 94
+        logger.info(f"[BMA_AUDIT] ✅ Decision: Mixed/general waste → approve CC 94")
         return {"code": "cc", "status": "approve", "dt": "94", "wi": []}
 
 
@@ -486,19 +526,41 @@ def process_decision(claimed_type: str, ai_json: Dict[str, Any]) -> Dict[str, An
     # CASE 2: HAZARDOUS (113)
     # ==================================================
     elif claimed_type == "hazardous":
-        # Rule: False Friends (M-150/Water bottles) -> WC 298
-        # ถ้าไม่เจอ Haz จริงๆ แต่เจอขวดน้ำ/ขวดแก้วเยอะๆ
-        if not haz_detected and (main == "recyclable" or "ขวด" in str(items)):
-             return {"code": "wc", "status": "reject", "dt": "298", "wi": ["ขยะรีไซเคิล (ขวด)"]}
+        logger.info(f"[BMA_AUDIT] ☢️  CASE 2: HAZARDOUS WASTE - haz_detected={haz_detected}, main={main}, pct={pct}")
+
+        # Rule: Wrong Category Detection
+        # ถ้าไม่เจอ Haz จริงๆ แต่เจอของประเภทอื่น
+        if not haz_detected:
+            # False Friends (M-150/Water bottles) -> WC 298
+            if main == "recyclable" or "ขวด" in str(items):
+                logger.info(f"[BMA_AUDIT] ✅ Decision: Recyclable in hazardous bin → reject WC 298")
+                return {"code": "wc", "status": "reject", "dt": "298", "wi": ["ขยะรีไซเคิล (ขวด)"]}
+
+            # General waste in hazardous bin -> WC 94
+            if main == "general" or main == "general_plastic":
+                logger.info(f"[BMA_AUDIT] ✅ Decision: General waste in hazardous bin → reject WC 94")
+                return {"code": "wc", "status": "reject", "dt": "94", "wi": ["ขยะทั่วไป"]}
+
+            # Organic waste in hazardous bin -> WC 77
+            if main == "organic":
+                logger.info(f"[BMA_AUDIT] ✅ Decision: Organic waste in hazardous bin → reject WC 77")
+                return {"code": "wc", "status": "reject", "dt": "77", "wi": ["ขยะอินทรีย์"]}
 
         # Rule: Real Hazardous Items Visible
         if haz_detected:
+             logger.info(f"[BMA_AUDIT] ⚠️  Hazardous items detected! pct={pct}")
              # เช็ค Contamination
-             if pct > 20: return {"code": "hc", "status": "reject", "dt": "113", "wi": items}
-             if pct > 0:  return {"code": "lc", "status": "approve", "dt": "113", "wi": items}
+             if pct > 20:
+                 logger.info(f"[BMA_AUDIT] ✅ Decision: Heavy contamination (pct={pct}) → reject HC 113")
+                 return {"code": "hc", "status": "reject", "dt": "113", "wi": items}
+             if pct > 0:
+                 logger.info(f"[BMA_AUDIT] ✅ Decision: Light contamination (pct={pct}) → approve LC 113")
+                 return {"code": "lc", "status": "approve", "dt": "113", "wi": items}
+             logger.info(f"[BMA_AUDIT] ✅ Decision: Pure hazardous (pct=0) → approve CC 113")
              return {"code": "cc", "status": "approve", "dt": "113", "wi": []}
 
-        # ถ้าไม่เจออะไรเลย
+        # ถ้าไม่เจออะไรเลย (empty/unclear)
+        logger.info(f"[BMA_AUDIT] ✅ Decision: No identifiable waste found → reject UI")
         return {"code": "ui", "status": "reject", "dt": "0", "wi": ["ไม่พบขยะอันตราย"]}
 
 
@@ -506,17 +568,23 @@ def process_decision(claimed_type: str, ai_json: Dict[str, Any]) -> Dict[str, An
     # CASE 3: ORGANIC (77)
     # ==================================================
     elif claimed_type == "organic":
+        logger.info(f"[BMA_AUDIT] 🍃 CASE 3: ORGANIC WASTE - main={main}, pct={pct}")
+
         # Rule: Content Logic
         # ถ้าเห็นกระดาษ/พลาสติกใส ใน organic bin -> AI จะ detect เป็น "general" -> reject
         if main == "recyclable" or main == "general" or main == "general_plastic":
+             logger.info(f"[BMA_AUDIT] ✅ Decision: Wrong content type in organic bin → reject WC 94")
              return {"code": "wc", "status": "reject", "dt": "94", "wi": ["ขยะทั่วไป"]}
 
         # Rule: Purity Rules
         if pct > 20: # Soft Contam > 20%
+             logger.info(f"[BMA_AUDIT] ✅ Decision: High contamination (pct={pct}) → reject WC 94")
              return {"code": "wc", "status": "reject", "dt": "94", "wi": items}
         elif pct > 0: # Soft Contam < 20%
+             logger.info(f"[BMA_AUDIT] ✅ Decision: Light contamination (pct={pct}) → approve LC 77")
              return {"code": "lc", "status": "approve", "dt": "77", "wi": items}
 
+        logger.info(f"[BMA_AUDIT] ✅ Decision: Pure organic (pct=0) → approve CC 77")
         return {"code": "cc", "status": "approve", "dt": "77", "wi": []}
 
 
@@ -524,34 +592,45 @@ def process_decision(claimed_type: str, ai_json: Dict[str, Any]) -> Dict[str, An
     # CASE 4: RECYCLABLE (298)
     # ==================================================
     elif claimed_type == "recyclable":
+        logger.info(f"[BMA_AUDIT] ♻️  CASE 4: RECYCLABLE WASTE - main={main}, pct={pct}, is_heavy_liquid={is_heavy_liquid}")
+
         # Rule: Definition Check (General Plastic vs Recyclable)
         if main == "general_plastic":
+             logger.info(f"[BMA_AUDIT] ✅ Decision: General plastic in recyclable bin → reject WC 94")
              # Food containers, Straws, Spoons -> WC 94
              return {"code": "wc", "status": "reject", "dt": "94", "wi": ["พลาสติกกำพร้า/กล่องอาหาร"]}
 
         if main == "organic":
+             logger.info(f"[BMA_AUDIT] ✅ Decision: Organic in recyclable bin → reject WC 94")
              return {"code": "wc", "status": "reject", "dt": "94", "wi": ["ขยะเศษอาหาร"]}
 
         if main == "general":
+             logger.info(f"[BMA_AUDIT] ✅ Decision: General in recyclable bin → reject WC 94")
              return {"code": "wc", "status": "reject", "dt": "94", "wi": ["ขยะทั่วไป"]}
 
         # Rule: Hard Contamination (Heavy Liquid)
         if is_heavy_liquid:
+             logger.info(f"[BMA_AUDIT] ✅ Decision: Heavy liquid detected → reject HC 298")
              return {"code": "hc", "status": "reject", "dt": "298", "wi": ["ขวดมีน้ำเหลือ"]}
 
         # Rule: Purity & Tolerance
         if pct > 50:
+             logger.info(f"[BMA_AUDIT] ✅ Decision: Very high contamination (pct={pct}) → reject HC 298")
              return {"code": "hc", "status": "reject", "dt": "298", "wi": items}
         elif pct > 20:
+             logger.info(f"[BMA_AUDIT] ✅ Decision: Moderate contamination (pct={pct}) → reject WC 94")
              # Prompt Rule B: > 20% (Messy/Dirty) -> WC 94
              return {"code": "wc", "status": "reject", "dt": "94", "wi": items}
         elif pct > 0:
+             logger.info(f"[BMA_AUDIT] ✅ Decision: Light contamination (pct={pct}) → approve LC 298")
              # Prompt Rule B: < 20% -> LC 298
              return {"code": "lc", "status": "approve", "dt": "298", "wi": items}
 
+        logger.info(f"[BMA_AUDIT] ✅ Decision: Pure recyclable (pct=0) → approve CC 298")
         return {"code": "cc", "status": "approve", "dt": "298", "wi": []}
 
     # Fallback
+    logger.warning(f"[BMA_AUDIT] ⚠️  FALLBACK: Unknown claimed_type='{claimed_type}' → reject UI")
     return {"code": "ui", "status": "reject", "dt": "0", "wi": ["ระบุประเภทไม่ได้"]}
 
 
@@ -790,13 +869,15 @@ def execute(
 
     def _process_transaction(txn_id: int) -> Optional[Dict[str, Any]]:
         """Process a single transaction with parallel material audits."""
+        logger.info(f"[BMA_AUDIT] 🏠 Processing transaction_id={txn_id}")
+
         txn = db_session.query(Transaction).filter(
             Transaction.id == txn_id,
             Transaction.deleted_date.is_(None),
         ).first()
 
         if not txn:
-            logger.warning(f"[BMA_AUDIT] Transaction {txn_id} not found in database")
+            logger.warning(f"[BMA_AUDIT] ❌ Transaction {txn_id} not found in database")
             # Return error response instead of None to ensure all transaction_ids get a result
             return {
                 "ext_id_1": "unknown",
@@ -808,11 +889,15 @@ def execute(
                 "materials": {}
             }
 
+        logger.info(f"[BMA_AUDIT] 📋 Transaction found: ext_id_1={txn.ext_id_1}, ext_id_2={txn.ext_id_2}")
+
         # Load active records for this transaction
         records = db_session.query(TransactionRecord).filter(
             TransactionRecord.created_transaction_id == txn_id,
             TransactionRecord.deleted_date.is_(None),
         ).all()
+
+        logger.info(f"[BMA_AUDIT] 📦 Found {len(records)} material records for transaction {txn_id}")
 
         # Map material_id → record
         records_by_key: Dict[str, TransactionRecord] = {}
@@ -820,6 +905,8 @@ def execute(
             mat_key = MATERIAL_ID_TO_KEY.get(rec.material_id)
             if mat_key:
                 records_by_key[mat_key] = rec
+                images_count = len(rec.images) if rec.images else 0
+                logger.info(f"[BMA_AUDIT]   - {mat_key} (material_id={rec.material_id}): {images_count} images")
 
         # ------------------------------------------------------------------
         # Step 1: Coverage check
@@ -831,6 +918,10 @@ def execute(
         # Prepare transaction-level audit note
         transaction_audit_note = {
             "type": "bma",
+            "transaction_id": txn_id,
+            "ext_id_1": txn.ext_id_1,
+            "ext_id_2": txn.ext_id_2,
+            "household_id": txn.ext_id_2,  # For easy lookup
             "step_1": {
                 "status": "pass" if has_all_required else "fail",
                 "required": sorted(REQUIRED_MATERIALS),
@@ -944,6 +1035,10 @@ def execute(
                             decision["dt"],
                             decision["wi"]
                         )
+
+                        # Add debug info to audit result
+                        audit_result["_debug"] = extraction.get("_debug", {})
+                        audit_result["_debug"]["decision"] = decision
 
                         logger.info(f"[BMA_AUDIT] ✅ Success - txn={txn_id}, material={task['material']}, decision={decision}")
                         gemini_resp["result"] = audit_result
@@ -1113,6 +1208,13 @@ def execute(
         # For now, use placeholder values
         district = "เขตยานนาวา"  # Placeholder
         subdistrict = "แขวงช่องนนทรี"  # Placeholder
+
+        logger.info(f"[BMA_AUDIT] 🏁 Transaction {txn_id} completed:")
+        logger.info(f"[BMA_AUDIT]   - ext_id_1={ext_id_1}, household_id={ext_id_2}")
+        logger.info(f"[BMA_AUDIT]   - status={transaction_status}, message={transaction_message}")
+        logger.info(f"[BMA_AUDIT]   - materials={list(materials_data.keys())}")
+        for mat_key, mat_data in materials_data.items():
+            logger.info(f"[BMA_AUDIT]     • {mat_key}: detect={mat_data['detect']}, status={mat_data['status']}")
 
         return {
             "ext_id_1": ext_id_1,

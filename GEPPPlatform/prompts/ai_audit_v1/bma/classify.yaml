@@ -46,10 +46,17 @@ template: |
   • **HOLDER (ignore these):** Outer bin, plastic bag used to hold/display waste for photo, container holding items
   • **WASTE (classify these):** Items INSIDE the holder
 
+  **🔍 HOW TO IDENTIFY HOLDER:**
+  • **Container edges/walls visible** → That's the HOLDER (bin/bucket/box)
+  • **Photo from ABOVE looking down** → You're looking INTO a holder
+  • **Photo from INSIDE looking down** → The container around you is the HOLDER
+  • **Large bag/bin opened to show contents** → That's the HOLDER
+
   **When there's an outer container (bin/bag holding waste inside):**
   • **Step 1: Identify the HOLDER** - Is there a bag/bin/container that is HOLDING the waste?
   • **Step 2: Ignore the HOLDER** - Don't count the outer bag/bin as waste
   • **Step 3: Look ONLY at contents INSIDE** - What items are IN the holder?
+  • **Step 4: Classify based on contents ONLY** - Not the holder material
 
   **Classification based on CONTENTS only:**
   • **Food scraps ONLY (no packaging mixed in) → "organic"** ✅
@@ -74,6 +81,9 @@ template: |
   • Plastic bag (opened) with ONLY rice + eggshells + food → Bag = HOLDER → Contents = pure organic → **"organic"** ✅
   • Plastic bag with vegetables + tissue paper (15%) stuck to food → Tissue = food-contact (< 20%) → **"organic"** ✅
   • Plastic bag with rice + plastic sachets/snack bags mixed in → Sachets = packaging → **"general"** ❌
+  • Yellow bin (from above) with post-it note on equipment → Bin = HOLDER → Contents = equipment + paper → **Classify contents**
+  • Green bin with bags inside (photo from above) → Bin = HOLDER → Bags = WASTE → **Classify bags and their contents**
+  • Photo from inside bin looking down at plastic bags → Container = HOLDER → Bags = WASTE → **Classify the bags**
 
   **When the item itself IS the waste (no outer container):**
   • Classify the item directly
