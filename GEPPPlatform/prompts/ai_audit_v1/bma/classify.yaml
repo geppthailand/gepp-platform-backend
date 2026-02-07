@@ -30,6 +30,13 @@ template: |
   • **If container looks CLEAN/EMPTY/WASHED → "recyclable"** ✅
   • If container has VISIBLE food/grease/residue → "general" ❌
 
+  **🚨 CRITICAL: Mixed Plastics = General Waste**
+  • **Plastic CUPS (แก้วพลาสติก) → "general"** ❌ (NOT recyclable)
+  • **Plastic STRAWS (หลอด) → "general"** ❌ (NOT recyclable)
+  • **Plastic BAGS (ถุงหิ้ว) → "general"** ❌ (NOT recyclable in BMA system)
+  • **If you see MIXED plastics (cups + bottles + straws + bags) → "general"** ❌
+  • **ONLY clean PET bottles/cans/glass → "recyclable"** ✅
+
   Examples:
   - Clear bag with chicken bones + fish + rice → "organic" ✅
   - Clear bag with PET bottles (clean) → "recyclable" ✅
