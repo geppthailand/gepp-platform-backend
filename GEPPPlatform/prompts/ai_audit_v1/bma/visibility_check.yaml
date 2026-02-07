@@ -7,7 +7,14 @@ template: |
 
   **🚨 YOUR ONLY JOB: Answer "Can I identify specific waste items?"**
 
-  --- CRITICAL TEST ---
+  **⚠️ STEP 0 - CHECK FOR APP/SCREENSHOT UI FIRST:**
+  Before doing anything else, check if this is a screenshot or app UI:
+  • Look for mobile status bar (time, battery, Wi-Fi)
+  • Look for app buttons/overlays (ภาพตัวอย่าง, เข้าใจแล้ว, etc.)
+  • Look for navigation bars or app interface elements
+  • **If you see ANY app UI → IMMEDIATELY return "artificial"** ❌
+
+  --- STEP 1 - CRITICAL TEST (ONLY if no app UI) ---
   Ask yourself: "If I remove the label, can I NAME specific objects inside?"
 
   **CRITICAL RULE**: You must be able to NAME at least 2-3 SPECIFIC objects inside.
@@ -38,8 +45,30 @@ template: |
 
   --- SPECIAL CASES ---
   • Empty container (no waste) → "empty"
-  • Screenshot/App UI visible → "artificial"
   • Photo too blurry → "blur"
+
+  **🚨 CRITICAL: Screenshot/App UI Detection → "artificial"**
+  **ALWAYS check for app/internet UI elements FIRST before classifying:**
+
+  ✅ Return "artificial" if you see ANY of these:
+  • **Mobile phone status bar** (time, battery, Wi-Fi signal at top)
+  • **App buttons/text overlays** (ภาพตัวอย่าง, เข้าใจแล้ว, etc.)
+  • **Navigation bars** (back button, home button at bottom)
+  • **App interface elements** (overlaid text, buttons, menus)
+  • **Screenshot indicators** (notification icons, screen recording dots)
+  • **Internet/social media UI** (Facebook, LINE, Instagram frames)
+
+  **Examples - "artificial":**
+  • Photo with status bar showing "20:37 น." and 100% battery → **"artificial"** ❌
+  • Photo with button text "ภาพตัวอย่าง เข้าใจแล้ว" at bottom → **"artificial"** ❌
+  • Photo with visible app navigation controls → **"artificial"** ❌
+  • Screenshot from social media app showing post frame → **"artificial"** ❌
+
+  **Examples - "visible" (actual photos):**
+  • Photo of waste in bin, no UI elements → **"visible"** ✅
+  • Photo with ONLY product branding (Coca-Cola logo on bottle) → **"visible"** ✅
+    (Product branding is part of the waste item, not app UI)
+
   • **WASTE SIGN ONLY**: If you ONLY see a warning/category SIGN (like red sign "ไม่มีขยะอันตราย") with NO actual waste items → "artificial"
     - WARNING: Product branding (Panasonic, Coca-Cola, etc.) is NOT a "sign" - it's part of the actual waste item!
     - Fluorescent tube with "Panasonic" logo → "visible" (actual hazardous waste) ✅
@@ -77,34 +106,48 @@ template: |
   - **IMPORTANT**: If bag is NOT inside a bin/container, it must be clear enough to NAME items inside
 
   --- EXAMPLES ---
+
+  **🚨 ARTIFICIAL Examples (APP/SCREENSHOT - MUST reject first):**
+  1. Photo showing mobile status bar "20:37 น." with battery icon
+     → Has app UI elements → **"artificial"** ❌
+
+  2. Photo with button text "ภาพตัวอย่าง เข้าใจแล้ว" overlay at bottom
+     → Has app UI overlay → **"artificial"** ❌
+
+  3. Screenshot from LINE/Facebook showing waste photo with post frame
+     → Social media UI visible → **"artificial"** ❌
+
+  4. Photo with navigation bar (back/home buttons) visible
+     → App navigation UI visible → **"artificial"** ❌
+
   ❌ OPAQUE Examples (MUST reject):
-  1. Tied white cloudy bag with label "ขยะเศษอาหาร", see yellow/green vague colors inside
+  5. Tied white cloudy bag with label "ขยะเศษอาหาร", see yellow/green vague colors inside
      → Cannot name specific objects (just colors) → "opaque"
 
-  2. Closed translucent bag showing blurry shapes, can't identify what items
+  6. Closed translucent bag showing blurry shapes, can't identify what items
      → Cannot name specific objects (just shapes) → "opaque"
 
-  3. Milky white bag with orange/brown colors visible but unclear what items
+  7. Milky white bag with orange/brown colors visible but unclear what items
      → Cannot name specific objects (just colors) → "opaque"
 
-  ✅ VISIBLE Examples (OK to accept):
-  4. Clear bag with Lay's cans and plastic bottles - see logos and shapes clearly
+  ✅ VISIBLE Examples (OK to accept - NO app UI):
+  8. Clear bag with Lay's cans and plastic bottles - see logos and shapes clearly (NO app UI)
      → Can name "Lay's cans" and "plastic bottles" → "visible"
 
-  5. Open bin with rice grains and banana peels clearly visible
+  9. Open bin with rice grains and banana peels clearly visible (NO app UI)
      → Can name "rice" and "banana peels" → "visible"
 
-  6. Transparent bag with tissue papers and plastic wrapper - can see items clearly
-     → Can name "tissue" and "plastic wrapper" → "visible"
+  10. Transparent bag with tissue papers and plastic wrapper - can see items clearly (NO app UI)
+      → Can name "tissue" and "plastic wrapper" → "visible"
 
-  7. **GENERAL - OPENED BIN**: Pink/blue bucket with LID REMOVED, showing white/black bags inside
-     → Container is opened, can see waste bags exist → "visible" ✅
+  11. **GENERAL - OPENED BIN**: Pink/blue bucket with LID REMOVED, showing white/black bags inside (NO app UI)
+      → Container is opened, can see waste bags exist → "visible" ✅
 
-  8. **GENERAL - INSIDE BIN VIEW**: Photo taken inside green bin, looking down at tied white bags
-     → Photo taken from inside, bags ARE the visible waste → "visible" ✅
+  12. **GENERAL - INSIDE BIN VIEW**: Photo taken inside green bin, looking down at tied white bags (NO app UI)
+      → Photo taken from inside, bags ARE the visible waste → "visible" ✅
 
-  9. **GENERAL - OPENED BIN FROM ABOVE**: Black bin photographed from above (lid off), showing plastic bags with food packaging/skewers inside
-     → Bin is open, photographed from above, can see waste bags and contents → "visible" ✅
+  13. **GENERAL - OPENED BIN FROM ABOVE**: Black bin photographed from above (lid off), showing plastic bags with food packaging/skewers inside (NO app UI)
+      → Bin is open, photographed from above, can see waste bags and contents → "visible" ✅
 
   ❌ vs ✅ CRITICAL DISTINCTION:
   - Tied white bag on ground (photo from outside) → "opaque" ❌
