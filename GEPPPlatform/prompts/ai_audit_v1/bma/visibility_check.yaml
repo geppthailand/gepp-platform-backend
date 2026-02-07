@@ -30,19 +30,23 @@ template: |
   • Empty container (no waste) → "empty"
   • Screenshot/App UI visible → "artificial"
   • Photo too blurry → "blur"
-  • **WASTE SIGN ONLY**: If you ONLY see a sign (like "ไม่มีขยะอันตราย" or waste category signs) with NO actual waste items visible → "artificial"
+  • **WASTE SIGN ONLY**: If you ONLY see a warning/category SIGN (like red sign "ไม่มีขยะอันตราย") with NO actual waste items → "artificial"
+    - WARNING: Product branding (Panasonic, Coca-Cola, etc.) is NOT a "sign" - it's part of the actual waste item!
+    - Fluorescent tube with "Panasonic" logo → "visible" (actual hazardous waste) ✅
+    - Red sign on rocks saying "no hazardous waste" → "artificial" (just a sign) ❌
 
   --- GENERAL WASTE EXCEPTION ---
   **If claimed_type is "general" (ขยะทั่วไป):**
 
   ✅ Accept "visible" if ANY of these apply:
   - Container OPENED (lid removed) showing bags inside → "visible"
-  - Can see THROUGH outer bag to identify waste inside → "visible"
-  - Can NAME specific items inside (plastic bags, wrappers, packaging) → "visible"
+  - Can see THROUGH outer bag to identify waste TYPE → "visible"
+  - Can NAME waste category (food packaging, plastic bags, wrappers) even if not crystal clear → "visible"
   - **Photo taken INSIDE bin** (looking down at bags) - the bags ARE the waste → "visible"
   - Example: Pink/blue bin with lid removed, showing garbage bags → "visible"
-  - Example: Black bin with clear/semi-clear bag showing plastic packaging → "visible"
+  - Example: Black bin with translucent bag showing food packaging/bags → "visible" ✅
   - Example: Inside green bin looking down at tied white bags → "visible" ✅
+  - Example: Semi-clear bag with food packaging, can identify it's packaging waste → "visible" ✅
 
   ❌ Still reject "opaque" if:
   - Bag is TIED and OPAQUE and photographed from OUTSIDE on ground → "opaque"
