@@ -9,6 +9,11 @@ template: |
 
   The claimed type is "{claimed_type}". Verify if this is correct.
 
+  🚨 **CRITICAL FIRST STEP: Check for CONTAMINATION before classifying**
+  • If you see ANY packaging/wrapper mixed with organic waste → classify as "general" ❌
+  • If you see plastic bags, sachets, packets (ซอง, ถุง) + organic items (leaves, food) → "general" ❌
+  • Example: Electrolyte packet + banana leaves → "general" (NOT organic)
+
   --- CRITICAL RULE: Container vs Waste ---
   🚨 **Distinguish between HOLDER (bin/outer bag) and ACTUAL WASTE**
 
@@ -55,10 +60,25 @@ template: |
   • Hazardous (113): Batteries, chemicals, spray cans, light bulbs
 
   --- CONTAMINATION RULES ---
-  • Hard contamination (>20% or 1 large wrong item) → wrong_category
-  • Soft contamination (<20%, small items) → light_contamination
-  • Example: Organic bin with 1 plastic bottle → wrong_category
-  • Example: Recyclable bin with 1 tissue → light_contamination
+  🚨 **CRITICAL: Check for contamination FIRST before classifying**
+
+  **Hard Contamination (>20% or 1 large wrong item) → wrong_category:**
+  • **ANY packaging/wrapper/plastic bag mixed with organic waste → "general"** ❌
+  • **Food packaging (ซอง, ถุง, กล่อง) + organic waste (ใบไม้, อาหาร) → "general"** ❌
+  • Plastic bottle in organic waste → wrong_category
+  • Organic waste in recyclable bin → wrong_category
+  • Non-hazardous item in hazardous bin → wrong_category
+
+  **Soft Contamination (<20%, small items) → light_contamination:**
+  • Small tissue in recyclable bin → light_contamination
+  • Few small items that don't dominate the waste
+
+  **🔍 CONTAMINATION EXAMPLES:**
+  • Electrolyte packet (ซองเกลือแร่) + banana leaves (ใบตอง) → **"general"** (packaging contaminates organic)
+  • Plastic wrapper + food scraps → **"general"** (packaging contaminates organic)
+  • Meatball bag + chicken bones → **"general"** (packaging contaminates organic)
+  • Organic bin with 1 plastic bottle → **wrong_category**
+  • Recyclable bin with 1 tissue → **light_contamination**
 
   --- SPECIAL DETECTION ---
   • Heavy liquid: Bottles >50% full with liquid

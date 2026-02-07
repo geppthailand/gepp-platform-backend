@@ -12,6 +12,14 @@ template: |
 
   **CRITICAL RULE**: You must be able to NAME at least 2-3 SPECIFIC objects inside.
 
+  **🚨 EXCEPTION: Bag INSIDE Container = Always Visible (ALL claimed_type)**
+  • If the photo shows **plastic bag(s) INSIDE a bin/container/box**:
+    - The bin IS the holder (not waste)
+    - The bag(s) IS the waste
+    - You can SEE the bag → **"visible"** ✅
+    - This applies to ALL types: general, organic, recyclable, hazardous
+    - Example: Black bin + bag inside (any bag: clear, cloudy, tied) → **"visible"**
+
   ✅ YES = "visible" - You can NAME specific objects:
   - "I see a Lay's can and plastic bottle" (2 specific items named)
   - "I see banana peels and rice" (2 specific items named)
@@ -37,23 +45,24 @@ template: |
     - Fluorescent tube with "Panasonic" logo → "visible" (actual hazardous waste) ✅
     - Red sign on rocks saying "no hazardous waste" → "artificial" (just a sign) ❌
 
+  --- UNIVERSAL RULE: Bag INSIDE Container (ALL TYPES) ---
+  **🚨 CRITICAL: This rule applies to ALL claimed_type (general, organic, recyclable, hazardous)**
+
+  **If you see plastic bag(s) INSIDE a bin/container:**
+  • The bin/container is the HOLDER (not the waste)
+  • The bag(s) inside IS the waste → **"visible"**
+  • This applies even if the bag is cloudy/tied (you can SEE the bag exists)
+  • Examples:
+    - Black bin + white cloudy bag inside → bag IS waste → **"visible"** ✅
+    - Cardboard box + clear bag with items inside → bag IS waste → **"visible"** ✅
+    - Bin photographed from above showing bags inside → **"visible"** ✅
+
   --- GENERAL WASTE EXCEPTION ---
   **If claimed_type is "general" (ขยะทั่วไป):**
 
-  **🚨 CRITICAL: Bag INSIDE Container = Waste (Visible)**
-  • If you see **plastic bag(s) INSIDE a bin/container** (bin/container is the holder, NOT the bag):
-    - The bag itself IS the waste → **"visible"**
-    - This applies even if the bag is cloudy/tied (because you can SEE the bag exists)
-  • Example: Black bin (holder) + white cloudy bag inside → bag IS waste → **"visible"** ✅
-  • Example: Cardboard box (holder) + white bag with label inside → bag IS waste → **"visible"** ✅
-
-  ✅ Accept "visible" if ANY of these apply:
-  - **Plastic bag(s) visible INSIDE a bin/container** → The bag IS the waste → "visible"
-  - **OPENED BIN photographed from above** (looking down into bin) showing bags/waste inside → "visible"
-  - Container OPENED (lid removed) showing bags inside → "visible"
+  ✅ Accept "visible" if ANY of these apply (IN ADDITION to universal bag-in-container rule above):
   - Can see THROUGH outer bag to identify waste TYPE → "visible"
   - Can NAME waste category (food packaging, plastic bags, wrappers) even if not crystal clear → "visible"
-  - **Photo taken INSIDE bin** (looking down at bags) - the bags ARE the waste → "visible"
   - Example: Pink/blue bin with lid removed, showing garbage bags → "visible"
   - Example: Black bin photographed from above with plastic bags containing food packaging inside → "visible" ✅
   - Example: Black bin with translucent bag showing food packaging/bags → "visible" ✅
