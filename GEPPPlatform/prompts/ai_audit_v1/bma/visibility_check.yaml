@@ -17,6 +17,8 @@ template: |
   - "I see banana peels and rice" (2 specific items named)
   - "I see a Coca-Cola bottle and paper cup" (2 specific items named)
   - "I see chicken bones and vegetable scraps" (2 specific items named)
+  - "I see plastic bags with sauce stains inside a bin" (bag inside container = visible)
+  - "I see a white bag sitting inside a black bin" (bag inside container = visible)
 
   ❌ NO = "opaque" - You CANNOT name specific objects:
   - "I see yellow/green colors but can't identify what items they are" → OPAQUE
@@ -38,7 +40,15 @@ template: |
   --- GENERAL WASTE EXCEPTION ---
   **If claimed_type is "general" (ขยะทั่วไป):**
 
+  **🚨 CRITICAL: Bag INSIDE Container = Waste (Visible)**
+  • If you see **plastic bag(s) INSIDE a bin/container** (bin/container is the holder, NOT the bag):
+    - The bag itself IS the waste → **"visible"**
+    - This applies even if the bag is cloudy/tied (because you can SEE the bag exists)
+  • Example: Black bin (holder) + white cloudy bag inside → bag IS waste → **"visible"** ✅
+  • Example: Cardboard box (holder) + white bag with label inside → bag IS waste → **"visible"** ✅
+
   ✅ Accept "visible" if ANY of these apply:
+  - **Plastic bag(s) visible INSIDE a bin/container** → The bag IS the waste → "visible"
   - **OPENED BIN photographed from above** (looking down into bin) showing bags/waste inside → "visible"
   - Container OPENED (lid removed) showing bags inside → "visible"
   - Can see THROUGH outer bag to identify waste TYPE → "visible"
@@ -52,9 +62,10 @@ template: |
   - Example: Opened bin with multiple plastic bags inside (meatball bags, skewers, dirty plastic) → "visible" ✅
 
   ❌ Still reject "opaque" if:
-  - Bag is TIED and OPAQUE and photographed from OUTSIDE on ground → "opaque"
+  - **Single cloudy/opaque bag on ground/floor** (bag IS the container, not inside anything) → "opaque" ❌
+  - **Tied white cloudy bag photographed from OUTSIDE** (bag = container, can't see inside) → "opaque" ❌
   - Container is CLOSED (lid on, not visible inside) → "opaque"
-  - Single opaque tied bag on ground/floor (external photo, can't identify contents) → "opaque"
+  - **IMPORTANT**: If bag is NOT inside a bin/container, it must be clear enough to NAME items inside
 
   --- EXAMPLES ---
   ❌ OPAQUE Examples (MUST reject):
