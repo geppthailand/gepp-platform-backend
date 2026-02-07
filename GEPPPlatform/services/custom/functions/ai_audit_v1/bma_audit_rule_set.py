@@ -528,8 +528,21 @@ def process_decision(claimed_type: str, ai_json: Dict[str, Any]) -> Dict[str, An
     elif claimed_type == "hazardous":
         logger.info(f"[BMA_AUDIT] ☢️  CASE 2: HAZARDOUS WASTE - haz_detected={haz_detected}, main={main}, pct={pct}")
 
+        # Rule: Real Hazardous Items Visible FIRST
+        if haz_detected:
+             logger.info(f"[BMA_AUDIT] ⚠️  Hazardous items detected! pct={pct}")
+             # เช็ค Contamination
+             if pct > 20:
+                 logger.info(f"[BMA_AUDIT] ✅ Decision: Heavy contamination (pct={pct}) → reject HC 113")
+                 return {"code": "hc", "status": "reject", "dt": "113", "wi": items}
+             if pct > 0:
+                 logger.info(f"[BMA_AUDIT] ✅ Decision: Light contamination (pct={pct}) → approve LC 113")
+                 return {"code": "lc", "status": "approve", "dt": "113", "wi": items}
+             logger.info(f"[BMA_AUDIT] ✅ Decision: Pure hazardous (pct=0) → approve CC 113")
+             return {"code": "cc", "status": "approve", "dt": "113", "wi": []}
+
         # Rule: Wrong Category Detection
-        # ถ้าไม่เจอ Haz จริงๆ แต่เจอของประเภทอื่น
+        # ถ้าไม่เจอ Haz จริงๆ (haz_detected=false) แต่เจอของประเภทอื่น
         if not haz_detected:
             # False Friends (M-150/Water bottles) -> WC 298
             if main == "recyclable" or "ขวด" in str(items):
@@ -546,21 +559,14 @@ def process_decision(claimed_type: str, ai_json: Dict[str, Any]) -> Dict[str, An
                 logger.info(f"[BMA_AUDIT] ✅ Decision: Organic waste in hazardous bin → reject WC 77")
                 return {"code": "wc", "status": "reject", "dt": "77", "wi": ["ขยะอินทรีย์"]}
 
-        # Rule: Real Hazardous Items Visible
-        if haz_detected:
-             logger.info(f"[BMA_AUDIT] ⚠️  Hazardous items detected! pct={pct}")
-             # เช็ค Contamination
-             if pct > 20:
-                 logger.info(f"[BMA_AUDIT] ✅ Decision: Heavy contamination (pct={pct}) → reject HC 113")
-                 return {"code": "hc", "status": "reject", "dt": "113", "wi": items}
-             if pct > 0:
-                 logger.info(f"[BMA_AUDIT] ✅ Decision: Light contamination (pct={pct}) → approve LC 113")
-                 return {"code": "lc", "status": "approve", "dt": "113", "wi": items}
-             logger.info(f"[BMA_AUDIT] ✅ Decision: Pure hazardous (pct=0) → approve CC 113")
-             return {"code": "cc", "status": "approve", "dt": "113", "wi": []}
+            # ⚠️ CRITICAL FIX: AI classified as "hazardous" but haz_detected=false
+            # This means AI is confused or image is unclear -> WC with unknown category
+            if main == "hazardous":
+                logger.info(f"[BMA_AUDIT] ✅ Decision: AI said hazardous but haz_detected=false → reject WC 94 (default to general)")
+                return {"code": "wc", "status": "reject", "dt": "94", "wi": ["ไม่พบขยะอันตราย แต่อาจเป็นขยะทั่วไป"]}
 
-        # ถ้าไม่เจออะไรเลย (empty/unclear)
-        logger.info(f"[BMA_AUDIT] ✅ Decision: No identifiable waste found → reject UI")
+        # ถ้าไม่เจออะไรเลย (empty/unclear) - This should rarely happen now
+        logger.info(f"[BMA_AUDIT] ⚠️  Decision: No identifiable waste found → reject UI")
         return {"code": "ui", "status": "reject", "dt": "0", "wi": ["ไม่พบขยะอันตราย"]}
 
 

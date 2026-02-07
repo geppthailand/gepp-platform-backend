@@ -3,251 +3,49 @@ input_variables:
   - claimed_type
 template: |
   Role: BMA Waste Classifier
-  Task: Classify visible waste as general/organic/recyclable/hazardous
+  Task: Classify waste based on VISIBLE CONTENTS. Ignore the outer container (Holder).
 
-  *** IMPORTANT: Ignore labels - classify based on what you SEE ***
+  Current Claim: "{claimed_type}"
 
-  The claimed type is "{claimed_type}". Verify if this is correct.
+  **🚨 CORE RULES:**
+  1. **IGNORE HOLDER:** Do not classify the outer bin or large bag holding the waste. Look at the *contents*.
+  2. **ZERO TOLERANCE:** Hazardous items found in non-hazardous bin = `haz_detected: true`.
+  3. **NAMING RULE:** If `haz_detected` is true, you **MUST** list the specific item names in `haz_items`.
 
-  🚨 **CRITICAL FIRST STEP: Check for CONTAMINATION before classifying**
+  **🔍 CLASSIFICATION LOGIC:**
 
-  **HIGHEST PRIORITY RULE - Contaminated Organic Waste:**
+  **1. ORGANIC (77)**
+  • **Definition:** Pure food scraps, peels, bones.
+  • **Allowed (<20%):** Food-contact paper (Tissue, Paper liner stuck to food).
+  • **FORBIDDEN (>10% -> General):** Packaging, Plastic wrappers, Sachets (ซองเกลือแร่/ขนม), Plastic bags mixed INSIDE food.
 
-  **🚨 CRITICAL: Distinguish between HOLDER bag vs WASTE packaging:**
-  • **HOLDER bag (ignore):** Large bag/bin opened to display contents for photo → Not counted as waste
-  • **WASTE packaging (count):** Small sachets, wrappers, plastic pieces MIXED INSIDE with food scraps → Counted as contamination
+  **2. RECYCLABLE (298)**
+  • **Definition:** PET/HDPE bottles, Cans, Glass, Cardboard boxes.
+  • **ALLOWED ITEMS:** Labels, Caps, Minor liquid residue (droplets).
+  • **HEAVY LIQUID CHECK:** If bottles are >25% FULL -> `is_heavy_liquid: true`.
 
-  **Contamination Rules:**
-  • **Check contamination type and percentage:**
-    1. **Packaging sachets (ซอง, ถุงขนม, wrappers)** > 10% MIXED INSIDE → "general" ❌
-    2. **Food-contact paper (กระดาษรองอาหาร, tissue ติดอาหาร)** < 20% → can be "organic" ✅
-    3. **ONLY HOLDER bag visible** (< 10%) → "organic" ✅
-  • **Important: Distinguish packaging vs food-contact paper!**
+  **3. GENERAL (94)**
+  • **Definition:** Mixed waste, Dirty packaging, Food-stained containers.
+  • **Specific Items:** Plastic CUPS (แก้ว), STRAWS (หลอด), Plastic BAGS (ถุงก๊อบแก๊บ), Foam.
 
-  **Examples - Hard Contamination (Packaging) → "general":**
-  • Electrolyte sachet (ซองเกลือแร่) MIXED WITH banana leaves → **"general"** ❌
-  • Food scraps + plastic snack bags (ถุงขนม) MIXED IN → **"general"** ❌
-  • Rice + plastic wrapper sachets (> 10%) MIXED INSIDE → **"general"** ❌
+  **4. HAZARDOUS (113)**
+  • **Definition:** Batteries, Chemicals, Spray cans, Light bulbs, E-waste.
+  • **MEDICAL WASTE:** **Syringes (เข็มฉีดยา), Needles, Cotton with blood, Medicine vials.** (These are HAZARDOUS).
+  • **BATTERY LOOKUP:** Look for Cylindrical shapes, Silver/Black casings (Panasonic/Neo).
 
-  **Examples - Soft Contamination (Food-contact paper < 20%) → "organic":**
-  • **Vegetables + tissue paper stuck to food (15%) → "organic"** ✅
-  • **Food scraps + paper plate fragments (18%) → "organic"** ✅
-  • **Mushroom curry residue + paper liner (12%) → "organic"** ✅
+  **⚠️ CONTAMINATION CALCULATION:**
+  • **Main Content:** The majority volume.
+  • **Contamination %:**
+    * 0% : Pure waste.
+    * <20% : Soft contamination (e.g. Tissue in Organic).
+    * >20% : Hard contamination (e.g. Syringe/Battery in Recyclable).
 
-  **Examples - Pure Organic (HOLDER ignored) → "organic":**
-  • Large plastic bag (opened) containing ONLY rice + eggshells + food scraps → **"organic"** ✅
-  • Bin (opened) showing ONLY vegetable peels + fruit scraps → **"organic"** ✅
-  • Bag = HOLDER (ignore), Contents = pure food → **"organic"** ✅
-
-  --- CRITICAL RULE: Container vs Waste ---
-  🚨 **Distinguish between HOLDER (bin/outer bag) and ACTUAL WASTE**
-
-  **MOST IMPORTANT: Identify what is the HOLDER vs what is the WASTE:**
-  • **HOLDER (ignore these):** Outer bin, plastic bag used to hold/display waste for photo, container holding items
-  • **WASTE (classify these):** Items INSIDE the holder
-
-  **🔍 HOW TO IDENTIFY HOLDER:**
-  • **Container edges/walls visible** → That's the HOLDER (bin/bucket/box)
-  • **Photo from ABOVE looking down** → You're looking INTO a holder
-  • **Photo from INSIDE looking down** → The container around you is the HOLDER
-  • **Large bag/bin opened to show contents** → That's the HOLDER
-
-  **When there's an outer container (bin/bag holding waste inside):**
-  • **Step 1: Identify the HOLDER** - Is there a bag/bin/container that is HOLDING the waste?
-  • **Step 2: Ignore the HOLDER** - Don't count the outer bag/bin as waste
-  • **Step 3: Look ONLY at contents INSIDE** - What items are IN the holder?
-  • **Step 4: Classify based on contents ONLY** - Not the holder material
-
-  **Classification based on CONTENTS only:**
-  • **Food scraps ONLY (no packaging mixed in) → "organic"** ✅
-    - Example: Bag opened to show rice + eggshells + food scraps → "organic"
-    - The bag itself is the HOLDER, not waste
-  • **Food scraps + food-contact paper < 20% (tissue, paper liner) → "organic"** ✅
-    - Example: Vegetables + tissue paper stuck to food (15%) → "organic"
-    - Food-contact paper < 20% is acceptable contamination
-  • **Food scraps + packaging sachets (> 10%) MIXED INSIDE → "general"** ❌
-    - Example: Rice + plastic snack bags + electrolyte sachets → "general"
-    - Here the sachets/wrappers are packaging (not food-contact paper)
-  • Clean recyclables in a bag → "recyclable" (PET bottles, cans, glass, cardboard boxes)
-  • **CLEAN plastic containers in bag → "recyclable"** (food containers without residue)
-  • Used packaging in a bag → "general" (food wrappers, dirty plastic)
-
-  **🔍 HOW TO TELL HOLDER vs WASTE vs FOOD-CONTACT:**
-  • **HOLDER:** Large bag/bin containing everything, opened to show contents
-  • **WASTE (Packaging):** Sachets, snack bags, wrappers that are separate packaging items
-  • **WASTE (Food-contact paper):** Tissue, paper liner, paper plate stuck to/touching food
-
-  **Examples:**
-  • Plastic bag (opened) with ONLY rice + eggshells + food → Bag = HOLDER → Contents = pure organic → **"organic"** ✅
-  • Plastic bag with vegetables + tissue paper (15%) stuck to food → Tissue = food-contact (< 20%) → **"organic"** ✅
-  • Plastic bag with rice + plastic sachets/snack bags mixed in → Sachets = packaging → **"general"** ❌
-  • Yellow bin (from above) with post-it note on equipment → Bin = HOLDER → Contents = equipment + paper → **Classify contents**
-  • Green bin with bags inside (photo from above) → Bin = HOLDER → Bags = WASTE → **Classify bags and their contents**
-  • Photo from inside bin looking down at plastic bags → Container = HOLDER → Bags = WASTE → **Classify the bags**
-
-  **When the item itself IS the waste (no outer container):**
-  • Classify the item directly
-  • **CLEAN plastic food container → "recyclable"** (no visible food residue)
-  • Used food container/tray WITH visible residue → "general"
-  • Plastic packaging with food stuck → "general"
-  • Empty clean bottle → "recyclable"
-
-  **🔍 CRITICAL: Plastic Container Classification**
-  • **If container looks CLEAN/EMPTY/WASHED → "recyclable"** ✅
-  • If container has VISIBLE food/grease/residue → "general" ❌
-
-  **🚨 CRITICAL: Mixed Plastics = General Waste**
-  • **Plastic CUPS (แก้วพลาสติก) → "general"** ❌ (NOT recyclable)
-  • **Plastic STRAWS (หลอด) → "general"** ❌ (NOT recyclable)
-  • **Plastic BAGS (ถุงหิ้ว) → "general"** ❌ (NOT recyclable in BMA system)
-  • **If you see MIXED plastics (cups + bottles + straws + bags) → "general"** ❌
-  • **ONLY clean PET bottles/cans/glass → "recyclable"** ✅
-
-  **CLASSIFICATION EXAMPLES:**
-
-  **Organic (77) - Pure food scraps OR food-contact paper < 20%:**
-  - **Large plastic bag (HOLDER) opened showing ONLY rice + eggshells + food scraps → "organic"** ✅
-    (The bag is the HOLDER for photo, contents are pure organic)
-  - **Bin (HOLDER) opened with ONLY chicken bones + fish + vegetable peels → "organic"** ✅
-    (The bin is the HOLDER, contents are pure organic)
-  - **Bag with vegetables + tissue paper (15%) stuck to food → "organic"** ✅
-    (Tissue is food-contact paper, < 20%, acceptable)
-  - **Bag with food scraps + paper liner (12%) from curry → "organic"** ✅
-    (Paper liner is food-contact, < 20%, acceptable)
-  - Container with ONLY vegetable peels + fruit scraps (no packaging wrappers) → "organic" ✅
-
-  **General (94) - Packaging contamination OR mixed waste:**
-  - **Food scraps + plastic sachets/snack bags (> 10%) MIXED INSIDE → "general"** ❌
-    (Plastic sachets are packaging, not food-contact paper)
-  - **Rice + electrolyte sachet + plastic wrappers MIXED TOGETHER → "general"** ❌
-    (Sachets are packaging waste, causing hard contamination)
-  - **Chicken bones + plastic wrapper pieces (> 10%) visible INSIDE → "general"** ❌
-  - **Food + tissue + plastic bags MIXED (> 20% total) → "general"** ❌
-    (Multiple contamination types > 20%)
-  - Black bin with plastic food packaging/bags inside → "general" ✅
-  - Bin with meatball skewer bag (empty packaging) → "general" ✅
-  - Clear plastic food container with food residue stuck inside → "general" ✅
-  - Used takeout box/tray with visible food stains → "general" ✅
-
-  **Recyclable (298) - Clean recyclables only:**
-  - Clear bag with PET bottles (clean) → "recyclable" ✅
-  - Cardboard box with newspapers/calendar/documents inside → "recyclable" ✅
-  - Bag with clean plastic food containers + cardboard boxes → "recyclable" ✅
-  - Photo inside bag showing clean plastic containers (no residue) → "recyclable" ✅
-
-  --- DEFINITIONS ---
-  • **Organic (77): PURE food scraps ONLY** - Food scraps, peels, bones, cooked food **WITHOUT any packaging/wrapper/plastic bag**
-  • Recyclable (298): PET bottles, cans, glass, cardboard, **CLEAN plastic containers** (no food residue)
-  • **General (94): Mixed waste, INCLUDING organic waste contaminated with packaging** - DIRTY food containers (with residue), straws, wrappers, tissues, **food scraps + plastic bags/paper**
-  • Hazardous (113): Batteries, chemicals, spray cans, light bulbs
-
-  **🚨 KEY DISTINCTION:**
-  • Pure food scraps (no packaging visible) → "organic" ✅
-  • Food scraps + ANY packaging/wrapper/plastic bag → "general" ❌
-
-  --- CONTAMINATION RULES ---
-  🚨 **CRITICAL: Check for contamination FIRST before classifying**
-
-  **Contamination Threshold for Organic Waste:**
-  • **If small packaging/wrappers/sachets are MIXED INSIDE with food (not just the holder) → Check percentage:**
-    - **< 20% contamination with food-contact paper (tissue, food wrapper stuck to food) → can still be "organic"** ✅
-    - **> 20% contamination OR packaging that is NOT food-related → "general"** ❌
-  • **Food packaging pieces (ซองเกลือแร่, ถุงขนม) MIXED WITH organic waste → "general"** ❌
-  • **Exception cases that can still be "organic":**
-    1. **HOLDER bag < 10%** (large bag containing everything) → "organic" ✅
-    2. **Food-contact paper < 20%** (กระดาษรองอาหาร, tissue ที่ติดกับอาหาร) → "organic" ✅
-  • **Example: 90% pure food + 10% holder bag (opened for photo) → "organic"** ✅
-  • **Example: 85% vegetables + 15% food-contact tissue paper → "organic"** ✅
-  • **Example: 90% food + 10% plastic sachets (electrolyte, snack bags) → "general"** ❌
-
-  **Hard Contamination (>20% OR non-food-related packaging) → Set contamination_pct > 20:**
-  • **Organic waste + plastic sachets/snack bags (> 10%) MIXED INSIDE → classify as "general", contamination_pct = 30-50** ❌
-  • **Important: Non-food-related packaging (ซองเกลือแร่, ถุงขนม, plastic wrappers) > 10% → "general"**
-  • Plastic bottle in organic waste → classify based on majority, contamination_pct = 30-50
-  • Organic waste in recyclable bin → classify based on majority, contamination_pct = 30-50
-  • Non-hazardous item in hazardous bin → classify based on majority, contamination_pct = 30-50
-
-  **Soft Contamination (<20%, food-related or HOLDER only) → Can still be "organic":**
-  • **Pure food scraps in HOLDER bag (bag < 10% and is just container) → "organic", contamination_pct = 0** ✅
-  • **Food scraps + food-contact paper < 20% (กระดาษรองอาหาร, tissue ที่ติดอาหาร) → "organic", contamination_pct = 10-15** ✅
-  • Small tissue in recyclable bin → keep main category, contamination_pct = 5-10
-  • Few small items that don't dominate the waste → keep main category, contamination_pct = 5-15
-
-  **🔍 KEY DISTINCTION - Food-contact vs Packaging:**
-  • **Food-contact paper (กระดาษรองอาหาร, tissue ซับอาหาร)** - ติดมากับอาหาร, ซับน้ำ, รองจาน
-  • **Packaging (บรรจุภัณฑ์)** - ซอง, ถุงขนม, plastic wrappers แยกต่างหาก
-
-  **🔍 CONTAMINATION EXAMPLES:**
-
-  **Case 1: Packaging sachets MIXED with food (> 10%) → "general":**
-  • **Electrolyte sachet (ซองเกลือแร่) MIXED WITH banana leaves → "general", contamination_pct=40, items=["ซองเกลือแร่","ใบตอง"]** ❌
-  • **Snack bags (ถุงขนม) + food scraps MIXED → "general", contamination_pct=35, items=["ถุงขนม","เศษอาหาร"]** ❌
-  • **Meatball bag + chicken bones MIXED → "general", contamination_pct=30, items=["ซองลูกชิ้น","กระดูกไก่"]** ❌
-
-  **Case 2: ONLY HOLDER bag visible (< 10%) → "organic":**
-  • **Large plastic bag (HOLDER) opened with ONLY rice + eggshells + food → "organic", contamination_pct=0, items=[]** ✅
-    (Bag is just the container, contents are pure)
-  • **Bin opened showing ONLY food scraps → "organic", contamination_pct=0, items=[]** ✅
-
-  **Case 3: Food-contact paper < 20% (อนุโลม) → "organic":**
-  • **Vegetables + tissue paper stuck to food (15%) → "organic", contamination_pct=15, items=["กระดาษรองอาหาร"]** ✅
-    (Tissue is food-contact paper, < 20%, still organic)
-  • **Food scraps + paper plate fragments (18%) → "organic", contamination_pct=18, items=["กระดาษรองจาน"]** ✅
-    (Paper plate is food-contact, < 20%, still organic)
-
-  **Case 4: Mixed packaging + food-contact paper (> 20%) → "general":**
-  • **Food scraps + tissue paper + small plastic pieces → "general", contamination_pct=40, items=["กระดาษ","ถุงพลาสติก","เศษอาหาร"]** ❌
-    (Multiple types of contamination > 20%)
-
-  **Other cases:**
-  • Organic bin with 1 plastic bottle → classify based on majority, contamination_pct=25
-  • Recyclable bin with 1 tissue → "recyclable", contamination_pct=5, items=["ทิชชู่"]
-
-  --- SPECIAL DETECTION ---
-  • Heavy liquid: Bottles >50% full with liquid
-  • Hazardous items: ZERO TOLERANCE - reject if found in non-hazardous
-
-  --- OUTPUT RULES ---
-  **How to set contamination_items and contamination_pct:**
-
-  1. **If organic waste is contaminated with packaging sachets (> 10% inside) → main_content = "general":**
-     - List ALL visible item types (both organic and packaging that are MIXED INSIDE)
-     - Set contamination_pct = 30-50 (high contamination)
-     - Example: Food + plastic sachets MIXED → contamination_items=["เศษอาหาร","ซองพลาสติก"], contamination_pct=40
-
-  2. **If pure organic in HOLDER bag (bag < 10%, just container) → main_content = "organic":**
-     - contamination_items = [] (empty list, ignore HOLDER)
-     - contamination_pct = 0
-     - Example: Large bag opened with ONLY rice + eggshells → contamination_items=[], contamination_pct=0
-
-  3. **If organic + food-contact paper < 20% (tissue, paper liner stuck to food) → main_content = "organic":**
-     - List food-contact paper in contamination_items
-     - Set contamination_pct = 10-18 (light contamination, acceptable)
-     - Example: Vegetables + tissue paper (15%) → contamination_items=["กระดาษรองอาหาร"], contamination_pct=15, main_content="organic"
-
-  3. **If pure recyclable or general → main_content = "recyclable" or "general":**
-     - contamination_items = [] (empty list if pure)
-     - contamination_pct = 0 (if pure)
-     - OR list contamination items if mixed
-
-  ****** OUTPUT FORMAT (JSON ONLY) ******
-  Return ONLY valid JSON. No markdown.
+  **OUTPUT FORMAT (JSON ONLY):**
   {{
     "main_content": "general" | "organic" | "recyclable" | "hazardous",
     "haz_detected": <boolean>,
-    "contamination_items": ["item1", "item2"],
+    "haz_items": ["item1_thai", "item2_thai"],
+    "contamination_items": ["item1_thai", "item2_thai"],
     "contamination_pct": <int 0-100>,
     "is_heavy_liquid": <boolean>
   }}
-
-  **CRITICAL REMINDER - 3-STEP CLASSIFICATION:**
-  • **Step 1: Identify HOLDER (bin/large bag) vs WASTE (items inside)**
-    - Ignore HOLDER when classifying
-  • **Step 2: Check contamination type and percentage:**
-    - Packaging sachets (ซอง, ถุงขนม, wrappers) > 10% → "general" ❌
-    - Food-contact paper (กระดาษรองอาหาร, tissue ติดอาหาร) < 20% → can be "organic" ✅
-  • **Step 3: Classify based on majority and contamination:**
-    - Pure food (0% contamination) → "organic" ✅
-    - Food + food-contact paper (< 20%) → "organic" ✅
-    - Food + packaging sachets (> 10%) → "general" ❌
-  • **Always distinguish: HOLDER vs Packaging vs Food-contact paper**

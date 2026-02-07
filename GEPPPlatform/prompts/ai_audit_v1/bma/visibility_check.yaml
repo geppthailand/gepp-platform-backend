@@ -2,196 +2,39 @@ _type: prompt
 input_variables:
   - claimed_type
 template: |
-  Role: BMA Waste Visibility Checker
-  Task: Determine if you can see the waste clearly enough to identify it.
+  Role: BMA Waste Visibility Auditor
+  Task: Determine if the waste in the image is REAL and VISIBLE enough to identify specific items.
 
-  **🚨 YOUR ONLY JOB: Answer "Can I identify specific waste items?"**
+  **🚨 STEP 1: DETECT ARTIFICIAL / APP UI (Priority #1)**
+  Check carefully for ANY digital elements. If found -> return "artificial".
+  • **Top/Bottom Bars:** Look at the very top and bottom edges for black/white bars, status icons (Time, Battery), or navigation buttons.
+  • **Text Overlays:** Look for floating text like "made-in-china", "ครอบตัด", "Save", "Edit", or website URLs.
+  • **App UI:** Buttons, Menus, Social Media frames (LINE/Facebook).
+  • **Stock Photos:** Watermarks, Perfect studio lighting, Unnatural composition.
 
-  **⚠️ STEP 0 - CHECK FOR APP/SCREENSHOT UI FIRST:**
-  Before doing anything else, check if this is a screenshot or app UI:
-  • Look for mobile status bar (time, battery, Wi-Fi)
-  • Look for app buttons/overlays (ภาพตัวอย่าง, เข้าใจแล้ว, etc.)
-  • Look for navigation bars or app interface elements
-  • **If you see ANY app UI → IMMEDIATELY return "artificial"** ❌
+  **STEP 2: CHECK VISIBILITY (Real Photos)**
+  Determine status based on these STRICT rules.
 
-  --- STEP 1 - CRITICAL TEST (ONLY if no app UI) ---
-  **FIRST: Check photo context/angle:**
-  • Is there a bin/container/box visible in the photo?
-  • Is the photo taken from ABOVE looking down?
-  • Is the photo taken from INSIDE a container?
-  • Can you see container edges/walls?
+  ❌ **OPAQUE (Fail)** - Return "opaque" if ANY of these apply:
+  1. **Cloudy/Milky Bag Rule:** The bag is Translucent White, Frosted, or Matte (Standard convenience store bag) AND it is TIED/CLOSED.
+     * *Reason:* "Cannot identify specific items through cloudy plastic."
+  2. **Standalone Bag:** The bag is sitting on the floor/ground (NOT inside a bin/container) AND contents are not clearly distinguishable.
+  3. **Hidden Contents:** You see a bag/container but CANNOT name 2-3 specific waste items inside (only vague colors/shapes).
+  4. **Closed Container:** Bin with lid on, or fully opaque bag (Black/Blue) tied shut.
 
-  **If YES to any above** → Items are INSIDE a container → **Skip to "visible"** ✅
+  ✅ **VISIBLE (Pass)** - Only if NONE of the above apply, AND:
+  1. **Container Context:** Items are INSIDE an OPEN bin/box/bucket (even if inside bags, if the bin is open and you see the bags -> Visible).
+  2. **Top-Down View:** Photo taken looking DOWN into an open container/pile.
+  3. **Transparency:** Standalone bag is GLASS-LIKE TRANSPARENT (See-through like cling wrap or clear curry bag) where items are crisp and clear.
+  4. **Open Bag:** Bag is OPEN, revealing contents directly.
+  5. **General Waste Exception:** If claimed_type="general" AND it is a PILE of multiple bags/items (context implies mixed waste).
 
-  **If NO (isolated bag/item)** → Ask yourself: "If I remove the label, can I NAME specific objects inside?"
+  **CRITICAL EDGE CASE ( The "Milky Bag" ):**
+  • **Case A:** White cloudy bag, TIED, sitting on concrete floor. -> **OPAQUE** ❌ (Can't see inside clearly, no container context).
+  • **Case B:** Same bag, but INSIDE a green bin. -> **VISIBLE** ✅ (The bin is the holder, the bag is the waste).
 
-  **CRITICAL RULE**: You must be able to NAME at least 2-3 SPECIFIC objects inside (if not in container context).
-
-  **🚨 EXCEPTION: Bag INSIDE Container = Always Visible (ALL claimed_type)**
-  • If the photo shows **plastic bag(s) INSIDE a bin/container/box**:
-    - The bin IS the holder (not waste)
-    - The bag(s) IS the waste
-    - You can SEE the bag → **"visible"** ✅
-    - This applies to ALL types: general, organic, recyclable, hazardous
-    - Example: Black bin + bag inside (any bag: clear, cloudy, tied) → **"visible"**
-    - Example: Green bin photographed from above showing bags inside → **"visible"**
-    - Example: Yellow bin with plastic bag visible inside → **"visible"**
-
-  **🚨 CRITICAL CONTEXT RULE:**
-  • **Photo taken FROM INSIDE bin looking down** → The bags you see ARE the waste → **"visible"** ✅
-  • **Photo taken FROM ABOVE bin (bird's eye view)** → Can see what's inside bin → **"visible"** ✅
-  • **Photo of OPENED bin/container** → Can see contents inside → **"visible"** ✅
-  • **Photo showing items INSIDE a holder/container** → You can see the items exist → **"visible"** ✅
-
-  ✅ YES = "visible" - You can NAME specific objects OR see items inside container:
-  - "I see a Lay's can and plastic bottle" (2 specific items named)
-  - "I see banana peels and rice" (2 specific items named)
-  - "I see a Coca-Cola bottle and paper cup" (2 specific items named)
-  - "I see chicken bones and vegetable scraps" (2 specific items named)
-  - "I see plastic bags with sauce stains inside a bin" (bag inside container = visible)
-  - "I see a white bag sitting inside a black bin" (bag inside container = visible)
-  - "I see items inside a green bin from above" (can see items = visible)
-  - "Photo taken from inside bin showing bags" (bags are visible = visible)
-  - "I see food containers and plastic inside a yellow bin" (items in container = visible)
-  - "I see a post-it note on equipment inside a container" (items visible = visible)
-
-  ❌ NO = "opaque" - You CANNOT name specific objects AND not inside container:
-  - "I see yellow/green colors but can't identify what items they are" (AND no container) → OPAQUE
-  - "I see vague shapes through cloudy plastic" (AND bag on ground, not in bin) → OPAQUE
-  - "I see something that might be food but can't tell what" (AND no container context) → OPAQUE
-  - "There's a label but I can't verify specific contents inside" (AND bag is standalone) → OPAQUE
-  - "I see general waste materials but can't name specific items" (AND not in a bin) → OPAQUE
-  - "Tied/closed white bag with vague colors inside" (AND bag on floor, NOT inside bin) → OPAQUE
-
-  --- SPECIAL CASES ---
-  • Empty container (no waste) → "empty"
-  • Photo too blurry → "blur"
-
-  **🚨 CRITICAL: Screenshot/App UI Detection → "artificial"**
-  **ALWAYS check for app/internet UI elements FIRST before classifying:**
-
-  ✅ Return "artificial" if you see ANY of these:
-  • **Mobile phone status bar** (time, battery, Wi-Fi signal at top)
-  • **App buttons/text overlays** (ภาพตัวอย่าง, เข้าใจแล้ว, etc.)
-  • **Navigation bars** (back button, home button at bottom)
-  • **App interface elements** (overlaid text, buttons, menus)
-  • **Screenshot indicators** (notification icons, screen recording dots)
-  • **Internet/social media UI** (Facebook, LINE, Instagram frames)
-
-  **Examples - "artificial":**
-  • Photo with status bar showing "20:37 น." and 100% battery → **"artificial"** ❌
-  • Photo with button text "ภาพตัวอย่าง เข้าใจแล้ว" at bottom → **"artificial"** ❌
-  • Photo with visible app navigation controls → **"artificial"** ❌
-  • Screenshot from social media app showing post frame → **"artificial"** ❌
-
-  **Examples - "visible" (actual photos):**
-  • Photo of waste in bin, no UI elements → **"visible"** ✅
-  • Photo with ONLY product branding (Coca-Cola logo on bottle) → **"visible"** ✅
-    (Product branding is part of the waste item, not app UI)
-
-  • **WASTE SIGN ONLY**: If you ONLY see a warning/category SIGN (like red sign "ไม่มีขยะอันตราย") with NO actual waste items → "artificial"
-    - WARNING: Product branding (Panasonic, Coca-Cola, etc.) is NOT a "sign" - it's part of the actual waste item!
-    - Fluorescent tube with "Panasonic" logo → "visible" (actual hazardous waste) ✅
-    - Red sign on rocks saying "no hazardous waste" → "artificial" (just a sign) ❌
-
-  --- UNIVERSAL RULE: Bag INSIDE Container (ALL TYPES) ---
-  **🚨 CRITICAL: This rule applies to ALL claimed_type (general, organic, recyclable, hazardous)**
-
-  **If you see plastic bag(s) INSIDE a bin/container:**
-  • The bin/container is the HOLDER (not the waste)
-  • The bag(s) inside IS the waste → **"visible"**
-  • This applies even if the bag is cloudy/tied (you can SEE the bag exists)
-  • Examples:
-    - Black bin + white cloudy bag inside → bag IS waste → **"visible"** ✅
-    - Cardboard box + clear bag with items inside → bag IS waste → **"visible"** ✅
-    - Bin photographed from above showing bags inside → **"visible"** ✅
-
-  --- GENERAL WASTE EXCEPTION ---
-  **If claimed_type is "general" (ขยะทั่วไป):**
-
-  ✅ Accept "visible" if ANY of these apply (IN ADDITION to universal bag-in-container rule above):
-  - Can see THROUGH outer bag to identify waste TYPE → "visible"
-  - Can NAME waste category (food packaging, plastic bags, wrappers) even if not crystal clear → "visible"
-  - **Photo shows CONTEXT of container (bin, bucket, holder)** → "visible"
-  - **Camera angle is from ABOVE or INSIDE container** → "visible"
-  - Example: Pink/blue bin with lid removed, showing garbage bags → "visible"
-  - Example: Black bin photographed from above with plastic bags containing food packaging inside → "visible" ✅
-  - Example: Black bin with translucent bag showing food packaging/bags → "visible" ✅
-  - Example: Inside green bin looking down at tied white bags → "visible" ✅
-  - Example: Semi-clear bag with food packaging, can identify it's packaging waste → "visible" ✅
-  - Example: Opened bin with multiple plastic bags inside (meatball bags, skewers, dirty plastic) → "visible" ✅
-  - Example: Yellow bin from above showing items inside → "visible" ✅
-  - Example: Photo from inside container showing waste items below → "visible" ✅
-
-  ❌ Still reject "opaque" if:
-  - **Single cloudy/opaque bag on ground/floor WITH NO VISIBLE CONTAINER** (bag IS the container, not inside anything) → "opaque" ❌
-  - **Tied white cloudy bag photographed from OUTSIDE WITH NO CONTAINER CONTEXT** (bag = container, can't see inside) → "opaque" ❌
-  - **Container is CLOSED (lid on, cannot see inside)** → "opaque"
-  - **IMPORTANT**: If bag is NOT inside a bin/container AND no container visible in photo, it must be clear enough to NAME items inside
-  - **WARNING**: If you see a bin/container edge in photo → The bag IS inside container → "visible" ✅
-
-  --- EXAMPLES ---
-
-  **🚨 ARTIFICIAL Examples (APP/SCREENSHOT - MUST reject first):**
-  1. Photo showing mobile status bar "20:37 น." with battery icon
-     → Has app UI elements → **"artificial"** ❌
-
-  2. Photo with button text "ภาพตัวอย่าง เข้าใจแล้ว" overlay at bottom
-     → Has app UI overlay → **"artificial"** ❌
-
-  3. Screenshot from LINE/Facebook showing waste photo with post frame
-     → Social media UI visible → **"artificial"** ❌
-
-  4. Photo with navigation bar (back/home buttons) visible
-     → App navigation UI visible → **"artificial"** ❌
-
-  ❌ OPAQUE Examples (MUST reject):
-  5. Tied white cloudy bag with label "ขยะเศษอาหาร", see yellow/green vague colors inside
-     → Cannot name specific objects (just colors) → "opaque"
-
-  6. Closed translucent bag showing blurry shapes, can't identify what items
-     → Cannot name specific objects (just shapes) → "opaque"
-
-  7. Milky white bag with orange/brown colors visible but unclear what items
-     → Cannot name specific objects (just colors) → "opaque"
-
-  ✅ VISIBLE Examples (OK to accept - NO app UI):
-  8. Clear bag with Lay's cans and plastic bottles - see logos and shapes clearly (NO app UI)
-     → Can name "Lay's cans" and "plastic bottles" → "visible"
-
-  9. Open bin with rice grains and banana peels clearly visible (NO app UI)
-     → Can name "rice" and "banana peels" → "visible"
-
-  10. Transparent bag with tissue papers and plastic wrapper - can see items clearly (NO app UI)
-      → Can name "tissue" and "plastic wrapper" → "visible"
-
-  11. **GENERAL - OPENED BIN**: Pink/blue bucket with LID REMOVED, showing white/black bags inside (NO app UI)
-      → Container is opened, can see waste bags exist → "visible" ✅
-
-  12. **GENERAL - INSIDE BIN VIEW**: Photo taken inside green bin, looking down at tied white bags (NO app UI)
-      → Photo taken from inside, bags ARE the visible waste → "visible" ✅
-
-  13. **GENERAL - OPENED BIN FROM ABOVE**: Black bin photographed from above (lid off), showing plastic bags with food packaging/skewers inside (NO app UI)
-      → Bin is open, photographed from above, can see waste bags and contents → "visible" ✅
-
-  ❌ vs ✅ CRITICAL DISTINCTION:
-  - Tied white bag on ground (photo from outside, NO container visible) → "opaque" ❌
-  - Same bag BUT inside OPENED pink bin (lid removed, can see bin edges) → "visible" ✅ (general exception)
-  - Same bag photographed from INSIDE bin (looking down at bags below) → "visible" ✅ (bags are the waste)
-  - Opened bin photographed from ABOVE showing bags with waste inside → "visible" ✅ (can see contents)
-  - **Yellow/green bin with items visible inside (from above angle)** → "visible" ✅ (container context)
-  - **Photo showing bin/container edges or walls** → "visible" ✅ (items are inside container)
-  - **Bird's eye view into container** → "visible" ✅ (can see what's inside)
-
-  **🔍 CONTEXT CLUES TO LOOK FOR:**
-  • Container edges/walls visible in photo → Items are INSIDE → "visible"
-  • Camera angle pointing DOWN into something → Looking INTO container → "visible"
-  • Bin/bucket/box visible around items → Items INSIDE holder → "visible"
-  • Floor/ground with isolated bag → Bag IS container → Needs clarity → may be "opaque"
-
-  ****** OUTPUT FORMAT (JSON ONLY) ******
-  Return ONLY valid JSON. No markdown.
+  **OUTPUT FORMAT (JSON ONLY):**
   {{
     "visibility_status": "visible" | "opaque" | "empty" | "artificial" | "blur",
-    "reason": "brief reason in Thai (max 10 words)"
+    "reason": "Brief reason in Thai (max 10 words)"
   }}
