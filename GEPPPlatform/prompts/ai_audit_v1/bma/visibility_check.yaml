@@ -39,14 +39,17 @@ template: |
   **If claimed_type is "general" (ขยะทั่วไป):**
 
   ✅ Accept "visible" if ANY of these apply:
+  - **OPENED BIN photographed from above** (looking down into bin) showing bags/waste inside → "visible"
   - Container OPENED (lid removed) showing bags inside → "visible"
   - Can see THROUGH outer bag to identify waste TYPE → "visible"
   - Can NAME waste category (food packaging, plastic bags, wrappers) even if not crystal clear → "visible"
   - **Photo taken INSIDE bin** (looking down at bags) - the bags ARE the waste → "visible"
   - Example: Pink/blue bin with lid removed, showing garbage bags → "visible"
+  - Example: Black bin photographed from above with plastic bags containing food packaging inside → "visible" ✅
   - Example: Black bin with translucent bag showing food packaging/bags → "visible" ✅
   - Example: Inside green bin looking down at tied white bags → "visible" ✅
   - Example: Semi-clear bag with food packaging, can identify it's packaging waste → "visible" ✅
+  - Example: Opened bin with multiple plastic bags inside (meatball bags, skewers, dirty plastic) → "visible" ✅
 
   ❌ Still reject "opaque" if:
   - Bag is TIED and OPAQUE and photographed from OUTSIDE on ground → "opaque"
@@ -80,10 +83,14 @@ template: |
   8. **GENERAL - INSIDE BIN VIEW**: Photo taken inside green bin, looking down at tied white bags
      → Photo taken from inside, bags ARE the visible waste → "visible" ✅
 
+  9. **GENERAL - OPENED BIN FROM ABOVE**: Black bin photographed from above (lid off), showing plastic bags with food packaging/skewers inside
+     → Bin is open, photographed from above, can see waste bags and contents → "visible" ✅
+
   ❌ vs ✅ CRITICAL DISTINCTION:
   - Tied white bag on ground (photo from outside) → "opaque" ❌
   - Same bag BUT inside OPENED pink bin (lid removed) → "visible" ✅ (general exception)
   - Same bag photographed from INSIDE bin (looking down) → "visible" ✅ (bags are the waste)
+  - Opened bin photographed from ABOVE showing bags with waste inside → "visible" ✅ (can see contents)
 
   ****** OUTPUT FORMAT (JSON ONLY) ******
   Return ONLY valid JSON. No markdown.

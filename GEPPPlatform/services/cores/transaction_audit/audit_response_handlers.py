@@ -180,7 +180,7 @@ def handle_create_response_pattern(
 
     Request body:
     {
-        "condition": "wc",  // Required: code (ncm, cc, wc, ui, hc, lc, pe, ie)
+        "condition": "wc",  // Required: code (ncm, cc, wc, ui, hc, lc, pe, ie, ai)
         "pattern": "จากรูป {{claimed_type}} ตรวจพบว่าเป็น {{detect_type}}..."  // Required
     }
     """
@@ -197,7 +197,7 @@ def handle_create_response_pattern(
             raise ValidationException('Pattern is required')
 
         # Validate condition is one of the allowed codes
-        valid_codes = ['ncm', 'cc', 'wc', 'ui', 'hc', 'lc', 'pe', 'ie']
+        valid_codes = ['ncm', 'cc', 'wc', 'ui', 'hc', 'lc', 'pe', 'ie', 'ai']
         if condition not in valid_codes:
             raise ValidationException(f'Invalid code. Must be one of: {", ".join(valid_codes)}')
 

@@ -435,7 +435,7 @@ def process_decision(claimed_type: str, ai_json: Dict[str, Any]) -> Dict[str, An
     """
     # --- 1. PRE-CHECKS (AI/Screen Capture/Blur) ---
     if ai_json.get("img_quality") == "artificial_ui":
-        return {"code": "ai", "status": "pending", "dt": "0", "wi": []}
+        return {"code": "ai", "status": "pending", "dt": "0", "wi": ["ภาพจากแอปพลิเคชัน/UI"]}
 
     if ai_json.get("img_quality") == "blur":
         return {"code": "ui", "status": "reject", "dt": "0", "wi": ["ภาพเบลอ/มองไม่เห็น"]}
@@ -1059,16 +1059,26 @@ def execute(
                         # Determine detect material key
                         detect_key = MATERIAL_ID_TO_KEY.get(detect_type_id, "unknown")
 
+                        # Map status: a -> approve, r -> reject, p -> pending
+                        status_map = {
+                            "a": "approve",
+                            "r": "reject",
+                            "p": "pending"
+                        }
+                        material_status = status_map.get(audit_status, "reject")
+
                         materials_data[mat_key] = {
                             "image_url": audit_out.get("image_url", ""),
                             "detect": detect_key,
-                            "status": "approve" if audit_status == "a" else "reject",
+                            "status": material_status,
                             "message": custom_msg
                         }
 
-                        # Update transaction status if any material is rejected
+                        # Update transaction status if any material is rejected or pending
                         if audit_status == "r" and transaction_status == "approve":
                             transaction_status = "reject"
+                        elif audit_status == "p" and transaction_status == "approve":
+                            transaction_status = "pending"
 
         # ------------------------------------------------------------------
         # Update transaction with audit results (do not commit here - will commit after all threads complete)
@@ -1077,10 +1087,18 @@ def execute(
             # Update transaction with audit results
             txn.ai_audit_note = transaction_audit_note
             txn.audit_tokens = transaction_tokens
-            txn.ai_audit_status = AIAuditStatus.approved if transaction_status == "approve" else AIAuditStatus.rejected
+
+            # Map transaction status to AIAuditStatus enum
+            if transaction_status == "approve":
+                txn.ai_audit_status = AIAuditStatus.approved
+            elif transaction_status == "pending":
+                txn.ai_audit_status = AIAuditStatus.no_action  # Use no_action for pending cases
+            else:  # reject
+                txn.ai_audit_status = AIAuditStatus.rejected
+
             txn.ai_audit_date = datetime.utcnow()
 
-            logger.info(f"[BMA_AUDIT] Prepared audit results for transaction {txn_id}")
+            logger.info(f"[BMA_AUDIT] Prepared audit results for transaction {txn_id} with status {transaction_status}")
         except Exception as e:
             logger.error(f"[BMA_AUDIT] Failed to prepare audit results for transaction {txn_id}: {e}", exc_info=True)
 
