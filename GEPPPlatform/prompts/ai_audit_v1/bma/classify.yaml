@@ -27,6 +27,7 @@ template: |
   Examples:
   - Clear bag with chicken bones + fish + rice → "organic" ✅
   - Clear bag with PET bottles (clean) → "recyclable" ✅
+  - Cardboard box with newspapers/calendar/documents inside → "recyclable" ✅
   - Black bin with plastic food packaging/bags inside → "general" ✅
   - Bin with meatball skewer bag (empty packaging) → "general" ✅
   - Clear plastic food container with food residue stuck inside → "general" ✅

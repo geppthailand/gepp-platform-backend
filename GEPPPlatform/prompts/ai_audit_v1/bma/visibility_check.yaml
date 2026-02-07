@@ -39,13 +39,15 @@ template: |
   - Container OPENED (lid removed) showing bags inside → "visible"
   - Can see THROUGH outer bag to identify waste inside → "visible"
   - Can NAME specific items inside (plastic bags, wrappers, packaging) → "visible"
+  - **Photo taken INSIDE bin** (looking down at bags) - the bags ARE the waste → "visible"
   - Example: Pink/blue bin with lid removed, showing garbage bags → "visible"
   - Example: Black bin with clear/semi-clear bag showing plastic packaging → "visible"
+  - Example: Inside green bin looking down at tied white bags → "visible" ✅
 
   ❌ Still reject "opaque" if:
-  - Bag is TIED and OPAQUE (can't see through, can't identify items) → "opaque"
+  - Bag is TIED and OPAQUE and photographed from OUTSIDE on ground → "opaque"
   - Container is CLOSED (lid on, not visible inside) → "opaque"
-  - Single opaque tied bag on ground (can't identify contents) → "opaque"
+  - Single opaque tied bag on ground/floor (external photo, can't identify contents) → "opaque"
 
   --- EXAMPLES ---
   ❌ OPAQUE Examples (MUST reject):
@@ -71,9 +73,13 @@ template: |
   7. **GENERAL - OPENED BIN**: Pink/blue bucket with LID REMOVED, showing white/black bags inside
      → Container is opened, can see waste bags exist → "visible" ✅
 
+  8. **GENERAL - INSIDE BIN VIEW**: Photo taken inside green bin, looking down at tied white bags
+     → Photo taken from inside, bags ARE the visible waste → "visible" ✅
+
   ❌ vs ✅ CRITICAL DISTINCTION:
   - Tied white bag on ground (photo from outside) → "opaque" ❌
   - Same bag BUT inside OPENED pink bin (lid removed) → "visible" ✅ (general exception)
+  - Same bag photographed from INSIDE bin (looking down) → "visible" ✅ (bags are the waste)
 
   ****** OUTPUT FORMAT (JSON ONLY) ******
   Return ONLY valid JSON. No markdown.
