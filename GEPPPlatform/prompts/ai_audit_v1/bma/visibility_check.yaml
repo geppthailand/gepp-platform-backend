@@ -35,15 +35,17 @@ template: |
   --- GENERAL WASTE EXCEPTION ---
   **If claimed_type is "general" (ขยะทั่วไป):**
 
-  ✅ Accept "visible" if container is OPENED (lid removed/opened):
-  - Open bin/bucket showing opaque bags inside → "visible"
-  - Opened container with visible waste bags (even if bags are opaque) → "visible"
-  - Example: Pink/blue/white bin with LID REMOVED, showing garbage bags inside → "visible"
+  ✅ Accept "visible" if ANY of these apply:
+  - Container OPENED (lid removed) showing bags inside → "visible"
+  - Can see THROUGH outer bag to identify waste inside → "visible"
+  - Can NAME specific items inside (plastic bags, wrappers, packaging) → "visible"
+  - Example: Pink/blue bin with lid removed, showing garbage bags → "visible"
+  - Example: Black bin with clear/semi-clear bag showing plastic packaging → "visible"
 
   ❌ Still reject "opaque" if:
-  - Bag is TIED and photographed from OUTSIDE (not opened) → "opaque"
+  - Bag is TIED and OPAQUE (can't see through, can't identify items) → "opaque"
   - Container is CLOSED (lid on, not visible inside) → "opaque"
-  - Single tied bag on ground/floor (not in opened container) → "opaque"
+  - Single opaque tied bag on ground (can't identify contents) → "opaque"
 
   --- EXAMPLES ---
   ❌ OPAQUE Examples (MUST reject):
