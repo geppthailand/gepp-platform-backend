@@ -6,32 +6,40 @@ template: |
   Task: Determine if the waste in the image is REAL and VISIBLE enough to identify specific items.
 
   **🚨 STEP 1: DETECT ARTIFICIAL / APP UI (Priority #1)**
-  Check carefully for ANY digital elements. If found -> return "artificial".
-  • **Top/Bottom Bars:** Look at the very top and bottom edges for black/white bars, status icons (Time, Battery), or navigation buttons.
-  • **Text Overlays:** Look for floating text like "made-in-china", "ครอบตัด", "Save", "Edit", or website URLs.
-  • **App UI:** Buttons, Menus, Social Media frames (LINE/Facebook).
-  • **Stock Photos:** Watermarks, Perfect studio lighting, Unnatural composition.
+  Check for digital elements or non-waste images. If found -> return "artificial".
+  • **Sign Only:** Image shows ONLY a text sign/label (e.g., "ไม่มีขยะอันตราย", "No Hazardous Waste") with NO actual waste items visible.
+     * *Exception:* If the sign is stuck ON a bin containing waste -> Continue to Step 2.
+  • **Top/Bottom Bars:** Status icons (Time, Battery), Navigation buttons (Back, Home).
+  • **Text Overlays:** Floating text ("made-in-china", "Crop", "Save", "Edit") or website URLs.
+  • **App UI:** Buttons, Menus, Social Media frames (LINE/Facebook/Shopee).
+  • **Stock Photos:** Watermarks, Perfect studio lighting.
 
   **STEP 2: CHECK VISIBILITY (Real Photos)**
-  Determine status based on these STRICT rules.
+  *Note: Images may be rotated 90/180 degrees. Analyze contents regardless of orientation.*
 
-  ❌ **OPAQUE (Fail)** - Return "opaque" if ANY of these apply:
-  1. **Cloudy/Milky Bag Rule:** The bag is Translucent White, Frosted, or Matte (Standard convenience store bag) AND it is TIED/CLOSED.
-     * *Reason:* "Cannot identify specific items through cloudy plastic."
-  2. **Standalone Bag:** The bag is sitting on the floor/ground (NOT inside a bin/container) AND contents are not clearly distinguishable.
-  3. **Hidden Contents:** You see a bag/container but CANNOT name 2-3 specific waste items inside (only vague colors/shapes).
-  4. **Closed Container:** Bin with lid on, or fully opaque bag (Black/Blue) tied shut.
+  ✅ **VISIBLE (Pass)** - Return "visible" if ANY of these apply (Overrides Opaque rules):
+  1. **Inside Bag/Bin View (HIGHEST PRIORITY):** The photo is taken looking **DOWN INTO** an **OPEN** bag or bin (Top-Down View).
+     * *Crucial Rule:* You must see the actual waste items **DIRECTLY through the opening** (unobstructed by bag material).
+     * *Note:* If this condition is met, bag color (Black/White/Cloudy) does not matter -> **VISIBLE**.
+  2. **Glass-like Transparency:** Bag is **CRYSTAL CLEAR** (See-through like cling wrap or clear curry bag).
+     * *Rule:* Items must be crisp and clearly identifiable through the plastic.
+  3. **Open Container:** Items are inside an OPEN bin/box/bucket/basket/mesh bin.
+  4. **Texture Exception:** **Bubble Wrap (Air Cushion)** inside a bin is VISIBLE WASTE.
+  5. **Big Trash Item:** Large items (Cardboard, Foil bag, Long tubes) visible on top/inside.
+  6. **General Waste Context:** A pile of mixed waste bags/items.
 
-  ✅ **VISIBLE (Pass)** - Only if NONE of the above apply, AND:
-  1. **Container Context:** Items are INSIDE an OPEN bin/box/bucket (even if inside bags, if the bin is open and you see the bags -> Visible).
-  2. **Top-Down View:** Photo taken looking DOWN into an open container/pile.
-  3. **Transparency:** Standalone bag is GLASS-LIKE TRANSPARENT (See-through like cling wrap or clear curry bag) where items are crisp and clear.
-  4. **Open Bag:** Bag is OPEN, revealing contents directly.
-  5. **General Waste Exception:** If claimed_type="general" AND it is a PILE of multiple bags/items (context implies mixed waste).
+  ❌ **OPAQUE (Fail)** - Return "opaque" ONLY if NONE of the above apply AND:
+  1. **Cloudy/Milky Bag Rule:** The bag is **Translucent White, Frosted, or Matte** (Standard carrier bag) AND it is **TIED/CLOSED**.
+     * *Strict Rule:* Even if you see vague colors/shapes inside or a label on the outside, if the plastic is cloudy and tied -> **OPAQUE**.
+  2. **Colored Opaque Bag:** Black, Blue, Green, Red bags that are **TIED/CLOSED**.
+  3. **Hidden Contents:** Container seen but CANNOT name 2-3 specific items inside.
+  4. **Blurry:** Image is too blurry to identify objects.
 
-  **CRITICAL EDGE CASE ( The "Milky Bag" ):**
-  • **Case A:** White cloudy bag, TIED, sitting on concrete floor. -> **OPAQUE** ❌ (Can't see inside clearly, no container context).
-  • **Case B:** Same bag, but INSIDE a green bin. -> **VISIBLE** ✅ (The bin is the holder, the bag is the waste).
+  **CRITICAL CHECK FOR "{claimed_type}":**
+  • Is the photo taken **LOOKING INTO an OPEN** bag/bin? -> **VISIBLE** ✅.
+  • Is it a **Milky/Cloudy/Black Bag (TIED)**? -> **OPAQUE** ❌.
+  • Is it a **Glass-like Clear Bag**? -> **VISIBLE** ✅.
+  • Is it **ONLY a sign**? -> **ARTIFICIAL** ❌.
 
   **OUTPUT FORMAT (JSON ONLY):**
   {{

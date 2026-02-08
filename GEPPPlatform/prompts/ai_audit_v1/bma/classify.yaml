@@ -6,41 +6,47 @@ template: |
   Task: Classify waste based on VISIBLE CONTENTS. Ignore the outer container (Holder).
 
   Current Claim: "{claimed_type}"
+  *Note: Images may be rotated. Identify objects by shape regardless of angle.*
 
   **🚨 CORE RULES:**
-  1. **IGNORE HOLDER:** Do not classify the outer bin or large bag holding the waste. Look at the *contents*.
+  1. **IGNORE HOLDER:** Do not classify the outer bin, sack, or plastic bag holding the waste. Look at the *contents*.
   2. **ZERO TOLERANCE:** Hazardous items found in non-hazardous bin = `haz_detected: true`.
-  3. **NAMING RULE:** If `haz_detected` is true, you **MUST** list the specific item names in `haz_items`.
+  3. **NAMING RULE:** If `haz_detected` is true, list specific items in `haz_items`.
 
   **🔍 CLASSIFICATION LOGIC:**
 
   **1. ORGANIC (77)**
-  • **Definition:** Pure food scraps, peels, bones.
+  • **Definition:** Pure food scraps, peels, leaves, bones.
   • **Allowed (<20%):** Food-contact paper (Tissue, Paper liner stuck to food).
-  • **FORBIDDEN (>10% -> General):** Packaging, Plastic wrappers, Sachets (ซองเกลือแร่/ขนม), Plastic bags mixed INSIDE food.
+  • **FORBIDDEN (>10% -> General):** Packaging, Plastic wrappers, Sachets, Plastic bags mixed INSIDE food.
 
   **2. RECYCLABLE (298)**
-  • **Definition:** PET/HDPE bottles, Cans, Glass, Cardboard boxes.
-  • **ALLOWED ITEMS:** Labels, Caps, Minor liquid residue (droplets).
-  • **HEAVY LIQUID CHECK:** If bottles are >25% FULL -> `is_heavy_liquid: true`.
+  • **Definition:** PET/HDPE bottles, Cans, Glass, Cardboard, Clean Paper.
+  • **ALLOWED HOLDERS:** Plastic Carrier Bags, Sacks containing recyclables.
+  • **ALLOWED ITEMS:** Labels, Caps, Minor liquid residue.
+  • **HEAVY LIQUID:** Bottles >25% FULL -> `is_heavy_liquid: true`.
 
   **3. GENERAL (94)**
   • **Definition:** Mixed waste, Dirty packaging, Food-stained containers.
-  • **Specific Items:** Plastic CUPS (แก้ว), STRAWS (หลอด), Plastic BAGS (ถุงก๊อบแก๊บ), Foam.
+  • **Specific Items:** Plastic CUPS (แก้ว), STRAWS (หลอด), Foam.
+  • **Soft Plastics:** **Bubble Wrap (พลาสติกกันกระแทก)**, Plastic Film, Candy wrappers.
+  • **Note:** Plastic Bags are General Waste ONLY if they are dirty waste mixed inside.
 
   **4. HAZARDOUS (113)**
-  • **Definition:** Batteries, Chemicals, Spray cans, Light bulbs, E-waste.
-  • **MEDICAL WASTE:** **Syringes (เข็มฉีดยา), Needles, Cotton with blood, Medicine vials.** (These are HAZARDOUS).
-  • **BATTERY LOOKUP:** Look for Cylindrical shapes, Silver/Black casings (Panasonic/Neo).
+  • **Definition:** Batteries, Chemicals, Spray cans, E-waste.
+  • **LIGHTING:** **Fluorescent Tubes (Long white tubes)**, Light bulbs.
+  • **MEDICAL:** Syringes, Needles, Cotton with blood.
+  • **BATTERY:** Cylindrical, Silver/Black casings.
 
   **⚠️ CONTAMINATION CALCULATION:**
-  • **Main Content:** The majority volume.
+  • **Main Content:** Majority volume.
   • **Contamination %:**
     * 0% : Pure waste.
-    * <20% : Soft contamination (e.g. Tissue in Organic).
-    * >20% : Hard contamination (e.g. Syringe/Battery in Recyclable).
+    * <20% : Soft contamination.
+    * >20% : Hard contamination.
 
-  **OUTPUT FORMAT (JSON ONLY):**
+  **OUTPUT FORMAT (JSON ONLY - NO PREAMBLE):**
+  Return ONLY the raw JSON object. Do not say "Here is the JSON" or use markdown blocks.
   {{
     "main_content": "general" | "organic" | "recyclable" | "hazardous",
     "haz_detected": <boolean>,
