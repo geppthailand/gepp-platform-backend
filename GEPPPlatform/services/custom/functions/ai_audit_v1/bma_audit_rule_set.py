@@ -481,16 +481,19 @@ def process_decision(claimed_type: str, ai_json: Dict[str, Any]) -> Dict[str, An
     haz_detected = ai_json.get("haz_detected", False)
     main = ai_json.get("main_content", "general")
     items = ai_json.get("contamination_items", [])
+    haz_items = ai_json.get("haz_items", [])  # Add haz_items extraction
     pct = ai_json.get("contamination_pct", 0)
     is_heavy_liquid = ai_json.get("is_heavy_liquid", False)
 
-    logger.info(f"[BMA_AUDIT] 📊 Extracted: bag_state={bag_state}, haz_detected={haz_detected}, main={main}, pct={pct}, items={items}")
+    logger.info(f"[BMA_AUDIT] 📊 Extracted: bag_state={bag_state}, haz_detected={haz_detected}, main={main}, pct={pct}, items={items}, haz_items={haz_items}")
 
     # --- 3. GLOBAL HAZARDOUS CHECK (ZERO TOLERANCE) ---
     # ถ้าเจอของอันตรายจริง แต่ไม่ได้ Claim ว่าเป็น Hazardous -> Reject WC 113
     if claimed_type != "hazardous" and haz_detected:
         logger.info(f"[BMA_AUDIT] ⚠️  Decision: hazardous detected in non-hazardous bin → reject WC 113")
-        return {"code": "wc", "status": "reject", "dt": "113", "wi": items}
+        # Use haz_items instead of contamination_items for hazardous detection
+        warning_items = haz_items if haz_items else ["ขยะอันตราย"]
+        return {"code": "wc", "status": "reject", "dt": "113", "wi": warning_items}
 
     # --- 4. VISIBILITY CHECKS (GLOBAL) ---
     # ถุงทึบ/มัดปาก/มองไม่เห็น = UI เสมอ

@@ -55,8 +55,3 @@ template: |
     "contamination_pct": <int 0-100>,
     "is_heavy_liquid": <boolean>
   }}
-
-  ***** สำคัญมาก *****
-  contamination_items และ haz_items ต้องเป็นคำภาษาไทยเท่านั้น และให้ตอบแบบเฉพาะเจาะจง
-  ไม่ถูกต้อง -> "contamination_items": ["ขยะทั่วไป", "ขยะเศษอาหาร"], "haz_items": ["ขยะอันตราย"],
-  ถูกต้อง -> "contamination_items": ["แก้วกระดาษ", "ขวดพลาสติก"], "haz_items": ["ถ่านไฟฉาย"],
