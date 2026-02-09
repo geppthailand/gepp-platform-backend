@@ -1,30 +1,10 @@
-_type: partial
-description: Abbreviated output format for BMA waste audit
-template: |
-  Return ONLY valid JSON:
-  {"ct": <id>, "as": "<a/r>", "cs": <0.00-1.00>, "rm": {"co": "<code>", "sv": "<i/m/c>", "de": {"dt": "<id_string>", "wi": [<thai_items>]}}}
+Return ONLY valid JSON. No Markdown. No extra text.
+Fields explained:
+- img_quality: "ok" if real photo. "artificial_ui" if screenshot/stock/AI. "blur/dark" if unreadable.
+- bag_state: "tied_opaque" (Reject UI), "tied_clear" (Inspectable), "open_visible" (Inspectable).
+- main_content: What implies the majority of the volume?
+- found_items: List 2-3 dominant items found in Thai (e.g. "ขวดพลาสติก", "เศษอาหาร", "ถุงพลาสติก").
+- contamination_pct: Integer 0-100. (If claimed is General, "recyclable" or "organic" are contamination).
 
-  IDs: 94=general, 77=organic, 298=recyclable, 113=hazardous
-
-  CODES:
-  • cc: correct → as:"a", sv:"i", dt:same as ct, wi:[]
-  • wc: wrong category → as:"r", sv:"c", dt:detected, wi:[wrong items in Thai]
-  • ui: unclear image → as:"r", sv:"c", dt:"0", wi:[quality issues in Thai]
-  • hc: heavy contamination >50% (recyclable/hazardous only) → as:"r", sv:"c", wi:[contaminated items]
-  • lc: light contamination <50% (recyclable/hazardous only) → as:"a", sv:"m", wi:[contaminated items]
-
-  PRIORITY: Report MOST SEVERE only. critical(c) > minor(m) > info(i)
-
-  RULES:
-  - dt = STRING ("94" not 94)
-  - wi = array, Thai names, MAX 3 items, use shortest words, empty [] if cc
-  - cs = 2 decimals
-  - Multiple issues → choose most severe
-  - No markdown, no extra text
-
-  EXAMPLES:
-  Correct: {"ct":94,"as":"a","cs":0.95,"rm":{"co":"cc","sv":"i","de":{"dt":"94","wi":[]}}}
-  Wrong: {"ct":94,"as":"r","cs":0.88,"rm":{"co":"wc","sv":"c","de":{"dt":"77","wi":["ผัก","อาหาร"]}}}
-  Unclear: {"ct":298,"as":"r","cs":0.32,"rm":{"co":"ui","sv":"c","de":{"dt":"0","wi":["เบลอ"]}}}
-  Heavy: {"ct":298,"as":"r","cs":0.91,"rm":{"co":"hc","sv":"c","de":{"dt":"298","wi":["ขวดเปื้อนหนัก"]}}}
-  Light: {"ct":298,"as":"a","cs":0.87,"rm":{"co":"lc","sv":"m","de":{"dt":"298","wi":["ขวดเปื้อน"]}}}
+Example Output:
+{"img_quality":"ok", "bag_state":"open_visible", "main_content":"mixed_general", "found_items":["ถุงขนม","กล่องโฟม","ทิชชู่"], "contamination_pct":0}
