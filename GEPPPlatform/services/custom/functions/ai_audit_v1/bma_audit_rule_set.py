@@ -1326,6 +1326,6 @@ def execute(
         "processed_transactions": len(results),
         "failed_transactions": len(failed_transactions),
         "failed_transaction_ids": failed_transactions if failed_transactions else [],
-        "token_usage": total_usage,
+        # "token_usage": total_usage,
         "results": simplified_response
     }
