@@ -1004,13 +1004,17 @@ class InputChannelService:
                         if user_id_int in tag_members or user_id_str in tag_members:
                             location_tags.append({
                                 'id': str(tag.id),
-                                'name': tag.name
+                                'name': tag.name,
+                                'start_date': tag.start_date.isoformat() if tag.start_date else None,
+                                'end_date': tag.end_date.isoformat() if tag.end_date else None,
                             })
                     else:
                         # If no user validation, include all tags
                         location_tags.append({
                             'id': str(tag.id),
-                            'name': tag.name
+                            'name': tag.name,
+                            'start_date': tag.start_date.isoformat() if tag.start_date else None,
+                            'end_date': tag.end_date.isoformat() if tag.end_date else None,
                         })
 
             # Get tenants for this location (same pattern as tags)
@@ -1034,12 +1038,16 @@ class InputChannelService:
                         if user_id_int in tenant_members or user_id_str in tenant_members:
                             location_tenants.append({
                                 'id': str(tenant.id),
-                                'name': tenant.name
+                                'name': tenant.name,
+                                'start_date': tenant.start_date.isoformat() if tenant.start_date else None,
+                                'end_date': tenant.end_date.isoformat() if tenant.end_date else None,
                             })
                     else:
                         location_tenants.append({
                             'id': str(tenant.id),
-                            'name': tenant.name
+                            'name': tenant.name,
+                            'start_date': tenant.start_date.isoformat() if tenant.start_date else None,
+                            'end_date': tenant.end_date.isoformat() if tenant.end_date else None,
                         })
 
             # Build path string from parent nodes
