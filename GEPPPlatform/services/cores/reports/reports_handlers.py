@@ -418,18 +418,23 @@ def _handle_overview_report(
         try:
             origins_result = reports_service.get_origin_by_organization(organization_id=organization_id)
             origin_names_map = {}
+            origin_path_map = {}
             for o in origins_result.get('data', []):
                 oid = o.get('origin_id')
-                name = o.get('display_name') or o.get('name_en') or o.get('name_th') or o.get('name')
-                if oid is not None and oid not in origin_names_map:
-                    origin_names_map[oid] = name
+                if oid is not None:
+                    if oid not in origin_names_map:
+                        origin_names_map[oid] = o.get('display_name') or o.get('name_en') or o.get('name_th') or o.get('name')
+                    if oid not in origin_path_map:
+                        origin_path_map[oid] = o.get('path') or ''
         except Exception:
             origin_names_map = {}
+            origin_path_map = {}
         
         top_recyclables = [
             {
                 'origin_id': oid,
                 'origin_name': origin_names_map.get(oid),
+                'path': origin_path_map.get(oid, ''),
                 'total_waste': w
             }
             for oid, w in top_origin_ids
