@@ -65,6 +65,17 @@ def handle_user_routes(event: Dict[str, Any], data: Dict[str, Any], **params) ->
     elif '/api/users/check-email' in path and method == 'POST':
         return handle_check_email_availability(user_service, data)
 
+    elif '/api/users/notifications/mark-all-read' in path and method == 'POST':
+        return handle_mark_all_notifications_read(user_service, current_user_id)
+    elif '/api/users/notifications/delete-all' in path and method == 'POST':
+        return handle_delete_all_notifications(user_service, current_user_id)
+    elif '/api/users/notifications/mark-read' in path and method == 'POST':
+        return handle_mark_notifications_read(user_service, current_user_id, data)
+    elif '/api/users/notifications/delete' in path and method == 'POST':
+        return handle_delete_notifications(user_service, current_user_id, data)
+    elif '/api/users/notifications' in path and method == 'GET':
+        return handle_get_user_notifications(user_service, current_user_id, query_params)
+
     elif '/api/users/invite' in path and method == 'POST':
         return handle_send_invitation(user_service, data, current_user_id)
 
@@ -380,6 +391,136 @@ def handle_check_email_availability(
     except Exception as e:
         raise APIException(f'Failed to check email availability: {str(e)}')
 
+
+def handle_mark_all_notifications_read(
+    user_service: UserService,
+    current_user_id: Any,
+) -> Dict[str, Any]:
+    """Handle POST /api/users/notifications/mark-all-read - Mark all notifications as read for current user."""
+    if not current_user_id:
+        raise UnauthorizedException('User ID not found')
+    user_location_id = int(current_user_id)
+    marked_count = user_service.mark_all_notifications_read(user_location_id)
+    return {
+        'success': True,
+        'message': f'Marked {marked_count} notification(s) as read',
+        'marked_count': marked_count,
+    }
+
+
+def handle_delete_all_notifications(
+    user_service: UserService,
+    current_user_id: Any,
+) -> Dict[str, Any]:
+    """Handle POST /api/users/notifications/delete-all - Delete all notifications for current user (soft delete)."""
+    if not current_user_id:
+        raise UnauthorizedException('User ID not found')
+    user_location_id = int(current_user_id)
+    deleted_count = user_service.delete_all_notifications(user_location_id)
+    return {
+        'success': True,
+        'message': f'Deleted {deleted_count} notification(s)',
+        'deleted_count': deleted_count,
+    }
+
+
+def handle_mark_notifications_read(
+    user_service: UserService,
+    current_user_id: Any,
+    data: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Handle POST /api/users/notifications/mark-read - Mark specific notifications as read. Body: { \"ids\": [ 234, 221, ... ] }."""
+    if not current_user_id:
+        raise UnauthorizedException('User ID not found')
+    if not data or 'ids' not in data:
+        raise ValidationException('Request body must contain "ids" array of user_notification ids')
+    raw_ids = data['ids']
+    if not isinstance(raw_ids, list):
+        raise ValidationException('Body "ids" must be an array of integers')
+    ids = []
+    for i, x in enumerate(raw_ids):
+        try:
+            ids.append(int(x))
+        except (TypeError, ValueError):
+            raise ValidationException(f'"ids"[{i}] must be an integer')
+    user_location_id = int(current_user_id)
+    marked_count = user_service.mark_notifications_read(user_location_id, ids)
+    return {
+        'success': True,
+        'message': f'Marked {marked_count} notification(s) as read',
+        'marked_count': marked_count,
+    }
+
+
+def handle_delete_notifications(
+    user_service: UserService,
+    current_user_id: Any,
+    data: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Handle POST /api/users/notifications/delete - Delete specific notifications. Body: { \"ids\": [ 234, 221, ... ] }."""
+    if not current_user_id:
+        raise UnauthorizedException('User ID not found')
+    if not data or 'ids' not in data:
+        raise ValidationException('Request body must contain "ids" array of user_notification ids')
+    raw_ids = data['ids']
+    if not isinstance(raw_ids, list):
+        raise ValidationException('Body "ids" must be an array of integers')
+    ids = []
+    for i, x in enumerate(raw_ids):
+        try:
+            ids.append(int(x))
+        except (TypeError, ValueError):
+            raise ValidationException(f'"ids"[{i}] must be an integer')
+    user_location_id = int(current_user_id)
+    deleted_count = user_service.delete_notifications(user_location_id, ids)
+    return {
+        'success': True,
+        'message': f'Deleted {deleted_count} notification(s)',
+        'deleted_count': deleted_count,
+    }
+
+
+def handle_get_user_notifications(
+    user_service: UserService,
+    current_user_id: Any,
+    query_params: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Handle GET /api/users/notifications - Get current user's notifications with pagination."""
+    if not current_user_id:
+        raise UnauthorizedException('User ID not found')
+    user_location_id = int(current_user_id)
+    limit = min(int(query_params.get('limit', 50) or 50), 100)
+    # Support both page (1-based) and offset
+    page_param = query_params.get('page')
+    offset_param = query_params.get('offset')
+    if page_param is not None and str(page_param).strip() != '':
+        page = max(1, int(page_param))
+        offset = (page - 1) * limit
+    else:
+        offset = int(offset_param or 0)
+        page = (offset // limit) + 1 if limit else 1
+    unread_only = str(query_params.get('unread_only', '')).lower() in ('true', '1', 'yes')
+    result = user_service.get_user_notifications(
+        user_location_id=user_location_id,
+        limit=limit,
+        offset=offset,
+        unread_only=unread_only
+    )
+    total = result['total']
+    total_pages = (total + limit - 1) // limit if limit else 0
+    return {
+        'success': True,
+        'data': result['data'],
+        'pagination': {
+            'page': page,
+            'limit': limit,
+            'total': total,
+            'total_pages': total_pages,
+            'offset': offset,
+            'has_next': page < total_pages,
+            'has_prev': page > 1,
+        },
+    }
 
 def handle_get_user_details(user_service: UserService, user_id: str) -> Dict[str, Any]:
     """Handle GET /api/users/{user_id} - Get user details"""

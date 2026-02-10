@@ -406,6 +406,40 @@ class OrganizationService:
         self.db.flush()
         return created
 
+    def get_notification_settings(self, organization_id: int) -> List[Dict[str, Any]]:
+        """
+        Get organization notification settings in the same shape as upsert input/output.
+        Returns list of items: organization_id, event, role (key), role_id, channels_mask, email_time, is_active.
+        """
+        result = self.db.execute(
+            text("""
+                SELECT ons.organization_id, ons.event, oroles.key AS role_key, ons.role_id,
+                       ons.channels_mask, ons.email_time, ons.is_active
+                FROM organization_notification_settings ons
+                JOIN organization_roles oroles ON oroles.id = ons.role_id
+                WHERE ons.organization_id = :org_id AND ons.deleted_date IS NULL
+                ORDER BY ons.event, oroles.key
+            """),
+            {'org_id': organization_id}
+        )
+        rows = result.fetchall()
+        data = []
+        for row in rows:
+            email_time = row.email_time
+            if email_time is not None:
+                # time type: format as "HH:MM"
+                email_time = str(email_time)[:5] if hasattr(email_time, '__str__') else email_time
+            data.append({
+                'organization_id': row.organization_id,
+                'event': row.event,
+                'role': row.role_key,
+                'role_id': row.role_id,
+                'channels_mask': row.channels_mask,
+                'email_time': email_time,
+                'is_active': row.is_active,
+            })
+        return data
+
     def _process_locations(self, organization_id: int, locations: List[Dict[str, Any]]) -> Dict[str, str]:
         """
         Process location data - create new locations and update existing ones.

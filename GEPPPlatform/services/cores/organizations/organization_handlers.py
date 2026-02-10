@@ -102,7 +102,9 @@ def organization_routes(event: Dict[str, Any], context: Any, **params) -> Dict[s
         body = json.loads(event.get('body', '{}'))
         return handle_update_ai_audit_permission(org_service, user_id, user_organization_id, body, headers)
 
-    # Notification settings (create/upsert)
+    # Notification settings
+    elif method == 'GET' and '/api/organizations/notification-settings' in path:
+        return handle_get_notification_settings(org_service, user_id, headers)
     elif method == 'POST' and '/api/organizations/notification-settings' in path:
         body = json.loads(event.get('body') or '{}')
         return handle_upsert_notification_settings(org_service, user_id, body, headers)
@@ -426,6 +428,26 @@ def handle_update_organization_setup(org_service: OrganizationService, user_id: 
         raise BadRequestException(str(e))
     except Exception as e:
         raise APIException(f'Error updating organization setup: {str(e)}')
+
+
+def handle_get_notification_settings(
+    org_service: OrganizationService,
+    user_id: int,
+    headers: Dict[str, str]
+) -> Dict[str, Any]:
+    """Get organization notification settings in the same format as upsert input/output.
+    Returns { "success": True, "data": [ { organization_id, event, role, ... }, ... ] }
+    """
+    organization = org_service.get_user_organization(user_id)
+    if not organization:
+        raise NotFoundException('User is not part of any organization')
+
+    data = org_service.get_notification_settings(organization.id)
+    return {
+        'success': True,
+        'data': data,
+        'message': f'Notification settings ({len(data)} item(s))',
+    }
 
 
 def handle_upsert_notification_settings(

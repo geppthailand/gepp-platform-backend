@@ -233,7 +233,7 @@ class TransactionService:
                     text("""
                         INSERT INTO notifications
                             (created_by_id, resource, notification_type, is_active, created_date, updated_date)
-                        VALUES (:created_by_id, :resource::jsonb, :notification_type, TRUE, NOW(), NOW())
+                        VALUES (:created_by_id, CAST(:resource AS jsonb), :notification_type, TRUE, NOW(), NOW())
                         RETURNING id
                     """),
                     {
@@ -253,7 +253,8 @@ class TransactionService:
                         """),
                         {'org_id': organization_id, 'role_ids': bell_role_ids},
                     )
-                    for u in users_bell.fetchall():
+                    user_rows = users_bell.fetchall()
+                    for u in user_rows:
                         self.db.execute(
                             text("""
                                 INSERT INTO user_notifications
@@ -339,7 +340,7 @@ class TransactionService:
                     text("""
                         INSERT INTO notifications
                             (created_by_id, resource, notification_type, is_active, created_date, updated_date)
-                        VALUES (:created_by_id, :resource::jsonb, :notification_type, TRUE, NOW(), NOW())
+                        VALUES (:created_by_id, CAST(:resource AS jsonb), :notification_type, TRUE, NOW(), NOW())
                         RETURNING id
                     """),
                     {
@@ -479,7 +480,7 @@ class TransactionService:
                     text("""
                         INSERT INTO notifications
                             (created_by_id, resource, notification_type, is_active, created_date, updated_date)
-                        VALUES (:created_by_id, :resource::jsonb, :notification_type, TRUE, NOW(), NOW())
+                        VALUES (:created_by_id, CAST(:resource AS jsonb), :notification_type, TRUE, NOW(), NOW())
                         RETURNING id
                     """),
                     {
