@@ -960,9 +960,11 @@ def handle_get_audit_report(
                 ).all()
                 tenant_name_by_id = {t.id: (t.name or f"Tenant {t.id}") for t in tenants}
 
-            # Build options: location, location·tag, location·tenant, location·tag·tenant
-            # Per origin: show all 4 types using tags/tenants that appear with that origin.
-            # Only show location·tag·tenant when that exact combo exists in combos_result.
+            # Build options: only the most specific (leaf) level per origin.
+            # - If origin has BOTH tags AND tenants: only location·tag·tenant (no location-only, location·tag, location·tenant).
+            # - If origin has only tags: location-only + each location·tag.
+            # - If origin has only tenants: location-only + each location·tenant.
+            # - If origin has neither: location-only only.
             combos_set = {(r[0], r[1], r[2]) for r in combos_result}
             seen_option_ids = set()
             for origin_id in origin_ids:
@@ -970,42 +972,57 @@ def handle_get_audit_report(
                 path = location_paths.get(int(origin_id), '') if origin_id else ''
                 origin_tag_ids = list(tags_by_origin.get(origin_id, []))
                 origin_tenant_ids = list(tenants_by_origin.get(origin_id, []))
-                # 1) Location only
-                oid = f"{origin_id}||"
-                if oid not in seen_option_ids:
-                    seen_option_ids.add(oid)
-                    origin_options.append({'id': oid, 'name': origin_name, 'path': path})
-                # 2) Location · tag
-                for tag_id in origin_tag_ids:
-                    tname = tag_name_by_id.get(tag_id)
-                    if tname:
-                        oid = f"{origin_id}|{tag_id}|"
-                        if oid not in seen_option_ids:
-                            seen_option_ids.add(oid)
-                            origin_options.append({'id': oid, 'name': f"{origin_name} · {tname}", 'path': path})
-                # 3) Location · tenant
-                for tenant_id in origin_tenant_ids:
-                    tname = tenant_name_by_id.get(tenant_id)
-                    if tname:
-                        oid = f"{origin_id}||{tenant_id}"
-                        if oid not in seen_option_ids:
-                            seen_option_ids.add(oid)
-                            origin_options.append({'id': oid, 'name': f"{origin_name} · {tname}", 'path': path})
-                # 4) Location · tag · tenant - only when that combo exists in data
-                for tag_id in origin_tag_ids:
+                has_tags = bool(origin_tag_ids)
+                has_tenants = bool(origin_tenant_ids)
+
+                if has_tags and has_tenants:
+                    # Only leaf options: location·tag·tenant (where combo exists in data)
+                    for tag_id in origin_tag_ids:
+                        for tenant_id in origin_tenant_ids:
+                            if (origin_id, tag_id, tenant_id) in combos_set:
+                                tname = tag_name_by_id.get(tag_id)
+                                tnt = tenant_name_by_id.get(tenant_id)
+                                if tname and tnt:
+                                    oid = f"{origin_id}|{tag_id}|{tenant_id}"
+                                    if oid not in seen_option_ids:
+                                        seen_option_ids.add(oid)
+                                        origin_options.append({
+                                            'id': oid,
+                                            'name': f"{origin_name} · {tname} · {tnt}",
+                                            'path': path
+                                        })
+                elif has_tags:
+                    # Location only + each location·tag
+                    oid = f"{origin_id}||"
+                    if oid not in seen_option_ids:
+                        seen_option_ids.add(oid)
+                        origin_options.append({'id': oid, 'name': origin_name, 'path': path})
+                    for tag_id in origin_tag_ids:
+                        tname = tag_name_by_id.get(tag_id)
+                        if tname:
+                            oid = f"{origin_id}|{tag_id}|"
+                            if oid not in seen_option_ids:
+                                seen_option_ids.add(oid)
+                                origin_options.append({'id': oid, 'name': f"{origin_name} · {tname}", 'path': path})
+                elif has_tenants:
+                    # Location only + each location·tenant
+                    oid = f"{origin_id}||"
+                    if oid not in seen_option_ids:
+                        seen_option_ids.add(oid)
+                        origin_options.append({'id': oid, 'name': origin_name, 'path': path})
                     for tenant_id in origin_tenant_ids:
-                        if (origin_id, tag_id, tenant_id) in combos_set:
-                            tname = tag_name_by_id.get(tag_id)
-                            tnt = tenant_name_by_id.get(tenant_id)
-                            if tname and tnt:
-                                oid = f"{origin_id}|{tag_id}|{tenant_id}"
-                                if oid not in seen_option_ids:
-                                    seen_option_ids.add(oid)
-                                    origin_options.append({
-                                        'id': oid,
-                                        'name': f"{origin_name} · {tname} · {tnt}",
-                                        'path': path
-                                    })
+                        tname = tenant_name_by_id.get(tenant_id)
+                        if tname:
+                            oid = f"{origin_id}||{tenant_id}"
+                            if oid not in seen_option_ids:
+                                seen_option_ids.add(oid)
+                                origin_options.append({'id': oid, 'name': f"{origin_name} · {tname}", 'path': path})
+                else:
+                    # No tags, no tenants: location only
+                    oid = f"{origin_id}||"
+                    if oid not in seen_option_ids:
+                        seen_option_ids.add(oid)
+                        origin_options.append({'id': oid, 'name': origin_name, 'path': path})
 
         # Status options
         statuses = [
