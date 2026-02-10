@@ -312,15 +312,42 @@ def handle_list_transactions(
         page = int(query_params.get('page', 1))
         page_size = min(int(query_params.get('page_size', 20)), 100)  # Max 100 per page
         status = query_params.get('status')
-        origin_id = int(query_params['origin_id']) if query_params.get('origin_id') else None
         destination_id = int(query_params['destination_id']) if query_params.get('destination_id') else None
         include_records = query_params.get('include_records', 'false').lower() == 'true'
+
+        # Origin filter: may be a single origin_id (int) or composite "origin_id|tag_id|tenant_id"
+        origin_id = None
+        location_tag_id = None
+        tenant_id = None
+        origin_raw = query_params.get('origin_id')
+        if origin_raw:
+            if '|' in str(origin_raw):
+                parts = str(origin_raw).split('|')
+                origin_id = int(parts[0]) if parts[0] else None
+                location_tag_id = int(parts[1]) if len(parts) > 1 and parts[1] else None
+                tenant_id = int(parts[2]) if len(parts) > 2 and parts[2] else None
+            else:
+                origin_id = int(origin_raw)
 
         # Additional filter parameters
         search = query_params.get('search')
         date_from = query_params.get('date_from')
         date_to = query_params.get('date_to')
-        district = int(query_params['district']) if query_params.get('district') else None
+        material_id = int(query_params['material_id']) if query_params.get('material_id') else None
+        district_raw = query_params.get('district')
+        district = None
+        if district_raw:
+            if '|' in str(district_raw):
+                # Composite "origin_id|tag_id|tenant_id" (e.g. "2202||" or "2507|46|1")
+                parts = str(district_raw).split('|')
+                if origin_id is None:
+                    origin_id = int(parts[0]) if parts[0] else None
+                if location_tag_id is None:
+                    location_tag_id = int(parts[1]) if len(parts) > 1 and parts[1] else None
+                if tenant_id is None:
+                    tenant_id = int(parts[2]) if len(parts) > 2 and parts[2] else None
+            else:
+                district = int(district_raw)
         sub_district = int(query_params['sub_district']) if query_params.get('sub_district') else None
 
         # Always filter by user's organization
@@ -336,7 +363,10 @@ def handle_list_transactions(
             date_from=date_from,
             date_to=date_to,
             district=district,
-            sub_district=sub_district
+            sub_district=sub_district,
+            location_tag_id=location_tag_id,
+            tenant_id=tenant_id,
+            material_id=material_id
         )
 
         if result['success']:

@@ -6,9 +6,11 @@ Handles data retrieval and processing for various reports
 from typing import List, Optional, Dict, Any
 from GEPPPlatform.models.cores.references import Material, MaterialTag
 from GEPPPlatform.models.users.user_location import UserLocation
+from GEPPPlatform.models.users.user_related import UserLocationTag, UserTenant
 from GEPPPlatform.models.subscriptions.organizations import OrganizationSetup
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy import or_, and_
 from datetime import datetime, timedelta, timezone
 import logging
 
@@ -75,10 +77,43 @@ class ReportsService:
                     query = query.filter(TransactionRecord.material_id.in_(filters['material_ids']))
                     applied_filters['material_ids'] = filters['material_ids']
                 
-                # Filter by origin_ids (supports multiple)
-                if filters.get('origin_ids'):
-                    query = query.filter(Transaction.origin_id.in_(filters['origin_ids']))
-                    applied_filters['origin_ids'] = filters['origin_ids']
+                # Filter by origin_combos (multiple composites: "2507||1,2507|46|")
+                # If "origin only" (oid, None, None) is selected for an origin, include ALL rows for that origin.
+                if filters.get('origin_combos'):
+                    combos = filters['origin_combos']
+                    origin_only_origin_ids = {oid for (oid, tag_id, tenant_id) in combos if tag_id is None and tenant_id is None}
+                    conditions = []
+                    for oid in origin_only_origin_ids:
+                        conditions.append(Transaction.origin_id == oid)
+                    for oid, tag_id, tenant_id in combos:
+                        if oid in origin_only_origin_ids:
+                            continue
+                        c = (Transaction.origin_id == oid)
+                        if tag_id is None:
+                            c = and_(c, Transaction.location_tag_id.is_(None))
+                        else:
+                            c = and_(c, Transaction.location_tag_id == tag_id)
+                        if tenant_id is None:
+                            c = and_(c, Transaction.tenant_id.is_(None))
+                        else:
+                            c = and_(c, Transaction.tenant_id == tenant_id)
+                        conditions.append(c)
+                    if conditions:
+                        query = query.filter(or_(*conditions))
+                        applied_filters['origin_combos'] = combos
+                else:
+                    # Filter by origin_ids (supports multiple)
+                    if filters.get('origin_ids'):
+                        query = query.filter(Transaction.origin_id.in_(filters['origin_ids']))
+                        applied_filters['origin_ids'] = filters['origin_ids']
+                    # Filter by location_tag_id (when single composite origin selected)
+                    if filters.get('location_tag_id') is not None:
+                        query = query.filter(Transaction.location_tag_id == filters['location_tag_id'])
+                        applied_filters['location_tag_id'] = filters['location_tag_id']
+                    # Filter by tenant_id (when single composite origin selected)
+                    if filters.get('tenant_id') is not None:
+                        query = query.filter(Transaction.tenant_id == filters['tenant_id'])
+                        applied_filters['tenant_id'] = filters['tenant_id']
                 
                 # Filter by date range
                 date_from = filters.get('date_from')
@@ -260,28 +295,30 @@ class ReportsService:
 
     def get_origin_by_organization(self, organization_id: int, filters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
-        Get all active origins for a specific organization
-        
-        Args:
-            organization_id: The organization ID to filter by
-            
-        Returns:
-            Dict with origin data and metadata
+        Get origin filter options with composite origin+tag+tenant combinations from existing transaction data.
+        Returns only the most specific (leaf) level per origin: if origin has both tags and tenants, only
+        origin·tag·tenant; if only tags/tenants, origin + origin·tag or origin·tenant; if neither, origin only.
         """
-
         try:
-            # Determine origin ids that match provided filters (date range and/or material_ids)
-            origin_ids_filtered: Optional[set] = None
+            # Query distinct (origin_id, location_tag_id, tenant_id) from Transaction (with filters)
+            base_filter = [
+                Transaction.organization_id == organization_id,
+                Transaction.deleted_date.is_(None),
+                Transaction.status != TransactionStatus.rejected,
+                Transaction.origin_id.isnot(None)
+            ]
             if filters and (filters.get('date_from') or filters.get('date_to') or filters.get('material_ids')):
-                tr_query = self.db.query(Transaction.origin_id).join(
+                tr_query = self.db.query(
+                    Transaction.origin_id,
+                    Transaction.location_tag_id,
+                    Transaction.tenant_id
+                ).join(
                     TransactionRecord,
                     TransactionRecord.created_transaction_id == Transaction.id
                 ).filter(
-                    Transaction.organization_id == organization_id,
-                    TransactionRecord.is_active == True,
-                    Transaction.status != TransactionStatus.rejected
+                    *base_filter,
+                    TransactionRecord.is_active == True
                 )
-                # Apply material filter if present
                 material_ids = (filters.get('material_ids') or [])
                 if material_ids:
                     try:
@@ -290,7 +327,6 @@ class ReportsService:
                             tr_query = tr_query.filter(TransactionRecord.material_id.in_(mids))
                     except Exception:
                         pass
-                # Clamp and apply date range if provided
                 date_from = filters.get('date_from')
                 date_to = filters.get('date_to')
                 if date_from or date_to:
@@ -314,37 +350,186 @@ class ReportsService:
                         if date_to:
                             try:
                                 parsed = datetime.fromisoformat(date_to) if isinstance(date_to, str) else date_to
-                                now = datetime.now(timezone.utc)
-                                end_of_today = now.replace(hour=23, minute=59, second=59, microsecond=999999)
+                                end_of_today = datetime.now(timezone.utc).replace(hour=23, minute=59, second=59, microsecond=999999)
                                 if parsed and parsed > end_of_today:
                                     parsed = end_of_today
                                 tr_query = tr_query.filter(TransactionRecord.transaction_date <= (parsed.isoformat() if isinstance(date_to, str) else parsed))
                             except Exception:
                                 tr_query = tr_query.filter(TransactionRecord.transaction_date <= date_to)
-                rows = tr_query.distinct().all()
-                origin_ids_filtered = {row[0] for row in rows if row and row[0] is not None}
-
-            # Base origins query
-            query = self.db.query(UserLocation).filter(
-                UserLocation.organization_id == organization_id,
-                UserLocation.is_active == True,
-                UserLocation.is_location == True,
-                UserLocation.type.notin_(['hub', 'hub-main'])
-            )
-            if origin_ids_filtered is not None:
-                if not origin_ids_filtered:
-                    origins = []
-                else:
-                    query = query.filter(UserLocation.id.in_(list(origin_ids_filtered)))
-                    origins = query.all()
+                combos_result = tr_query.distinct().all()
             else:
-                origins = query.all()
+                combos_result = self.db.query(
+                    Transaction.origin_id,
+                    Transaction.location_tag_id,
+                    Transaction.tenant_id
+                ).filter(*base_filter).distinct().all()
 
-            # Convert to dict
-            origins_data = []
-            for origin in origins:
-                origins_data.append(self._origin_to_dict(origin))
+            origin_ids = list({row[0] for row in combos_result if row[0] is not None})
+            tag_ids = list({row[1] for row in combos_result if row[1] is not None})
+            tenant_ids = list({row[2] for row in combos_result if row[2] is not None})
+            tags_by_origin: Dict[int, set] = {}
+            tenants_by_origin: Dict[int, set] = {}
+            for origin_id, tag_id, tenant_id in combos_result:
+                if origin_id is None:
+                    continue
+                if origin_id not in tags_by_origin:
+                    tags_by_origin[origin_id] = set()
+                if tag_id is not None:
+                    tags_by_origin[origin_id].add(tag_id)
+                if origin_id not in tenants_by_origin:
+                    tenants_by_origin[origin_id] = set()
+                if tenant_id is not None:
+                    tenants_by_origin[origin_id].add(tenant_id)
 
+            origin_options: List[Dict[str, Any]] = []
+            if not origin_ids:
+                return {
+                    'success': True,
+                    'data': [],
+                    'total': 0,
+                    'organization_id': organization_id,
+                    'message': 'Origins retrieved successfully'
+                }
+
+            origin_locations = self.db.query(UserLocation).filter(UserLocation.id.in_(origin_ids)).all()
+            origin_name_by_id = {
+                loc.id: loc.display_name or loc.name_en or loc.name_th or f"Location {loc.id}"
+                for loc in origin_locations
+            }
+            tag_name_by_id: Dict[int, str] = {}
+            if tag_ids:
+                tags = self.db.query(UserLocationTag).filter(
+                    UserLocationTag.id.in_(tag_ids),
+                    UserLocationTag.organization_id == organization_id,
+                    UserLocationTag.is_active == True,
+                    UserLocationTag.deleted_date.is_(None)
+                ).all()
+                tag_name_by_id = {t.id: (t.name or f"Tag {t.id}") for t in tags}
+            tenant_name_by_id: Dict[int, str] = {}
+            if tenant_ids:
+                tenants = self.db.query(UserTenant).filter(
+                    UserTenant.id.in_(tenant_ids),
+                    UserTenant.organization_id == organization_id,
+                    UserTenant.is_active == True,
+                    UserTenant.deleted_date.is_(None)
+                ).all()
+                tenant_name_by_id = {t.id: (t.name or f"Tenant {t.id}") for t in tenants}
+
+            location_paths: Dict[int, str] = {}
+            org_setup = self.db.query(OrganizationSetup).filter(
+                OrganizationSetup.organization_id == organization_id,
+                OrganizationSetup.is_active == True
+            ).first() or self.db.query(OrganizationSetup).filter(
+                OrganizationSetup.organization_id == organization_id
+            ).order_by(OrganizationSetup.created_date.desc()).first()
+            if org_setup and org_setup.root_nodes:
+                all_locations = self.db.query(UserLocation).filter(
+                    UserLocation.organization_id == organization_id,
+                    UserLocation.is_active == True,
+                    UserLocation.deleted_date.is_(None)
+                ).all()
+                location_names = {loc.id: loc.display_name or loc.name_en or loc.name_th or f"Location {loc.id}" for loc in all_locations}
+                parent_map: Dict[int, int] = {}
+                root_nodes = org_setup.root_nodes if isinstance(org_setup.root_nodes, list) else []
+
+                def _build_parent_map(nodes, parent_id=None):
+                    for node in nodes:
+                        nid = node.get('nodeId')
+                        if nid is not None:
+                            nid = int(nid) if isinstance(nid, str) else nid
+                            if parent_id is not None:
+                                parent_map[nid] = parent_id
+                            if node.get('children'):
+                                _build_parent_map(node.get('children', []), nid)
+                _build_parent_map(root_nodes, None)
+
+                def _collect_all_node_ids(nodes):
+                    ids = set()
+                    for node in nodes:
+                        nid = node.get('nodeId')
+                        if nid is not None:
+                            ids.add(int(nid) if isinstance(nid, str) else nid)
+                        if node.get('children'):
+                            ids |= _collect_all_node_ids(node.get('children', []))
+                    return ids
+                all_node_ids = _collect_all_node_ids(root_nodes)
+
+                def _get_ancestors(loc_id, visited=None):
+                    visited = visited or set()
+                    if loc_id in visited:
+                        return []
+                    visited.add(loc_id)
+                    pid = parent_map.get(loc_id)
+                    if pid is None:
+                        return []
+                    return _get_ancestors(pid, visited) + [location_names.get(pid, f"Location {pid}")]
+                for loc in origin_locations:
+                    loc_id = int(loc.id)
+                    location_paths[loc_id] = ', '.join(_get_ancestors(loc_id)) if loc_id in all_node_ids else ''
+
+            # Build options: only the most specific (leaf) level per origin.
+            # - If origin has BOTH tags AND tenants: only location·tag·tenant (no location-only, location·tag, location·tenant).
+            # - If origin has only tags: location-only + each location·tag.
+            # - If origin has only tenants: location-only + each location·tenant.
+            # - If origin has neither: location-only only.
+            combos_set = {(r[0], r[1], r[2]) for r in combos_result}
+            seen_ids: set = set()
+
+            for origin_id in origin_ids:
+                origin_name = origin_name_by_id.get(origin_id, f"Location {origin_id}")
+                path = location_paths.get(origin_id, '')
+                origin_tag_ids = list(tags_by_origin.get(origin_id, []))
+                origin_tenant_ids = list(tenants_by_origin.get(origin_id, []))
+                has_tags = bool(origin_tag_ids)
+                has_tenants = bool(origin_tenant_ids)
+
+                if has_tags and has_tenants:
+                    # Only leaf options: location·tag·tenant (where combo exists in data)
+                    for tag_id in origin_tag_ids:
+                        for tenant_id in origin_tenant_ids:
+                            if (origin_id, tag_id, tenant_id) in combos_set:
+                                tname = tag_name_by_id.get(tag_id)
+                                tnt = tenant_name_by_id.get(tenant_id)
+                                if tname and tnt:
+                                    oid = f"{origin_id}|{tag_id}|{tenant_id}"
+                                    if oid not in seen_ids:
+                                        seen_ids.add(oid)
+                                        origin_options.append({'id': oid, 'origin_id': origin_id, 'name': f"{origin_name} · {tname} · {tnt}", 'display_name': f"{origin_name} · {tname} · {tnt}", 'path': path})
+                elif has_tags:
+                    # Location only + each location·tag
+                    oid = f"{origin_id}||"
+                    if oid not in seen_ids:
+                        seen_ids.add(oid)
+                        origin_options.append({'id': oid, 'origin_id': origin_id, 'name': origin_name, 'display_name': origin_name, 'path': path})
+                    for tag_id in origin_tag_ids:
+                        tname = tag_name_by_id.get(tag_id)
+                        if tname:
+                            oid = f"{origin_id}|{tag_id}|"
+                            if oid not in seen_ids:
+                                seen_ids.add(oid)
+                                origin_options.append({'id': oid, 'origin_id': origin_id, 'name': f"{origin_name} · {tname}", 'display_name': f"{origin_name} · {tname}", 'path': path})
+                elif has_tenants:
+                    # Location only + each location·tenant
+                    oid = f"{origin_id}||"
+                    if oid not in seen_ids:
+                        seen_ids.add(oid)
+                        origin_options.append({'id': oid, 'origin_id': origin_id, 'name': origin_name, 'display_name': origin_name, 'path': path})
+                    for tenant_id in origin_tenant_ids:
+                        tname = tenant_name_by_id.get(tenant_id)
+                        if tname:
+                            oid = f"{origin_id}||{tenant_id}"
+                            if oid not in seen_ids:
+                                seen_ids.add(oid)
+                                origin_options.append({'id': oid, 'origin_id': origin_id, 'name': f"{origin_name} · {tname}", 'display_name': f"{origin_name} · {tname}", 'path': path})
+                else:
+                    # No tags, no tenants: location only
+                    oid = f"{origin_id}||"
+                    if oid not in seen_ids:
+                        seen_ids.add(oid)
+                        origin_options.append({'id': oid, 'origin_id': origin_id, 'name': origin_name, 'display_name': origin_name, 'path': path})
+
+            sorted_options = sorted(origin_options, key=lambda x: x['name'])
+            origins_data = sorted_options
             return {
                 'success': True,
                 'data': origins_data,
@@ -385,15 +570,49 @@ class ReportsService:
             )
             # Apply optional filters
             if filters:
-                # Origin filter: restrict to specific origins if provided
-                origin_ids = (filters.get('origin_ids') or [])
-                if origin_ids:
-                    try:
-                        oids = [int(o) for o in origin_ids]
-                        if oids:
-                            transaction_records_query = transaction_records_query.filter(Transaction.origin_id.in_(oids))
-                    except Exception:
-                        pass
+                # Origin combos (multiple composites: "2507||1,2507|46|")
+                # If "origin only" (oid, None, None) is selected, include ALL rows for that origin.
+                if filters.get('origin_combos'):
+                    combos = filters['origin_combos']
+                    origin_only_origin_ids = {oid for (oid, tag_id, tenant_id) in combos if tag_id is None and tenant_id is None}
+                    conditions = []
+                    for oid in origin_only_origin_ids:
+                        conditions.append(Transaction.origin_id == oid)
+                    for oid, tag_id, tenant_id in combos:
+                        if oid in origin_only_origin_ids:
+                            continue
+                        c = (Transaction.origin_id == oid)
+                        if tag_id is None:
+                            c = and_(c, Transaction.location_tag_id.is_(None))
+                        else:
+                            c = and_(c, Transaction.location_tag_id == tag_id)
+                        if tenant_id is None:
+                            c = and_(c, Transaction.tenant_id.is_(None))
+                        else:
+                            c = and_(c, Transaction.tenant_id == tenant_id)
+                        conditions.append(c)
+                    if conditions:
+                        transaction_records_query = transaction_records_query.filter(or_(*conditions))
+                else:
+                    # Origin filter: restrict to specific origins if provided
+                    origin_ids = (filters.get('origin_ids') or [])
+                    if origin_ids:
+                        try:
+                            oids = [int(o) for o in origin_ids]
+                            if oids:
+                                transaction_records_query = transaction_records_query.filter(Transaction.origin_id.in_(oids))
+                        except Exception:
+                            pass
+                    # Location tag filter (when single composite origin selected)
+                    if filters.get('location_tag_id') is not None:
+                        transaction_records_query = transaction_records_query.filter(
+                            Transaction.location_tag_id == filters['location_tag_id']
+                        )
+                    # Tenant filter (when single composite origin selected)
+                    if filters.get('tenant_id') is not None:
+                        transaction_records_query = transaction_records_query.filter(
+                            Transaction.tenant_id == filters['tenant_id']
+                        )
                 # Material filter (optional intersection)
                 material_ids = (filters.get('material_ids') or [])
                 if material_ids:

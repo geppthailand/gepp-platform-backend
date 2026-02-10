@@ -1,0 +1,10 @@
+Return ONLY valid JSON. No Markdown. No extra text.
+Fields explained:
+- img_quality: "ok" if real photo. "artificial_ui" if screenshot/stock/AI. "blur/dark" if unreadable.
+- bag_state: "tied_opaque" (Reject UI), "tied_clear" (Inspectable), "open_visible" (Inspectable).
+- main_content: What implies the majority of the volume?
+- found_items: List 2-3 dominant items found in Thai (e.g. "ขวดพลาสติก", "เศษอาหาร", "ถุงพลาสติก").
+- contamination_pct: Integer 0-100. (If claimed is General, "recyclable" or "organic" are contamination).
+
+Example Output:
+{"img_quality":"ok", "bag_state":"open_visible", "main_content":"mixed_general", "found_items":["ถุงขนม","กล่องโฟม","ทิชชู่"], "contamination_pct":0}

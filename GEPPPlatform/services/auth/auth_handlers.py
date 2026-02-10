@@ -105,17 +105,17 @@ class AuthHandlers:
     def generate_jwt_tokens(self, user_id: int, organization_id: int, email: str) -> Dict[str, str]:
         """Generate JWT auth_token and refresh_token"""
         now = datetime.now(timezone.utc)
-        
-        # Auth token (short-lived: 15 minutes)
+
+        # Auth token (expires in 1 day)
         auth_payload = {
             'user_id': user_id,
             'organization_id': organization_id,
             'email': email,
             'type': 'auth',
-            'exp': now + timedelta(minutes=15),
+            'exp': now + timedelta(days=1),
             'iat': now
         }
-        
+
         # Refresh token (long-lived: 7 days)
         refresh_payload = {
             'user_id': user_id,
@@ -125,10 +125,10 @@ class AuthHandlers:
             'exp': now + timedelta(days=7),
             'iat': now
         }
-        
+
         auth_token = jwt.encode(auth_payload, self.jwt_secret, algorithm='HS256')
         refresh_token = jwt.encode(refresh_payload, self.jwt_secret, algorithm='HS256')
-        
+
         return {
             'auth_token': auth_token,
             'refresh_token': refresh_token
@@ -142,7 +142,7 @@ class AuthHandlers:
             'device_id': device_id,
             'device_name': device_name,
             'type': 'device',
-            'exp': now + timedelta(minutes=15),
+            'exp': now + timedelta(days=1),
             'iat': now
         }
 
@@ -474,7 +474,7 @@ class AuthHandlers:
                 'auth_token': tokens['auth_token'],
                 'refresh_token': tokens['refresh_token'],
                 'token_type': 'Bearer',
-                'expires_in': 3600,  # 60 minutes in seconds
+                'expires_in': 86400,  # 1 day in seconds
                 'user': user_data
             }
 
@@ -693,7 +693,7 @@ class AuthHandlers:
                 'auth_token': tokens['auth_token'],
                 'refresh_token': tokens['refresh_token'],
                 'token_type': 'Bearer',
-                'expires_in': 900  # 15 minutes in seconds
+                'expires_in': 86400  # 1 day in seconds
             }
 
         except Exception as e:
@@ -805,7 +805,7 @@ class AuthHandlers:
                 'auth_token': tokens['auth_token'],
                 'refresh_token': tokens['refresh_token'],
                 'token_type': 'Bearer',
-                'expires_in': 900,  # 15 minutes in seconds
+                'expires_in': 86400,  # 1 day in seconds
                 'user': {
                     'id': user.id,
                     'email': email,
@@ -859,7 +859,7 @@ class AuthHandlers:
                 'auth_token': tokens['auth_token'],
                 'refresh_token': tokens['refresh_token'],
                 'token_type': 'Bearer',
-                'expires_in': 900,
+                'expires_in': 86400,  # 1 day in seconds
                 'device': {
                     'id': device.id,
                     'device_name': device.device_name,
