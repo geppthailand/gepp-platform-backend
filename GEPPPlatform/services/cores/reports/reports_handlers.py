@@ -19,7 +19,6 @@ from ....exceptions import APIException, ValidationException, NotFoundException
 from GEPPPlatform.models.cores.references import MainMaterial, MaterialCategory
 from GEPPPlatform.models.users.user_location import UserLocation
 
-
 # ========== HELPER FUNCTIONS ==========
 
 def _validate_organization_id(current_user: Dict[str, Any]) -> int:
@@ -2203,6 +2202,7 @@ def _handle_export_pdf_report(
         # Diversion (sankey + materials monthly table)
         'diversion_data': diversion_data,
     }
+    print(f"DATA GOT")
 
     # Generate PDF via Lambda hub (routes to reports export function)
     from ..pdf_export_hub import generate_pdf_via_lambda
