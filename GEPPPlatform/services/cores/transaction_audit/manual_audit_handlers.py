@@ -501,16 +501,15 @@ def handle_approve_transaction_record(
         if transaction_id is not None and organization_id is not None:
             try:
                 txn_service = TransactionService(db_session)
-                txn_service.create_txn_approved_notifications_for_record(
+                txn_service.create_txn_approved_notifications_if_all_records_approved(
                     transaction_id=int(transaction_id),
-                    record_id=record_id,
                     organization_id=organization_id,
                     created_by_id=int(current_user_id),
                 )
             except Exception as e:
                 logger.warning(
-                    "TXN_APPROVED (record) notifications failed for record_id=%s: %s",
-                    record_id,
+                    "TXN_APPROVED notifications failed for transaction_id=%s: %s",
+                    transaction_id,
                     str(e),
                 )
         return {

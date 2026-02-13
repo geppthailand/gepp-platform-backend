@@ -9,8 +9,11 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy import cast, String, exists, and_
 import json
 import logging
+import os
 from datetime import datetime
 from decimal import Decimal
+
+import boto3
 
 from sqlalchemy import cast, String, text
 from sqlalchemy.orm import Session, joinedload
@@ -188,6 +191,45 @@ class TransactionService:
                 'errors': [str(e)]
             }
 
+    def _send_email_via_lambda(
+        self,
+        to_email: str,
+        subject: str,
+        html_content: str,
+        text_content: Optional[str] = None,
+    ) -> bool:
+        """Send email via Lambda (same contract as auth_handlers)."""
+        try:
+            lambda_function_name = os.environ.get("EMAIL_LAMBDA_FUNCTION", "PROD-GEPPEmailNotification")
+            message = {
+                "from_email": os.environ.get("EMAIL_FROM", "noreply@gepp.me"),
+                "from_name": os.environ.get("EMAIL_FROM_NAME", "GEPP Platform"),
+                "to": [{"email": to_email, "type": "to"}],
+                "subject": subject,
+                "html": html_content,
+            }
+            if text_content:
+                message["text"] = text_content
+            lambda_client = boto3.client("lambda")
+            response = lambda_client.invoke(
+                FunctionName=lambda_function_name,
+                InvocationType="RequestResponse",
+                Payload=json.dumps({"data": {"message": message}}).encode("utf-8"),
+            )
+            response_payload = response.get("Payload").read()
+            response_data = json.loads(response_payload)
+            if response.get("FunctionError"):
+                logger.warning("Email Lambda function error: %s", response.get("FunctionError"))
+                return False
+            if isinstance(response_data, dict) and "body" in response_data:
+                body_data = json.loads(response_data.get("body", "{}"))
+                if body_data.get("data", {}).get("status") == "success":
+                    return True
+            return False
+        except Exception as e:
+            logger.exception("Error sending email via Lambda: %s", e)
+            return False
+
     def _send_txn_created_emails(
         self,
         transaction_id: int,
@@ -196,17 +238,74 @@ class TransactionService:
         resource: Dict[str, Any],
     ) -> None:
         """
-        Send TXN_CREATED notification emails to the given addresses.
-        Stub: implement actual email sending later.
+        Send TXN_CREATED notification emails to the given addresses via Lambda.
         """
         if not email_list:
             return
-        # TODO: Implement email sending (e.g. SES, SMTP).
-        logger.info(
-            "TXN_CREATED emails would be sent to %d address(es) for transaction_id=%s (stub)",
-            len(email_list),
-            transaction_id,
-        )
+        subject = f"New transaction #{transaction_id} – GEPP Platform"
+        html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f4f6f8; line-height: 1.6; color: #333;">
+    <div style="max-width: 560px; margin: 0 auto; padding: 32px 24px;">
+        <div style="background: #ffffff; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); overflow: hidden;">
+            <div style="background: linear-gradient(135deg, #2c3e50 0%, #27ae60 100%); padding: 28px 24px; text-align: center;">
+                <h1 style="margin: 0; color: #ffffff; font-size: 22px; font-weight: 600; letter-spacing: -0.02em;">New Transaction</h1>
+                <p style="margin: 8px 0 0 0; color: rgba(255,255,255,0.9); font-size: 14px;">GEPP Platform</p>
+            </div>
+            <div style="padding: 28px 24px;">
+                <p style="margin: 0 0 16px 0; font-size: 15px;">Hello,</p>
+                <p style="margin: 0 0 20px 0; font-size: 15px;">A new transaction has been created in your organization.</p>
+                <div style="background: #f8f9fa; border-radius: 8px; padding: 16px 20px; margin: 24px 0; border-left: 4px solid #27ae60;">
+                    <p style="margin: 0 0 4px 0; font-size: 12px; color: #6c757d; text-transform: uppercase; letter-spacing: 0.05em;">Transaction ID</p>
+                    <p style="margin: 0; font-size: 18px; font-weight: 600; color: #2c3e50;">#{transaction_id}</p>
+                </div>
+                <p style="margin: 0; font-size: 14px; color: #6c757d;">Log in to the platform to view details and take action if needed.</p>
+            </div>
+            <hr style="border: none; border-top: 1px solid #eee; margin: 0;">
+            <div style="padding: 16px 24px;">
+                <p style="margin: 0; font-size: 12px; color: #95a5a6;">This is an automated message from GEPP Platform. Please do not reply to this email.</p>
+            </div>
+        </div>
+    </div>
+</body>
+</html>"""
+        text_content = f"""New Transaction – GEPP Platform
+
+Hello,
+
+A new transaction has been created in your organization.
+
+Transaction ID: #{transaction_id}
+
+Log in to the platform to view details and take action if needed.
+
+—
+This is an automated message from GEPP Platform. Please do not reply to this email."""
+        for to_email in email_list:
+            try:
+                sent = self._send_email_via_lambda(
+                    to_email=to_email,
+                    subject=subject,
+                    html_content=html_content,
+                    text_content=text_content,
+                )
+                logger.info(
+                    "TXN_CREATED email to %s for transaction_id=%s: sent=%s",
+                    to_email,
+                    transaction_id,
+                    sent,
+                )
+            except Exception as e:
+                logger.exception(
+                    "Failed to send TXN_CREATED email to %s for transaction_id=%s: %s",
+                    to_email,
+                    transaction_id,
+                    e,
+                )
 
     def _send_txn_updated_emails(
         self,
@@ -216,17 +315,74 @@ class TransactionService:
         resource: Dict[str, Any],
     ) -> None:
         """
-        Send TXN_UPDATED notification emails to the given addresses.
-        Stub: implement actual email sending later.
+        Send TXN_UPDATED notification emails to the given addresses via Lambda.
         """
         if not email_list:
             return
-        # TODO: Implement email sending (e.g. SES, SMTP).
-        logger.info(
-            "TXN_UPDATED emails would be sent to %d address(es) for transaction_id=%s (stub)",
-            len(email_list),
-            transaction_id,
-        )
+        subject = f"Transaction #{transaction_id} updated – GEPP Platform"
+        html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f4f6f8; line-height: 1.6; color: #333;">
+    <div style="max-width: 560px; margin: 0 auto; padding: 32px 24px;">
+        <div style="background: #ffffff; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); overflow: hidden;">
+            <div style="background: linear-gradient(135deg, #2c3e50 0%, #3498db 100%); padding: 28px 24px; text-align: center;">
+                <h1 style="margin: 0; color: #ffffff; font-size: 22px; font-weight: 600; letter-spacing: -0.02em;">Transaction Updated</h1>
+                <p style="margin: 8px 0 0 0; color: rgba(255,255,255,0.9); font-size: 14px;">GEPP Platform</p>
+            </div>
+            <div style="padding: 28px 24px;">
+                <p style="margin: 0 0 16px 0; font-size: 15px;">Hello,</p>
+                <p style="margin: 0 0 20px 0; font-size: 15px;">A transaction in your organization has been updated.</p>
+                <div style="background: #f8f9fa; border-radius: 8px; padding: 16px 20px; margin: 24px 0; border-left: 4px solid #3498db;">
+                    <p style="margin: 0 0 4px 0; font-size: 12px; color: #6c757d; text-transform: uppercase; letter-spacing: 0.05em;">Transaction ID</p>
+                    <p style="margin: 0; font-size: 18px; font-weight: 600; color: #2c3e50;">#{transaction_id}</p>
+                </div>
+                <p style="margin: 0; font-size: 14px; color: #6c757d;">Log in to the platform to view the latest details.</p>
+            </div>
+            <hr style="border: none; border-top: 1px solid #eee; margin: 0;">
+            <div style="padding: 16px 24px;">
+                <p style="margin: 0; font-size: 12px; color: #95a5a6;">This is an automated message from GEPP Platform. Please do not reply to this email.</p>
+            </div>
+        </div>
+    </div>
+</body>
+</html>"""
+        text_content = f"""Transaction Updated – GEPP Platform
+
+Hello,
+
+A transaction in your organization has been updated.
+
+Transaction ID: #{transaction_id}
+
+Log in to the platform to view the latest details.
+
+—
+This is an automated message from GEPP Platform. Please do not reply to this email."""
+        for to_email in email_list:
+            try:
+                sent = self._send_email_via_lambda(
+                    to_email=to_email,
+                    subject=subject,
+                    html_content=html_content,
+                    text_content=text_content,
+                )
+                logger.info(
+                    "TXN_UPDATED email to %s for transaction_id=%s: sent=%s",
+                    to_email,
+                    transaction_id,
+                    sent,
+                )
+            except Exception as e:
+                logger.exception(
+                    "Failed to send TXN_UPDATED email to %s for transaction_id=%s: %s",
+                    to_email,
+                    transaction_id,
+                    e,
+                )
 
     def create_txn_created_notifications(
         self,
@@ -448,14 +604,72 @@ class TransactionService:
         email_list: List[str],
         resource: Dict[str, Any],
     ) -> None:
-        """Send TXN_APPROVED notification emails. Stub: implement later."""
+        """Send TXN_APPROVED notification emails to the given addresses via Lambda."""
         if not email_list:
             return
-        logger.info(
-            "TXN_APPROVED emails would be sent to %d address(es) for transaction_id=%s (stub)",
-            len(email_list),
-            transaction_id,
-        )
+        txn_ref = f"#{transaction_id}"
+        subject = f"Transaction {txn_ref} has been approved – GEPP Platform"
+        html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f4f6f8; line-height: 1.6; color: #333;">
+    <div style="max-width: 560px; margin: 0 auto; padding: 32px 24px;">
+        <div style="background: #ffffff; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); overflow: hidden;">
+            <div style="background: linear-gradient(135deg, #2c3e50 0%, #27ae60 100%); padding: 28px 24px; text-align: center;">
+                <h1 style="margin: 0; color: #ffffff; font-size: 22px; font-weight: 600; letter-spacing: -0.02em;">Transaction Approved</h1>
+                <p style="margin: 8px 0 0 0; color: rgba(255,255,255,0.9); font-size: 14px;">GEPP Platform</p>
+            </div>
+            <div style="padding: 28px 24px;">
+                <p style="margin: 0 0 16px 0; font-size: 15px;">Hello,</p>
+                <p style="margin: 0 0 20px 0; font-size: 15px;">Transaction {txn_ref} has been approved.</p>
+                <div style="background: #f8f9fa; border-radius: 8px; padding: 16px 20px; margin: 24px 0; border-left: 4px solid #27ae60;">
+                    <p style="margin: 0 0 4px 0; font-size: 12px; color: #6c757d; text-transform: uppercase; letter-spacing: 0.05em;">Transaction</p>
+                    <p style="margin: 0; font-size: 18px; font-weight: 600; color: #2c3e50;">{txn_ref}</p>
+                </div>
+                <p style="margin: 0; font-size: 14px; color: #6c757d;">Log in to the platform to view details.</p>
+            </div>
+            <hr style="border: none; border-top: 1px solid #eee; margin: 0;">
+            <div style="padding: 16px 24px;">
+                <p style="margin: 0; font-size: 12px; color: #95a5a6;">This is an automated message from GEPP Platform. Please do not reply to this email.</p>
+            </div>
+        </div>
+    </div>
+</body>
+</html>"""
+        text_content = f"""Transaction Approved – GEPP Platform
+
+Hello,
+
+Transaction {txn_ref} has been approved.
+
+Log in to the platform to view details.
+
+—
+This is an automated message from GEPP Platform. Please do not reply to this email."""
+        for to_email in email_list:
+            try:
+                sent = self._send_email_via_lambda(
+                    to_email=to_email,
+                    subject=subject,
+                    html_content=html_content,
+                    text_content=text_content,
+                )
+                logger.info(
+                    "TXN_APPROVED email to %s for transaction_id=%s: sent=%s",
+                    to_email,
+                    transaction_id,
+                    sent,
+                )
+            except Exception as e:
+                logger.exception(
+                    "Failed to send TXN_APPROVED email to %s for transaction_id=%s: %s",
+                    to_email,
+                    transaction_id,
+                    e,
+                )
 
     def _send_txn_rejected_emails(
         self,
@@ -464,14 +678,72 @@ class TransactionService:
         email_list: List[str],
         resource: Dict[str, Any],
     ) -> None:
-        """Send TXN_REJECTED notification emails. Stub: implement later."""
+        """Send TXN_REJECTED notification emails to the given addresses via Lambda."""
         if not email_list:
             return
-        logger.info(
-            "TXN_REJECTED emails would be sent to %d address(es) for transaction_id=%s (stub)",
-            len(email_list),
-            transaction_id,
-        )
+        txn_ref = f"#{transaction_id}"
+        subject = f"Transaction {txn_ref} has been rejected – GEPP Platform"
+        html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f4f6f8; line-height: 1.6; color: #333;">
+    <div style="max-width: 560px; margin: 0 auto; padding: 32px 24px;">
+        <div style="background: #ffffff; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); overflow: hidden;">
+            <div style="background: linear-gradient(135deg, #2c3e50 0%, #e74c3c 100%); padding: 28px 24px; text-align: center;">
+                <h1 style="margin: 0; color: #ffffff; font-size: 22px; font-weight: 600; letter-spacing: -0.02em;">Transaction Rejected</h1>
+                <p style="margin: 8px 0 0 0; color: rgba(255,255,255,0.9); font-size: 14px;">GEPP Platform</p>
+            </div>
+            <div style="padding: 28px 24px;">
+                <p style="margin: 0 0 16px 0; font-size: 15px;">Hello,</p>
+                <p style="margin: 0 0 20px 0; font-size: 15px;">Transaction {txn_ref} has been rejected because one or all of its records have been rejected. Please check the platform.</p>
+                <div style="background: #f8f9fa; border-radius: 8px; padding: 16px 20px; margin: 24px 0; border-left: 4px solid #e74c3c;">
+                    <p style="margin: 0 0 4px 0; font-size: 12px; color: #6c757d; text-transform: uppercase; letter-spacing: 0.05em;">Transaction</p>
+                    <p style="margin: 0; font-size: 18px; font-weight: 600; color: #2c3e50;">{txn_ref}</p>
+                </div>
+                <p style="margin: 0; font-size: 14px; color: #6c757d;">Log in to the platform to view details and take action if needed.</p>
+            </div>
+            <hr style="border: none; border-top: 1px solid #eee; margin: 0;">
+            <div style="padding: 16px 24px;">
+                <p style="margin: 0; font-size: 12px; color: #95a5a6;">This is an automated message from GEPP Platform. Please do not reply to this email.</p>
+            </div>
+        </div>
+    </div>
+</body>
+</html>"""
+        text_content = f"""Transaction Rejected – GEPP Platform
+
+Hello,
+
+Transaction {txn_ref} has been rejected because one or all of its records have been rejected. Please check the platform.
+
+Log in to the platform to view details and take action if needed.
+
+—
+This is an automated message from GEPP Platform. Please do not reply to this email."""
+        for to_email in email_list:
+            try:
+                sent = self._send_email_via_lambda(
+                    to_email=to_email,
+                    subject=subject,
+                    html_content=html_content,
+                    text_content=text_content,
+                )
+                logger.info(
+                    "TXN_REJECTED email to %s for transaction_id=%s: sent=%s",
+                    to_email,
+                    transaction_id,
+                    sent,
+                )
+            except Exception as e:
+                logger.exception(
+                    "Failed to send TXN_REJECTED email to %s for transaction_id=%s: %s",
+                    to_email,
+                    transaction_id,
+                    e,
+                )
 
     def _create_txn_event_notifications(
         self,
@@ -582,19 +854,47 @@ class TransactionService:
                 exc_info=True,
             )
 
+    def _transaction_has_all_records_approved(self, transaction_id: int) -> bool:
+        """Return True if the transaction has at least one record and all records are approved."""
+        count = self.db.query(TransactionRecord).filter(
+            TransactionRecord.created_transaction_id == transaction_id,
+        ).count()
+        if count == 0:
+            return False
+        not_approved = self.db.query(TransactionRecord).filter(
+            TransactionRecord.created_transaction_id == transaction_id,
+            TransactionRecord.status != 'approved',
+        ).count()
+        return not_approved == 0
+
     def create_txn_approved_notifications(
         self,
         transaction_id: int,
         organization_id: int,
         created_by_id: int,
     ) -> None:
-        """Create notifications and email list for TXN_APPROVED (BELL + EMAIL stub)."""
+        """Create notifications and email list for TXN_APPROVED (BELL + EMAIL)."""
         self._create_txn_event_notifications(
             transaction_id=transaction_id,
             organization_id=organization_id,
             created_by_id=created_by_id,
             event='TXN_APPROVED',
             send_email_fn=self._send_txn_approved_emails,
+        )
+
+    def create_txn_approved_notifications_if_all_records_approved(
+        self,
+        transaction_id: int,
+        organization_id: int,
+        created_by_id: int,
+    ) -> None:
+        """Create TXN_APPROVED notifications and emails only when all records in the transaction are approved."""
+        if not self._transaction_has_all_records_approved(transaction_id):
+            return
+        self.create_txn_approved_notifications(
+            transaction_id=transaction_id,
+            organization_id=organization_id,
+            created_by_id=created_by_id,
         )
 
     def create_txn_rejected_notifications(
