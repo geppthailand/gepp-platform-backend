@@ -102,6 +102,13 @@ def organization_routes(event: Dict[str, Any], context: Any, **params) -> Dict[s
         body = json.loads(event.get('body', '{}'))
         return handle_update_ai_audit_permission(org_service, user_id, user_organization_id, body, headers)
 
+    # Notification settings
+    elif method == 'GET' and '/api/organizations/notification-settings' in path:
+        return handle_get_notification_settings(org_service, user_id, headers)
+    elif method == 'POST' and '/api/organizations/notification-settings' in path:
+        body = json.loads(event.get('body') or '{}')
+        return handle_upsert_notification_settings(org_service, user_id, body, headers)
+
     else:
         raise NotFoundException('Organization endpoint not found')
 
@@ -421,6 +428,53 @@ def handle_update_organization_setup(org_service: OrganizationService, user_id: 
         raise BadRequestException(str(e))
     except Exception as e:
         raise APIException(f'Error updating organization setup: {str(e)}')
+
+
+def handle_get_notification_settings(
+    org_service: OrganizationService,
+    user_id: int,
+    headers: Dict[str, str]
+) -> Dict[str, Any]:
+    """Get organization notification settings in the same format as upsert input/output.
+    Returns { "success": True, "data": [ { organization_id, event, role, ... }, ... ] }
+    """
+    organization = org_service.get_user_organization(user_id)
+    if not organization:
+        raise NotFoundException('User is not part of any organization')
+
+    data = org_service.get_notification_settings(organization.id)
+    return {
+        'success': True,
+        'data': data,
+        'message': f'Notification settings ({len(data)} item(s))',
+    }
+
+
+def handle_upsert_notification_settings(
+    org_service: OrganizationService,
+    user_id: int,
+    body: Any,
+    headers: Dict[str, str]
+) -> Dict[str, Any]:
+    """Create or update organization notification settings from a list of items.
+    Body format: { "data": [ { organization_id, event, role, ... }, ... ] }
+    """
+    if not isinstance(body, dict) or 'data' not in body:
+        raise ValidationException('Request body must be { "data": [ ... ] } with data as array of notification setting items')
+    items = body['data']
+    if not isinstance(items, list):
+        raise ValidationException('Body "data" must be a JSON array of notification setting items')
+
+    organization = org_service.get_user_organization(user_id)
+    if not organization:
+        raise NotFoundException('User is not part of any organization')
+
+    data = org_service.upsert_notification_settings(organization.id, items)
+    return {
+        'success': True,
+        'data': data,
+        'message': f'Notification settings saved ({len(data)} item(s))',
+    }
 
 
 def handle_update_ai_audit_permission(

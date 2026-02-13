@@ -584,6 +584,22 @@ main() {
                 print_success "Migration tracking reset"
             fi
             ;;
+        "rerun")
+            if [ -z "${2:-}" ]; then
+                print_error "Usage: $0 rerun <version>"
+                echo "  Example: $0 rerun 20260128_100000_001"
+                echo "  Version is the first 3 segments of the filename (e.g. 20260128_100000_001 from 20260128_100000_001_create_organization_notification_settings.sql)"
+                exit 1
+            fi
+            check_postgres
+            create_database
+            create_migration_table
+            local version="$2"
+            print_status "Removing version $version from schema_migrations so it can run again..."
+            psql $PSQL_OPTS -d $DB_NAME -c "DELETE FROM schema_migrations WHERE version = '$version';" 2>/dev/null || true
+            print_success "Version $version cleared. Running migrations..."
+            run_all_migrations
+            ;;
         "optimize")
             check_postgres
             print_status "Applying database optimizations..."
@@ -604,13 +620,14 @@ main() {
             show_status
             ;;
         *)
-            echo "Usage: $0 [status|rollback|reset|optimize]"
+            echo "Usage: $0 [status|rollback|reset|rerun|optimize]"
             echo ""
             echo "Commands:"
             echo "  (no args)  Run all pending migrations with optimizations"
             echo "  status     Show migration status and performance metrics"
             echo "  rollback   Rollback last migration (not implemented)"
             echo "  reset      Reset migration tracking"
+            echo "  rerun VER  Remove one migration from tracking and run migrations again (e.g. rerun 20260128_100000_001)"
             echo "  optimize   Apply database optimizations"
             echo ""
             echo "Environment Variables:"

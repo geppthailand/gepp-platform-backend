@@ -514,13 +514,15 @@ def draw_table(pdf, x, y, w, h, r=6, type="Header"):
 # --- Page drawing functions (vendored) ---
 def draw_cover(pdf, page_width_points: float, page_height_points: float, data: dict) -> None:
     _header(pdf, page_width_points, page_height_points, data)
+    # Use report period year, or current year
+    year_str = str(datetime.now().year)
     middle = page_height_points / 2
     # Slightly shift content down to better center on the page
     content_center = middle - 20
     pdf.setFillColor(PRIMARY)
     pdf.setFont("IBMPlexSansThai-Bold", 100)
     # Move text block down a bit to better center vertically
-    pdf.drawString(0.63 * inch, content_center + 0, "2025")
+    pdf.drawString(0.63 * inch, content_center + 0, year_str)
     pdf.setFillColor(colors.HexColor("#9ac7b5"))
     pdf.setFont("IBMPlexSansThai-Medium", 38.5)
     pdf.drawString(0.63 * inch, content_center - 40, "GEPP REPORT")
@@ -2676,5 +2678,3 @@ def lambda_handler(event, context):
         }
     # Direct invoke return
     return response_obj
-
-

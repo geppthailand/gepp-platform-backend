@@ -6,6 +6,7 @@ Routes to appropriate export functions based on export_type.
 
 from typing import Dict, Any, Optional
 import os
+import re
 import json
 import boto3
 import base64
@@ -113,6 +114,21 @@ def _invoke_pdf_lambda(payload: Dict[str, Any], export_type: str = "reports") ->
                     error_msg = f"Lambda error (status {status_code}): {body_content[:200]}"
                     print(f"[PDF_HUB] Returning status code error: {error_msg}")
                     return {"success": False, "error": error_msg}
+                # statusCode 200 with non-JSON body = binary PDF (API Gateway binary response)
+                if status_code == 200 and body_content:
+                    headers = out.get("headers") or {}
+                    content_disp = headers.get("Content-Disposition") or ""
+                    filename = None
+                    if "filename=" in content_disp:
+                        m = re.search(r'filename=["\']?([^"\']+)["\']?', content_disp)
+                        if m:
+                            filename = m.group(1).strip()
+                    print(f"[PDF_HUB] Lambda binary PDF response (status 200), filename={filename}")
+                    return {
+                        "success": True,
+                        "pdf_base64": body_content,
+                        "filename": filename,
+                    }
                 return {"success": False, "error": f"Invalid JSON in Lambda response body: {str(e)}"}
         
         # Direct response format (not API Gateway proxy)

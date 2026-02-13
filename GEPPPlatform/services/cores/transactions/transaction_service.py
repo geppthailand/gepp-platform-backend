@@ -7,11 +7,20 @@ from typing import List, Optional, Dict, Any, Tuple
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy import cast, String, exists, and_
+import json
+import logging
+import os
 from datetime import datetime
 from decimal import Decimal
-import logging
+
+import boto3
+
+from sqlalchemy import cast, String, text
+from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.exc import SQLAlchemyError
 
 from ....models.transactions.transactions import Transaction, TransactionStatus, TransactionRecordStatus
+
 from ....models.transactions.transaction_records import TransactionRecord
 from ...file_upload_service import S3FileUploadService
 from ....models.users.user_location import UserLocation
@@ -181,6 +190,761 @@ class TransactionService:
                 'message': 'An unexpected error occurred',
                 'errors': [str(e)]
             }
+
+    def _send_email_via_lambda(
+        self,
+        to_email: str,
+        subject: str,
+        html_content: str,
+        text_content: Optional[str] = None,
+    ) -> bool:
+        """Send email via Lambda (same contract as auth_handlers)."""
+        try:
+            lambda_function_name = os.environ.get("EMAIL_LAMBDA_FUNCTION", "PROD-GEPPEmailNotification")
+            message = {
+                "from_email": os.environ.get("EMAIL_FROM", "noreply@gepp.me"),
+                "from_name": os.environ.get("EMAIL_FROM_NAME", "GEPP Platform"),
+                "to": [{"email": to_email, "type": "to"}],
+                "subject": subject,
+                "html": html_content,
+            }
+            if text_content:
+                message["text"] = text_content
+            lambda_client = boto3.client("lambda")
+            response = lambda_client.invoke(
+                FunctionName=lambda_function_name,
+                InvocationType="RequestResponse",
+                Payload=json.dumps({"data": {"message": message}}).encode("utf-8"),
+            )
+            response_payload = response.get("Payload").read()
+            response_data = json.loads(response_payload)
+            if response.get("FunctionError"):
+                logger.warning("Email Lambda function error: %s", response.get("FunctionError"))
+                return False
+            if isinstance(response_data, dict) and "body" in response_data:
+                body_data = json.loads(response_data.get("body", "{}"))
+                if body_data.get("data", {}).get("status") == "success":
+                    return True
+            return False
+        except Exception as e:
+            logger.exception("Error sending email via Lambda: %s", e)
+            return False
+
+    def _send_txn_created_emails(
+        self,
+        transaction_id: int,
+        organization_id: int,
+        email_list: List[str],
+        resource: Dict[str, Any],
+    ) -> None:
+        """
+        Send TXN_CREATED notification emails to the given addresses via Lambda.
+        """
+        if not email_list:
+            return
+        subject = f"New transaction #{transaction_id} – GEPP Platform"
+        html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f4f6f8; line-height: 1.6; color: #333;">
+    <div style="max-width: 560px; margin: 0 auto; padding: 32px 24px;">
+        <div style="background: #ffffff; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); overflow: hidden;">
+            <div style="background: linear-gradient(135deg, #2c3e50 0%, #27ae60 100%); padding: 28px 24px; text-align: center;">
+                <h1 style="margin: 0; color: #ffffff; font-size: 22px; font-weight: 600; letter-spacing: -0.02em;">New Transaction</h1>
+                <p style="margin: 8px 0 0 0; color: rgba(255,255,255,0.9); font-size: 14px;">GEPP Platform</p>
+            </div>
+            <div style="padding: 28px 24px;">
+                <p style="margin: 0 0 16px 0; font-size: 15px;">Hello,</p>
+                <p style="margin: 0 0 20px 0; font-size: 15px;">A new transaction has been created in your organization.</p>
+                <div style="background: #f8f9fa; border-radius: 8px; padding: 16px 20px; margin: 24px 0; border-left: 4px solid #27ae60;">
+                    <p style="margin: 0 0 4px 0; font-size: 12px; color: #6c757d; text-transform: uppercase; letter-spacing: 0.05em;">Transaction ID</p>
+                    <p style="margin: 0; font-size: 18px; font-weight: 600; color: #2c3e50;">#{transaction_id}</p>
+                </div>
+                <p style="margin: 0; font-size: 14px; color: #6c757d;">Log in to the platform to view details and take action if needed.</p>
+            </div>
+            <hr style="border: none; border-top: 1px solid #eee; margin: 0;">
+            <div style="padding: 16px 24px;">
+                <p style="margin: 0; font-size: 12px; color: #95a5a6;">This is an automated message from GEPP Platform. Please do not reply to this email.</p>
+            </div>
+        </div>
+    </div>
+</body>
+</html>"""
+        text_content = f"""New Transaction – GEPP Platform
+
+Hello,
+
+A new transaction has been created in your organization.
+
+Transaction ID: #{transaction_id}
+
+Log in to the platform to view details and take action if needed.
+
+—
+This is an automated message from GEPP Platform. Please do not reply to this email."""
+        for to_email in email_list:
+            try:
+                sent = self._send_email_via_lambda(
+                    to_email=to_email,
+                    subject=subject,
+                    html_content=html_content,
+                    text_content=text_content,
+                )
+                logger.info(
+                    "TXN_CREATED email to %s for transaction_id=%s: sent=%s",
+                    to_email,
+                    transaction_id,
+                    sent,
+                )
+            except Exception as e:
+                logger.exception(
+                    "Failed to send TXN_CREATED email to %s for transaction_id=%s: %s",
+                    to_email,
+                    transaction_id,
+                    e,
+                )
+
+    def _send_txn_updated_emails(
+        self,
+        transaction_id: int,
+        organization_id: int,
+        email_list: List[str],
+        resource: Dict[str, Any],
+    ) -> None:
+        """
+        Send TXN_UPDATED notification emails to the given addresses via Lambda.
+        """
+        if not email_list:
+            return
+        subject = f"Transaction #{transaction_id} updated – GEPP Platform"
+        html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f4f6f8; line-height: 1.6; color: #333;">
+    <div style="max-width: 560px; margin: 0 auto; padding: 32px 24px;">
+        <div style="background: #ffffff; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); overflow: hidden;">
+            <div style="background: linear-gradient(135deg, #2c3e50 0%, #3498db 100%); padding: 28px 24px; text-align: center;">
+                <h1 style="margin: 0; color: #ffffff; font-size: 22px; font-weight: 600; letter-spacing: -0.02em;">Transaction Updated</h1>
+                <p style="margin: 8px 0 0 0; color: rgba(255,255,255,0.9); font-size: 14px;">GEPP Platform</p>
+            </div>
+            <div style="padding: 28px 24px;">
+                <p style="margin: 0 0 16px 0; font-size: 15px;">Hello,</p>
+                <p style="margin: 0 0 20px 0; font-size: 15px;">A transaction in your organization has been updated.</p>
+                <div style="background: #f8f9fa; border-radius: 8px; padding: 16px 20px; margin: 24px 0; border-left: 4px solid #3498db;">
+                    <p style="margin: 0 0 4px 0; font-size: 12px; color: #6c757d; text-transform: uppercase; letter-spacing: 0.05em;">Transaction ID</p>
+                    <p style="margin: 0; font-size: 18px; font-weight: 600; color: #2c3e50;">#{transaction_id}</p>
+                </div>
+                <p style="margin: 0; font-size: 14px; color: #6c757d;">Log in to the platform to view the latest details.</p>
+            </div>
+            <hr style="border: none; border-top: 1px solid #eee; margin: 0;">
+            <div style="padding: 16px 24px;">
+                <p style="margin: 0; font-size: 12px; color: #95a5a6;">This is an automated message from GEPP Platform. Please do not reply to this email.</p>
+            </div>
+        </div>
+    </div>
+</body>
+</html>"""
+        text_content = f"""Transaction Updated – GEPP Platform
+
+Hello,
+
+A transaction in your organization has been updated.
+
+Transaction ID: #{transaction_id}
+
+Log in to the platform to view the latest details.
+
+—
+This is an automated message from GEPP Platform. Please do not reply to this email."""
+        for to_email in email_list:
+            try:
+                sent = self._send_email_via_lambda(
+                    to_email=to_email,
+                    subject=subject,
+                    html_content=html_content,
+                    text_content=text_content,
+                )
+                logger.info(
+                    "TXN_UPDATED email to %s for transaction_id=%s: sent=%s",
+                    to_email,
+                    transaction_id,
+                    sent,
+                )
+            except Exception as e:
+                logger.exception(
+                    "Failed to send TXN_UPDATED email to %s for transaction_id=%s: %s",
+                    to_email,
+                    transaction_id,
+                    e,
+                )
+
+    def create_txn_created_notifications(
+        self,
+        transaction_id: int,
+        organization_id: int,
+        created_by_id: int,
+    ) -> None:
+        """
+        Create one notification (notification_type='TXN_CREATED'), user_notifications for users
+        whose roles have BELL (channels_mask 2 or 3), and collect emails for users whose roles
+        have EMAIL (channels_mask 1 or 3) then call _send_txn_created_emails (stub).
+        """
+        try:
+            resource_dict = {'transaction_id': transaction_id}
+            resource_json = json.dumps(resource_dict)
+
+            # BELL: roles with channels_mask 2 or 3
+            r_bell = self.db.execute(
+                text("""
+                    SELECT role_id FROM organization_notification_settings
+                    WHERE organization_id = :org_id AND event = 'TXN_CREATED'
+                      AND is_active = TRUE AND deleted_date IS NULL
+                      AND (channels_mask & 2) != 0
+                """),
+                {'org_id': organization_id},
+            )
+            bell_role_ids = [row[0] for row in r_bell.fetchall()]
+
+            if bell_role_ids:
+                ins = self.db.execute(
+                    text("""
+                        INSERT INTO notifications
+                            (created_by_id, resource, notification_type, is_active, created_date, updated_date)
+                        VALUES (:created_by_id, CAST(:resource AS jsonb), :notification_type, TRUE, NOW(), NOW())
+                        RETURNING id
+                    """),
+                    {
+                        'created_by_id': created_by_id,
+                        'resource': resource_json,
+                        'notification_type': 'TXN_CREATED',
+                    },
+                )
+                row = ins.fetchone()
+                if row:
+                    notif_id = row[0]
+                    users_bell = self.db.execute(
+                        text("""
+                            SELECT DISTINCT id FROM user_locations
+                            WHERE organization_id = :org_id AND organization_role_id = ANY(:role_ids)
+                              AND is_user = TRUE AND is_active = TRUE AND deleted_date IS NULL
+                        """),
+                        {'org_id': organization_id, 'role_ids': bell_role_ids},
+                    )
+                    user_rows = users_bell.fetchall()
+                    for u in user_rows:
+                        self.db.execute(
+                            text("""
+                                INSERT INTO user_notifications
+                                    (user_id, notification_id, is_read, is_active, created_date, updated_date)
+                                VALUES (:user_id, :notification_id, FALSE, TRUE, NOW(), NOW())
+                                ON CONFLICT (user_id, notification_id) DO NOTHING
+                            """),
+                            {'user_id': u[0], 'notification_id': notif_id},
+                        )
+
+            # EMAIL: roles with channels_mask 1 or 3; collect user emails
+            r_email = self.db.execute(
+                text("""
+                    SELECT role_id FROM organization_notification_settings
+                    WHERE organization_id = :org_id AND event = 'TXN_CREATED'
+                      AND is_active = TRUE AND deleted_date IS NULL
+                      AND (channels_mask & 1) != 0
+                """),
+                {'org_id': organization_id},
+            )
+            email_role_ids = [row[0] for row in r_email.fetchall()]
+            email_list: List[str] = []
+            if email_role_ids:
+                users_email = self.db.execute(
+                    text("""
+                        SELECT DISTINCT id, email FROM user_locations
+                        WHERE organization_id = :org_id AND organization_role_id = ANY(:role_ids)
+                          AND is_user = TRUE AND is_active = TRUE AND deleted_date IS NULL
+                          AND email IS NOT NULL AND TRIM(email) != ''
+                    """),
+                    {'org_id': organization_id, 'role_ids': email_role_ids},
+                )
+                seen: set = set()
+                for u in users_email.fetchall():
+                    em = (u[1] or '').strip()
+                    if em and em not in seen:
+                        seen.add(em)
+                        email_list.append(em)
+
+            self._send_txn_created_emails(
+                transaction_id=transaction_id,
+                organization_id=organization_id,
+                email_list=email_list,
+                resource=resource_dict,
+            )
+            self.db.flush()
+        except Exception as e:
+            logger.error(
+                "Error creating TXN_CREATED notifications for transaction_id=%s: %s",
+                transaction_id,
+                str(e),
+                exc_info=True,
+            )
+
+    def create_txn_updated_notifications(
+        self,
+        transaction_id: int,
+        organization_id: int,
+        created_by_id: int,
+    ) -> None:
+        """
+        Create one notification (notification_type='TXN_UPDATED'), user_notifications for users
+        whose roles have BELL (channels_mask 2 or 3), and collect emails for users whose roles
+        have EMAIL (channels_mask 1 or 3) then call _send_txn_updated_emails (stub).
+        """
+        try:
+            resource_dict = {'transaction_id': transaction_id}
+            resource_json = json.dumps(resource_dict)
+
+            r_bell = self.db.execute(
+                text("""
+                    SELECT role_id FROM organization_notification_settings
+                    WHERE organization_id = :org_id AND event = 'TXN_UPDATED'
+                      AND is_active = TRUE AND deleted_date IS NULL
+                      AND (channels_mask & 2) != 0
+                """),
+                {'org_id': organization_id},
+            )
+            bell_role_ids = [row[0] for row in r_bell.fetchall()]
+
+            if bell_role_ids:
+                ins = self.db.execute(
+                    text("""
+                        INSERT INTO notifications
+                            (created_by_id, resource, notification_type, is_active, created_date, updated_date)
+                        VALUES (:created_by_id, CAST(:resource AS jsonb), :notification_type, TRUE, NOW(), NOW())
+                        RETURNING id
+                    """),
+                    {
+                        'created_by_id': created_by_id,
+                        'resource': resource_json,
+                        'notification_type': 'TXN_UPDATED',
+                    },
+                )
+                row = ins.fetchone()
+                if row:
+                    notif_id = row[0]
+                    users_bell = self.db.execute(
+                        text("""
+                            SELECT DISTINCT id FROM user_locations
+                            WHERE organization_id = :org_id AND organization_role_id = ANY(:role_ids)
+                              AND is_user = TRUE AND is_active = TRUE AND deleted_date IS NULL
+                        """),
+                        {'org_id': organization_id, 'role_ids': bell_role_ids},
+                    )
+                    for u in users_bell.fetchall():
+                        self.db.execute(
+                            text("""
+                                INSERT INTO user_notifications
+                                    (user_id, notification_id, is_read, is_active, created_date, updated_date)
+                                VALUES (:user_id, :notification_id, FALSE, TRUE, NOW(), NOW())
+                                ON CONFLICT (user_id, notification_id) DO NOTHING
+                            """),
+                            {'user_id': u[0], 'notification_id': notif_id},
+                        )
+
+            r_email = self.db.execute(
+                text("""
+                    SELECT role_id FROM organization_notification_settings
+                    WHERE organization_id = :org_id AND event = 'TXN_UPDATED'
+                      AND is_active = TRUE AND deleted_date IS NULL
+                      AND (channels_mask & 1) != 0
+                """),
+                {'org_id': organization_id},
+            )
+            email_role_ids = [row[0] for row in r_email.fetchall()]
+            email_list: List[str] = []
+            if email_role_ids:
+                users_email = self.db.execute(
+                    text("""
+                        SELECT DISTINCT id, email FROM user_locations
+                        WHERE organization_id = :org_id AND organization_role_id = ANY(:role_ids)
+                          AND is_user = TRUE AND is_active = TRUE AND deleted_date IS NULL
+                          AND email IS NOT NULL AND TRIM(email) != ''
+                    """),
+                    {'org_id': organization_id, 'role_ids': email_role_ids},
+                )
+                seen: set = set()
+                for u in users_email.fetchall():
+                    em = (u[1] or '').strip()
+                    if em and em not in seen:
+                        seen.add(em)
+                        email_list.append(em)
+
+            self._send_txn_updated_emails(
+                transaction_id=transaction_id,
+                organization_id=organization_id,
+                email_list=email_list,
+                resource=resource_dict,
+            )
+            self.db.flush()
+        except Exception as e:
+            logger.error(
+                "Error creating TXN_UPDATED notifications for transaction_id=%s: %s",
+                transaction_id,
+                str(e),
+                exc_info=True,
+            )
+
+    def _send_txn_approved_emails(
+        self,
+        transaction_id: int,
+        organization_id: int,
+        email_list: List[str],
+        resource: Dict[str, Any],
+    ) -> None:
+        """Send TXN_APPROVED notification emails to the given addresses via Lambda."""
+        if not email_list:
+            return
+        txn_ref = f"#{transaction_id}"
+        subject = f"Transaction {txn_ref} has been approved – GEPP Platform"
+        html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f4f6f8; line-height: 1.6; color: #333;">
+    <div style="max-width: 560px; margin: 0 auto; padding: 32px 24px;">
+        <div style="background: #ffffff; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); overflow: hidden;">
+            <div style="background: linear-gradient(135deg, #2c3e50 0%, #27ae60 100%); padding: 28px 24px; text-align: center;">
+                <h1 style="margin: 0; color: #ffffff; font-size: 22px; font-weight: 600; letter-spacing: -0.02em;">Transaction Approved</h1>
+                <p style="margin: 8px 0 0 0; color: rgba(255,255,255,0.9); font-size: 14px;">GEPP Platform</p>
+            </div>
+            <div style="padding: 28px 24px;">
+                <p style="margin: 0 0 16px 0; font-size: 15px;">Hello,</p>
+                <p style="margin: 0 0 20px 0; font-size: 15px;">Transaction {txn_ref} has been approved.</p>
+                <div style="background: #f8f9fa; border-radius: 8px; padding: 16px 20px; margin: 24px 0; border-left: 4px solid #27ae60;">
+                    <p style="margin: 0 0 4px 0; font-size: 12px; color: #6c757d; text-transform: uppercase; letter-spacing: 0.05em;">Transaction</p>
+                    <p style="margin: 0; font-size: 18px; font-weight: 600; color: #2c3e50;">{txn_ref}</p>
+                </div>
+                <p style="margin: 0; font-size: 14px; color: #6c757d;">Log in to the platform to view details.</p>
+            </div>
+            <hr style="border: none; border-top: 1px solid #eee; margin: 0;">
+            <div style="padding: 16px 24px;">
+                <p style="margin: 0; font-size: 12px; color: #95a5a6;">This is an automated message from GEPP Platform. Please do not reply to this email.</p>
+            </div>
+        </div>
+    </div>
+</body>
+</html>"""
+        text_content = f"""Transaction Approved – GEPP Platform
+
+Hello,
+
+Transaction {txn_ref} has been approved.
+
+Log in to the platform to view details.
+
+—
+This is an automated message from GEPP Platform. Please do not reply to this email."""
+        for to_email in email_list:
+            try:
+                sent = self._send_email_via_lambda(
+                    to_email=to_email,
+                    subject=subject,
+                    html_content=html_content,
+                    text_content=text_content,
+                )
+                logger.info(
+                    "TXN_APPROVED email to %s for transaction_id=%s: sent=%s",
+                    to_email,
+                    transaction_id,
+                    sent,
+                )
+            except Exception as e:
+                logger.exception(
+                    "Failed to send TXN_APPROVED email to %s for transaction_id=%s: %s",
+                    to_email,
+                    transaction_id,
+                    e,
+                )
+
+    def _send_txn_rejected_emails(
+        self,
+        transaction_id: int,
+        organization_id: int,
+        email_list: List[str],
+        resource: Dict[str, Any],
+    ) -> None:
+        """Send TXN_REJECTED notification emails to the given addresses via Lambda."""
+        if not email_list:
+            return
+        txn_ref = f"#{transaction_id}"
+        subject = f"Transaction {txn_ref} has been rejected – GEPP Platform"
+        html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f4f6f8; line-height: 1.6; color: #333;">
+    <div style="max-width: 560px; margin: 0 auto; padding: 32px 24px;">
+        <div style="background: #ffffff; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); overflow: hidden;">
+            <div style="background: linear-gradient(135deg, #2c3e50 0%, #e74c3c 100%); padding: 28px 24px; text-align: center;">
+                <h1 style="margin: 0; color: #ffffff; font-size: 22px; font-weight: 600; letter-spacing: -0.02em;">Transaction Rejected</h1>
+                <p style="margin: 8px 0 0 0; color: rgba(255,255,255,0.9); font-size: 14px;">GEPP Platform</p>
+            </div>
+            <div style="padding: 28px 24px;">
+                <p style="margin: 0 0 16px 0; font-size: 15px;">Hello,</p>
+                <p style="margin: 0 0 20px 0; font-size: 15px;">Transaction {txn_ref} has been rejected because one or all of its records have been rejected. Please check the platform.</p>
+                <div style="background: #f8f9fa; border-radius: 8px; padding: 16px 20px; margin: 24px 0; border-left: 4px solid #e74c3c;">
+                    <p style="margin: 0 0 4px 0; font-size: 12px; color: #6c757d; text-transform: uppercase; letter-spacing: 0.05em;">Transaction</p>
+                    <p style="margin: 0; font-size: 18px; font-weight: 600; color: #2c3e50;">{txn_ref}</p>
+                </div>
+                <p style="margin: 0; font-size: 14px; color: #6c757d;">Log in to the platform to view details and take action if needed.</p>
+            </div>
+            <hr style="border: none; border-top: 1px solid #eee; margin: 0;">
+            <div style="padding: 16px 24px;">
+                <p style="margin: 0; font-size: 12px; color: #95a5a6;">This is an automated message from GEPP Platform. Please do not reply to this email.</p>
+            </div>
+        </div>
+    </div>
+</body>
+</html>"""
+        text_content = f"""Transaction Rejected – GEPP Platform
+
+Hello,
+
+Transaction {txn_ref} has been rejected because one or all of its records have been rejected. Please check the platform.
+
+Log in to the platform to view details and take action if needed.
+
+—
+This is an automated message from GEPP Platform. Please do not reply to this email."""
+        for to_email in email_list:
+            try:
+                sent = self._send_email_via_lambda(
+                    to_email=to_email,
+                    subject=subject,
+                    html_content=html_content,
+                    text_content=text_content,
+                )
+                logger.info(
+                    "TXN_REJECTED email to %s for transaction_id=%s: sent=%s",
+                    to_email,
+                    transaction_id,
+                    sent,
+                )
+            except Exception as e:
+                logger.exception(
+                    "Failed to send TXN_REJECTED email to %s for transaction_id=%s: %s",
+                    to_email,
+                    transaction_id,
+                    e,
+                )
+
+    def _create_txn_event_notifications(
+        self,
+        transaction_id: int,
+        organization_id: int,
+        created_by_id: int,
+        event: str,
+        send_email_fn: Any,
+        resource_override: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """
+        Shared logic: create one notification for event, user_notifications (BELL),
+        collect emails (EMAIL), call send_email_fn. Used for TXN_APPROVED, TXN_REJECTED.
+        resource_override: if set, use as notification resource (e.g. {'transaction': {'id': txn_id, 'record_id': record_id}}).
+        """
+        try:
+            resource_dict = resource_override if resource_override is not None else {'transaction_id': transaction_id}
+            resource_json = json.dumps(resource_dict)
+
+            r_bell = self.db.execute(
+                text("""
+                    SELECT role_id FROM organization_notification_settings
+                    WHERE organization_id = :org_id AND event = :event
+                      AND is_active = TRUE AND deleted_date IS NULL
+                      AND (channels_mask & 2) != 0
+                """),
+                {'org_id': organization_id, 'event': event},
+            )
+            bell_role_ids = [row[0] for row in r_bell.fetchall()]
+
+            if bell_role_ids:
+                ins = self.db.execute(
+                    text("""
+                        INSERT INTO notifications
+                            (created_by_id, resource, notification_type, is_active, created_date, updated_date)
+                        VALUES (:created_by_id, CAST(:resource AS jsonb), :notification_type, TRUE, NOW(), NOW())
+                        RETURNING id
+                    """),
+                    {
+                        'created_by_id': created_by_id,
+                        'resource': resource_json,
+                        'notification_type': event,
+                    },
+                )
+                row = ins.fetchone()
+                if row:
+                    notif_id = row[0]
+                    users_bell = self.db.execute(
+                        text("""
+                            SELECT DISTINCT id FROM user_locations
+                            WHERE organization_id = :org_id AND organization_role_id = ANY(:role_ids)
+                              AND is_user = TRUE AND is_active = TRUE AND deleted_date IS NULL
+                        """),
+                        {'org_id': organization_id, 'role_ids': bell_role_ids},
+                    )
+                    for u in users_bell.fetchall():
+                        self.db.execute(
+                            text("""
+                                INSERT INTO user_notifications
+                                    (user_id, notification_id, is_read, is_active, created_date, updated_date)
+                                VALUES (:user_id, :notification_id, FALSE, TRUE, NOW(), NOW())
+                                ON CONFLICT (user_id, notification_id) DO NOTHING
+                            """),
+                            {'user_id': u[0], 'notification_id': notif_id},
+                        )
+
+            r_email = self.db.execute(
+                text("""
+                    SELECT role_id FROM organization_notification_settings
+                    WHERE organization_id = :org_id AND event = :event
+                      AND is_active = TRUE AND deleted_date IS NULL
+                      AND (channels_mask & 1) != 0
+                """),
+                {'org_id': organization_id, 'event': event},
+            )
+            email_role_ids = [row[0] for row in r_email.fetchall()]
+            email_list: List[str] = []
+            if email_role_ids:
+                users_email = self.db.execute(
+                    text("""
+                        SELECT DISTINCT id, email FROM user_locations
+                        WHERE organization_id = :org_id AND organization_role_id = ANY(:role_ids)
+                          AND is_user = TRUE AND is_active = TRUE AND deleted_date IS NULL
+                          AND email IS NOT NULL AND TRIM(email) != ''
+                    """),
+                    {'org_id': organization_id, 'role_ids': email_role_ids},
+                )
+                seen: set = set()
+                for u in users_email.fetchall():
+                    em = (u[1] or '').strip()
+                    if em and em not in seen:
+                        seen.add(em)
+                        email_list.append(em)
+
+            send_email_fn(
+                transaction_id=transaction_id,
+                organization_id=organization_id,
+                email_list=email_list,
+                resource=resource_dict,
+            )
+            self.db.flush()
+        except Exception as e:
+            logger.error(
+                "Error creating %s notifications for transaction_id=%s: %s",
+                event,
+                transaction_id,
+                str(e),
+                exc_info=True,
+            )
+
+    def _transaction_has_all_records_approved(self, transaction_id: int) -> bool:
+        """Return True if the transaction has at least one record and all records are approved."""
+        count = self.db.query(TransactionRecord).filter(
+            TransactionRecord.created_transaction_id == transaction_id,
+        ).count()
+        if count == 0:
+            return False
+        not_approved = self.db.query(TransactionRecord).filter(
+            TransactionRecord.created_transaction_id == transaction_id,
+            TransactionRecord.status != 'approved',
+        ).count()
+        return not_approved == 0
+
+    def create_txn_approved_notifications(
+        self,
+        transaction_id: int,
+        organization_id: int,
+        created_by_id: int,
+    ) -> None:
+        """Create notifications and email list for TXN_APPROVED (BELL + EMAIL)."""
+        self._create_txn_event_notifications(
+            transaction_id=transaction_id,
+            organization_id=organization_id,
+            created_by_id=created_by_id,
+            event='TXN_APPROVED',
+            send_email_fn=self._send_txn_approved_emails,
+        )
+
+    def create_txn_approved_notifications_if_all_records_approved(
+        self,
+        transaction_id: int,
+        organization_id: int,
+        created_by_id: int,
+    ) -> None:
+        """Create TXN_APPROVED notifications and emails only when all records in the transaction are approved."""
+        if not self._transaction_has_all_records_approved(transaction_id):
+            return
+        self.create_txn_approved_notifications(
+            transaction_id=transaction_id,
+            organization_id=organization_id,
+            created_by_id=created_by_id,
+        )
+
+    def create_txn_rejected_notifications(
+        self,
+        transaction_id: int,
+        organization_id: int,
+        created_by_id: int,
+    ) -> None:
+        """Create notifications and email list for TXN_REJECTED (BELL + EMAIL stub)."""
+        self._create_txn_event_notifications(
+            transaction_id=transaction_id,
+            organization_id=organization_id,
+            created_by_id=created_by_id,
+            event='TXN_REJECTED',
+            send_email_fn=self._send_txn_rejected_emails,
+        )
+
+    def create_txn_approved_notifications_for_record(
+        self,
+        transaction_id: int,
+        record_id: int,
+        organization_id: int,
+        created_by_id: int,
+    ) -> None:
+        """Create TXN_APPROVED notifications for a record approve; resource = { transaction: { id, record_id } }."""
+        self._create_txn_event_notifications(
+            transaction_id=transaction_id,
+            organization_id=organization_id,
+            created_by_id=created_by_id,
+            event='TXN_APPROVED',
+            send_email_fn=self._send_txn_approved_emails,
+            resource_override={'transaction': {'id': transaction_id, 'record_id': record_id}},
+        )
+
+    def create_txn_rejected_notifications_for_record(
+        self,
+        transaction_id: int,
+        record_id: int,
+        organization_id: int,
+        created_by_id: int,
+    ) -> None:
+        """Create TXN_REJECTED notifications for a record reject; resource = { transaction: { id, record_id } }."""
+        self._create_txn_event_notifications(
+            transaction_id=transaction_id,
+            organization_id=organization_id,
+            created_by_id=created_by_id,
+            event='TXN_REJECTED',
+            send_email_fn=self._send_txn_rejected_emails,
+            resource_override={'transaction': {'id': transaction_id, 'record_id': record_id}},
+        )
 
     def get_transaction(self, transaction_id: int, include_records: bool = False) -> Dict[str, Any]:
         """

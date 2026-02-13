@@ -2,7 +2,7 @@
 Organization role presets and management
 """
 
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from sqlalchemy.orm import Session
 
 from ....models.subscriptions.subscription_models import OrganizationRole, OrganizationPermission
@@ -226,3 +226,14 @@ class OrganizationRolePresets:
         ).first()
 
         return role is not None
+
+    def get_role_id_by_key(self, organization_id: int, key: str) -> Optional[int]:
+        """
+        Resolve organization_roles.id from organization_id and role key (e.g. admin, data_input, auditor, viewer).
+        """
+        role = self.db.query(OrganizationRole).filter(
+            OrganizationRole.organization_id == organization_id,
+            OrganizationRole.key == key,
+            OrganizationRole.is_active == True
+        ).first()
+        return role.id if role else None

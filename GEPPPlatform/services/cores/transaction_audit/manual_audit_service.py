@@ -497,11 +497,13 @@ class ManualAuditService:
 
             logger.info(f"Transaction record {record_id} approved successfully with status: {record.status}")
 
+            transaction_id = transaction.id if transaction else record.created_transaction_id
             return {
                 'success': True,
                 'message': f'Transaction record {record_id} approved successfully',
                 'data': {
                     'record_id': record_id,
+                    'transaction_id': transaction_id,
                     'new_status': 'approved',
                     'approved_by': auditor_user_id,
                     'approved_at': datetime.now(timezone.utc).isoformat(),
@@ -602,11 +604,13 @@ class ManualAuditService:
 
             logger.info(f"Transaction record {record_id} rejected successfully with status: {record.status}")
 
+            transaction_id = transaction.id if transaction else record.created_transaction_id
             return {
                 'success': True,
                 'message': f'Transaction record {record_id} rejected successfully',
                 'data': {
                     'record_id': record_id,
+                    'transaction_id': transaction_id,
                     'new_status': 'rejected',
                     'rejected_by': auditor_user_id,
                     'rejected_at': datetime.now(timezone.utc).isoformat(),
