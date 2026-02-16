@@ -256,9 +256,14 @@ class AuthHandlers:
                     'message': 'Invalid email format'
                 }
 
-            # Check if email already exists
+            # Check if email already exists (only non-deleted, active users)
             session = self.db_session
-            existing_user = session.query(UserLocation).filter_by(email=email).first()
+            existing_user = (
+                session.query(UserLocation)
+                .filter_by(email=email)
+                .filter(UserLocation.is_active == True, UserLocation.deleted_date.is_(None))
+                .first()
+            )
 
             if existing_user:
                 return {
