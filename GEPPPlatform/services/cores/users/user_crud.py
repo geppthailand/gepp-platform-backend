@@ -268,11 +268,13 @@ class UserCRUD:
         return query.first()
 
     def get_user_by_email(self, email: str) -> Optional[UserLocation]:
-        """Get user by email"""
+        """Get user by email (only active, non-deleted users)"""
         return self.db.query(UserLocation).filter(
             and_(
                 UserLocation.email == email,
-                UserLocation.is_user == True
+                UserLocation.is_user == True,
+                UserLocation.is_active == True,
+                UserLocation.deleted_date.is_(None)
             )
         ).first()
 
