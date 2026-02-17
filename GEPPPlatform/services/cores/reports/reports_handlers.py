@@ -18,6 +18,7 @@ from ..transactions.presigned_url_service import TransactionPresignedUrlService
 from ....exceptions import APIException, ValidationException, NotFoundException
 from GEPPPlatform.models.cores.references import MainMaterial, MaterialCategory
 from GEPPPlatform.models.users.user_location import UserLocation
+from GEPPPlatform.models.transactions.transactions import TransactionStatus
 
 # ========== HELPER FUNCTIONS ==========
 
@@ -323,16 +324,25 @@ def _handle_overview_report(
     organization_id: int,
     filters: Dict[str, Any]
 ) -> Dict[str, Any]:
-    """Handle /api/reports/overview endpoint"""
-    
-    # Get transaction records
-    result = reports_service.get_transaction_records_by_organization(
+    """Handle /api/reports/overview endpoint.
+
+    Optimized: uses get_overview_data() which selects only needed columns
+    in a single SQL query with JOINs (no N+1, no full ORM loading).
+    """
+
+    # Fast path: single SQL query returning lightweight tuples
+    result = reports_service.get_overview_data(
         organization_id=organization_id,
         filters=filters if filters else None,
-        report_type='overview'
     )
-    
-    # Initialize aggregation variables
+    rows = result.get('rows', [])
+
+    # Tuple indices from query:
+    # 0: origin_quantity, 1: transaction_date, 2: created_transaction_id,
+    # 3: origin_id, 4: status, 5: unit_weight, 6: calc_ghg,
+    # 7: category_id, 8: main_material_id, 9: material_tags
+
+    # Aggregate in single pass
     ghg_reduction = 0.0
     total_waste = 0.0
     recyclable_waste = 0.0
@@ -340,132 +350,101 @@ def _handle_overview_report(
     recyclable_ghg_reduction = 0.0
     origin_waste_map = {}
     category_waste_map = {}
-    # Track monthly totals grouped by year
     month_totals_by_year = {}
-    
-    # Aggregate metrics from transaction records
-    for record in result.get('data', []):
-        # Skip rejected transactions
-        if record.get('is_rejected'):
-            continue
-        
-        material = record.get('material') or {}
-        weight = _calculate_weight(record, material)
-        calc_ghg = float(material.get('calc_ghg') or 0)
+    tx_ids = set()
+    tx_approved = set()
+
+    for row in rows:
+        origin_qty = float(row[0] or 0)
+        tx_date = row[1]
+        tx_id = row[2]
+        origin_id = row[3]
+        status = row[4]
+        unit_weight = float(row[5] or 0)
+        calc_ghg = float(row[6] or 0)
+        cat_id = row[7]
+        main_mat_id = row[8]
+
+        # Track transactions
+        tx_ids.add(tx_id)
+        if status == TransactionStatus.approved:
+            tx_approved.add(tx_id)
+
+        weight = origin_qty * unit_weight
         record_ghg = weight * calc_ghg
-        
+
         total_waste += weight
         ghg_reduction += record_ghg
-        
-        # Aggregate by month for chart_data
-        dt = _parse_datetime(record.get('transaction_date'))
-        if dt:
-            y = dt.year
-            m = dt.month
-            if y not in month_totals_by_year:
-                month_totals_by_year[y] = {}
-            month_totals_by_year[y][m] = month_totals_by_year[y].get(m, 0.0) + weight
-        
-        # Plastic saved calculation - materials with main_material_id = 1 and category_id = 1
-        main_material_id = material.get('main_material_id')
-        category_id = material.get('category_id') if material else record.get('category_id')
-        try:
-            main_material_id_int = int(main_material_id) if main_material_id is not None else None
-            category_id_int = int(category_id) if category_id is not None else None
-        except Exception:
-            main_material_id_int = None
-            category_id_int = None
-        
-        if main_material_id_int == 1 and category_id_int == 1:
+
+        # Monthly aggregation
+        if tx_date:
+            try:
+                dt = tx_date if isinstance(tx_date, datetime) else datetime.fromisoformat(str(tx_date))
+                y, m = dt.year, dt.month
+                if y not in month_totals_by_year:
+                    month_totals_by_year[y] = {}
+                month_totals_by_year[y][m] = month_totals_by_year[y].get(m, 0.0) + weight
+            except Exception:
+                pass
+
+        # Plastic saved (main_material_id=1 AND category_id=1)
+        if main_mat_id == 1 and cat_id == 1:
             plastic_saved += weight
-        
+
         # Recyclable waste (category_id in {1, 3})
-        cat_id = material.get('category_id') if material else record.get('category_id')
-        try:
-            cat_id_int = int(cat_id) if cat_id is not None else None
-        except Exception:
-            cat_id_int = None
-        
-        if cat_id_int in (1, 3):
+        if cat_id in (1, 3):
             recyclable_waste += weight
             recyclable_ghg_reduction += record_ghg
-            
-            # Aggregate by origin for top recyclables
-            origin_id = record.get('origin_id')
             if origin_id is not None:
                 origin_waste_map[origin_id] = origin_waste_map.get(origin_id, 0.0) + weight
-        
-        # Aggregate by category for waste_type_proportions
-        cat_id_raw = material.get('category_id') if material else record.get('category_id')
-        try:
-            cat_id = int(cat_id_raw) if cat_id_raw is not None else None
-        except Exception:
-            cat_id = None
+
+        # Category proportions
         if cat_id is not None:
-            if cat_id not in category_waste_map:
-                category_waste_map[cat_id] = 0.0
-            category_waste_map[cat_id] += weight
-    
-    # Calculate recycle rate
+            category_waste_map[cat_id] = category_waste_map.get(cat_id, 0.0) + weight
+
     recycle_rate = ((recyclable_waste / total_waste) * 100) if total_waste > 0 else 0.0
-    
-    # Build top recyclables (top 5 origins)
+
+    # Top 5 recyclable origins — fetch only the needed location names
     top_origin_ids = sorted(origin_waste_map.items(), key=lambda kv: kv[1], reverse=True)[:5]
     top_recyclables = []
-    
     if top_origin_ids:
+        needed_ids = [oid for oid, _ in top_origin_ids]
         try:
-            origins_result = reports_service.get_origin_by_organization(organization_id=organization_id)
-            origin_names_map = {}
-            origin_path_map = {}
-            for o in origins_result.get('data', []):
-                oid = o.get('origin_id')
-                if oid is not None:
-                    if oid not in origin_names_map:
-                        origin_names_map[oid] = o.get('display_name') or o.get('name_en') or o.get('name_th') or o.get('name')
-                    if oid not in origin_path_map:
-                        origin_path_map[oid] = o.get('path') or ''
+            locs = reports_service.db.query(
+                UserLocation.id, UserLocation.display_name, UserLocation.name_en, UserLocation.name_th
+            ).filter(UserLocation.id.in_(needed_ids)).all()
+            name_map = {loc[0]: (loc[1] or loc[2] or loc[3] or f"Location {loc[0]}") for loc in locs}
         except Exception:
-            origin_names_map = {}
-            origin_path_map = {}
-        
+            name_map = {}
         top_recyclables = [
-            {
-                'origin_id': oid,
-                'origin_name': origin_names_map.get(oid),
-                'path': origin_path_map.get(oid, ''),
-                'total_waste': w
-            }
+            {'origin_id': oid, 'origin_name': name_map.get(oid), 'path': '', 'total_waste': w}
             for oid, w in top_origin_ids
         ]
-    
-    # Build chart_data grouped by year with months sorted Jan..Dec
+
+    # Chart data by year/month
     chart_data = {}
     for year in sorted(month_totals_by_year.keys()):
         monthly = month_totals_by_year[year]
         chart_data[str(year)] = [
-            {
-                'month': datetime(2000, m, 1).strftime('%b'),
-                'value': round(monthly[m], 2)
-            }
+            {'month': datetime(2000, m, 1).strftime('%b'), 'value': round(monthly[m], 2)}
             for m in sorted(monthly.keys())
         ]
-    
-    # Build waste_type_proportions by category
+
+    # Category proportions
     category_names_map = _fetch_category_names(reports_service.db, set(category_waste_map.keys()))
-    waste_type_proportions = []
-    for cid, total in sorted(category_waste_map.items(), key=lambda kv: kv[1], reverse=True):
-        proportion_percent = (total / total_waste * 100) if total_waste > 0 else 0.0
-        waste_type_proportions.append({
+    waste_type_proportions = [
+        {
             'category_id': cid,
             'category_name': category_names_map.get(cid, f"Category {cid}"),
             'total_waste': total,
-            'proportion_percent': proportion_percent,
-        })
+            'proportion_percent': (total / total_waste * 100) if total_waste > 0 else 0.0,
+        }
+        for cid, total in sorted(category_waste_map.items(), key=lambda kv: kv[1], reverse=True)
+    ]
 
     return {
-        'transactions_total': result.get('transactions_total', 0),
-        'transactions_approved': result.get('transactions_approved', 0),
+        'transactions_total': len(tx_ids),
+        'transactions_approved': len(tx_approved),
         'key_indicators': {
             'total_waste': total_waste,
             'recycle_rate': recycle_rate,

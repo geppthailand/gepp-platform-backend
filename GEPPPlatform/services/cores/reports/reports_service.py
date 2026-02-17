@@ -293,6 +293,103 @@ class ReportsService:
             logger.error(f"Unexpected error in get_transaction_records_by_organization: {str(e)}")
             raise
 
+    def get_overview_data(
+        self,
+        organization_id: int,
+        filters: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        Optimized data fetch for overview report.
+        Single SQL query selecting only needed columns — no N+1, no full ORM loading.
+        Returns lightweight rows for fast Python-side aggregation.
+        """
+        try:
+            query = self.db.query(
+                TransactionRecord.origin_quantity,
+                TransactionRecord.transaction_date,
+                TransactionRecord.created_transaction_id,
+                Transaction.origin_id,
+                Transaction.status,
+                Material.unit_weight,
+                Material.calc_ghg,
+                Material.category_id,
+                Material.main_material_id,
+                Material.tags.label('material_tags'),
+            ).join(
+                Transaction,
+                TransactionRecord.created_transaction_id == Transaction.id
+            ).outerjoin(
+                Material,
+                TransactionRecord.material_id == Material.id
+            ).filter(
+                Transaction.organization_id == organization_id,
+                TransactionRecord.is_active == True,
+                Transaction.status != TransactionStatus.rejected
+            )
+
+            # Apply filters
+            if filters:
+                if filters.get('origin_combos'):
+                    combos = filters['origin_combos']
+                    origin_only = {oid for (oid, tid, tenid) in combos if tid is None and tenid is None}
+                    conditions = []
+                    for oid in origin_only:
+                        conditions.append(Transaction.origin_id == oid)
+                    for oid, tag_id, tenant_id in combos:
+                        if oid in origin_only:
+                            continue
+                        c = (Transaction.origin_id == oid)
+                        c = and_(c, Transaction.location_tag_id == tag_id) if tag_id else and_(c, Transaction.location_tag_id.is_(None))
+                        c = and_(c, Transaction.tenant_id == tenant_id) if tenant_id else and_(c, Transaction.tenant_id.is_(None))
+                        conditions.append(c)
+                    if conditions:
+                        query = query.filter(or_(*conditions))
+                else:
+                    if filters.get('origin_ids'):
+                        query = query.filter(Transaction.origin_id.in_(filters['origin_ids']))
+                    if filters.get('location_tag_id') is not None:
+                        query = query.filter(Transaction.location_tag_id == filters['location_tag_id'])
+                    if filters.get('tenant_id') is not None:
+                        query = query.filter(Transaction.tenant_id == filters['tenant_id'])
+
+                if filters.get('material_ids'):
+                    query = query.filter(TransactionRecord.material_id.in_(filters['material_ids']))
+
+                date_from = filters.get('date_from')
+                date_to = filters.get('date_to')
+                if date_from or date_to:
+                    try:
+                        MAX_DAYS = 365 * 3
+                        now = datetime.now(timezone.utc)
+                        end_of_today = now.replace(hour=23, minute=59, second=59, microsecond=999999)
+                        df = datetime.fromisoformat(date_from) if isinstance(date_from, str) else date_from
+                        dt = datetime.fromisoformat(date_to) if isinstance(date_to, str) else date_to
+                        if dt and dt > end_of_today:
+                            dt = end_of_today
+                        if df and dt and (dt - df).days > MAX_DAYS:
+                            df = dt - timedelta(days=MAX_DAYS)
+                        if df:
+                            query = query.filter(TransactionRecord.transaction_date >= (df.isoformat() if isinstance(date_from, str) else df))
+                        if dt:
+                            query = query.filter(TransactionRecord.transaction_date <= (dt.isoformat() if isinstance(date_to, str) else dt))
+                    except Exception:
+                        if date_from:
+                            query = query.filter(TransactionRecord.transaction_date >= date_from)
+                        if date_to:
+                            query = query.filter(TransactionRecord.transaction_date <= date_to)
+
+            rows = query.all()
+
+            return {
+                'success': True,
+                'rows': rows,
+                'total_records': len(rows),
+            }
+
+        except Exception as e:
+            logger.error(f"Error in get_overview_data: {str(e)}")
+            raise
+
     def get_origin_by_organization(self, organization_id: int, filters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Get origin filter options with composite origin+tag+tenant combinations from existing transaction data.
