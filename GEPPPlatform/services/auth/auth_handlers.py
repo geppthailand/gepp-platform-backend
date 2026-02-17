@@ -45,6 +45,8 @@ class AuthHandlers:
 
     def verify_password(self, password: str, hashed: str) -> bool:
         """Verify a password against a hash"""
+        if not password or not hashed:
+            return False
         return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
 
     def generate_secret_key(self) -> str:
@@ -399,10 +401,12 @@ class AuthHandlers:
             
             session = self.db_session
             # Get user by email with organization_role relationship loaded
+            # Must filter is_user=True to avoid matching business_unit locations with same email
             user = session.query(UserLocation).options(
                 joinedload(UserLocation.organization_role)
             ).filter_by(
                 email=email,
+                is_user=True,
                 is_active=True
             ).first()
 
@@ -457,9 +461,10 @@ class AuthHandlers:
                 raise ValidationException('Email and password are required')
 
             session = self.db_session
-            # Get user by email
+            # Get user by email (is_user=True to avoid matching business_unit locations)
             user = session.query(UserLocation).filter_by(
                 email=email,
+                is_user=True,
                 is_active=True
             ).first()
 
@@ -705,10 +710,10 @@ class AuthHandlers:
                 }
             
             session = self.db_session
-            # Check if email already exists (only non-deleted, active users)
+            # Check if email already exists (only non-deleted, active users - not locations)
             existing_user = (
                 session.query(UserLocation)
-                .filter_by(email=email)
+                .filter_by(email=email, is_user=True)
                 .filter(UserLocation.is_active == True, UserLocation.deleted_date.is_(None))
                 .first()
             )
@@ -752,9 +757,10 @@ class AuthHandlers:
                 raise UnauthorizedException("Expired login token")
 
             session = self.db_session
-            # Get user by email
+            # Get user by email (is_user=True to avoid matching business_unit locations)
             user = session.query(UserLocation).filter_by(
                 email=email,
+                is_user=True,
                 is_active=True
             ).first()
 
