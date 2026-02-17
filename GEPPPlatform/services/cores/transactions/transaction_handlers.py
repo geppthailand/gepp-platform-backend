@@ -216,6 +216,16 @@ def handle_create_transaction(
         )
 
         if result['success']:
+            txn = result['transaction']
+            transaction_id = txn.get('id')
+            organization_id = txn.get('organization_id') or current_user_organization_id
+            created_by_id = int(current_user_id)
+            if transaction_id and organization_id is not None:
+                transaction_service.create_txn_created_notifications(
+                    transaction_id=transaction_id,
+                    organization_id=organization_id,
+                    created_by_id=created_by_id,
+                )
             return {
                 'success': True,
                 'message': result['message'],
@@ -408,6 +418,13 @@ def handle_update_transaction(
         )
 
         if result['success']:
+            organization_id = transaction.get('organization_id') or current_user_organization_id
+            if organization_id is not None:
+                transaction_service.create_txn_updated_notifications(
+                    transaction_id=transaction_id,
+                    organization_id=organization_id,
+                    created_by_id=int(current_user_id),
+                )
             return {
                 'success': True,
                 'message': result['message'],
@@ -458,6 +475,13 @@ def handle_update_transaction_with_records(
         )
 
         if result['success']:
+            organization_id = transaction.get('organization_id') or current_user_organization_id
+            if organization_id is not None:
+                transaction_service.create_txn_updated_notifications(
+                    transaction_id=transaction_id,
+                    organization_id=organization_id,
+                    created_by_id=int(current_user_id),
+                )
             return {
                 'success': True,
                 'message': result['message'],

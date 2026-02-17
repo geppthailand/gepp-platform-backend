@@ -20,7 +20,7 @@ from GEPPPlatform.models.users.user_location import UserLocation
 from GEPPPlatform.models.users.integration_tokens import IntegrationToken
 from GEPPPlatform.models.users.user_reset_password_log import UserResetPasswordLog
 from GEPPPlatform.models.subscriptions.organizations import Organization, OrganizationInfo
-from GEPPPlatform.models.subscriptions.subscription_models import SubscriptionPlan, Subscription
+from GEPPPlatform.models.subscriptions.subscription_models import SubscriptionPlan, Subscription, OrganizationRole
 from GEPPPlatform.models.cores.iot_devices import IoTDevice
 from ..cores.organizations.organization_role_presets import OrganizationRolePresets
 from ...exceptions import (
@@ -240,43 +240,6 @@ class AuthHandlers:
                 print(f"[CUSTOM_API_AUTH] REJECTION: Invalid token - {e}")
             return None
 
-    def check_email(self, data: Dict[str, Any], **kwargs) -> Dict[str, Any]:
-        """Check if an email already exists for registration"""
-        try:
-            email = data.get('email', '').strip().lower()
-
-            if not email:
-                raise ValidationException('Email is required')
-
-            # Check email format
-            if '@' not in email or '.' not in email.split('@')[-1]:
-                return {
-                    'available': False,
-                    'error': 'invalid_format',
-                    'message': 'Invalid email format'
-                }
-
-            # Check if email already exists
-            session = self.db_session
-            existing_user = session.query(UserLocation).filter_by(email=email).first()
-
-            if existing_user:
-                return {
-                    'available': False,
-                    'error': 'email_exists',
-                    'message': 'Email already registered'
-                }
-
-            return {
-                'available': True,
-                'message': 'Email is available'
-            }
-
-        except ValidationException:
-            raise
-        except Exception as e:
-            raise APIException(f'Failed to check email availability: {str(e)}')
-
     def register(self, data: Dict[str, Any], **kwargs) -> Dict[str, Any]:
         """Register a new user with organization and free subscription using SQLAlchemy"""
         try:
@@ -395,7 +358,15 @@ class AuthHandlers:
 
                 # 8. Create default organization roles
                 role_presets = OrganizationRolePresets(session)
-                default_roles = role_presets.create_default_roles_for_organization(organization.id)
+                role_presets.create_default_roles_for_organization(organization.id)
+
+                # 9. Assign admin role to the registering user (owner)
+                admin_role = session.query(OrganizationRole).filter(
+                    OrganizationRole.organization_id == organization.id,
+                    OrganizationRole.key == 'admin'
+                ).first()
+                if admin_role:
+                    user.organization_role_id = admin_role.id
 
                 # Commit the transaction
                 session.commit()
@@ -734,8 +705,13 @@ class AuthHandlers:
                 }
             
             session = self.db_session
-            # Check if email already exists
-            existing_user = session.query(UserLocation).filter_by(email=email).first()
+            # Check if email already exists (only non-deleted, active users)
+            existing_user = (
+                session.query(UserLocation)
+                .filter_by(email=email)
+                .filter(UserLocation.is_active == True, UserLocation.deleted_date.is_(None))
+                .first()
+            )
             
             if existing_user:
                 return {

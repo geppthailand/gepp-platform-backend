@@ -4,6 +4,7 @@ High-level user management service
 
 from typing import List, Optional, Dict, Any, Tuple
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 from datetime import datetime, timedelta
 import secrets
 import string
@@ -154,6 +155,128 @@ class UserService:
             'organization_tree': self._get_user_organization_tree(user),
             'subscription_status': self._get_user_subscription_status(user_id)
         }
+
+    def get_user_notifications(
+        self,
+        user_location_id: int,
+        limit: int = 50,
+        offset: int = 0,
+        unread_only: bool = False
+    ) -> Dict[str, Any]:
+        """
+        Get notifications for a user (user_locations.id).
+        Returns list of user_notification records with joined notification details.
+        """
+        unread_clause = "AND un.is_read = FALSE" if unread_only else ""
+        result = self.db.execute(
+            text(f"""
+                SELECT un.id AS user_notification_id,
+                       un.user_id, un.notification_id, un.is_read, un.is_active AS user_notification_active,
+                       un.created_date AS user_notification_created,
+                       n.notification_type, n.resource, n.created_date AS notification_created
+                FROM user_notifications un
+                JOIN notifications n ON n.id = un.notification_id AND n.deleted_date IS NULL
+                WHERE un.user_id = :user_id AND un.deleted_date IS NULL
+                {unread_clause}
+                ORDER BY un.created_date DESC
+                LIMIT :limit OFFSET :offset
+            """),
+            {'user_id': user_location_id, 'limit': limit, 'offset': offset}
+        )
+        rows = result.fetchall()
+        total_result = self.db.execute(
+            text("""
+                SELECT COUNT(*) FROM user_notifications un
+                JOIN notifications n ON n.id = un.notification_id AND n.deleted_date IS NULL
+                WHERE un.user_id = :user_id AND un.deleted_date IS NULL
+            """ + (" AND un.is_read = FALSE" if unread_only else "")),
+            {'user_id': user_location_id}
+        )
+        total = total_result.scalar() or 0
+        data = []
+        for row in rows:
+            data.append({
+                'id': row.user_notification_id,
+                'user_id': row.user_id,
+                'notification_id': row.notification_id,
+                'is_read': row.is_read,
+                'is_active': row.user_notification_active,
+                'created_date': row.user_notification_created.isoformat() if row.user_notification_created else None,
+                'notification_type': row.notification_type,
+                'resource': row.resource if isinstance(row.resource, dict) else (row.resource or {}),
+                'notification_created': row.notification_created.isoformat() if row.notification_created else None,
+            })
+        return {'data': data, 'total': total, 'limit': limit, 'offset': offset}
+
+    def mark_all_notifications_read(self, user_location_id: int) -> int:
+        """
+        Mark all notifications as read for a user (user_locations.id).
+        Returns the number of rows updated.
+        """
+        result = self.db.execute(
+            text("""
+                UPDATE user_notifications
+                SET is_read = TRUE, updated_date = NOW()
+                WHERE user_id = :user_id AND deleted_date IS NULL AND is_read = FALSE
+            """),
+            {'user_id': user_location_id},
+        )
+        self.db.flush()
+        return result.rowcount
+
+    def mark_notifications_read(self, user_location_id: int, ids: List[int]) -> int:
+        """
+        Mark specific notifications as read for a user (user_locations.id).
+        ids: list of user_notifications.id. Only rows belonging to the user are updated.
+        Returns the number of rows updated.
+        """
+        if not ids:
+            return 0
+        result = self.db.execute(
+            text("""
+                UPDATE user_notifications
+                SET is_read = TRUE, updated_date = NOW()
+                WHERE user_id = :user_id AND id = ANY(:ids) AND deleted_date IS NULL AND is_read = FALSE
+            """),
+            {'user_id': user_location_id, 'ids': ids},
+        )
+        self.db.flush()
+        return result.rowcount
+
+    def delete_notifications(self, user_location_id: int, ids: List[int]) -> int:
+        """
+        Soft-delete specific notifications for a user (user_locations.id).
+        ids: list of user_notifications.id. Only rows belonging to the user are updated.
+        Returns the number of rows updated.
+        """
+        if not ids:
+            return 0
+        result = self.db.execute(
+            text("""
+                UPDATE user_notifications
+                SET deleted_date = NOW(), updated_date = NOW()
+                WHERE user_id = :user_id AND id = ANY(:ids) AND deleted_date IS NULL
+            """),
+            {'user_id': user_location_id, 'ids': ids},
+        )
+        self.db.flush()
+        return result.rowcount
+
+    def delete_all_notifications(self, user_location_id: int) -> int:
+        """
+        Soft-delete all notifications for a user (user_locations.id).
+        Sets deleted_date = NOW() on user_notifications. Returns the number of rows updated.
+        """
+        result = self.db.execute(
+            text("""
+                UPDATE user_notifications
+                SET deleted_date = NOW(), updated_date = NOW()
+                WHERE user_id = :user_id AND deleted_date IS NULL
+            """),
+            {'user_id': user_location_id},
+        )
+        self.db.flush()
+        return result.rowcount
 
     def update_user(
         self,

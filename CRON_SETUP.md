@@ -207,3 +207,50 @@ python -m GEPPPlatform.services.cores.transaction_audit.cron_process_audit_queue
 # Or use the API endpoint
 curl -X POST http://localhost:8000/api/transaction_audit/process_queue
 ```
+
+---
+
+# Scheduled Report Notifications (Hourly)
+
+The scheduled report job runs every hour and finds `organization_notification_settings` that have an `email_time` and are active, then collects recipient emails by role for each organization.
+
+## What it does
+
+1. Queries **organization_notification_settings** where:
+   - **email_time** IS NOT NULL (scheduled; rows without email_time are not for schedule)
+   - **is_active** = true
+   - **event** is one of: `RPT_TXN_DAILY`, `RPT_TXN_WEEKLY`, `RPT_TXN_MONTHLY`, `RPT_TXN_BIWEEKLY`
+   - Current hour in **Thai time (Asia/Bangkok, UTC+7)** matches the hour of **email_time**
+2. For each matching row, gets **role_id** and **organization_id**, then loads all user emails for that org and role from **user_locations** (organization_role_id, organization_id, is_user, active, non-deleted).
+
+Handler module: `GEPPPlatform.services.cores.reports.schedule_report`.
+
+## AWS Lambda (run every hour)
+
+Create a Lambda that runs on a schedule and uses this handler:
+
+**Handler (entry point):** `GEPPPlatform.services.cores.reports.schedule_report.lambda_handler`
+
+**CloudWatch Events rule (hourly):**
+
+- In AWS Console: EventBridge → Rules → Create rule → Schedule: **rate(1 hour)**.
+- Or in SAM/serverless:
+
+```yaml
+functions:
+  scheduleReportNotifications:
+    handler: GEPPPlatform.services.cores.reports.schedule_report.lambda_handler
+    events:
+      - schedule:
+          rate: rate(1 hour)
+          enabled: true
+```
+
+Ensure the Lambda has the same environment (e.g. DB_* vars) and deployment package as your main app so it can connect to the database.
+
+## Run locally (one-off)
+
+```bash
+cd /path/to/gepp-platform-backend
+python -m GEPPPlatform.services.cores.reports.schedule_report
+```
