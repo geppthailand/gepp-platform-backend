@@ -340,7 +340,8 @@ def _handle_overview_report(
     # Tuple indices from query:
     # 0: origin_quantity, 1: transaction_date, 2: created_transaction_id,
     # 3: origin_id, 4: status, 5: unit_weight, 6: calc_ghg,
-    # 7: category_id, 8: main_material_id, 9: material_tags
+    # 7: material_category_id, 8: material_main_material_id, 9: material_tags,
+    # 10: origin_weight_kg, 11: record_category_id, 12: record_main_material_id
 
     # Aggregate in single pass
     ghg_reduction = 0.0
@@ -350,6 +351,7 @@ def _handle_overview_report(
     recyclable_ghg_reduction = 0.0
     origin_waste_map = {}
     category_waste_map = {}
+    cat_mm_waste_map = {}   # (cat_id, main_mat_id) -> weight for split-out detection
     month_totals_by_year = {}
     tx_ids = set()
     tx_approved = set()
@@ -362,15 +364,20 @@ def _handle_overview_report(
         status = row[4]
         unit_weight = float(row[5] or 0)
         calc_ghg = float(row[6] or 0)
-        cat_id = row[7]
-        main_mat_id = row[8]
+        origin_weight_kg = float(row[10] or 0)
+
+        # Use Material category/main_material as primary source (matches old reportUtils logic).
+        # Fallback to TransactionRecord fields when Material is missing.
+        cat_id = row[7] or row[11]           # material_category_id || record_category_id
+        main_mat_id = row[8] or row[12]      # material_main_material_id || record_main_material_id
 
         # Track transactions
         tx_ids.add(tx_id)
         if status == TransactionStatus.approved:
             tx_approved.add(tx_id)
 
-        weight = origin_qty * unit_weight
+        # Use origin_qty * unit_weight when Material exists, fallback to origin_weight_kg
+        weight = origin_qty * unit_weight if unit_weight > 0 else origin_weight_kg
         record_ghg = weight * calc_ghg
 
         total_waste += weight
@@ -401,6 +408,9 @@ def _handle_overview_report(
         # Category proportions
         if cat_id is not None:
             category_waste_map[cat_id] = category_waste_map.get(cat_id, 0.0) + weight
+            if main_mat_id is not None:
+                key = (cat_id, main_mat_id)
+                cat_mm_waste_map[key] = cat_mm_waste_map.get(key, 0.0) + weight
 
     recycle_rate = ((recyclable_waste / total_waste) * 100) if total_waste > 0 else 0.0
 
@@ -430,6 +440,44 @@ def _handle_overview_report(
             for m in sorted(monthly.keys())
         ]
 
+    # Split "Waste to Energy" out of General Waste (category_id=4).
+    # In the old DB, "Waste to Energy" was its own material_category. In the new DB, those
+    # materials were merged under General Waste. We identify them by: any record under
+    # category_id=4 whose main_material_id is NOT the "General Waste" main_material (GENERAL_WASTE).
+    # Those are waste-to-energy materials (plastics for burning, fuel materials, etc.).
+    _GENERAL_WASTE_CAT_ID = 4
+    # Find the main_material_id for "General Waste" (code=GENERAL_WASTE) so we can exclude it
+    _general_waste_mm_id = None
+    try:
+        gw_row = reports_service.db.query(MainMaterial.id).filter(
+            MainMaterial.code == 'GENERAL_WASTE'
+        ).first()
+        if gw_row:
+            _general_waste_mm_id = gw_row[0]
+    except Exception:
+        pass
+
+    # Fallback: if query fails, try to detect from data (most weight under cat=4)
+    if _general_waste_mm_id is None:
+        cat4_pairs = {mm_id: w for (c, mm_id), w in cat_mm_waste_map.items() if c == _GENERAL_WASTE_CAT_ID}
+        if cat4_pairs:
+            _general_waste_mm_id = max(cat4_pairs, key=cat4_pairs.get)
+
+    # Accumulate waste-to-energy weight: everything under General Waste category
+    # that does NOT belong to the "General Waste" main_material
+    wte_weight = 0.0
+    if _general_waste_mm_id is not None:
+        for (cat_id, mm_id), weight in cat_mm_waste_map.items():
+            if cat_id == _GENERAL_WASTE_CAT_ID and mm_id != _general_waste_mm_id and weight > 0:
+                wte_weight += weight
+
+    # Subtract waste-to-energy from General Waste category
+    if wte_weight > 0:
+        category_waste_map[_GENERAL_WASTE_CAT_ID] = category_waste_map.get(_GENERAL_WASTE_CAT_ID, 0.0) - wte_weight
+
+    # Remove zero/negative category entries
+    category_waste_map = {k: v for k, v in category_waste_map.items() if v > 0}
+
     # Category proportions
     category_names_map = _fetch_category_names(reports_service.db, set(category_waste_map.keys()))
     waste_type_proportions = [
@@ -439,8 +487,17 @@ def _handle_overview_report(
             'total_waste': total,
             'proportion_percent': (total / total_waste * 100) if total_waste > 0 else 0.0,
         }
-        for cid, total in sorted(category_waste_map.items(), key=lambda kv: kv[1], reverse=True)
+        for cid, total in category_waste_map.items()
     ]
+    # Add "Waste to Energy" as a separate entry if it has weight
+    if wte_weight > 0:
+        waste_type_proportions.append({
+            'category_id': None,
+            'category_name': 'Waste to Energy',
+            'total_waste': wte_weight,
+            'proportion_percent': (wte_weight / total_waste * 100) if total_waste > 0 else 0.0,
+        })
+    waste_type_proportions.sort(key=lambda x: x['total_waste'], reverse=True)
 
     return {
         'transactions_total': len(tx_ids),
@@ -813,7 +870,14 @@ def _handle_performance_report(
     # Build location ID → list of (origin_quantity, unit_weight, category_id) tuples
     location_records_map: Dict[int, list] = {}
     for row in rows:
-        origin_qty, txn_date, txn_id, origin_id, status, unit_weight, calc_ghg, category_id, main_material_id, material_tags = row
+        # Unpack all 13 columns from get_overview_data query
+        (origin_qty, txn_date, txn_id, origin_id, status,
+         unit_weight, calc_ghg, mat_category_id, mat_main_material_id, material_tags,
+         origin_weight_kg, record_category_id, record_main_material_id) = row
+
+        # Use Material category as primary source (matches old reportUtils logic)
+        category_id = mat_category_id or record_category_id
+
         if status == TransactionStatus.rejected:
             continue
         if origin_id:

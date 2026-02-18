@@ -64,7 +64,6 @@ class ReportsService:
             ).filter(
                 Transaction.organization_id == organization_id,
                 Transaction.deleted_date.is_(None),
-                TransactionRecord.is_active == True,
                 TransactionRecord.deleted_date.is_(None),
                 Transaction.status != TransactionStatus.rejected,
                 TransactionRecord.status != 'rejected',
@@ -318,6 +317,9 @@ class ReportsService:
                 Material.category_id,
                 Material.main_material_id,
                 Material.tags.label('material_tags'),
+                TransactionRecord.origin_weight_kg,
+                TransactionRecord.category_id.label('record_category_id'),
+                TransactionRecord.main_material_id.label('record_main_material_id'),
             ).join(
                 Transaction,
                 TransactionRecord.created_transaction_id == Transaction.id
@@ -327,7 +329,6 @@ class ReportsService:
             ).filter(
                 Transaction.organization_id == organization_id,
                 Transaction.deleted_date.is_(None),
-                TransactionRecord.is_active == True,
                 TransactionRecord.deleted_date.is_(None),
                 Transaction.status != TransactionStatus.rejected,
                 TransactionRecord.status != 'rejected',
@@ -420,7 +421,7 @@ class ReportsService:
                     TransactionRecord.created_transaction_id == Transaction.id
                 ).filter(
                     *base_filter,
-                    TransactionRecord.is_active == True
+                    TransactionRecord.deleted_date.is_(None)
                 )
                 material_ids = (filters.get('material_ids') or [])
                 if material_ids:
@@ -669,7 +670,6 @@ class ReportsService:
             ).filter(
                 Transaction.organization_id == organization_id,
                 Transaction.deleted_date.is_(None),
-                TransactionRecord.is_active == True,
                 TransactionRecord.deleted_date.is_(None),
                 Transaction.status != TransactionStatus.rejected,
                 TransactionRecord.status != 'rejected',
