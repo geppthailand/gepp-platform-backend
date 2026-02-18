@@ -232,6 +232,65 @@ def _calculate_weight(record: Dict[str, Any], material: Dict[str, Any]) -> float
     return quantity * unit_weight
 
 
+_GENERAL_WASTE_CAT_ID = 4  # Material category ID for General Waste
+
+
+def _get_general_waste_mm_id(db) -> Optional[int]:
+    """Look up the main_material_id for 'General Waste' (code=GENERAL_WASTE).
+    Returns None if the lookup fails."""
+    try:
+        gw_row = db.query(MainMaterial.id).filter(
+            MainMaterial.code == 'GENERAL_WASTE'
+        ).first()
+        if gw_row:
+            return gw_row[0]
+    except Exception:
+        pass
+    return None
+
+
+def _split_waste_to_energy(material_map: Dict[str, float], cat_mm_map: Dict[Tuple[int, int], float],
+                           general_waste_mm_id: Optional[int], category_names: Dict[int, str]) -> Dict[str, float]:
+    """Split 'Waste to Energy' out of General Waste in a material_map keyed by category name.
+
+    Any record under category_id=4 whose main_material_id != GENERAL_WASTE main_material
+    is reclassified as 'Waste to Energy'.
+
+    Args:
+        material_map: {category_name: weight} dict (mutated in place and returned)
+        cat_mm_map: {(category_id, main_material_id): weight} tracking dict
+        general_waste_mm_id: the main_material_id for GENERAL_WASTE (from DB or fallback)
+        category_names: {category_id: name} mapping
+
+    Returns:
+        The updated material_map with Waste to Energy split out.
+    """
+    if general_waste_mm_id is None:
+        # Fallback: pick the main_material with the most weight under category 4
+        cat4_pairs = {mm_id: w for (c, mm_id), w in cat_mm_map.items() if c == _GENERAL_WASTE_CAT_ID}
+        if cat4_pairs:
+            general_waste_mm_id = max(cat4_pairs, key=cat4_pairs.get)
+        else:
+            return material_map
+
+    wte_weight = 0.0
+    for (cat_id, mm_id), weight in cat_mm_map.items():
+        if cat_id == _GENERAL_WASTE_CAT_ID and mm_id != general_waste_mm_id and weight > 0:
+            wte_weight += weight
+
+    if wte_weight > 0:
+        # Subtract from General Waste entry
+        gw_name = category_names.get(_GENERAL_WASTE_CAT_ID, 'General Waste')
+        if gw_name in material_map:
+            material_map[gw_name] = material_map[gw_name] - wte_weight
+            if material_map[gw_name] <= 0:
+                del material_map[gw_name]
+        # Add Waste to Energy entry
+        material_map['Waste to Energy'] = material_map.get('Waste to Energy', 0.0) + wte_weight
+
+    return material_map
+
+
 def _extract_destination_id(notes: str) -> Optional[int]:
     """Extract destination ID from notes field (format: 'Destination: {id}')"""
     if not notes or 'Destination:' not in notes:
@@ -444,18 +503,7 @@ def _handle_overview_report(
     # In the old DB, "Waste to Energy" was its own material_category. In the new DB, those
     # materials were merged under General Waste. We identify them by: any record under
     # category_id=4 whose main_material_id is NOT the "General Waste" main_material (GENERAL_WASTE).
-    # Those are waste-to-energy materials (plastics for burning, fuel materials, etc.).
-    _GENERAL_WASTE_CAT_ID = 4
-    # Find the main_material_id for "General Waste" (code=GENERAL_WASTE) so we can exclude it
-    _general_waste_mm_id = None
-    try:
-        gw_row = reports_service.db.query(MainMaterial.id).filter(
-            MainMaterial.code == 'GENERAL_WASTE'
-        ).first()
-        if gw_row:
-            _general_waste_mm_id = gw_row[0]
-    except Exception:
-        pass
+    _general_waste_mm_id = _get_general_waste_mm_id(reports_service.db)
 
     # Fallback: if query fails, try to detect from data (most weight under cat=4)
     if _general_waste_mm_id is None:
@@ -867,7 +915,7 @@ def _handle_performance_report(
 
     # Collect all category IDs from rows and fetch names
     all_category_ids = set()
-    # Build location ID → list of (origin_quantity, unit_weight, category_id) tuples
+    # Build location ID → list of (origin_quantity, unit_weight, category_id, main_material_id) tuples
     location_records_map: Dict[int, list] = {}
     for row in rows:
         # Unpack all 13 columns from get_overview_data query
@@ -877,6 +925,7 @@ def _handle_performance_report(
 
         # Use Material category as primary source (matches old reportUtils logic)
         category_id = mat_category_id or record_category_id
+        main_material_id = mat_main_material_id or record_main_material_id
 
         if status == TransactionStatus.rejected:
             continue
@@ -886,7 +935,8 @@ def _handle_performance_report(
             location_records_map[origin_id].append((
                 float(origin_qty or 0),
                 float(unit_weight or 0),
-                int(category_id) if category_id is not None else None
+                int(category_id) if category_id is not None else None,
+                int(main_material_id) if main_material_id is not None else None
             ))
         if category_id is not None:
             try:
@@ -913,26 +963,37 @@ def _handle_performance_report(
     location_names = _fetch_destination_names(reports_service.db, location_ids)
     category_names = _fetch_category_names(reports_service.db, all_category_ids)
 
+    # Look up GENERAL_WASTE main_material_id once for waste-to-energy splitting
+    _perf_gw_mm_id = _get_general_waste_mm_id(reports_service.db)
+
     # Helper to calculate metrics from lightweight tuples
     def calculate_metrics(records):
-        """records: list of (origin_qty, unit_weight, category_id) tuples"""
+        """records: list of (origin_qty, unit_weight, category_id, main_material_id) tuples"""
         material_metrics: Dict[str, float] = {}
+        cat_mm_map: Dict[Tuple[int, int], float] = {}
         total_weight = 0.0
         recyclable_weight = 0.0
         general_weight = 0.0
 
-        for origin_qty, unit_weight, cat_id in records:
+        for origin_qty, unit_weight, cat_id, mm_id in records:
             weight = origin_qty * unit_weight
             total_weight += weight
 
             if cat_id is not None:
                 material_name = category_names.get(cat_id, f"Category {cat_id}")
                 material_metrics[material_name] = material_metrics.get(material_name, 0.0) + weight
+                # Track (cat_id, mm_id) for waste-to-energy splitting
+                if mm_id is not None:
+                    key = (cat_id, mm_id)
+                    cat_mm_map[key] = cat_mm_map.get(key, 0.0) + weight
 
             if cat_id in (1, 3):
                 recyclable_weight += weight
-            if cat_id == 4:
+            if cat_id == _GENERAL_WASTE_CAT_ID:
                 general_weight += weight
+
+        # Split Waste to Energy out of General Waste
+        _split_waste_to_energy(material_metrics, cat_mm_map, _perf_gw_mm_id, category_names)
 
         recycling_rate = (recyclable_weight / total_weight * 100) if total_weight > 0 else 0.0
         return {
@@ -1182,6 +1243,9 @@ def _handle_comparison_report(
     left_result = fetch_side(left_from, left_to)
     right_result = fetch_side(right_from, right_to)
 
+    # Look up GENERAL_WASTE main_material_id once for waste-to-energy splitting
+    _gw_mm_id = _get_general_waste_mm_id(reports_service.db)
+
     def _month_labels_in_range(start_iso: Optional[str], end_iso: Optional[str]) -> Optional[list]:
         start_dt = _parse_datetime(start_iso)
         end_dt = _parse_datetime(end_iso)
@@ -1200,6 +1264,7 @@ def _handle_comparison_report(
     def build_grouped(result: Dict[str, Any], start_iso: Optional[str], end_iso: Optional[str], reports_service: ReportsService) -> Dict[str, Any]:
         material_map: Dict[str, float] = {}
         month_map: Dict[str, float] = {}
+        cat_mm_map: Dict[Tuple[int, int], float] = {}  # (cat_id, main_material_id) -> weight
         total_waste = 0.0
         category_ids: set = set()
         # First pass: collect category IDs
@@ -1244,10 +1309,22 @@ def _handle_comparison_report(
             if not dt:
                 continue
             month_label = datetime(2000, dt.month, 1).strftime('%b')
-            # Aggregate
+            # Aggregate by category name
             material_map[material_name] = material_map.get(material_name, 0.0) + weight
             month_map[month_label] = month_map.get(month_label, 0.0) + weight
             total_waste += weight
+
+            # Track (category_id, main_material_id) for waste-to-energy splitting
+            mm_id = material.get('main_material_id') or record.get('main_material_id')
+            if mm_id is not None:
+                try:
+                    key = (cat_id_int, int(mm_id))
+                    cat_mm_map[key] = cat_mm_map.get(key, 0.0) + weight
+                except Exception:
+                    pass
+
+        # Split Waste to Energy out of General Waste
+        _split_waste_to_energy(material_map, cat_mm_map, _gw_mm_id, category_names)
 
         # Ensure months are ordered chronologically in output dict (preserving insertion order by building anew)
         ordered_month_map: Dict[str, float] = {}
@@ -1890,7 +1967,6 @@ def _handle_export_pdf_report(
     Aggregate data from all report handlers into a single structure
     compatible with scripts/generate_pdf_report.py.
     """
-    print(f"FILTERS: {filters}")
     # Validate date range for comparison and diversion reports
     date_from = filters.get('date_from')
     date_to = filters.get('date_to')
@@ -2186,8 +2262,6 @@ def _handle_export_pdf_report(
         # Diversion (sankey + materials monthly table)
         'diversion_data': diversion_data,
     }
-    print(f"DATA GOT")
-
     # Generate PDF via Lambda hub (routes to reports export function)
     from ..pdf_export_hub import generate_pdf_via_lambda
     return generate_pdf_via_lambda(data, export_type="reports", default_filename_prefix="report")
