@@ -6,7 +6,8 @@ Handles CRUD operations, validation, and transaction record linking
 from typing import List, Optional, Dict, Any, Tuple
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy import cast, String, exists, and_
+from sqlalchemy import cast, String, exists, and_, func, or_
+from sqlalchemy.dialects.postgresql import JSONB
 import json
 import logging
 import os
@@ -26,6 +27,7 @@ from ...file_upload_service import S3FileUploadService
 from ....models.users.user_location import UserLocation
 from ....models.users.user_related import UserLocationTag, UserTenant
 from ....models.subscriptions.organizations import Organization, OrganizationSetup
+from ....models.subscriptions.subscription_models import OrganizationRole
 
 logger = logging.getLogger(__name__)
 
@@ -1033,6 +1035,26 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                 'errors': [str(e)]
             }
 
+    def _should_filter_transactions_by_origin_member(self, current_user_id) -> bool:
+        """
+        Return True if we should filter transactions by origin members (only show where user is in origin.members).
+        Return False to show all org transactions (user is admin or has no role).
+        """
+        try:
+            user_id = int(current_user_id)
+            user = self.db.query(UserLocation).options(
+                joinedload(UserLocation.organization_role)
+            ).filter(UserLocation.id == user_id).first()
+            if not user:
+                return True  # Unknown user: apply filter to be safe
+            if user.organization_role_id is None:
+                return False  # No role: get every transaction as usual
+            if user.organization_role and user.organization_role.key == 'admin':
+                return False  # Admin: get every transaction as usual
+            return True  # Has a non-admin role: filter by origin members
+        except Exception:
+            return True  # On error, apply filter to be safe
+
     def list_transactions(
         self,
         organization_id: Optional[int] = None,
@@ -1049,7 +1071,8 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
         sub_district: Optional[int] = None,
         location_tag_id: Optional[int] = None,
         tenant_id: Optional[int] = None,
-        material_id: Optional[int] = None
+        material_id: Optional[int] = None,
+        current_user_id: Optional[int] = None
     ) -> Dict[str, Any]:
         """
         List transactions with filtering and pagination
@@ -1100,6 +1123,57 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                 query = query.filter(Transaction.status == status)
             if origin_id:
                 query = query.filter(Transaction.origin_id == origin_id)
+
+            # Only include transactions where the current user is a member of the origin location,
+            # or of the transaction's tag, or of the transaction's tenant (unless user is admin or has no role)
+            if current_user_id is not None and self._should_filter_transactions_by_origin_member(current_user_id):
+                uid_int = int(current_user_id)
+                uid_str = str(current_user_id)
+                query = query.join(Transaction.origin)
+                query = query.outerjoin(
+                    UserLocationTag,
+                    Transaction.location_tag_id == UserLocationTag.id
+                )
+                query = query.outerjoin(
+                    UserTenant,
+                    Transaction.tenant_id == UserTenant.id
+                )
+                # Origin: user in origin.members — format [{"role": "admin", "user_id": 4354}, ...]
+                # Match by containment: array contains an object with this user_id (int or string)
+                pattern_num = func.jsonb_build_array(
+                    func.jsonb_build_object('user_id', uid_int)
+                )
+                pattern_str = func.jsonb_build_array(
+                    func.jsonb_build_object('user_id', uid_str)
+                )
+                origin_cond = and_(
+                    UserLocation.members.isnot(None),
+                    or_(UserLocation.members.op('@>')(pattern_num), UserLocation.members.op('@>')(pattern_str))
+                )
+                # Tag: user in tag.members — format [3483, 3484, 3485] (plain user_location IDs)
+                tag_cond = and_(
+                    Transaction.location_tag_id.isnot(None),
+                    UserLocationTag.members.isnot(None),
+                    or_(
+                        cast(UserLocationTag.members, JSONB).op('@>')(func.jsonb_build_array(uid_int)),
+                        cast(UserLocationTag.members, JSONB).op('@>')(func.jsonb_build_array(uid_str))
+                    )
+                )
+                # Tenant: user in tenant.members — format [3483, 3484, 3485] (plain user_location IDs)
+                tenant_cond = and_(
+                    Transaction.tenant_id.isnot(None),
+                    UserTenant.members.isnot(None),
+                    or_(
+                        cast(UserTenant.members, JSONB).op('@>')(func.jsonb_build_array(uid_int)),
+                        cast(UserTenant.members, JSONB).op('@>')(func.jsonb_build_array(uid_str))
+                    )
+                )
+                # User must be in origin AND (in tag when present) AND (in tenant when present)
+                query = query.filter(and_(
+                    origin_cond,
+                    or_(Transaction.location_tag_id.is_(None), tag_cond),
+                    or_(Transaction.tenant_id.is_(None), tenant_cond)
+                ))
             if location_tag_id is not None:
                 query = query.filter(Transaction.location_tag_id == location_tag_id)
             if tenant_id is not None:

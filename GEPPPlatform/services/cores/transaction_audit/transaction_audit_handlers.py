@@ -98,7 +98,8 @@ def handle_transaction_audit_routes(event: Dict[str, Any], data: Dict[str, Any],
             return handle_get_audit_report(
                 db_session,
                 query_params,
-                current_user_organization_id
+                current_user_organization_id,
+                current_user_id
             )
 
         else:
@@ -419,13 +420,210 @@ def handle_process_audit_queue(db_session: Any) -> Dict[str, Any]:
         raise APIException(f'Failed to process audit queue: {str(e)}')
 
 
+def _should_filter_audit_by_member(db_session: Any, current_user_id: Any) -> bool:
+    """Return True if we should filter by origin/tag/tenant members (non-admin with a role)."""
+    try:
+        from sqlalchemy.orm import joinedload
+        from ....models.users.user_location import UserLocation
+        user_id = int(current_user_id)
+        user = db_session.query(UserLocation).options(
+            joinedload(UserLocation.organization_role)
+        ).filter(UserLocation.id == user_id).first()
+        if not user:
+            return True
+        if user.organization_role_id is None:
+            return False
+        if user.organization_role and user.organization_role.key == 'admin':
+            return False
+        return True
+    except Exception:
+        return True
+
+
+def _apply_member_filter_to_transaction_query(query, db_session: Any, current_user_id: Any):
+    """Apply origin/tag/tenant member filter to a query that includes Transaction. No-op if admin or no role."""
+    if current_user_id is None or not _should_filter_audit_by_member(db_session, current_user_id):
+        return query
+    from sqlalchemy import func, or_, cast
+    from sqlalchemy.dialects.postgresql import JSONB
+    from ....models.users.user_location import UserLocation
+    from ....models.users.user_related import UserLocationTag, UserTenant
+    uid_int = int(current_user_id)
+    uid_str = str(current_user_id)
+    query = query.join(Transaction.origin)
+    query = query.outerjoin(UserLocationTag, Transaction.location_tag_id == UserLocationTag.id)
+    query = query.outerjoin(UserTenant, Transaction.tenant_id == UserTenant.id)
+    pattern_num = func.jsonb_build_array(func.jsonb_build_object('user_id', uid_int))
+    pattern_str = func.jsonb_build_array(func.jsonb_build_object('user_id', uid_str))
+    origin_cond = and_(
+        UserLocation.members.isnot(None),
+        or_(UserLocation.members.op('@>')(pattern_num), UserLocation.members.op('@>')(pattern_str))
+    )
+    tag_cond = and_(
+        Transaction.location_tag_id.isnot(None),
+        UserLocationTag.members.isnot(None),
+        or_(
+            cast(UserLocationTag.members, JSONB).op('@>')(func.jsonb_build_array(uid_int)),
+            cast(UserLocationTag.members, JSONB).op('@>')(func.jsonb_build_array(uid_str))
+        )
+    )
+    tenant_cond = and_(
+        Transaction.tenant_id.isnot(None),
+        UserTenant.members.isnot(None),
+        or_(
+            cast(UserTenant.members, JSONB).op('@>')(func.jsonb_build_array(uid_int)),
+            cast(UserTenant.members, JSONB).op('@>')(func.jsonb_build_array(uid_str))
+        )
+    )
+    return query.filter(and_(
+        origin_cond,
+        or_(Transaction.location_tag_id.is_(None), tag_cond),
+        or_(Transaction.tenant_id.is_(None), tenant_cond)
+    ))
+
+
+def _parse_audit_report_date_range(query_params: Dict[str, Any]):
+    """Parse date_from/date_to from query params to UTC datetimes (Asia/Bangkok for date-only). Returns (date_from_dt, date_to_dt)."""
+    from datetime import datetime, timezone
+    try:
+        from zoneinfo import ZoneInfo
+    except ImportError:
+        from backports.zoneinfo import ZoneInfo
+    default_tz = ZoneInfo('Asia/Bangkok')
+    date_from = query_params.get('date_from')
+    date_to = query_params.get('date_to')
+    date_from_dt = date_to_dt = None
+
+    def parse_date_string(date_str: str, is_end_of_day: bool = False):
+        try:
+            dt = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+            if dt.tzinfo:
+                return dt.astimezone(timezone.utc)
+        except ValueError:
+            pass
+        try:
+            dt = datetime.fromisoformat(date_str)
+            if dt.tzinfo:
+                return dt.astimezone(timezone.utc)
+        except ValueError:
+            dt = datetime.strptime(date_str, '%Y-%m-%d')
+        # Naive or date-only: treat as Asia/Bangkok and normalize to start/end of day
+        if dt.tzinfo is None:
+            if is_end_of_day:
+                dt = dt.replace(hour=23, minute=59, second=59, microsecond=999999)
+            else:
+                dt = dt.replace(hour=0, minute=0, second=0, microsecond=0)
+            dt = dt.replace(tzinfo=default_tz)
+        return dt.astimezone(timezone.utc)
+
+    if date_from:
+        date_from_dt = parse_date_string(date_from, False) if isinstance(date_from, str) else date_from
+        if date_from_dt.tzinfo is None:
+            date_from_dt = date_from_dt.replace(tzinfo=timezone.utc)
+        else:
+            date_from_dt = date_from_dt.astimezone(timezone.utc)
+        date_from_dt = date_from_dt.astimezone(default_tz).replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+    if date_to:
+        date_to_dt = parse_date_string(date_to, True) if isinstance(date_to, str) else date_to
+        if date_to_dt.tzinfo is None:
+            date_to_dt = date_to_dt.replace(tzinfo=timezone.utc)
+        else:
+            date_to_dt = date_to_dt.astimezone(timezone.utc)
+        date_to_dt = date_to_dt.astimezone(default_tz).replace(hour=23, minute=59, second=59, microsecond=999999).astimezone(timezone.utc)
+    return date_from_dt, date_to_dt
+
+
+def _build_audit_monthly_trends(all_transactions: list) -> list:
+    """Build last 12 months trend data from transactions."""
+    from datetime import datetime
+    thai_month_names = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.',
+                        'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.']
+    current_date = datetime.now()
+    monthly_data = {}
+    for i in range(11, -1, -1):
+        year, month = current_date.year, current_date.month - i
+        while month <= 0:
+            month += 12
+            year -= 1
+        month_key = f"{year}-{month:02d}"
+        monthly_data[month_key] = {
+            'approved': 0, 'rejected': 0,
+            'month_label': thai_month_names[month - 1],
+            'year_label': str((year + 543) % 100)
+        }
+    for t in all_transactions:
+        if t.transaction_date and (month_key := t.transaction_date.strftime('%Y-%m')) in monthly_data:
+            if t.ai_audit_status == AIAuditStatus.approved:
+                monthly_data[month_key]['approved'] += 1
+            elif t.ai_audit_status == AIAuditStatus.rejected:
+                monthly_data[month_key]['rejected'] += 1
+    return [
+        {'month': monthly_data[k]['month_label'], 'year': monthly_data[k]['year_label'],
+         'approved': monthly_data[k]['approved'], 'rejected': monthly_data[k]['rejected']}
+        for k in sorted(monthly_data.keys())
+    ]
+
+
+def _build_audit_rejection_breakdown(rejected_transactions: list, db_session: Any) -> list:
+    """Build rejection reasons breakdown with rule names."""
+    from collections import Counter
+    from ....models.audit_rules import AuditRule
+    reasons = []
+    for t in rejected_transactions:
+        if t.reject_triggers and isinstance(t.reject_triggers, list):
+            reasons.extend(t.reject_triggers)
+    reason_counts = Counter(reasons)
+    rule_ids = list(reason_counts.keys())
+    audit_rules = db_session.query(AuditRule).filter(AuditRule.rule_id.in_(rule_ids)).all()
+    rule_name_map = {r.rule_id: r.rule_name for r in audit_rules}
+    return [
+        {'rule_id': rid, 'rule_name': rule_name_map.get(rid, rid), 'count': count}
+        for rid, count in reason_counts.most_common()
+    ]
+
+
+def _build_audit_transaction_list_items(paginated_transactions: list) -> list:
+    """Build list of transaction dicts for audit report."""
+    import json
+    out = []
+    for t in paginated_transactions:
+        audit_details = None
+        reject_messages = []
+        if t.ai_audit_note:
+            try:
+                audit_details = json.loads(t.ai_audit_note)
+                if isinstance(audit_details, dict) and 's' in audit_details and 'v' in audit_details:
+                    for v in audit_details.get('v', []):
+                        if v.get('m'):
+                            reject_messages.append(v['m'])
+            except Exception:
+                audit_details = {'note': t.ai_audit_note}
+        out.append({
+            'id': t.id,
+            'transaction_date': t.transaction_date.isoformat() if t.transaction_date else None,
+            'status': t.status.value if hasattr(t.status, 'value') else str(t.status),
+            'ai_audit_status': t.ai_audit_status.value if hasattr(t.ai_audit_status, 'value') else None,
+            'weight_kg': float(t.weight_kg) if t.weight_kg else 0,
+            'total_amount': float(t.total_amount) if t.total_amount else 0,
+            'reject_triggers': t.reject_triggers or [],
+            'warning_triggers': t.warning_triggers or [],
+            'reject_messages': reject_messages,
+            'audit_details': audit_details
+        })
+    return out
+
+
 def handle_get_audit_report(
     db_session: Any,
     query_params: Dict[str, Any],
-    organization_id: int
+    organization_id: int,
+    current_user_id: Any = None
 ) -> Dict[str, Any]:
     """
-    Handle GET /api/transaction_audit/audit_report - Get comprehensive audit report with filters
+    Handle GET /api/transaction_audit/audit_report - Get comprehensive audit report with filters.
+
+    If current_user_id is set and user is not admin and has a role, only transactions where
+    the user is in origin members AND (tag members when present) AND (tenant members when present).
 
     Query parameters:
     - search: str - Partial match search for transaction ID
@@ -445,18 +643,10 @@ def handle_get_audit_report(
     - Filter options for dropdowns
     """
     try:
-        import json
-        from datetime import datetime, timedelta, timezone
-        from sqlalchemy import func, extract, String, exists
-        from collections import Counter
+        from sqlalchemy import String, exists
         from ....models.subscriptions.organizations import OrganizationSetup
-        
-        # Import ZoneInfo for timezone handling (Python 3.9+)
-        try:
-            from zoneinfo import ZoneInfo
-        except ImportError:
-            # Fallback for Python < 3.9
-            from backports.zoneinfo import ZoneInfo
+        from ....models.users.user_location import UserLocation
+        from ....models.users.user_related import UserLocationTag, UserTenant
 
         logger.info(f"Generating audit report for organization {organization_id} with filters: {query_params}")
 
@@ -473,6 +663,8 @@ def handle_get_audit_report(
             )
         )
 
+        query = _apply_member_filter_to_transaction_query(query, db_session, current_user_id)
+
         # Apply filters
         search = query_params.get('search')
         date_from = query_params.get('date_from')
@@ -488,99 +680,17 @@ def handle_get_audit_report(
         if search:
             query = query.filter(Transaction.id.cast(String).contains(search))
 
-        # Date filters - filter by TransactionRecord.transaction_date
-        # Include transaction if any of its records fall within the date range
-        # Use Asia/Bangkok timezone (UTC+7) as default for date-only strings
-        if date_from or date_to:
-            # Default timezone for date-only strings (Asia/Bangkok = UTC+7)
-            default_tz = ZoneInfo('Asia/Bangkok')
-            date_from_dt = None
-            date_to_dt = None
-            
-            def parse_date_string(date_str: str, is_end_of_day: bool = False):
-                """Parse date string, treating date-only strings as Asia/Bangkok timezone"""
-                # Check if it's a date-only string (YYYY-MM-DD format)
-                is_date_only = False
-                try:
-                    # Try parsing as ISO format with timezone
-                    dt = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
-                    if dt.tzinfo:
-                        return dt.astimezone(timezone.utc)
-                except ValueError:
-                    pass
-                
-                try:
-                    # Try parsing as ISO format without timezone
-                    dt = datetime.fromisoformat(date_str)
-                    if dt.tzinfo:
-                        return dt.astimezone(timezone.utc)
-                    is_date_only = True
-                except ValueError:
-                    # Try parsing as date string (YYYY-MM-DD)
-                    try:
-                        dt = datetime.strptime(date_str, '%Y-%m-%d')
-                        is_date_only = True
-                    except ValueError:
-                        raise ValueError(f"Invalid date format: {date_str}")
-                
-                # If date-only or no timezone, treat as Asia/Bangkok timezone
-                if is_date_only or dt.tzinfo is None:
-                    if is_end_of_day:
-                        dt = dt.replace(hour=23, minute=59, second=59, microsecond=999999)
-                    else:
-                        dt = dt.replace(hour=0, minute=0, second=0, microsecond=0)
-                    dt = dt.replace(tzinfo=default_tz)
-                    return dt.astimezone(timezone.utc)
-                else:
-                    return dt.astimezone(timezone.utc)
-            
-            if date_from:
-                if isinstance(date_from, str):
-                    date_from_dt = parse_date_string(date_from, is_end_of_day=False)
-                else:
-                    date_from_dt = date_from
-                    if date_from_dt.tzinfo is None:
-                        date_from_dt = date_from_dt.replace(tzinfo=timezone.utc)
-                    else:
-                        date_from_dt = date_from_dt.astimezone(timezone.utc)
-                    # Ensure start of day in local timezone
-                    date_from_local = date_from_dt.astimezone(default_tz)
-                    date_from_local = date_from_local.replace(hour=0, minute=0, second=0, microsecond=0)
-                    date_from_dt = date_from_local.astimezone(timezone.utc)
-            
-            if date_to:
-                if isinstance(date_to, str):
-                    date_to_dt = parse_date_string(date_to, is_end_of_day=True)
-                else:
-                    date_to_dt = date_to
-                    if date_to_dt.tzinfo is None:
-                        date_to_dt = date_to_dt.replace(tzinfo=timezone.utc)
-                    else:
-                        date_to_dt = date_to_dt.astimezone(timezone.utc)
-                    # Ensure end of day in local timezone
-                    date_to_local = date_to_dt.astimezone(default_tz)
-                    date_to_local = date_to_local.replace(hour=23, minute=59, second=59, microsecond=999999)
-                    date_to_dt = date_to_local.astimezone(timezone.utc)
-            
-            # Build EXISTS subquery to check if transaction has records in date range
+        # Date filters: include transaction if any record falls in range (Asia/Bangkok for date-only)
+        date_from_dt, date_to_dt = _parse_audit_report_date_range(query_params)
+        if date_from_dt is not None or date_to_dt is not None:
             record_date_filter = and_(
                 TransactionRecord.created_transaction_id == Transaction.id,
                 TransactionRecord.is_active == True
             )
-            
-            if date_from_dt:
-                record_date_filter = and_(
-                    record_date_filter,
-                    TransactionRecord.transaction_date >= date_from_dt
-                )
-            
-            if date_to_dt:
-                record_date_filter = and_(
-                    record_date_filter,
-                    TransactionRecord.transaction_date <= date_to_dt
-                )
-            
-            # Use EXISTS to check if transaction has any records matching the date filter
+            if date_from_dt is not None:
+                record_date_filter = and_(record_date_filter, TransactionRecord.transaction_date >= date_from_dt)
+            if date_to_dt is not None:
+                record_date_filter = and_(record_date_filter, TransactionRecord.transaction_date <= date_to_dt)
             query = query.filter(exists().where(record_date_filter))
 
         # District (origin) filtering - supports composite "origin_id|tag_id|tenant_id"
@@ -639,147 +749,22 @@ def handle_get_audit_report(
         rejected_percentage = round((rejected_count / total_transactions * 100), 2) if total_transactions > 0 else 0
         queued_percentage = round((queued_count / total_transactions * 100), 2) if total_transactions > 0 else 0
 
-        # Monthly trend data (for stacked bar chart)
-        # Always show last 12 months (from 11 months ago to current month)
-        from datetime import datetime, timedelta
-
-        current_date = datetime.now()
-        monthly_data = {}
-
-        # Thai month abbreviations for display
-        thai_month_names = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.',
-                          'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.']
-
-        # Generate last 12 months (from 11 months ago to current month)
-        for i in range(11, -1, -1):
-            # Calculate month by going back i months
-            year = current_date.year
-            month = current_date.month - i
-            while month <= 0:
-                month += 12
-                year -= 1
-            month_key = f"{year}-{month:02d}"
-            month_idx = month - 1
-            # Use Thai Buddhist year (add 543)
-            buddhist_year = (year + 543) % 100  # Get last 2 digits
-            # Format: month name and year on separate lines for frontend
-            month_label = thai_month_names[month_idx]
-            year_label = str(buddhist_year)
-            monthly_data[month_key] = {
-                'approved': 0,
-                'rejected': 0,
-                'month_label': month_label,
-                'year_label': year_label
-            }
-
-        logger.info(f"Monthly data keys initialized (last 12 months): {list(monthly_data.keys())}")
-
-        # Count transactions by month (based on ALL filtered transactions)
-        approved_in_range = 0
-        rejected_in_range = 0
-        for transaction in all_transactions:
-            if transaction.transaction_date:
-                month_key = transaction.transaction_date.strftime('%Y-%m')
-                # Only count if the month is in our last 12 months range
-                if month_key in monthly_data:
-                    # Count based on ai_audit_status
-                    if transaction.ai_audit_status == AIAuditStatus.approved:
-                        monthly_data[month_key]['approved'] += 1
-                        approved_in_range += 1
-                    elif transaction.ai_audit_status == AIAuditStatus.rejected:
-                        monthly_data[month_key]['rejected'] += 1
-                        rejected_in_range += 1
-
-        logger.info(f"Transactions counted - approved: {approved_in_range}, rejected: {rejected_in_range}")
-
-        # Sort by month and format for frontend (chronological order)
-        monthly_trends = []
-        for month_key in sorted(monthly_data.keys()):
-            monthly_trends.append({
-                'month': monthly_data[month_key]['month_label'],
-                'year': monthly_data[month_key]['year_label'],
-                'approved': monthly_data[month_key]['approved'],
-                'rejected': monthly_data[month_key]['rejected']
-            })
-
-        logger.info(f"Monthly trends data: {monthly_trends}")
-
-        # Rejection reasons breakdown (for pie chart)
-        # Extract all reject_triggers and count occurrences
-        rejection_reasons = []
-        for transaction in rejected_transactions:
-            if transaction.reject_triggers and isinstance(transaction.reject_triggers, list):
-                rejection_reasons.extend(transaction.reject_triggers)
-
-        # Count frequency of each rejection reason
-        reason_counts = Counter(rejection_reasons)
-
-        # Fetch rule names from audit_rules table
-        from ....models.audit_rules import AuditRule
-        rule_ids = list(reason_counts.keys())
-        audit_rules = db_session.query(AuditRule).filter(AuditRule.rule_id.in_(rule_ids)).all()
-        rule_name_map = {rule.rule_id: rule.rule_name for rule in audit_rules}
-
-        rejection_breakdown = [
-            {
-                'rule_id': rule_id,
-                'rule_name': rule_name_map.get(rule_id, rule_id),  # Fallback to rule_id if name not found
-                'count': count
-            }
-            for rule_id, count in reason_counts.most_common()
-        ]
-
-        # Prepare transaction list for รายละเอียดการตรวจสอบ (PAGINATED)
-        transaction_list = []
-        for transaction in paginated_transactions:
-            # Parse ai_audit_note if it's JSON
-            audit_details = None
-            reject_messages = []
-
-            if transaction.ai_audit_note:
-                try:
-                    audit_details = json.loads(transaction.ai_audit_note)
-
-                    # Extract reject_messages from compact format
-                    if isinstance(audit_details, dict) and 's' in audit_details and 'v' in audit_details:
-                        # Compact format: extract messages from violations
-                        for violation in audit_details.get('v', []):
-                            msg = violation.get('m', '')
-                            if msg:
-                                reject_messages.append(msg)
-                except:
-                    audit_details = {'note': transaction.ai_audit_note}
-
-            transaction_list.append({
-                'id': transaction.id,
-                'transaction_date': transaction.transaction_date.isoformat() if transaction.transaction_date else None,
-                'status': transaction.status.value if hasattr(transaction.status, 'value') else str(transaction.status),
-                'ai_audit_status': transaction.ai_audit_status.value if hasattr(transaction.ai_audit_status, 'value') else None,
-                'weight_kg': float(transaction.weight_kg) if transaction.weight_kg else 0,
-                'total_amount': float(transaction.total_amount) if transaction.total_amount else 0,
-                'reject_triggers': transaction.reject_triggers if transaction.reject_triggers else [],
-                'warning_triggers': transaction.warning_triggers if transaction.warning_triggers else [],
-                'reject_messages': reject_messages if reject_messages else [],
-                'audit_details': audit_details
-            })
+        monthly_trends = _build_audit_monthly_trends(all_transactions)
+        rejection_breakdown = _build_audit_rejection_breakdown(rejected_transactions, db_session)
+        transaction_list = _build_audit_transaction_list_items(paginated_transactions)
 
         # Build filter options for frontend (origin, origin+tag, origin+tenant, origin+tag+tenant, materials)
-        from ....models.users.user_location import UserLocation
-        from ....models.users.user_related import UserLocationTag, UserTenant
         from ....models.cores.references import Material
 
-        # Get distinct (origin_id, location_tag_id, tenant_id) from non-deleted transactions
-        combos_result = db_session.query(
-            Transaction.origin_id,
-            Transaction.location_tag_id,
-            Transaction.tenant_id
-        ).filter(
-            and_(
-                Transaction.organization_id == organization_id,
-                Transaction.deleted_date.is_(None),
-                Transaction.origin_id.isnot(None)
-            )
-        ).distinct().all()
+        # Distinct (origin_id, tag_id, tenant_id) from visible transactions
+        combos_query = db_session.query(
+            Transaction.origin_id, Transaction.location_tag_id, Transaction.tenant_id
+        ).filter(and_(
+            Transaction.organization_id == organization_id,
+            Transaction.deleted_date.is_(None),
+            Transaction.origin_id.isnot(None)
+        ))
+        combos_result = _apply_member_filter_to_transaction_query(combos_query, db_session, current_user_id).distinct().all()
 
         origin_ids = list({row[0] for row in combos_result if row[0] is not None})
         tag_ids = list({row[1] for row in combos_result if row[1] is not None})
@@ -1031,19 +1016,18 @@ def handle_get_audit_report(
             {'value': 'rejected', 'label': 'ไม่อนุมัติ'}
         ]
 
-        # Material options: distinct material_id from transaction records (same org, non-deleted)
-        material_ids = [
-            row[0] for row in db_session.query(TransactionRecord.material_id)
+        # Material options: distinct material_id from visible transactions
+        material_query = (
+            db_session.query(TransactionRecord.material_id)
             .join(Transaction, TransactionRecord.created_transaction_id == Transaction.id)
-            .filter(
-                and_(
-                    Transaction.organization_id == organization_id,
-                    Transaction.deleted_date.is_(None),
-                    TransactionRecord.is_active == True,
-                    TransactionRecord.material_id.isnot(None)
-                )
-            ).distinct().all()
-        ]
+            .filter(and_(
+                Transaction.organization_id == organization_id,
+                Transaction.deleted_date.is_(None),
+                TransactionRecord.is_active == True,
+                TransactionRecord.material_id.isnot(None)
+            ))
+        )
+        material_ids = [row[0] for row in _apply_member_filter_to_transaction_query(material_query, db_session, current_user_id).distinct().all()]
         materials_options = []
         if material_ids:
             materials = db_session.query(Material).filter(
