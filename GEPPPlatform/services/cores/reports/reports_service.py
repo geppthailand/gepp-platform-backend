@@ -8,14 +8,16 @@ from GEPPPlatform.models.cores.references import Material, MaterialTag
 from GEPPPlatform.models.users.user_location import UserLocation
 from GEPPPlatform.models.users.user_related import UserLocationTag, UserTenant
 from GEPPPlatform.models.subscriptions.organizations import OrganizationSetup
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy import or_, and_
+from sqlalchemy import or_, and_, func, cast
+from sqlalchemy.dialects.postgresql import JSONB
 from datetime import datetime, timedelta, timezone
 import logging
 
 from ....models.transactions.transactions import Transaction, TransactionStatus
 from ....models.transactions.transaction_records import TransactionRecord
+from ....models.subscriptions.subscription_models import OrganizationRole
 from ....exceptions import ValidationException, NotFoundException
 
 logger = logging.getLogger(__name__)
@@ -35,18 +37,13 @@ class ReportsService:
         self,
         organization_id: int,
         filters: Optional[Dict[str, Any]] = None,
-        report_type: str = None
+        report_type: str = None,
+        current_user_id: Any = None
     ) -> Dict[str, Any]:
         """
-        Get all active transaction records for a specific organization
-        
-        Args:
-            organization_id: The organization ID to filter by
-            filters: Optional filters (e.g., status, date range, material type)
-            report_type: Optional report type. If 'overview', includes material data in each record
-            
-        Returns:
-            Dict with transaction records data and metadata
+        Get all active transaction records for a specific organization.
+        If current_user_id is set and user is not admin and has a role, only records from transactions
+        where the user is in origin/tag/tenant members.
         """
         try:
             # Print input parameters
@@ -66,7 +63,14 @@ class ReportsService:
                 TransactionRecord.is_active == True,
                 Transaction.status != TransactionStatus.rejected
             )
-            
+            # Log member filter: whether it's applied and for which user
+            _apply_member = self._should_filter_reports_by_member(current_user_id)
+            logger.info(
+                f"[REPORTS] get_transaction_records_by_organization member_filter: current_user_id={current_user_id}, "
+                f"apply_member_filter={_apply_member}, report_type={report_type}"
+            )
+            query = self._apply_member_filter_to_transaction_query(query, current_user_id)
+
             # Track applied filters for logging
             applied_filters = {}
             
@@ -167,9 +171,47 @@ class ReportsService:
             
             # Execute query
             transaction_records = query.all()
-            
-            # Preload transaction statuses for included records
+
+            # Preload transaction fields (origin_id, location_tag_id, tenant_id) for logging
             transaction_ids = {record.created_transaction_id for record in transaction_records}
+            txn_meta_map: Dict[int, Dict[str, Any]] = {}
+            if transaction_ids:
+                txn_rows = self.db.query(
+                    Transaction.id,
+                    Transaction.origin_id,
+                    Transaction.location_tag_id,
+                    Transaction.tenant_id,
+                    Transaction.weight_kg,
+                ).filter(Transaction.id.in_(transaction_ids)).all()
+                for row in txn_rows:
+                    txn_meta_map[row[0]] = {
+                        'origin_id': row[1],
+                        'location_tag_id': row[2],
+                        'tenant_id': row[3],
+                        'weight_kg': float(row[4]) if row[4] is not None else None,
+                    }
+
+            # Log per-record data (weight, tag, tenant) for debugging report weight issues (first 20 only)
+            logger.info(
+                f"[REPORTS] get_transaction_records_by_organization fetched {len(transaction_records)} records "
+                f"(org_id={organization_id}, report_type={report_type})"
+            )
+            _to_log = transaction_records[:20]
+            for i, record in enumerate(_to_log):
+                txn_meta = txn_meta_map.get(record.created_transaction_id) or {}
+                logger.info(
+                    f"[REPORTS] record[{i}] id={record.id} txn_id={record.created_transaction_id} "
+                    f"origin_id={txn_meta.get('origin_id')} tag_id={txn_meta.get('location_tag_id')} "
+                    f"tenant_id={txn_meta.get('tenant_id')} "
+                    f"origin_weight_kg={getattr(record, 'origin_weight_kg', None)} "
+                    f"origin_quantity={getattr(record, 'origin_quantity', None)} "
+                    f"txn_weight_kg={txn_meta.get('weight_kg')} "
+                    f"transaction_date={record.transaction_date}"
+                )
+            if len(transaction_records) > 20:
+                logger.info(f"[REPORTS] ... and {len(transaction_records) - 20} more records (only first 20 logged)")
+
+            # Preload transaction statuses for included records
             status_map: Dict[int, TransactionStatus] = {}
             if transaction_ids:
                 transactions_rows = self.db.query(Transaction.id, Transaction.status).filter(
@@ -238,11 +280,21 @@ class ReportsService:
                 if report_type in ('overview', 'diversion', 'performance', 'materials', 'comparison') and record.material_id:
                     record_dict['material'] = materials_map.get(record.material_id)
                 
-                # Include origin_id from the created transaction for downstream aggregations
+                # Include origin_id, location_tag_id, tenant_id from the created transaction for downstream aggregations and tag/tenant handling
                 try:
-                    record_dict['origin_id'] = record.created_transaction.origin_id if record.created_transaction else None
+                    txn = record.created_transaction
+                    if txn:
+                        record_dict['origin_id'] = txn.origin_id
+                        record_dict['location_tag_id'] = getattr(txn, 'location_tag_id', None)
+                        record_dict['tenant_id'] = getattr(txn, 'tenant_id', None)
+                    else:
+                        record_dict['origin_id'] = None
+                        record_dict['location_tag_id'] = None
+                        record_dict['tenant_id'] = None
                 except Exception:
                     record_dict['origin_id'] = None
+                    record_dict['location_tag_id'] = None
+                    record_dict['tenant_id'] = None
 
                 # Mark rejection status for downstream filtering
                 try:
@@ -252,27 +304,37 @@ class ReportsService:
                     record_dict['is_rejected'] = False
                 
                 records_data.append(record_dict)
-            
-            # Prepare result summary for logging
-            result_summary = {
-                'organization_id': organization_id,
-                'report_type': report_type,
-                'total_records': len(records_data),
-                'transactions_total': transactions_total,
-                'transactions_approved': transactions_approved,
-                'filters_applied': applied_filters if applied_filters else None
-            }
-            
-            # Print results
-            print(
-                f"get_transaction_records_by_organization results - "
-                f"organization_id: {organization_id}, "
-                f"report_type: {report_type}, "
-                f"total_records: {len(records_data)}, "
-                f"transactions_total: {transactions_total}, "
-                f"transactions_approved: {transactions_approved}"
+
+            # Summary log for weight/tag/tenant debugging
+            with_weight = sum(1 for d in records_data if (d.get('origin_weight_kg') or 0) > 0)
+            with_tag_or_tenant = 0
+            for d in records_data:
+                oid = d.get('origin_id')
+                txn_meta = txn_meta_map.get(d.get('created_transaction_id')) if d.get('created_transaction_id') else {}
+                if txn_meta and (txn_meta.get('location_tag_id') is not None or txn_meta.get('tenant_id') is not None):
+                    with_tag_or_tenant += 1
+            logger.info(
+                f"[REPORTS] records_data summary: total={len(records_data)} "
+                f"with_origin_weight_kg>0={with_weight} with_tag_or_tenant={with_tag_or_tenant}"
             )
-            
+
+            # Print full record data for overview so you can check weight (all report types)
+            print("\n" + "=" * 60 + " [REPORTS] RECORDS DATA (check weight) " + "=" * 60)
+            print(f"report_type={report_type} organization_id={organization_id} total_records={len(records_data)}\n")
+            for i, d in enumerate(records_data):
+                txn_id = d.get('created_transaction_id')
+                txn_meta = txn_meta_map.get(txn_id) or {}
+                print(f"--- record[{i}] ---")
+                print(f"  id={d.get('id')}  created_transaction_id={txn_id}")
+                print(f"  origin_id={d.get('origin_id')}  location_tag_id={txn_meta.get('location_tag_id')}  tenant_id={txn_meta.get('tenant_id')}")
+                print(f"  origin_weight_kg={d.get('origin_weight_kg')}  origin_quantity={d.get('origin_quantity')}  total_amount={d.get('total_amount')}")
+                print(f"  transaction_date={d.get('transaction_date')}  material_id={d.get('material_id')}")
+                if d.get('material'):
+                    mat = d['material']
+                    print(f"  material: name={mat.get('name_en') or mat.get('name_th')} unit_weight={mat.get('unit_weight')}")
+                print()
+            print("=" * 60 + "\n")
+
             return {
                 'success': True,
                 'data': records_data,
@@ -282,7 +344,7 @@ class ReportsService:
                 'organization_id': organization_id,
                 'message': 'Transaction records retrieved successfully'
             }
-            
+
         except ValidationException as e:
             logger.error(f"Validation error in get_transaction_records_by_organization: {str(e)}")
             raise
@@ -293,11 +355,68 @@ class ReportsService:
             logger.error(f"Unexpected error in get_transaction_records_by_organization: {str(e)}")
             raise
 
-    def get_origin_by_organization(self, organization_id: int, filters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def _should_filter_reports_by_member(self, current_user_id: Any) -> bool:
+        """Return True if we should filter by origin/tag/tenant members (non-admin with a role)."""
+        if current_user_id is None:
+            return False
+        try:
+            user_id = int(current_user_id)
+            user = self.db.query(UserLocation).options(
+                joinedload(UserLocation.organization_role)
+            ).filter(UserLocation.id == user_id).first()
+            if not user:
+                return True
+            if user.organization_role_id is None:
+                return False
+            if user.organization_role and user.organization_role.key == 'admin':
+                return False
+            return True
+        except Exception:
+            return True
+
+    def _apply_member_filter_to_transaction_query(self, query, current_user_id: Any):
+        """Apply origin/tag/tenant member filter to a query that includes Transaction. No-op if admin or no role."""
+        if current_user_id is None or not self._should_filter_reports_by_member(current_user_id):
+            return query
+        logger.info(f"[REPORTS] Applying member filter to transaction query for current_user_id={current_user_id}")
+        uid_int = int(current_user_id)
+        uid_str = str(current_user_id)
+        query = query.join(Transaction.origin)
+        query = query.outerjoin(UserLocationTag, Transaction.location_tag_id == UserLocationTag.id)
+        query = query.outerjoin(UserTenant, Transaction.tenant_id == UserTenant.id)
+        pattern_num = func.jsonb_build_array(func.jsonb_build_object('user_id', uid_int))
+        pattern_str = func.jsonb_build_array(func.jsonb_build_object('user_id', uid_str))
+        origin_cond = and_(
+            UserLocation.members.isnot(None),
+            or_(UserLocation.members.op('@>')(pattern_num), UserLocation.members.op('@>')(pattern_str))
+        )
+        tag_cond = and_(
+            Transaction.location_tag_id.isnot(None),
+            UserLocationTag.members.isnot(None),
+            or_(
+                cast(UserLocationTag.members, JSONB).op('@>')(func.jsonb_build_array(uid_int)),
+                cast(UserLocationTag.members, JSONB).op('@>')(func.jsonb_build_array(uid_str))
+            )
+        )
+        tenant_cond = and_(
+            Transaction.tenant_id.isnot(None),
+            UserTenant.members.isnot(None),
+            or_(
+                cast(UserTenant.members, JSONB).op('@>')(func.jsonb_build_array(uid_int)),
+                cast(UserTenant.members, JSONB).op('@>')(func.jsonb_build_array(uid_str))
+            )
+        )
+        return query.filter(and_(
+            origin_cond,
+            or_(Transaction.location_tag_id.is_(None), tag_cond),
+            or_(Transaction.tenant_id.is_(None), tenant_cond)
+        ))
+
+    def get_origin_by_organization(self, organization_id: int, filters: Optional[Dict[str, Any]] = None, current_user_id: Any = None) -> Dict[str, Any]:
         """
         Get origin filter options with composite origin+tag+tenant combinations from existing transaction data.
-        Returns only the most specific (leaf) level per origin: if origin has both tags and tenants, only
-        origin·tag·tenant; if only tags/tenants, origin + origin·tag or origin·tenant; if neither, origin only.
+        If current_user_id is set and user is not admin and has a role, only origins from transactions where
+        the user is in origin/tag/tenant members. Returns only the most specific (leaf) level per origin.
         """
         try:
             # Query distinct (origin_id, location_tag_id, tenant_id) from Transaction (with filters)
@@ -356,13 +475,15 @@ class ReportsService:
                                 tr_query = tr_query.filter(TransactionRecord.transaction_date <= (parsed.isoformat() if isinstance(date_to, str) else parsed))
                             except Exception:
                                 tr_query = tr_query.filter(TransactionRecord.transaction_date <= date_to)
+                tr_query = self._apply_member_filter_to_transaction_query(tr_query, current_user_id)
                 combos_result = tr_query.distinct().all()
             else:
-                combos_result = self.db.query(
+                combos_query = self.db.query(
                     Transaction.origin_id,
                     Transaction.location_tag_id,
                     Transaction.tenant_id
-                ).filter(*base_filter).distinct().all()
+                ).filter(*base_filter)
+                combos_result = self._apply_member_filter_to_transaction_query(combos_query, current_user_id).distinct().all()
 
             origin_ids = list({row[0] for row in combos_result if row[0] is not None})
             tag_ids = list({row[1] for row in combos_result if row[1] is not None})
@@ -548,15 +669,11 @@ class ReportsService:
             logger.error(f"Unexpected error in get_origin_by_organization: {str(e)}")
             raise
     
-    def get_material_by_organization(self, organization_id: int, filters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def get_material_by_organization(self, organization_id: int, filters: Optional[Dict[str, Any]] = None, current_user_id: Any = None) -> Dict[str, Any]:
         """
-        Get all active materials for a specific organization based on transaction records
-        
-        Args:
-            organization_id: The organization ID to filter by
-            
-        Returns:
-            Dict with material data and metadata
+        Get all active materials for a specific organization based on transaction records.
+        If current_user_id is set and user is not admin and has a role, only materials from transactions
+        where the user is in origin/tag/tenant members.
         """
         try:
             # Step 1: Get transaction records that belong to this organization
@@ -568,6 +685,7 @@ class ReportsService:
                 TransactionRecord.is_active == True,
                 Transaction.status != TransactionStatus.rejected
             )
+            transaction_records_query = self._apply_member_filter_to_transaction_query(transaction_records_query, current_user_id)
             # Apply optional filters
             if filters:
                 # Origin combos (multiple composites: "2507||1,2507|46|")

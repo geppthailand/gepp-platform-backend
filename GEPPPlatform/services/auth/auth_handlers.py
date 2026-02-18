@@ -20,7 +20,7 @@ from GEPPPlatform.models.users.user_location import UserLocation
 from GEPPPlatform.models.users.integration_tokens import IntegrationToken
 from GEPPPlatform.models.users.user_reset_password_log import UserResetPasswordLog
 from GEPPPlatform.models.subscriptions.organizations import Organization, OrganizationInfo
-from GEPPPlatform.models.subscriptions.subscription_models import SubscriptionPlan, Subscription, OrganizationRole
+from GEPPPlatform.models.subscriptions.subscription_models import SubscriptionPlan, Subscription
 from GEPPPlatform.models.cores.iot_devices import IoTDevice
 from ..cores.organizations.organization_role_presets import OrganizationRolePresets
 from ...exceptions import (
@@ -359,14 +359,6 @@ class AuthHandlers:
                 # 8. Create default organization roles
                 role_presets = OrganizationRolePresets(session)
                 role_presets.create_default_roles_for_organization(organization.id)
-
-                # 9. Assign admin role to the registering user (owner)
-                admin_role = session.query(OrganizationRole).filter(
-                    OrganizationRole.organization_id == organization.id,
-                    OrganizationRole.key == 'admin'
-                ).first()
-                if admin_role:
-                    user.organization_role_id = admin_role.id
 
                 # Commit the transaction
                 session.commit()
