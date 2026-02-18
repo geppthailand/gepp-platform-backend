@@ -63,10 +63,13 @@ class ReportsService:
                 TransactionRecord.created_transaction_id == Transaction.id
             ).filter(
                 Transaction.organization_id == organization_id,
+                Transaction.deleted_date.is_(None),
                 TransactionRecord.is_active == True,
-                Transaction.status != TransactionStatus.rejected
+                TransactionRecord.deleted_date.is_(None),
+                Transaction.status != TransactionStatus.rejected,
+                TransactionRecord.status != 'rejected',
             )
-            
+
             # Track applied filters for logging
             applied_filters = {}
             
@@ -323,8 +326,11 @@ class ReportsService:
                 TransactionRecord.material_id == Material.id
             ).filter(
                 Transaction.organization_id == organization_id,
+                Transaction.deleted_date.is_(None),
                 TransactionRecord.is_active == True,
-                Transaction.status != TransactionStatus.rejected
+                TransactionRecord.deleted_date.is_(None),
+                Transaction.status != TransactionStatus.rejected,
+                TransactionRecord.status != 'rejected',
             )
 
             # Apply filters
@@ -662,8 +668,11 @@ class ReportsService:
                 TransactionRecord.created_transaction_id == Transaction.id
             ).filter(
                 Transaction.organization_id == organization_id,
+                Transaction.deleted_date.is_(None),
                 TransactionRecord.is_active == True,
-                Transaction.status != TransactionStatus.rejected
+                TransactionRecord.deleted_date.is_(None),
+                Transaction.status != TransactionStatus.rejected,
+                TransactionRecord.status != 'rejected',
             )
             # Apply optional filters
             if filters:
@@ -794,21 +803,29 @@ class ReportsService:
     def get_organization_setup(self, organization_id: int) -> Dict[str, Any]:
         """
         Get active organization setup with root_nodes
-        
+
         Args:
             organization_id: The organization ID to filter by
-            
+
         Returns:
             Dict with organization setup data (only active setup with root_nodes)
         """
         try:
-            
-            # Query for active organization setup
+
+            # Query for active organization setup (not soft-deleted)
             setup = self.db.query(OrganizationSetup).filter(
                 OrganizationSetup.organization_id == organization_id,
-                OrganizationSetup.is_active == True
-            ).first()
-            
+                OrganizationSetup.is_active == True,
+                OrganizationSetup.deleted_date.is_(None)
+            ).order_by(OrganizationSetup.created_date.desc()).first()
+
+            # Fallback: if no active setup, get the latest version regardless of is_active
+            if not setup:
+                setup = self.db.query(OrganizationSetup).filter(
+                    OrganizationSetup.organization_id == organization_id,
+                    OrganizationSetup.deleted_date.is_(None)
+                ).order_by(OrganizationSetup.created_date.desc()).first()
+
             if not setup:
                 return {
                     'success': True,

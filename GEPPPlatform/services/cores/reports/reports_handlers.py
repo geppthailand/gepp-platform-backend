@@ -784,20 +784,13 @@ def _handle_performance_report(
     organization_id: int,
     filters: Dict[str, Any]
 ) -> Dict[str, Any]:
-    """Handle /api/reports/performance endpoint"""
-    
-    # Get transaction records
-    result = reports_service.get_transaction_records_by_organization(
-        organization_id=organization_id,
-        filters=filters if filters else None,
-        report_type='performance'
-    )
-    
+    """Handle /api/reports/performance endpoint — optimized single-query path"""
+
     # Get organization setup with active root_nodes
     organization_setup = reports_service.get_organization_setup(
         organization_id=organization_id
     )
-    
+
     setup_data = organization_setup.get('data')
     if not setup_data or not setup_data.get('root_nodes'):
         return {
@@ -805,24 +798,41 @@ def _handle_performance_report(
             'data': [],
             'message': 'No organization setup found'
         }
-    
+
     root_nodes = setup_data.get('root_nodes', [])
-    transaction_records = result.get('data', [])
-    
-    # Build location ID to records mapping
-    location_records_map = {}
-    for record in transaction_records:
-        if record.get('is_rejected'):
+
+    # Use optimized single-query path (same as overview)
+    result = reports_service.get_overview_data(
+        organization_id=organization_id,
+        filters=filters if filters else None
+    )
+    rows = result.get('rows', [])
+
+    # Collect all category IDs from rows and fetch names
+    all_category_ids = set()
+    # Build location ID → list of (origin_quantity, unit_weight, category_id) tuples
+    location_records_map: Dict[int, list] = {}
+    for row in rows:
+        origin_qty, txn_date, txn_id, origin_id, status, unit_weight, calc_ghg, category_id, main_material_id, material_tags = row
+        if status == TransactionStatus.rejected:
             continue
-        origin_id = record.get('origin_id')
         if origin_id:
             if origin_id not in location_records_map:
                 location_records_map[origin_id] = []
-            location_records_map[origin_id].append(record)
-    
-    # Collect all location IDs and fetch names
+            location_records_map[origin_id].append((
+                float(origin_qty or 0),
+                float(unit_weight or 0),
+                int(category_id) if category_id is not None else None
+            ))
+        if category_id is not None:
+            try:
+                all_category_ids.add(int(category_id))
+            except Exception:
+                pass
+
+    # Collect all location IDs from hierarchy and fetch names
     location_ids = set()
-    
+
     def collect_location_ids(nodes):
         for node in nodes:
             node_id = node.get('nodeId')
@@ -834,67 +844,41 @@ def _handle_performance_report(
             children = node.get('children', [])
             if children:
                 collect_location_ids(children)
-    
+
     collect_location_ids(root_nodes)
     location_names = _fetch_destination_names(reports_service.db, location_ids)
-    
-    # Fetch all category names
-    all_category_ids = set()
-    for record in transaction_records:
-        if record.get('is_rejected'):
-            continue
-        material = record.get('material') or {}
-        cat_id = material.get('category_id') or record.get('category_id')
-        if cat_id:
-            try:
-                all_category_ids.add(int(cat_id))
-            except Exception:
-                pass
-    
     category_names = _fetch_category_names(reports_service.db, all_category_ids)
-    
-    # Helper to calculate metrics from records (grouped by category)
+
+    # Helper to calculate metrics from lightweight tuples
     def calculate_metrics(records):
-        material_metrics = {}
+        """records: list of (origin_qty, unit_weight, category_id) tuples"""
+        material_metrics: Dict[str, float] = {}
         total_weight = 0.0
         recyclable_weight = 0.0
         general_weight = 0.0
-        
-        for record in records:
-            material = record.get('material') or {}
-            weight = _calculate_weight(record, material)
+
+        for origin_qty, unit_weight, cat_id in records:
+            weight = origin_qty * unit_weight
             total_weight += weight
-            
-            # Get category
-            category_id = material.get('category_id') or record.get('category_id')
-            try:
-                cat_id_int = int(category_id) if category_id is not None else None
-            except Exception:
-                cat_id_int = None
-            if cat_id_int is not None:
-                material_name = category_names.get(cat_id_int, f"Category {cat_id_int}")
+
+            if cat_id is not None:
+                material_name = category_names.get(cat_id, f"Category {cat_id}")
                 material_metrics[material_name] = material_metrics.get(material_name, 0.0) + weight
-            
-            # Check if recyclable (category 1 or 3)
-            if cat_id_int in (1, 3):
+
+            if cat_id in (1, 3):
                 recyclable_weight += weight
-            # Sum general weight (category 4)
-            if cat_id_int == 4:
+            if cat_id == 4:
                 general_weight += weight
-        
+
         recycling_rate = (recyclable_weight / total_weight * 100) if total_weight > 0 else 0.0
-        
-        # Round values
-        metrics = {k: round(v, 2) for k, v in material_metrics.items() if v > 0}
-        
         return {
-            'metrics': metrics,
+            'metrics': {k: round(v, 2) for k, v in material_metrics.items() if v > 0},
             'totalWasteKg': round(total_weight, 2),
             'recyclingRatePercent': round(recycling_rate, 2),
             'recyclable_weight': round(recyclable_weight, 2),
             'general_weight': round(general_weight, 2)
         }
-    
+
     # Determine the maximum depth of the hierarchy
     def get_max_depth(nodes, current_depth=0):
         if not nodes:
@@ -906,147 +890,104 @@ def _handle_performance_report(
                 child_depth = get_max_depth(children, current_depth + 1)
                 max_child_depth = max(max_child_depth, child_depth)
         return max_child_depth
-    
+
     max_depth = get_max_depth(root_nodes)
-    
+
     # Define the standard hierarchy sequence
-    # The sequence is always: Branch → Building → Floor → Room (→ Item for 5+ levels)
-    # But it can start at any point based on the depth
     HIERARCHY_SEQUENCE = [
         ('branchName', 'buildings'),
         ('buildingName', 'floors'),
         ('floorName', 'rooms'),
         ('roomName', 'items'),
-        ('itemName', 'items'),  # For very deep nesting (5+ levels)
+        ('itemName', 'items'),
     ]
-    
+
     def get_level_config(total_depth):
-        """
-        Returns (name_key, children_key) for each level based on total depth
-        The hierarchy always follows: Branch → Building → Floor → Room (→ Item for 5+ levels)
-        But starts at the appropriate point based on depth
-        
-        Examples:
-        - Depth 0 (1 level):  Room
-        - Depth 1 (2 levels): Floor → Room
-        - Depth 2 (3 levels): Building → Floor → Room
-        - Depth 3 (4 levels): Branch → Building → Floor → Room
-        - Depth 4+ (5+ levels): Branch → Building → Floor → Room → Item
-        """
-        # Calculate the starting index in the sequence
-        # Sequence indices: 0=Branch, 1=Building, 2=Floor, 3=Room, 4=Item
-        # For depth 0-3, start at index (3 - depth)
-        # For depth 4+, start at index 0
         start_index = max(0, 3 - total_depth)
-        
         configs = []
         for i in range(total_depth + 1):
             seq_index = start_index + i
             if seq_index < len(HIERARCHY_SEQUENCE):
                 name_key, children_key = HIERARCHY_SEQUENCE[seq_index]
-                # Last level has no children
                 if i == total_depth:
                     configs.append((name_key, None))
                 else:
                     configs.append((name_key, children_key))
             else:
-                # Very deep nesting - continue using itemName with items
                 if i == total_depth:
                     configs.append(('itemName', None))
                 else:
                     configs.append(('itemName', 'items'))
-        
         return configs
-    
+
     level_configs = get_level_config(max_depth)
-    
+
     # Recursive function to build hierarchy
     def build_hierarchy(nodes, level=0):
         result = []
-        
+
         for node in nodes:
             node_id_str = node.get('nodeId')
             if not node_id_str:
                 continue
-            
             try:
                 node_id = int(node_id_str)
             except (ValueError, TypeError):
                 continue
-            
+
             # Get records for this location
             node_records = location_records_map.get(node_id, [])
-            
-            # Get child nodes
             children = node.get('children', [])
-            
-            # Recursively process children
             child_items = build_hierarchy(children, level + 1) if children else []
-            
+
             # Aggregate all records from this node and all descendants
-            all_records = node_records.copy()
-            
+            all_records = list(node_records)
+
             def collect_descendant_records(items):
                 collected = []
                 for item in items:
                     item_id = int(item['id'])
                     collected.extend(location_records_map.get(item_id, []))
-                    
-                    # Recursively collect from all possible child keys
                     for child_key in ['buildings', 'floors', 'rooms', 'items']:
                         if child_key in item:
                             for child in item[child_key]:
                                 collected.extend(collect_descendant_records([child]))
-                
                 return collected
-            
+
             if child_items:
                 all_records.extend(collect_descendant_records(child_items))
-            
-            # Calculate metrics
+
             calc = calculate_metrics(all_records)
-            
-            # Skip if no data
             if calc['totalWasteKg'] == 0:
                 continue
-            
-            # Get location name
+
             location_name = location_names.get(node_id, f"Location {node_id}")
-            
-            # Build item structure - all levels have same base structure
             item = {
                 'id': str(node_id),
                 'totalWasteKg': calc['totalWasteKg'],
                 'metrics': calc['metrics'],
             }
-            
-            # Level 0 always gets recyclingRatePercent (top of hierarchy)
+
             if level == 0:
                 item['recyclingRatePercent'] = calc['recyclingRatePercent']
                 item['recyclable_weight'] = calc['recyclable_weight']
                 item['general_weight'] = calc['general_weight']
-            
-            # Get config for this level
+
             if level < len(level_configs):
                 name_key, children_key = level_configs[level]
             else:
-                # Fallback for very deep nesting
                 name_key, children_key = ('itemName', 'items' if children else None)
-            
-            # Set the name
+
             item[name_key] = location_name
-            
-            # Set children if they exist
             if child_items and children_key:
                 item[children_key] = child_items
-            
+
             result.append(item)
-        
+
         return result
-    
-    # Build the performance data
+
     performance_data = build_hierarchy(root_nodes)
-    
+
     return {
         'success': True,
         'data': performance_data,
