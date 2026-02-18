@@ -226,10 +226,16 @@ def _parse_datetime(date_str: Optional[str]) -> Optional[datetime]:
 
 
 def _calculate_weight(record: Dict[str, Any], material: Dict[str, Any]) -> float:
-    """Calculate weight from quantity and unit_weight"""
+    """Calculate weight from quantity and unit_weight; fall back to origin_weight_kg when derived weight is 0 (e.g. tag/tenant records)."""
     quantity = float(record.get('origin_quantity') or 0)
-    unit_weight = float(material.get('unit_weight') or 0)
-    return quantity * unit_weight
+    material_dict = material or {}
+    unit_weight = float(material_dict.get('unit_weight') or 0)
+    weight = quantity * unit_weight
+    if weight <= 0:
+        origin_kg = float(record.get('origin_weight_kg') or 0)
+        if origin_kg > 0:
+            return origin_kg
+    return weight
 
 
 _GENERAL_WASTE_CAT_ID = 4  # Material category ID for General Waste
@@ -381,7 +387,8 @@ def _check_transaction_completion(transaction_map: Dict[int, Dict]) -> Tuple[int
 def _handle_overview_report(
     reports_service: ReportsService,
     organization_id: int,
-    filters: Dict[str, Any]
+    filters: Dict[str, Any],
+    current_user: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     """Handle /api/reports/overview endpoint.
 
@@ -390,9 +397,11 @@ def _handle_overview_report(
     """
 
     # Fast path: single SQL query returning lightweight tuples
+    current_user_id = (current_user or {}).get('user_id') or (current_user or {}).get('id')
     result = reports_service.get_overview_data(
         organization_id=organization_id,
         filters=filters if filters else None,
+        current_user_id=current_user_id
     )
     rows = result.get('rows', [])
 
@@ -473,20 +482,26 @@ def _handle_overview_report(
 
     recycle_rate = ((recyclable_waste / total_waste) * 100) if total_waste > 0 else 0.0
 
-    # Top 5 recyclable origins — fetch only the needed location names
+    # Top 5 recyclable origins — fetch origin names with member filtering
     top_origin_ids = sorted(origin_waste_map.items(), key=lambda kv: kv[1], reverse=True)[:5]
     top_recyclables = []
     if top_origin_ids:
-        needed_ids = [oid for oid, _ in top_origin_ids]
         try:
-            locs = reports_service.db.query(
-                UserLocation.id, UserLocation.display_name, UserLocation.name_en, UserLocation.name_th
-            ).filter(UserLocation.id.in_(needed_ids)).all()
-            name_map = {loc[0]: (loc[1] or loc[2] or loc[3] or f"Location {loc[0]}") for loc in locs}
+            origins_result = reports_service.get_origin_by_organization(organization_id=organization_id, current_user_id=current_user_id)
+            origin_names_map = {}
+            origin_path_map = {}
+            for o in origins_result.get('data', []):
+                oid = o.get('origin_id')
+                if oid is not None:
+                    if oid not in origin_names_map:
+                        origin_names_map[oid] = o.get('display_name') or o.get('name_en') or o.get('name_th') or o.get('name')
+                    if oid not in origin_path_map:
+                        origin_path_map[oid] = o.get('path') or ''
         except Exception:
-            name_map = {}
+            origin_names_map = {}
+            origin_path_map = {}
         top_recyclables = [
-            {'origin_id': oid, 'origin_name': name_map.get(oid), 'path': '', 'total_waste': w}
+            {'origin_id': oid, 'origin_name': origin_names_map.get(oid), 'path': origin_path_map.get(oid, ''), 'total_waste': w}
             for oid, w in top_origin_ids
         ]
 
@@ -572,15 +587,17 @@ def _handle_overview_report(
 def _handle_materials_report(
     reports_service: ReportsService,
     organization_id: int,
-    filters: Dict[str, Any]
+    filters: Dict[str, Any],
+    current_user: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     """Handle /api/reports/materials endpoint"""
-    
+    current_user_id = (current_user or {}).get('user_id') or (current_user or {}).get('id')
     # Get transaction records
     result = reports_service.get_transaction_records_by_organization(
         organization_id=organization_id,
         filters=filters if filters else None,
-        report_type='materials'
+        report_type='materials',
+        current_user_id=current_user_id
     )
     
     # Aggregate by main material
@@ -697,15 +714,18 @@ def _handle_materials_report(
 def _handle_diversion_report(
     reports_service: ReportsService,
     organization_id: int,
-    filters: Dict[str, Any]
+    filters: Dict[str, Any],
+    current_user: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     """Handle /api/reports/diversion endpoint"""
     
     # Get transaction records
+    current_user_id = (current_user or {}).get('user_id') or (current_user or {}).get('id')
     result = reports_service.get_transaction_records_by_organization(
         organization_id=organization_id,
         filters=filters if filters else None,
-        report_type='diversion'
+        report_type='diversion',
+        current_user_id=current_user_id
     )
     
     # Initialize tracking variables
@@ -887,9 +907,11 @@ def _handle_diversion_report(
 def _handle_performance_report(
     reports_service: ReportsService,
     organization_id: int,
-    filters: Dict[str, Any]
+    filters: Dict[str, Any],
+    current_user: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     """Handle /api/reports/performance endpoint — optimized single-query path"""
+    current_user_id = (current_user or {}).get('user_id') or (current_user or {}).get('id')
 
     # Get organization setup with active root_nodes
     organization_setup = reports_service.get_organization_setup(
@@ -909,7 +931,8 @@ def _handle_performance_report(
     # Use optimized single-query path (same as overview)
     result = reports_service.get_overview_data(
         organization_id=organization_id,
-        filters=filters if filters else None
+        filters=filters if filters else None,
+        current_user_id=current_user_id
     )
     rows = result.get('rows', [])
 
@@ -1123,6 +1146,7 @@ def _handle_comparison_report(
     reports_service: ReportsService,
     organization_id: int,
     filters: Dict[str, Any],
+    current_user: Optional[Dict[str, Any]] = None,
     client_timezone: Optional[str] = None
 ) -> Dict[str, Any]:
     """Handle /api/reports/comparison endpoint
@@ -1214,6 +1238,8 @@ def _handle_comparison_report(
     right_from = date_from
     right_to = date_to
 
+    _comparison_user_id = (current_user or {}).get('user_id') or (current_user or {}).get('id')
+
     def fetch_side(date_from: Optional[str], date_to: Optional[str]) -> Dict[str, Any]:
         # Build filters with date range and preserve other filters (material_ids, origin_ids)
         side_filters = {}
@@ -1237,7 +1263,8 @@ def _handle_comparison_report(
         return reports_service.get_transaction_records_by_organization(
             organization_id=organization_id,
             filters=side_filters if side_filters else None,
-            report_type='comparison'
+            report_type='comparison',
+            current_user_id=_comparison_user_id
         )
 
     left_result = fetch_side(left_from, left_to)
@@ -1880,15 +1907,15 @@ def handle_reports_routes(event: Dict[str, Any], **common_params) -> Dict[str, A
 
         if path == '/api/reports/overview':
             filters = _build_filters_from_query_params(query_params, timezone_name=tz_name)
-            return _handle_overview_report(reports_service, organization_id, filters)
+            return _handle_overview_report(reports_service, organization_id, filters, current_user)
 
         elif path == '/api/reports/performance':
             filters = _build_filters_from_query_params(query_params, timezone_name=tz_name)
-            return _handle_performance_report(reports_service, organization_id, filters)
+            return _handle_performance_report(reports_service, organization_id, filters, current_user)
         
         elif path == '/api/reports/diversion':
             filters = _build_filters_from_query_params(query_params, timezone_name=tz_name)
-            return _handle_diversion_report(reports_service, organization_id, filters)
+            return _handle_diversion_report(reports_service, organization_id, filters, current_user)
         
         elif path == '/api/reports/filter/origins':
             filters = _build_filters_from_query_params(query_params, timezone_name=tz_name)
@@ -1899,7 +1926,8 @@ def handle_reports_routes(event: Dict[str, Any], **common_params) -> Dict[str, A
             if not has_date:
                 filters.pop('date_from', None)
                 filters.pop('date_to', None)
-            return reports_service.get_origin_by_organization(organization_id=organization_id, filters=filters)
+            current_user_id = current_user.get('user_id') or current_user.get('id')
+            return reports_service.get_origin_by_organization(organization_id=organization_id, filters=filters, current_user_id=current_user_id)
 
         elif path == '/api/reports/filter/materials':
             filters = _build_filters_from_query_params(query_params, timezone_name=tz_name)
@@ -1910,15 +1938,16 @@ def handle_reports_routes(event: Dict[str, Any], **common_params) -> Dict[str, A
             if not has_date:
                 filters.pop('date_from', None)
                 filters.pop('date_to', None)
-            return reports_service.get_material_by_organization(organization_id=organization_id, filters=filters)
+            current_user_id = current_user.get('user_id') or current_user.get('id')
+            return reports_service.get_material_by_organization(organization_id=organization_id, filters=filters, current_user_id=current_user_id)
         
         elif path == '/api/reports/comparison':
             filters = _build_filters_from_query_params(query_params, timezone_name=tz_name)
-            return _handle_comparison_report(reports_service, organization_id, filters, client_timezone=tz_name)
+            return _handle_comparison_report(reports_service, organization_id, filters, current_user=current_user, client_timezone=tz_name)
 
         elif path == '/api/reports/materials':
             filters = _build_filters_from_query_params(query_params, timezone_name=tz_name)
-            return _handle_materials_report(reports_service, organization_id, filters)
+            return _handle_materials_report(reports_service, organization_id, filters, current_user)
 
         elif path == '/api/reports/export/pdf':
             filters = _build_filters_from_query_params(query_params, timezone_name=tz_name)
@@ -2030,21 +2059,21 @@ def _handle_export_pdf_report(
         comparison = None
     
     # 1) Pull data from the existing handlers/services
-    overview = _handle_overview_report(reports_service, organization_id, filters)
-    performance = _handle_performance_report(reports_service, organization_id, filters)
-    materials = _handle_materials_report(reports_service, organization_id, filters)
+    overview = _handle_overview_report(reports_service, organization_id, filters, current_user)
+    performance = _handle_performance_report(reports_service, organization_id, filters, current_user)
+    materials = _handle_materials_report(reports_service, organization_id, filters, current_user)
     
     # Get diversion and comparison data if not already set with error
     if diversion is None:
         try:
-            diversion = _handle_diversion_report(reports_service, organization_id, filters)
+            diversion = _handle_diversion_report(reports_service, organization_id, filters, current_user)
         except ValidationException as e:
             diversion = {'error': 'Please select valid date range. The date range must be within a single year and not exceed 365 days'}
     
     export_tz = current_user.get('timezone') or 'Asia/Bangkok'
     if comparison is None:
         try:
-            comparison = _handle_comparison_report(reports_service, organization_id, filters, client_timezone=export_tz)
+            comparison = _handle_comparison_report(reports_service, organization_id, filters, current_user=current_user, client_timezone=export_tz)
         except ValidationException as e:
             comparison = {'error': 'Please select valid date range. The date range must be within a single year and not exceed 365 days'}
 
@@ -2123,12 +2152,13 @@ def _handle_export_pdf_report(
         profile_img_view_url = profile_img_url
 
     # 4) Resolve location names from origin_ids filter; fallback to "all"
+    _current_user_id = (current_user or {}).get('user_id') or (current_user or {}).get('id')
     def _resolve_locations_from_filters(_filters: Dict[str, Any]) -> list[str] | str:
         origin_ids = _filters.get('origin_ids') or []
         if not origin_ids:
             return "all"
         try:
-            origins_result = reports_service.get_origin_by_organization(organization_id=organization_id)
+            origins_result = reports_service.get_origin_by_organization(organization_id=organization_id, current_user_id=_current_user_id)
             name_map = {}
             for o in origins_result.get('data', []):
                 oid = o.get('origin_id')

@@ -47,7 +47,8 @@ def handle_transaction_routes(event: Dict[str, Any], data: Dict[str, Any], **par
             return handle_list_transactions(
                 transaction_service,
                 query_params,
-                current_user_organization_id
+                current_user_organization_id,
+                current_user_id
             )
 
         elif path == '/api/transactions' and method == 'POST':
@@ -300,14 +301,20 @@ def handle_get_transaction(
 def handle_list_transactions(
     transaction_service: TransactionService,
     query_params: Dict[str, str],
-    current_user_organization_id: int
+    current_user_organization_id: int,
+    current_user_id: Any = None
 ) -> Dict[str, Any]:
     """
-    Handle GET /api/transactions - List transactions with filtering
+    Handle GET /api/transactions - List transactions with filtering.
 
-    Transactions are ordered by ID in descending order (newest first)
+    For non-admin users with a role: only returns transactions whose origin location
+    has the current user in its members. For admin users or users with no role: returns
+    all organization transactions. Transactions are ordered by ID descending (newest first).
     """
     try:
+        if not current_user_id:
+            raise UnauthorizedException('User ID is required to list transactions')
+
         # Parse query parameters
         page = int(query_params.get('page', 1))
         page_size = min(int(query_params.get('page_size', 20)), 100)  # Max 100 per page
@@ -350,7 +357,7 @@ def handle_list_transactions(
                 district = int(district_raw)
         sub_district = int(query_params['sub_district']) if query_params.get('sub_district') else None
 
-        # Always filter by user's organization
+        # Always filter by user's organization and only transactions where user is in origin members
         result = transaction_service.list_transactions(
             organization_id=current_user_organization_id,
             status=status,
@@ -366,7 +373,8 @@ def handle_list_transactions(
             sub_district=sub_district,
             location_tag_id=location_tag_id,
             tenant_id=tenant_id,
-            material_id=material_id
+            material_id=material_id,
+            current_user_id=current_user_id
         )
 
         if result['success']:

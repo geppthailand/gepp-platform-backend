@@ -835,7 +835,7 @@ def handle_get_organization_users(
 
 
 def handle_get_locations(db_session, user_service: UserService, query_params: Dict[str, Any], current_user: Dict[str, Any], headers: Dict[str, str]) -> Dict[str, Any]:
-    """Handle GET /api/locations - Get user locations (is_location = True) with tags and tenants for each location."""
+    """Handle GET /api/locations - Get user locations (is_location = True) with tags, tenants, and members for each location."""
     try:
         # Get current user's organization ID for filtering
         organization_id = current_user.get('organization_id') if current_user else None
@@ -866,6 +866,8 @@ def handle_get_locations(db_session, user_service: UserService, query_params: Di
         tenant_service = TenantService(db_session)
         for loc in locations:
             loc_id = loc.get('id')
+            # Ensure location members (user assignments) are always included
+            loc['members'] = loc.get('members') or []
             if loc_id is not None:
                 tags_full = tag_service.get_tags_by_location(loc_id, organization_id)
                 tenants_full = tenant_service.get_tenants_by_location(loc_id, organization_id)
