@@ -361,28 +361,34 @@ class ReportsService:
         self,
         organization_id: int,
         filters: Optional[Dict[str, Any]] = None,
-        current_user_id: Any = None
+        current_user_id: Any = None,
+        report_type: str = None
     ) -> Dict[str, Any]:
         """
-        Optimized data fetch for overview report.
+        Optimized data fetch for overview/comparison/performance reports.
         Single SQL query selecting only needed columns — no N+1, no full ORM loading.
         Returns lightweight rows for fast Python-side aggregation.
+
+        If report_type='comparison', date filtering is applied without clamping.
         """
         try:
             query = self.db.query(
-                TransactionRecord.origin_quantity,
-                TransactionRecord.transaction_date,
-                TransactionRecord.created_transaction_id,
-                Transaction.origin_id,
-                Transaction.status,
-                Material.unit_weight,
-                Material.calc_ghg,
-                Material.category_id,
-                Material.main_material_id,
-                Material.tags.label('material_tags'),
-                TransactionRecord.origin_weight_kg,
-                TransactionRecord.category_id.label('record_category_id'),
-                TransactionRecord.main_material_id.label('record_main_material_id'),
+                TransactionRecord.origin_quantity,          # 0
+                TransactionRecord.transaction_date,         # 1
+                TransactionRecord.created_transaction_id,   # 2
+                Transaction.origin_id,                      # 3
+                Transaction.status,                         # 4
+                Material.unit_weight,                       # 5
+                Material.calc_ghg,                          # 6
+                Material.category_id,                       # 7
+                Material.main_material_id,                  # 8
+                Material.tags.label('material_tags'),       # 9
+                TransactionRecord.origin_weight_kg,         # 10
+                TransactionRecord.category_id.label('record_category_id'),          # 11
+                TransactionRecord.main_material_id.label('record_main_material_id'),# 12
+                TransactionRecord.material_id,              # 13
+                Material.name_en.label('material_name_en'), # 14
+                Material.name_th.label('material_name_th'), # 15
             ).join(
                 Transaction,
                 TransactionRecord.created_transaction_id == Transaction.id
@@ -428,25 +434,32 @@ class ReportsService:
                 date_from = filters.get('date_from')
                 date_to = filters.get('date_to')
                 if date_from or date_to:
-                    try:
-                        MAX_DAYS = 365 * 3
-                        now = datetime.now(timezone.utc)
-                        end_of_today = now.replace(hour=23, minute=59, second=59, microsecond=999999)
-                        df = datetime.fromisoformat(date_from) if isinstance(date_from, str) else date_from
-                        dt = datetime.fromisoformat(date_to) if isinstance(date_to, str) else date_to
-                        if dt and dt > end_of_today:
-                            dt = end_of_today
-                        if df and dt and (dt - df).days > MAX_DAYS:
-                            df = dt - timedelta(days=MAX_DAYS)
-                        if df:
-                            query = query.filter(TransactionRecord.transaction_date >= (df.isoformat() if isinstance(date_from, str) else df))
-                        if dt:
-                            query = query.filter(TransactionRecord.transaction_date <= (dt.isoformat() if isinstance(date_to, str) else dt))
-                    except Exception:
+                    if report_type == 'comparison':
+                        # For comparison, use provided range as-is, no clamping
                         if date_from:
                             query = query.filter(TransactionRecord.transaction_date >= date_from)
                         if date_to:
                             query = query.filter(TransactionRecord.transaction_date <= date_to)
+                    else:
+                        try:
+                            MAX_DAYS = 365 * 3
+                            now = datetime.now(timezone.utc)
+                            end_of_today = now.replace(hour=23, minute=59, second=59, microsecond=999999)
+                            df = datetime.fromisoformat(date_from) if isinstance(date_from, str) else date_from
+                            dt = datetime.fromisoformat(date_to) if isinstance(date_to, str) else date_to
+                            if dt and dt > end_of_today:
+                                dt = end_of_today
+                            if df and dt and (dt - df).days > MAX_DAYS:
+                                df = dt - timedelta(days=MAX_DAYS)
+                            if df:
+                                query = query.filter(TransactionRecord.transaction_date >= (df.isoformat() if isinstance(date_from, str) else df))
+                            if dt:
+                                query = query.filter(TransactionRecord.transaction_date <= (dt.isoformat() if isinstance(date_to, str) else dt))
+                        except Exception:
+                            if date_from:
+                                query = query.filter(TransactionRecord.transaction_date >= date_from)
+                            if date_to:
+                                query = query.filter(TransactionRecord.transaction_date <= date_to)
 
             # Apply member-based filtering (non-admin users only see their own origins)
             query = self._apply_member_filter_to_transaction_query(query, current_user_id)
