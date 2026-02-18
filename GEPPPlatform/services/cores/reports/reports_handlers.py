@@ -1217,18 +1217,23 @@ def _handle_comparison_report(
         raise ValidationException("Comparison period cannot cross years")
     
     # Calculate left period: same period but in the previous year
-    # Handle leap year edge case (Feb 29 -> Feb 28 in non-leap year)
-    def subtract_year(dt: datetime) -> datetime:
-        try:
-            return dt.replace(year=dt.year - 1)
-        except ValueError:
-            # Handle Feb 29 in leap year -> Feb 28 in non-leap year
-            if dt.month == 2 and dt.day == 29:
-                return dt.replace(year=dt.year - 1, day=28)
-            raise
-    
+    # Handle leap year edge cases:
+    #   - Feb 29 in leap year -> Feb 28 in non-leap year
+    #   - Feb 28 (end of Feb in non-leap year) -> Feb 29 if previous year is leap year
+    import calendar
+
+    def subtract_year(dt: datetime, is_end_date: bool = False) -> datetime:
+        prev_year = dt.year - 1
+        if dt.month == 2 and dt.day == 29:
+            # Current is leap year Feb 29 -> previous non-leap year Feb 28
+            return dt.replace(year=prev_year, day=28)
+        if is_end_date and dt.month == 2 and dt.day == 28 and not calendar.isleap(dt.year) and calendar.isleap(prev_year):
+            # Current is non-leap year Feb 28 (end of Feb) -> previous leap year Feb 29
+            return dt.replace(year=prev_year, day=29)
+        return dt.replace(year=prev_year)
+
     left_from_dt = subtract_year(right_from_dt)
-    left_to_dt = subtract_year(right_to_dt)
+    left_to_dt = subtract_year(right_to_dt, is_end_date=True)
     
     # Ensure timezone is UTC for left dates
     if left_from_dt.tzinfo is None:
