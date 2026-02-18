@@ -606,7 +606,8 @@ def _handle_materials_report(
     # 3: origin_id, 4: status, 5: unit_weight, 6: calc_ghg,
     # 7: mat_category_id, 8: mat_main_material_id, 9: material_tags,
     # 10: origin_weight_kg, 11: record_category_id, 12: record_main_material_id,
-    # 13: material_id, 14: material_name_en, 15: material_name_th
+    # 13: material_id, 14: material_name_en, 15: material_name_th,
+    # 16: disposal_method, 17: record_status
 
     # Single pass: aggregate by main material AND sub material
     main_material_agg_map: Dict[int, Dict[str, float]] = {}
@@ -724,179 +725,178 @@ def _handle_diversion_report(
     filters: Dict[str, Any],
     current_user: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
-    """Handle /api/reports/diversion endpoint"""
-    
-    # Get transaction records
+    """Handle /api/reports/diversion endpoint — optimized single-query path"""
+
     current_user_id = (current_user or {}).get('user_id') or (current_user or {}).get('id')
-    result = reports_service.get_transaction_records_by_organization(
+
+    # Use optimized single-query path (returns lightweight tuples)
+    result = reports_service.get_overview_data(
         organization_id=organization_id,
         filters=filters if filters else None,
-        report_type='diversion',
         current_user_id=current_user_id
     )
-    
-    # Initialize tracking variables
+    rows = result.get('rows', [])
+
+    # Tuple indices from get_overview_data:
+    # 0: origin_quantity, 1: transaction_date, 2: created_transaction_id,
+    # 3: origin_id, 4: txn_status, 5: unit_weight, 6: calc_ghg,
+    # 7: mat_category_id, 8: mat_main_material_id, 9: material_tags,
+    # 10: origin_weight_kg, 11: record_category_id, 12: record_main_material_id,
+    # 13: material_id, 14: material_name_en, 15: material_name_th,
+    # 16: disposal_method, 17: record_status
+
     unique_origins = set()
-    transaction_map = {}
-    sankey_map = {}
-    material_table_map = {}
-    main_material_ids = set()
-    category_ids = set()
+    transaction_map: Dict[int, Dict] = {}
+    sankey_map: Dict[tuple, float] = {}
+    material_table_map: Dict[int, Dict] = {}
+    main_material_ids: set = set()
+    category_ids: set = set()
     category_to_main_map: Dict[int, set] = {}
-    # Track unique disposal methods (used instead of destination IDs)
-    disposal_methods = set()
-    
-    # Process all records
-    for record in result.get('data', []):
-        material = record.get('material') or {}
-        main_material_id = material.get('main_material_id') or record.get('main_material_id')
-        # Track category and map to main materials
-        cat_id = material.get('category_id') or record.get('category_id')
-        try:
-            if cat_id is not None:
+
+    for row in rows:
+        origin_qty = float(row[0] or 0)
+        txn_date = row[1]
+        txn_id = row[2]
+        origin_id = row[3]
+        unit_weight = float(row[5] or 0)
+        origin_weight_kg = float(row[10] or 0)
+        cat_id = row[7] or row[11]
+        mm_id = row[8] or row[12]
+        disposal_method = (row[16] or '').strip() or None
+        record_status = (row[17] or '').lower()
+
+        # Weight: prefer qty * unit_weight, fall back to origin_weight_kg
+        weight = origin_qty * unit_weight if unit_weight > 0 else origin_weight_kg
+        if weight <= 0 and origin_weight_kg > 0:
+            weight = origin_weight_kg
+
+        # Track category → main_material mapping
+        if cat_id is not None:
+            try:
                 cid_int = int(cat_id)
                 category_ids.add(cid_int)
-                if main_material_id:
+                if mm_id is not None:
+                    mm_id_int = int(mm_id)
                     if cid_int not in category_to_main_map:
                         category_to_main_map[cid_int] = set()
-                    category_to_main_map[cid_int].add(main_material_id)
-        except Exception:
-            pass
-        
+                    category_to_main_map[cid_int].add(mm_id_int)
+            except Exception:
+                pass
+
         # Track unique origins
-        origin_id = record.get('origin_id')
         if origin_id is not None:
             unique_origins.add(origin_id)
-        
-        # Calculate weight
-        weight = _calculate_weight(record, material)
-        status = record.get('status', '').lower()
-        transaction_id = record.get('created_transaction_id')
-        
+
         # Group by transaction for completion tracking
-        if transaction_id not in transaction_map:
-            transaction_map[transaction_id] = {
-                'records': [],
-                'total_weight': 0.0
-            }
-        transaction_map[transaction_id]['records'].append({'status': status, 'weight': weight})
-        transaction_map[transaction_id]['total_weight'] += weight
-        
-        # Use disposal_method directly from transaction_records (instead of destination in notes)
-        disposal_method = (record.get('disposal_method') or '').strip() or None
-        
-        # Build sankey data (MainMaterial -> DisposalMethod flows)
-        if main_material_id and disposal_method:
+        if txn_id is not None:
+            if txn_id not in transaction_map:
+                transaction_map[txn_id] = {'records': [], 'total_weight': 0.0}
+            transaction_map[txn_id]['records'].append({'status': record_status, 'weight': weight})
+            transaction_map[txn_id]['total_weight'] += weight
+
+        # Resolve main_material_id as int
+        main_material_id = None
+        if mm_id is not None:
+            try:
+                main_material_id = int(mm_id)
+            except Exception:
+                pass
+
+        # Build sankey data (MainMaterial → DisposalMethod flows)
+        if main_material_id is not None and disposal_method:
             main_material_ids.add(main_material_id)
-            disposal_methods.add(disposal_method)
             key = (main_material_id, disposal_method)
             sankey_map[key] = sankey_map.get(key, 0.0) + weight
-        
+
         # Build material_table data
-        if main_material_id:
+        if main_material_id is not None:
             main_material_ids.add(main_material_id)
-            
+
             if main_material_id not in material_table_map:
                 material_table_map[main_material_id] = {
                     'monthly_data': {},
                     'transactions': {},
                     'destinations': set()
                 }
-            
-            material_entry = material_table_map[main_material_id]
-            
+
+            entry = material_table_map[main_material_id]
+
             # Aggregate by month
-            dt = _parse_datetime(record.get('transaction_date'))
-            if dt:
-                month = dt.month
-                material_entry['monthly_data'][month] = material_entry['monthly_data'].get(month, 0.0) + weight
-            
+            if txn_date is not None:
+                dt = txn_date if isinstance(txn_date, datetime) else _parse_datetime(str(txn_date))
+                if dt:
+                    month = dt.month
+                    entry['monthly_data'][month] = entry['monthly_data'].get(month, 0.0) + weight
+
             # Track transaction statuses
-            if transaction_id:
-                if transaction_id not in material_entry['transactions']:
-                    material_entry['transactions'][transaction_id] = []
-                material_entry['transactions'][transaction_id].append(status)
-            
-            # Track disposal methods for this main material
+            if txn_id is not None:
+                if txn_id not in entry['transactions']:
+                    entry['transactions'][txn_id] = []
+                entry['transactions'][txn_id].append(record_status)
+
+            # Track disposal methods
             if disposal_method:
-                disposal_methods.add(disposal_method)
-                material_entry['destinations'].add(disposal_method)
-    
+                entry['destinations'].add(disposal_method)
+
     # Calculate completion metrics
     total_transactions, completed_transactions, complete_transfer = _check_transaction_completion(transaction_map)
     completed_rate = (completed_transactions / total_transactions * 100) if total_transactions > 0 else 0.0
     processing_transfer = 100.0 - completed_rate
-    
-    # Fetch main material names; disposal methods are already human-readable strings
+
+    # Fetch main material names
     main_material_names = _fetch_main_material_names(reports_service.db, main_material_ids)
-    # Fetch category names for materials_data
-    category_names = _fetch_category_names(reports_service.db, category_ids)
-    
+
     # Build sankey_data array
     sankey_data = [["From", "To", "Weight"]]
-    for (mm_id, method), weight in sankey_map.items():
-        from_name = main_material_names.get(mm_id, f"Material {mm_id}")
+    for (mm_id_key, method), w in sankey_map.items():
+        from_name = main_material_names.get(mm_id_key, f"Material {mm_id_key}")
         to_name = method or "Unknown Disposal"
-        sankey_data.append([from_name, to_name, weight])
-    
+        sankey_data.append([from_name, to_name, w])
+
     # Build material_table
     month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
     material_table = []
-    
-    for main_material_id, entry in material_table_map.items():
-        # Build monthly data array (only months with data)
+
+    for mid, entry in material_table_map.items():
         monthly_data = [
-            {'month': month_names[month_num - 1], 'value': entry['monthly_data'][month_num]}
-            for month_num in range(1, 13)
-            if month_num in entry['monthly_data']
+            {'month': month_names[m - 1], 'value': entry['monthly_data'][m]}
+            for m in range(1, 13)
+            if m in entry['monthly_data']
         ]
-        
-        # Determine status (Completed if all transactions have all records completed)
+
         all_completed = all(
-            all(status == 'completed' for status in statuses)
+            all(s == 'completed' for s in statuses)
             for statuses in entry['transactions'].values()
         )
         status = 'Completed' if all_completed else 'Processing'
-        
-        # Get disposal methods list
-        destination_names_list = [dm for dm in entry['destinations']]
-        
-        # Get material name
-        material_name = main_material_names.get(main_material_id, f"Material {main_material_id}")
-        
+
         material_table.append({
-            'key': main_material_id,
-            'materials': material_name,
+            'key': mid,
+            'materials': main_material_names.get(mid, f"Material {mid}"),
             'data': monthly_data,
             'status': status,
-            'destination': destination_names_list
+            'destination': list(entry['destinations'])
         })
-    
-    # Build materials_data grouped into two buckets:
-    # - Dangerous Waste: categories 5 and 6
-    # - Non-Dangerous Waste: all other categories
+
+    # Build materials_data: Dangerous (categories 5,6) vs Non-Dangerous
     danger_cids = {5, 6}
-    dangerous_main_ids = set()
-    non_dangerous_main_ids = set()
+    dangerous_main_ids: set = set()
+    non_dangerous_main_ids: set = set()
     for cid, mm_set in category_to_main_map.items():
         if cid in danger_cids:
             dangerous_main_ids.update(mm_set)
         else:
             non_dangerous_main_ids.update(mm_set)
+
     def build_main_children(mm_ids: set) -> list:
         return [
-            {"id": mm_id, "name": main_material_names.get(mm_id, f"Material {mm_id}")}
-            for mm_id in sorted(mm_ids)
+            {"id": mid, "name": main_material_names.get(mid, f"Material {mid}")}
+            for mid in sorted(mm_ids)
         ]
+
     materials_data = [
-        {
-            "category_name": "Dangerous Waste",
-            "main_materials": build_main_children(dangerous_main_ids),
-        },
-        {
-            "category_name": "Non-Dangerous Waste",
-            "main_materials": build_main_children(non_dangerous_main_ids),
-        },
+        {"category_name": "Dangerous Waste", "main_materials": build_main_children(dangerous_main_ids)},
+        {"category_name": "Non-Dangerous Waste", "main_materials": build_main_children(non_dangerous_main_ids)},
     ]
 
     return {
@@ -948,11 +948,12 @@ def _handle_performance_report(
     # Build location ID → list of (origin_quantity, unit_weight, category_id, main_material_id) tuples
     location_records_map: Dict[int, list] = {}
     for row in rows:
-        # Unpack all 16 columns from get_overview_data query
+        # Unpack all 18 columns from get_overview_data query
         (origin_qty, txn_date, txn_id, origin_id, status,
          unit_weight, calc_ghg, mat_category_id, mat_main_material_id, material_tags,
          origin_weight_kg, record_category_id, record_main_material_id,
-         _mat_id, _mat_name_en, _mat_name_th) = row
+         _mat_id, _mat_name_en, _mat_name_th,
+         _disposal_method, _record_status) = row
 
         # Use Material category as primary source (matches old reportUtils logic)
         category_id = mat_category_id or record_category_id
@@ -1307,7 +1308,8 @@ def _handle_comparison_report(
         for row in rows:
             # Tuple: (origin_qty, txn_date, txn_id, origin_id, status,
             #         unit_weight, calc_ghg, mat_cat_id, mat_mm_id, material_tags,
-            #         origin_weight_kg, rec_cat_id, rec_mm_id)
+            #         origin_weight_kg, rec_cat_id, rec_mm_id, material_id,
+            #         material_name_en, material_name_th, disposal_method, record_status)
             origin_qty = float(row[0] or 0)
             txn_date = row[1]
             status = row[4]

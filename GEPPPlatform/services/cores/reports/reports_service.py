@@ -389,6 +389,8 @@ class ReportsService:
                 TransactionRecord.material_id,              # 13
                 Material.name_en.label('material_name_en'), # 14
                 Material.name_th.label('material_name_th'), # 15
+                TransactionRecord.disposal_method,          # 16
+                TransactionRecord.status.label('record_status'),  # 17
             ).join(
                 Transaction,
                 TransactionRecord.created_transaction_id == Transaction.id
