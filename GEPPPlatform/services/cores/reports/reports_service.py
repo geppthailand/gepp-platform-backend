@@ -617,11 +617,7 @@ class ReportsService:
                                         seen_ids.add(oid)
                                         origin_options.append({'id': oid, 'origin_id': origin_id, 'name': f"{origin_name} · {tname} · {tnt}", 'display_name': f"{origin_name} · {tname} · {tnt}", 'path': path})
                 elif has_tags:
-                    # Location only + each location·tag
-                    oid = f"{origin_id}||"
-                    if oid not in seen_ids:
-                        seen_ids.add(oid)
-                        origin_options.append({'id': oid, 'origin_id': origin_id, 'name': origin_name, 'display_name': origin_name, 'path': path})
+                    # Only location·tag (no location-only when origin has tags)
                     for tag_id in origin_tag_ids:
                         tname = tag_name_by_id.get(tag_id)
                         if tname:
@@ -630,11 +626,7 @@ class ReportsService:
                                 seen_ids.add(oid)
                                 origin_options.append({'id': oid, 'origin_id': origin_id, 'name': f"{origin_name} · {tname}", 'display_name': f"{origin_name} · {tname}", 'path': path})
                 elif has_tenants:
-                    # Location only + each location·tenant
-                    oid = f"{origin_id}||"
-                    if oid not in seen_ids:
-                        seen_ids.add(oid)
-                        origin_options.append({'id': oid, 'origin_id': origin_id, 'name': origin_name, 'display_name': origin_name, 'path': path})
+                    # Only location·tenant (no location-only when origin has tenants)
                     for tenant_id in origin_tenant_ids:
                         tname = tenant_name_by_id.get(tenant_id)
                         if tname:

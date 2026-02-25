@@ -18,7 +18,6 @@ from ....exceptions import (
     APIException,
     UnauthorizedException,
     NotFoundException,
-    BadRequestException,
     ValidationException
 )
 
