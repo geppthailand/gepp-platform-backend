@@ -88,9 +88,13 @@ class ReportsService:
                 if filters.get('origin_combos'):
                     combos = filters['origin_combos']
                     origin_only_origin_ids = {oid for (oid, tag_id, tenant_id) in combos if tag_id is None and tenant_id is None}
-                    conditions = []
+                    # Expand origin-only combos to include descendants
+                    expanded_origin_only = set()
                     for oid in origin_only_origin_ids:
-                        conditions.append(Transaction.origin_id == oid)
+                        expanded_origin_only.update(self._resolve_descendant_ids(organization_id, [oid]))
+                    conditions = []
+                    if expanded_origin_only:
+                        conditions.append(Transaction.origin_id.in_(list(expanded_origin_only)))
                     for oid, tag_id, tenant_id in combos:
                         if oid in origin_only_origin_ids:
                             continue
@@ -108,10 +112,11 @@ class ReportsService:
                         query = query.filter(or_(*conditions))
                         applied_filters['origin_combos'] = combos
                 else:
-                    # Filter by origin_ids (supports multiple)
+                    # Filter by origin_ids (supports multiple) — expand to include descendants
                     if filters.get('origin_ids'):
-                        query = query.filter(Transaction.origin_id.in_(filters['origin_ids']))
-                        applied_filters['origin_ids'] = filters['origin_ids']
+                        expanded_ids = self._resolve_descendant_ids(organization_id, filters['origin_ids'])
+                        query = query.filter(Transaction.origin_id.in_(expanded_ids))
+                        applied_filters['origin_ids'] = expanded_ids
                     # Filter by location_tag_id (when single composite origin selected)
                     if filters.get('location_tag_id') is not None:
                         query = query.filter(Transaction.location_tag_id == filters['location_tag_id'])
@@ -120,7 +125,7 @@ class ReportsService:
                     if filters.get('tenant_id') is not None:
                         query = query.filter(Transaction.tenant_id == filters['tenant_id'])
                         applied_filters['tenant_id'] = filters['tenant_id']
-                
+
                 # Filter by date range
                 date_from = filters.get('date_from')
                 date_to = filters.get('date_to')
@@ -410,9 +415,13 @@ class ReportsService:
                 if filters.get('origin_combos'):
                     combos = filters['origin_combos']
                     origin_only = {oid for (oid, tid, tenid) in combos if tid is None and tenid is None}
-                    conditions = []
+                    # Expand origin-only combos to include descendants
+                    expanded_origin_only = set()
                     for oid in origin_only:
-                        conditions.append(Transaction.origin_id == oid)
+                        expanded_origin_only.update(self._resolve_descendant_ids(organization_id, [oid]))
+                    conditions = []
+                    if expanded_origin_only:
+                        conditions.append(Transaction.origin_id.in_(list(expanded_origin_only)))
                     for oid, tag_id, tenant_id in combos:
                         if oid in origin_only:
                             continue
@@ -424,7 +433,8 @@ class ReportsService:
                         query = query.filter(or_(*conditions))
                 else:
                     if filters.get('origin_ids'):
-                        query = query.filter(Transaction.origin_id.in_(filters['origin_ids']))
+                        expanded_ids = self._resolve_descendant_ids(organization_id, filters['origin_ids'])
+                        query = query.filter(Transaction.origin_id.in_(expanded_ids))
                     if filters.get('location_tag_id') is not None:
                         query = query.filter(Transaction.location_tag_id == filters['location_tag_id'])
                     if filters.get('tenant_id') is not None:
@@ -496,6 +506,46 @@ class ReportsService:
             return True
         except Exception:
             return True
+
+    def _resolve_descendant_ids(self, organization_id: int, origin_ids: List[int]) -> List[int]:
+        """
+        Given a list of origin_ids, expand each to include itself + all descendants
+        from organization_setup.root_nodes tree.
+        """
+        setup = self.db.query(OrganizationSetup).filter(
+            OrganizationSetup.organization_id == organization_id,
+            OrganizationSetup.is_active == True
+        ).first()
+        if not setup or not setup.root_nodes:
+            return origin_ids
+
+        root_nodes = setup.root_nodes if isinstance(setup.root_nodes, list) else []
+        target_set = set(origin_ids)
+        expanded = set(origin_ids)
+
+        def _collect_descendants(nodes):
+            ids = set()
+            for node in nodes:
+                nid = node.get('nodeId')
+                if nid is not None:
+                    nid = int(nid) if isinstance(nid, str) else nid
+                    ids.add(nid)
+                if node.get('children'):
+                    ids |= _collect_descendants(node['children'])
+            return ids
+
+        def _find_and_expand(nodes):
+            for node in nodes:
+                nid = node.get('nodeId')
+                if nid is not None:
+                    nid = int(nid) if isinstance(nid, str) else nid
+                if nid in target_set and node.get('children'):
+                    expanded.update(_collect_descendants(node['children']))
+                if node.get('children'):
+                    _find_and_expand(node['children'])
+
+        _find_and_expand(root_nodes)
+        return list(expanded)
 
     def _apply_member_filter_to_transaction_query(self, query, current_user_id: Any):
         """Apply origin/tag/tenant member filter to a query that includes Transaction. No-op if admin or no role."""
@@ -626,16 +676,8 @@ class ReportsService:
                     tenants_by_origin[origin_id].add(tenant_id)
 
             origin_options: List[Dict[str, Any]] = []
-            if not origin_ids:
-                return {
-                    'success': True,
-                    'data': [],
-                    'total': 0,
-                    'organization_id': organization_id,
-                    'message': 'Origins retrieved successfully'
-                }
 
-            origin_locations = self.db.query(UserLocation).filter(UserLocation.id.in_(origin_ids)).all()
+            origin_locations = self.db.query(UserLocation).filter(UserLocation.id.in_(origin_ids)).all() if origin_ids else []
             origin_name_by_id = {
                 loc.id: loc.display_name or loc.name_en or loc.name_th or f"Location {loc.id}"
                 for loc in origin_locations
@@ -772,6 +814,26 @@ class ReportsService:
                         seen_ids.add(oid)
                         origin_options.append({'id': oid, 'origin_id': origin_id, 'name': origin_name, 'display_name': origin_name, 'path': path})
 
+            # Add all structure locations (branch/building/floor/room) from root_nodes
+            # even if they have no transactions, so the filter shows the full tree
+            if org_setup and org_setup.root_nodes:
+                structure_types = {'branch', 'building', 'floor', 'room'}
+                location_by_id = {loc.id: loc for loc in all_locations}
+                for node_id in all_node_ids:
+                    oid = f"{node_id}||"
+                    if oid in seen_ids:
+                        continue
+                    loc = location_by_id.get(node_id)
+                    if not loc:
+                        continue
+                    loc_type = (loc.type or '').lower().strip()
+                    if loc_type not in structure_types:
+                        continue
+                    loc_name = loc.display_name or loc.name_en or loc.name_th or f"Location {node_id}"
+                    path = ', '.join(_get_ancestors(node_id))
+                    seen_ids.add(oid)
+                    origin_options.append({'id': oid, 'origin_id': node_id, 'name': loc_name, 'display_name': loc_name, 'path': path})
+
             sorted_options = sorted(origin_options, key=lambda x: x['name'])
             origins_data = sorted_options
             return {
@@ -818,9 +880,13 @@ class ReportsService:
                 if filters.get('origin_combos'):
                     combos = filters['origin_combos']
                     origin_only_origin_ids = {oid for (oid, tag_id, tenant_id) in combos if tag_id is None and tenant_id is None}
-                    conditions = []
+                    # Expand origin-only combos to include descendants
+                    expanded_origin_only = set()
                     for oid in origin_only_origin_ids:
-                        conditions.append(Transaction.origin_id == oid)
+                        expanded_origin_only.update(self._resolve_descendant_ids(organization_id, [oid]))
+                    conditions = []
+                    if expanded_origin_only:
+                        conditions.append(Transaction.origin_id.in_(list(expanded_origin_only)))
                     for oid, tag_id, tenant_id in combos:
                         if oid in origin_only_origin_ids:
                             continue
@@ -843,6 +909,7 @@ class ReportsService:
                         try:
                             oids = [int(o) for o in origin_ids]
                             if oids:
+                                oids = self._resolve_descendant_ids(organization_id, oids)
                                 transaction_records_query = transaction_records_query.filter(Transaction.origin_id.in_(oids))
                         except Exception:
                             pass
