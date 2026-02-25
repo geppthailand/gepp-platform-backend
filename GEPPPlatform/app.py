@@ -588,6 +588,16 @@ def main(event, context):
                             "data": audit_result
                         }
 
+                    elif "/api/traceability" in path:
+                        # Handle all traceability routes
+                        from .services.cores.traceability.traceability_handlers import handle_traceability_routes
+
+                        traceability_result = handle_traceability_routes(event, data=body, **commonParams)
+                        results = {
+                            "success": True,
+                            "data": traceability_result
+                        }
+
                     elif "/api/audit" in path:
                         if "/api/audit/manual" in path:
                             # Handle all manual audit routes
@@ -918,7 +928,7 @@ def main(event, context):
 
                     else:
                         # Handle other future modules here
-                        available_routes = ["/api/auth/*", "/api/users/*", "/api/organizations/*", "/api/materials/*", "/api/locations/*", "/api/reports/*", "/api/transactions/*", "/api/transaction_audit/*", "/api/audit/*", "/api/debug/*", "/api/integration/*", "/api/userapi/{api_path}/{service_path}/*", "/health"]
+                        available_routes = ["/api/auth/*", "/api/users/*", "/api/organizations/*", "/api/materials/*", "/api/locations/*", "/api/reports/*", "/api/transactions/*", "/api/transaction_audit/*", "/api/traceability/*", "/api/audit/*", "/api/debug/*", "/api/integration/*", "/api/userapi/{api_path}/{service_path}/*", "/health"]
                         return {
                             "statusCode": 404,
                             "headers": headers,
