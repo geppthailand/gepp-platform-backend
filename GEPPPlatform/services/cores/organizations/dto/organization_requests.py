@@ -271,6 +271,8 @@ class CreateOrganizationSetupRequest:
                 result['root_nodes'] = self.tree_structure['rootNodes']
             if 'hubNode' in self.tree_structure:
                 result['hub_node'] = self.tree_structure['hubNode']
+            if 'locations' in self.tree_structure:
+                result['locations'] = self.tree_structure['locations']
 
         if self.metadata is not None:
             result['metadata'] = self.metadata
