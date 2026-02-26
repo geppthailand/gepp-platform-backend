@@ -453,9 +453,11 @@ class OrganizationService:
             node_id = location_data.get('nodeId')
             to_create = location_data.get('to_create', True)
             display_name = location_data.get('display_name')
-            users = location_data.get('users', [])
+            # Only get users if explicitly provided in location_data (don't default to [])
+            has_users_field = 'users' in location_data
+            users = location_data.get('users') if has_users_field else None
 
-            print(f"Processing location: nodeId={node_id}, to_create={to_create}, display_name={display_name}, users={users}")
+            print(f"Processing location: nodeId={node_id}, to_create={to_create}, display_name={display_name}, has_users={has_users_field}, type={location_data.get('type')}")
 
             # Check if nodeId is numeric (existing location) or string (new location)
             is_numeric_id = self._is_numeric_id(node_id)
@@ -466,8 +468,8 @@ class OrganizationService:
                 if existing_location:
                     updated = False
 
-                    # Update members if users provided (including empty array for removal)
-                    if users is not None:
+                    # Update members only if users field was explicitly provided
+                    if has_users_field and users is not None:
                         existing_location.members = users
                         updated = True
                         print(f"  Updated existing location {node_id} with members: {users}")
@@ -489,11 +491,19 @@ class OrganizationService:
                             ).first()
                             if duplicate:
                                 raise ValueError(f'Destination name "{display_name}" already exists in this organization. Please use a different name.')
-                        
+
                         existing_location.display_name = display_name
                         existing_location.name_en = display_name  # Also update name_en
                         updated = True
                         print(f"  Updated existing location {node_id} with display_name and name_en: {display_name}")
+
+                    # Update type if provided (for drag-and-drop reparenting)
+                    location_type = location_data.get('type')
+                    if location_type and location_type != existing_location.type:
+                        old_type = existing_location.type
+                        existing_location.type = location_type
+                        updated = True
+                        print(f"  Updated existing location {node_id} type: {old_type} -> {location_type}")
 
                     if updated:
                         self.db.flush()
