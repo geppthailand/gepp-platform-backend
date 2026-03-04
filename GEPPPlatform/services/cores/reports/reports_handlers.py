@@ -170,9 +170,8 @@ def _build_filters_from_query_params(query_params: Dict[str, Any], timezone_name
 
     # Clamp date range constraints globally:
     # - date_to must not be in the future
-    # - date range must not exceed 3 years (by day count)
+    # - No limit on date range duration (allow all time)
     try:
-        MAX_DAYS = 365 * 3
         now_utc = datetime.now(timezone.utc)
         end_of_today = now_utc.replace(hour=23, minute=59, second=59, microsecond=999999)
 
@@ -184,25 +183,15 @@ def _build_filters_from_query_params(query_params: Dict[str, Any], timezone_name
             dt_to = end_of_today
             filters['date_to'] = dt_to.isoformat()
 
-        # If only date_to is provided, compute date_from as at most 3 years before
-        if dt_to and not dt_from:
-            if dt_to > end_of_today:
-                dt_to = end_of_today
-                filters['date_to'] = dt_to.isoformat()
-            dt_from = dt_to - timedelta(days=MAX_DAYS)
-            filters['date_from'] = dt_from.isoformat()
+        # If only date_to is provided, leave date_from empty (no default)
+        # Allow user to specify any date range they want
 
         # Clamp date_to to today if provided
         if dt_to and dt_to > end_of_today:
             dt_to = end_of_today
             filters['date_to'] = dt_to.isoformat()
 
-        # Enforce max window if both bounds present
-        if dt_from and dt_to:
-            delta_days = (dt_to - dt_from).days
-            if delta_days > MAX_DAYS:
-                dt_from = dt_to - timedelta(days=MAX_DAYS)
-                filters['date_from'] = dt_from.isoformat()
+        # No enforcement of max window - allow any date range duration
     except Exception:
         # Best-effort clamp; ignore parsing issues
         pass
