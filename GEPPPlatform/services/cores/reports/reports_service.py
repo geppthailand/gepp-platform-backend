@@ -140,17 +140,15 @@ class ReportsService:
                     if date_to:
                         query = query.filter(TransactionRecord.transaction_date <= date_to)
                 else:
-                    # Apply clamping (max 3 years, date_to <= today)
+                    # Apply clamping (date_to <= today only, no duration limit)
                     try:
-                        MAX_DAYS = 365 * 3
                         now = datetime.now(timezone.utc)
                         end_of_today = now.replace(hour=23, minute=59, second=59, microsecond=999999)
                         df = datetime.fromisoformat(date_from) if isinstance(date_from, str) else date_from
                         dt = datetime.fromisoformat(date_to) if isinstance(date_to, str) else date_to
                         if dt and dt > end_of_today:
                             dt = end_of_today
-                        if df and dt and (dt - df).days > MAX_DAYS:
-                            df = dt - timedelta(days=MAX_DAYS)
+                        # No duration limit - allow any date range
                         if df:
                             query = query.filter(TransactionRecord.transaction_date >= df.isoformat() if isinstance(date_from, str) else df)
                         if dt:
@@ -454,15 +452,13 @@ class ReportsService:
                             query = query.filter(TransactionRecord.transaction_date <= date_to)
                     else:
                         try:
-                            MAX_DAYS = 365 * 3
                             now = datetime.now(timezone.utc)
                             end_of_today = now.replace(hour=23, minute=59, second=59, microsecond=999999)
                             df = datetime.fromisoformat(date_from) if isinstance(date_from, str) else date_from
                             dt = datetime.fromisoformat(date_to) if isinstance(date_to, str) else date_to
                             if dt and dt > end_of_today:
                                 dt = end_of_today
-                            if df and dt and (dt - df).days > MAX_DAYS:
-                                df = dt - timedelta(days=MAX_DAYS)
+                            # No duration limit - allow any date range
                             if df:
                                 query = query.filter(TransactionRecord.transaction_date >= (df.isoformat() if isinstance(date_from, str) else df))
                             if dt:
@@ -623,15 +619,13 @@ class ReportsService:
                 date_to = filters.get('date_to')
                 if date_from or date_to:
                     try:
-                        MAX_DAYS = 365 * 3
                         now = datetime.now(timezone.utc)
                         end_of_today = now.replace(hour=23, minute=59, second=59, microsecond=999999)
                         df = datetime.fromisoformat(date_from) if isinstance(date_from, str) else date_from
                         dt = datetime.fromisoformat(date_to) if isinstance(date_to, str) else date_to
                         if dt and dt > end_of_today:
                             dt = end_of_today
-                        if df and dt and (dt - df).days > MAX_DAYS:
-                            df = dt - timedelta(days=MAX_DAYS)
+                        # No duration limit - allow any date range
                         if df:
                             tr_query = tr_query.filter(TransactionRecord.transaction_date >= (df.isoformat() if isinstance(date_from, str) else df))
                         if dt:
@@ -928,15 +922,13 @@ class ReportsService:
                 date_from = filters.get('date_from')
                 date_to = filters.get('date_to')
                 try:
-                    MAX_DAYS = 365 * 3
                     now = datetime.utcnow()
                     end_of_today = now.replace(hour=23, minute=59, second=59, microsecond=999999)
                     df = datetime.fromisoformat(date_from) if isinstance(date_from, str) else date_from
                     dt = datetime.fromisoformat(date_to) if isinstance(date_to, str) else date_to
                     if dt and dt > end_of_today:
                         dt = end_of_today
-                    if df and dt and (dt - df).days > MAX_DAYS:
-                        df = dt - timedelta(days=MAX_DAYS)
+                    # No duration limit - allow any date range
                     if df:
                         transaction_records_query = transaction_records_query.filter(TransactionRecord.transaction_date >= df.isoformat() if isinstance(date_from, str) else df)
                     if dt:

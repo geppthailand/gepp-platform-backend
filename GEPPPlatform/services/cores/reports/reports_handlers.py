@@ -170,9 +170,8 @@ def _build_filters_from_query_params(query_params: Dict[str, Any], timezone_name
 
     # Clamp date range constraints globally:
     # - date_to must not be in the future
-    # - date range must not exceed 3 years (by day count)
+    # - No limit on date range duration (allow all time)
     try:
-        MAX_DAYS = 365 * 3
         now_utc = datetime.now(timezone.utc)
         end_of_today = now_utc.replace(hour=23, minute=59, second=59, microsecond=999999)
 
@@ -184,25 +183,15 @@ def _build_filters_from_query_params(query_params: Dict[str, Any], timezone_name
             dt_to = end_of_today
             filters['date_to'] = dt_to.isoformat()
 
-        # If only date_to is provided, compute date_from as at most 3 years before
-        if dt_to and not dt_from:
-            if dt_to > end_of_today:
-                dt_to = end_of_today
-                filters['date_to'] = dt_to.isoformat()
-            dt_from = dt_to - timedelta(days=MAX_DAYS)
-            filters['date_from'] = dt_from.isoformat()
+        # If only date_to is provided, leave date_from empty (no default)
+        # Allow user to specify any date range they want
 
         # Clamp date_to to today if provided
         if dt_to and dt_to > end_of_today:
             dt_to = end_of_today
             filters['date_to'] = dt_to.isoformat()
 
-        # Enforce max window if both bounds present
-        if dt_from and dt_to:
-            delta_days = (dt_to - dt_from).days
-            if delta_days > MAX_DAYS:
-                dt_from = dt_to - timedelta(days=MAX_DAYS)
-                filters['date_from'] = dt_from.isoformat()
+        # No enforcement of max window - allow any date range duration
     except Exception:
         # Best-effort clamp; ignore parsing issues
         pass
@@ -331,17 +320,28 @@ def _fetch_destination_names(db_session, destination_ids: set) -> Dict[int, str]
         return {}
     try:
         destinations = db_session.query(
-            UserLocation.id, 
-            UserLocation.display_name, 
-            UserLocation.name_en, 
+            UserLocation.id,
+            UserLocation.display_name,
+            UserLocation.name_en,
             UserLocation.name_th
         ).filter(UserLocation.id.in_(destination_ids)).all()
-        
-        return {
+
+        result = {
             dest_id: (display_name or name_en or name_th or f"Location {dest_id}")
             for dest_id, display_name, name_en, name_th in destinations
         }
-    except Exception:
+
+        # Log for debugging
+        print(f"[DEBUG] _fetch_destination_names: Fetched {len(result)} names for {len(destination_ids)} IDs")
+        if len(result) != len(destination_ids):
+            missing = destination_ids - set(result.keys())
+            print(f"[DEBUG] Missing location names for IDs: {missing}")
+
+        return result
+    except Exception as e:
+        print(f"[ERROR] _fetch_destination_names failed: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return {}
 
 
@@ -1060,21 +1060,30 @@ def _handle_performance_report(
     ]
 
     def get_level_config(total_depth):
-        start_index = max(0, 3 - total_depth)
+        # ALWAYS start with branchName for level 0 (root nodes)
+        # Then map subsequent levels based on actual depth
         configs = []
         for i in range(total_depth + 1):
-            seq_index = start_index + i
-            if seq_index < len(HIERARCHY_SEQUENCE):
-                name_key, children_key = HIERARCHY_SEQUENCE[seq_index]
-                if i == total_depth:
-                    configs.append((name_key, None))
-                else:
-                    configs.append((name_key, children_key))
+            if i == 0:
+                # Level 0 is always branchName
+                name_key = 'branchName'
+                children_key = 'buildings' if total_depth > 0 else None
+                configs.append((name_key, children_key))
             else:
-                if i == total_depth:
-                    configs.append(('itemName', None))
+                # For deeper levels, map based on depth
+                # depth 1 → building, depth 2 → floor, depth 3 → room, etc.
+                seq_index = i
+                if seq_index < len(HIERARCHY_SEQUENCE):
+                    name_key, children_key = HIERARCHY_SEQUENCE[seq_index]
+                    if i == total_depth:
+                        configs.append((name_key, None))
+                    else:
+                        configs.append((name_key, children_key))
                 else:
-                    configs.append(('itemName', 'items'))
+                    if i == total_depth:
+                        configs.append(('itemName', None))
+                    else:
+                        configs.append(('itemName', 'items'))
         return configs
 
     level_configs = get_level_config(max_depth)
@@ -1136,6 +1145,10 @@ def _handle_performance_report(
                 name_key, children_key = ('itemName', 'items' if children else None)
 
             item[name_key] = location_name
+
+            # Debug logging for root level nodes
+            if level == 0:
+                print(f"[DEBUG] Level {level}: node_id={node_id}, name_key={name_key}, location_name=\"{location_name}\"")
             if child_items and children_key:
                 item[children_key] = child_items
 
