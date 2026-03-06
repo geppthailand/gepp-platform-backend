@@ -218,6 +218,45 @@ def generate_pdf_via_lambda(
     }
 
 
+def generate_traceability_pdf_and_link(
+    data: Dict[str, Any],
+    organization_id: int,
+) -> Dict[str, Any]:
+    """
+    Generate traceability PDF via Lambda, upload to S3 (no DB version/file record), return link only.
+    Same behavior as report PDF export: no version data stored, just the file link.
+    """
+    pdf_response = generate_pdf_via_lambda(
+        data,
+        export_type="traceability",
+        default_filename_prefix="traceability_report",
+    )
+    pdf_b64 = pdf_response.get("body", "")
+    content_disp = pdf_response.get("headers", {}).get("Content-Disposition", "")
+    filename = None
+    if content_disp and 'filename="' in content_disp:
+        import re
+        m = re.search(r'filename=["\']?([^"\']+)["\']?', content_disp)
+        if m:
+            filename = m.group(1).strip()
+    if not filename:
+        filename = f"traceability_report_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.pdf"
+    upload_result = upload_pdf_to_s3(
+        pdf_base64=pdf_b64,
+        filename=filename,
+        organization_id=organization_id,
+        file_type="traceability_report",
+        db_session=None,
+        user_id=None,
+    )
+    return {
+        "success": True,
+        "url": upload_result["s3_url"],
+        "filename": upload_result.get("filename", filename),
+        "s3_key": upload_result.get("s3_key"),
+    }
+
+
 def upload_pdf_to_s3(
     pdf_base64: str,
     filename: str,
@@ -578,13 +617,43 @@ def lambda_handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]
                         "error": error_msg
                     })
                 }
+        elif export_type == "traceability":
+            try:
+                import importlib.util
+                traceability_pdf_path = os.path.join(os.path.dirname(__file__), 'traceability', 'pdf_export.py')
+                if not os.path.exists(traceability_pdf_path):
+                    raise FileNotFoundError(f"Traceability PDF generator not found at: {traceability_pdf_path}")
+                spec = importlib.util.spec_from_file_location("traceability_pdf_export", traceability_pdf_path)
+                if spec is None or spec.loader is None:
+                    raise ImportError(f"Failed to create module spec for: {traceability_pdf_path}")
+                traceability_pdf_module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(traceability_pdf_module)
+                if not hasattr(traceability_pdf_module, 'generate_pdf_bytes'):
+                    raise AttributeError("traceability pdf_export module does not have 'generate_pdf_bytes' function")
+                logger.info("Generating traceability PDF...")
+                pdf_bytes = traceability_pdf_module.generate_pdf_bytes(data)
+                if not pdf_bytes or len(pdf_bytes) == 0:
+                    raise ValueError("Traceability PDF generation returned empty bytes")
+                timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+                filename = f"traceability_report_{timestamp}.pdf"
+            except Exception as e:
+                error_msg = f"Error generating traceability PDF: {str(e)}"
+                logger.error(error_msg, exc_info=True)
+                return {
+                    "statusCode": 500,
+                    "headers": {"Content-Type": "application/json"},
+                    "body": json.dumps({
+                        "success": False,
+                        "error": error_msg
+                    })
+                }
         else:
             return {
                 "statusCode": 400,
                 "headers": {"Content-Type": "application/json"},
                 "body": json.dumps({
                     "success": False,
-                    "error": f"Unknown export_type: {export_type}. Supported types: 'reports', 'gri'"
+                    "error": f"Unknown export_type: {export_type}. Supported types: 'reports', 'gri', 'traceability'"
                 })
             }
         
