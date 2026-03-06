@@ -228,6 +228,7 @@ def _calculate_weight(record: Dict[str, Any], material: Dict[str, Any]) -> float
 
 
 _GENERAL_WASTE_CAT_ID = 4  # Material category ID for General Waste
+_WASTE_TO_ENERGY_CAT_ID = 9  # Material category ID for Waste To Energy
 
 
 def _get_general_waste_mm_id(db) -> Optional[int]:
@@ -280,8 +281,15 @@ def _split_waste_to_energy(material_map: Dict[str, float], cat_mm_map: Dict[Tupl
             material_map[gw_name] = material_map[gw_name] - wte_weight
             if material_map[gw_name] <= 0:
                 del material_map[gw_name]
-        # Add Waste to Energy entry
-        material_map['Waste to Energy'] = material_map.get('Waste to Energy', 0.0) + wte_weight
+
+    # Merge actual "Waste To Energy" category (id=9) into the WTE bucket
+    wte_db_name = category_names.get(_WASTE_TO_ENERGY_CAT_ID, 'Waste To Energy')
+    if wte_db_name in material_map:
+        wte_weight += material_map.pop(wte_db_name)
+
+    # Add combined Waste To Energy entry
+    if wte_weight > 0:
+        material_map['Waste To Energy'] = wte_weight
 
     return material_map
 
@@ -537,6 +545,11 @@ def _handle_overview_report(
     if wte_weight > 0:
         category_waste_map[_GENERAL_WASTE_CAT_ID] = category_waste_map.get(_GENERAL_WASTE_CAT_ID, 0.0) - wte_weight
 
+    # Merge actual "Waste To Energy" category (id=9) into the split WTE bucket
+    # so it doesn't appear as a separate row
+    if _WASTE_TO_ENERGY_CAT_ID in category_waste_map:
+        wte_weight += category_waste_map.pop(_WASTE_TO_ENERGY_CAT_ID)
+
     # Remove zero/negative category entries
     category_waste_map = {k: v for k, v in category_waste_map.items() if v > 0}
 
@@ -554,8 +567,8 @@ def _handle_overview_report(
     # Add "Waste to Energy" as a separate entry if it has weight
     if wte_weight > 0:
         waste_type_proportions.append({
-            'category_id': None,
-            'category_name': 'Waste to Energy',
+            'category_id': _WASTE_TO_ENERGY_CAT_ID,
+            'category_name': 'Waste To Energy',
             'total_waste': round(wte_weight * 100) / 100,
             'proportion_percent': (wte_weight / total_waste * 100) if total_waste > 0 else 0.0,
         })
