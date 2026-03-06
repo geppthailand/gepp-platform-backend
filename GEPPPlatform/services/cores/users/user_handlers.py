@@ -1078,8 +1078,19 @@ def handle_check_location_dependencies(
             )
         ).first()
 
+        # If location doesn't exist or is already deleted, return no dependencies (idempotent)
         if not location:
-            raise NotFoundException(f'Location not found: {location_id}')
+            return {
+                'success': True,
+                'has_dependencies': False,
+                'transaction_count': 0,
+                'location_id': int(location_id),
+                'location_name': f'Location {location_id} (already deleted)',
+                'affected_locations': [],
+                'all_location_ids': [],
+                'descendant_count': 0,
+                'message': 'สถานที่นี้ถูกลบไปแล้ว'
+            }
 
         # Helper function to recursively find all descendant nodeIds from tree structure
         def find_all_node_ids(nodes, target_id=None, found=False):
@@ -1273,8 +1284,16 @@ def handle_delete_location_with_transactions(
             )
         ).first()
 
+        # If location doesn't exist or is already deleted, return success (idempotent delete)
         if not location:
-            raise NotFoundException(f'Location not found: {location_id}')
+            return {
+                'success': True,
+                'deleted_locations_count': 0,
+                'deleted_transactions_count': 0,
+                'location_id': int(location_id),
+                'location_name': f'Location {location_id} (already deleted)',
+                'message': f'Location {location_id} is already deleted'
+            }
 
         location_name = location.display_name or location.name_en or location.name_th
 
