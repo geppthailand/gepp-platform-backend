@@ -62,8 +62,10 @@ class ReportsService:
                 Transaction.organization_id == organization_id,
                 Transaction.deleted_date.is_(None),
                 TransactionRecord.deleted_date.is_(None),
-                Transaction.status != TransactionStatus.rejected,
-                TransactionRecord.status != 'rejected',
+                or_(
+                    TransactionRecord.status != 'rejected',
+                    TransactionRecord.status.is_(None)
+                ),
             )
             # Log member filter: whether it's applied and for which user
             _apply_member = self._should_filter_reports_by_member(current_user_id)
@@ -404,8 +406,10 @@ class ReportsService:
                 Transaction.organization_id == organization_id,
                 Transaction.deleted_date.is_(None),
                 TransactionRecord.deleted_date.is_(None),
-                Transaction.status != TransactionStatus.rejected,
-                TransactionRecord.status != 'rejected',
+                or_(
+                    TransactionRecord.status != 'rejected',
+                    TransactionRecord.status.is_(None)
+                ),
             )
 
             # Apply filters
@@ -855,8 +859,10 @@ class ReportsService:
                 Transaction.organization_id == organization_id,
                 Transaction.deleted_date.is_(None),
                 TransactionRecord.deleted_date.is_(None),
-                Transaction.status != TransactionStatus.rejected,
-                TransactionRecord.status != 'rejected',
+                or_(
+                    TransactionRecord.status != 'rejected',
+                    TransactionRecord.status.is_(None)
+                ),
             )
             transaction_records_query = self._apply_member_filter_to_transaction_query(transaction_records_query, current_user_id)
             # Apply optional filters

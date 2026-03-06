@@ -432,7 +432,6 @@ def _handle_overview_report(
         status = row[4]
         unit_weight = float(row[5] or 0)
         calc_ghg = float(row[6] or 0)
-        origin_weight_kg = float(row[10] or 0)
 
         # Use Material category/main_material as primary source (matches old reportUtils logic).
         # Fallback to TransactionRecord fields when Material is missing.
@@ -444,8 +443,8 @@ def _handle_overview_report(
         if status == TransactionStatus.approved:
             tx_approved.add(tx_id)
 
-        # Use origin_qty * unit_weight when Material exists, fallback to origin_weight_kg
-        weight = origin_qty * unit_weight if unit_weight > 0 else origin_weight_kg
+        # Use origin_qty * unit_weight (matches old version - no fallback)
+        weight = origin_qty * unit_weight
         record_ghg = weight * calc_ghg
 
         total_waste += weight
@@ -547,7 +546,7 @@ def _handle_overview_report(
         {
             'category_id': cid,
             'category_name': category_names_map.get(cid, f"Category {cid}"),
-            'total_waste': total,
+            'total_waste': round(total * 100) / 100,
             'proportion_percent': (total / total_waste * 100) if total_waste > 0 else 0.0,
         }
         for cid, total in category_waste_map.items()
@@ -557,7 +556,7 @@ def _handle_overview_report(
         waste_type_proportions.append({
             'category_id': None,
             'category_name': 'Waste to Energy',
-            'total_waste': wte_weight,
+            'total_waste': round(wte_weight * 100) / 100,
             'proportion_percent': (wte_weight / total_waste * 100) if total_waste > 0 else 0.0,
         })
     waste_type_proportions.sort(key=lambda x: x['total_waste'], reverse=True)
@@ -566,16 +565,16 @@ def _handle_overview_report(
         'transactions_total': len(tx_ids),
         'transactions_approved': len(tx_approved),
         'key_indicators': {
-            'total_waste': total_waste,
+            'total_waste': round(total_waste * 100) / 100,
             'recycle_rate': recycle_rate,
-            'ghg_reduction': ghg_reduction,
+            'ghg_reduction': round(ghg_reduction * 100) / 100,
         },
         'top_recyclables': top_recyclables,
         'overall_charts': {
             'chart_stat_data': [
-                {'title': 'Total Recyclables', 'value': recyclable_waste},
-                {'title': 'Number of Trees', 'value': (recyclable_ghg_reduction / 9.5 * 100) if recyclable_ghg_reduction > 0 else 0.0},
-                {'title': 'Plastic Saved', 'value': plastic_saved},
+                {'title': 'Total Recyclables', 'value': round(recyclable_waste * 100) / 100},
+                {'title': 'Number of Trees', 'value': round((recyclable_ghg_reduction / 9.5 * 100) * 100) / 100 if recyclable_ghg_reduction > 0 else 0.0},
+                {'title': 'Plastic Saved', 'value': round(plastic_saved * 100) / 100},
             ],
             'chart_data': chart_data
         },
@@ -620,7 +619,6 @@ def _handle_materials_report(
         status = row[4]
         unit_weight = float(row[5] or 0)
         calc_ghg = float(row[6] or 0)
-        origin_weight_kg = float(row[10] or 0)
         main_id = row[8] or row[12]  # mat_main_material_id || record_main_material_id
         material_id = row[13]
         mat_name_en = row[14]
@@ -629,7 +627,7 @@ def _handle_materials_report(
         if status == TransactionStatus.rejected:
             continue
 
-        weight = origin_qty * unit_weight if unit_weight > 0 else origin_weight_kg
+        weight = origin_qty * unit_weight
         ghg = weight * calc_ghg
 
         # Aggregate by main material
