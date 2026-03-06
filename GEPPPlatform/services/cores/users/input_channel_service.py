@@ -1299,6 +1299,18 @@ class InputChannelService:
             # Update transaction with record IDs
             transaction.transaction_records = transaction_record_ids
 
+            # Upsert traceability_transaction_group(s) for this origin/material/tag/tenant and month/year (same as create_transaction)
+            try:
+                from GEPPPlatform.services.cores.transactions.transaction_service import TransactionService
+                txn_svc = TransactionService(self.db)
+                txn_svc._upsert_traceability_groups_for_transaction(transaction, transaction_record_ids)
+            except Exception as _e:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "Failed to upsert traceability_transaction_group for QR submit transaction %s: %s",
+                    transaction.id, str(_e), exc_info=True
+                )
+
             # Handle image uploads
             images = data.get('b64image', [])
             if images and channel.enable_upload_image:

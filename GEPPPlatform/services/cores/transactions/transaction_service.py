@@ -11,8 +11,11 @@ from sqlalchemy.dialects.postgresql import JSONB
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
+
+# Timezone for traceability group year/month (record date interpreted in this zone)
+TRACEABILITY_DATE_TZ = "Asia/Bangkok"
 
 import boto3
 
@@ -23,6 +26,8 @@ from sqlalchemy.exc import SQLAlchemyError
 from ....models.transactions.transactions import Transaction, TransactionStatus, TransactionRecordStatus
 
 from ....models.transactions.transaction_records import TransactionRecord
+from ....models.transactions.traceability_transaction_group import TraceabilityTransactionGroup
+from ....models.transactions.transport_transaction import TransportTransaction
 from ...file_upload_service import S3FileUploadService
 from ....models.users.user_location import UserLocation
 from ....models.users.user_related import UserLocationTag, UserTenant
@@ -142,6 +147,10 @@ class TransactionService:
             transaction.transaction_records = transaction_record_ids
             transaction.destination_ids = destination_ids
             self._calculate_transaction_totals(transaction)
+
+            # Upsert traceability_transaction_group(s) for this origin/material/tag/tenant and month/year
+            if transaction_record_ids:
+                self._upsert_traceability_groups_for_transaction(transaction, transaction_record_ids)
 
             # Handle file uploads if provided
             if transaction_data.get('file_uploads') and transaction.id:
@@ -975,6 +984,30 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                     'message': 'Transaction not found',
                     'errors': ['Transaction does not exist or has been deleted']
                 }
+
+            # If this is a transport transaction, resolve to the non-transport (origin) transaction in the traceability chain
+            if getattr(transaction, 'transaction_method', None) == 'transport':
+                origin_txn_id = None
+                records_for_chain = self.db.query(TransactionRecord).filter(
+                    TransactionRecord.created_transaction_id == transaction.id,
+                    TransactionRecord.is_active == True,
+                    TransactionRecord.deleted_date.is_(None)
+                ).limit(10).all()
+                for rec in records_for_chain:
+                    if rec.traceability and len(rec.traceability) > 0:
+                        origin_txn_id = rec.traceability[0]
+                        break
+                if origin_txn_id is not None and origin_txn_id != transaction.id:
+                    origin_txn = self.db.query(Transaction).options(
+                        joinedload(Transaction.origin),
+                        joinedload(Transaction.created_by)
+                    ).filter(
+                        Transaction.id == origin_txn_id,
+                        Transaction.is_active == True
+                    ).first()
+                    if origin_txn:
+                        transaction = origin_txn
+                        transaction_id = origin_txn_id
 
             transaction_dict = self._transaction_to_dict(transaction)
 
@@ -1903,6 +1936,142 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
 
             transaction.weight_kg = _round_decimal(total_weight)
             transaction.total_amount = _round_decimal(total_amount)
+
+    def _upsert_traceability_groups_for_transaction(
+        self, transaction: Transaction, transaction_record_ids: List[int]
+    ) -> None:
+        """
+        Create or update traceability_transaction_group rows for this transaction.
+        Groups by (origin_id, material_id, location_tag_id, tenant_id, organization_id, year, month).
+        If a group exists for that key and has not been processed (no TransportTransaction linked),
+        append this transaction's record ids to it; otherwise create a new group (or create one if none exists).
+        """
+        try:
+            if not transaction_record_ids:
+                return
+
+            records = self.db.query(
+                TransactionRecord.id,
+                TransactionRecord.material_id,
+                TransactionRecord.transaction_date
+            ).filter(
+                TransactionRecord.id.in_(transaction_record_ids),
+                TransactionRecord.is_active == True
+            ).all()
+
+            # Group record ids by (material_id, year, month); use record's transaction_date in TRACEABILITY_DATE_TZ
+            txn_date = getattr(transaction, 'transaction_date', None)
+            by_material_year_month: Dict[Tuple[Optional[int], Optional[int], Optional[int]], List[int]] = {}
+            for rec_id, material_id, rec_date in records:
+                date_for_ym = rec_date if (rec_date and hasattr(rec_date, 'year')) else txn_date
+                year, month = self._transaction_date_year_month(date_for_ym)
+                key = (material_id, year, month)
+                by_material_year_month.setdefault(key, []).append(rec_id)
+
+            origin_id = transaction.origin_id
+            organization_id = transaction.organization_id
+            location_tag_id = getattr(transaction, 'location_tag_id', None)
+            tenant_id = getattr(transaction, 'tenant_id', None)
+
+            for (material_id, year, month), record_ids in by_material_year_month.items():
+                if year is None or month is None:
+                    continue
+                existing = self.db.query(TraceabilityTransactionGroup).filter(
+                    TraceabilityTransactionGroup.origin_id == origin_id,
+                    TraceabilityTransactionGroup.material_id == material_id,
+                    TraceabilityTransactionGroup.organization_id == organization_id,
+                    TraceabilityTransactionGroup.location_tag_id == location_tag_id,
+                    TraceabilityTransactionGroup.tenant_id == tenant_id,
+                    TraceabilityTransactionGroup.transaction_year == year,
+                    TraceabilityTransactionGroup.transaction_month == month,
+                    TraceabilityTransactionGroup.deleted_date.is_(None),
+                    TraceabilityTransactionGroup.is_active == True,
+                ).first()
+
+                if existing:
+                    # If group already has TransportTransactions, do not append; create a new group for these records
+                    has_transport = self.db.query(TransportTransaction).filter(
+                        TransportTransaction.transaction_group_id == existing.id,
+                        TransportTransaction.is_active == True,
+                        TransportTransaction.deleted_date.is_(None),
+                    ).limit(1).first() is not None
+                    if not has_transport:
+                        existing.transaction_record_id = list((existing.transaction_record_id or [])) + record_ids
+                        existing.updated_date = datetime.utcnow()
+                        continue
+                # No existing group, or existing group already processed: create new group
+                if not existing:
+                    # First time creating this group: backfill with all existing records that match
+                    # the same grouping (includes records created before this code was deployed)
+                    # Extract year/month in TRACEABILITY_DATE_TZ so 2026-01-01 00:00:00+07 stays Jan 2026
+                    txn_date_at_tz = TransactionRecord.transaction_date.op("AT TIME ZONE")(TRACEABILITY_DATE_TZ)
+                    backfill_rows = self.db.query(TransactionRecord.id).join(
+                        Transaction,
+                        TransactionRecord.created_transaction_id == Transaction.id
+                    ).filter(
+                        Transaction.origin_id == origin_id,
+                        Transaction.organization_id == organization_id,
+                        Transaction.location_tag_id == location_tag_id,
+                        Transaction.tenant_id == tenant_id,
+                        Transaction.is_active == True,
+                        Transaction.deleted_date.is_(None),
+                        TransactionRecord.material_id == material_id,
+                        func.extract("year", txn_date_at_tz) == year,
+                        func.extract("month", txn_date_at_tz) == month,
+                        TransactionRecord.is_active == True,
+                        TransactionRecord.deleted_date.is_(None)
+                    ).all()
+                    all_record_ids = [r[0] for r in backfill_rows]
+
+                    group = TraceabilityTransactionGroup(
+                        origin_id=origin_id,
+                        material_id=material_id,
+                        organization_id=organization_id,
+                        transaction_record_id=all_record_ids,
+                        transaction_carried_over=[],
+                        transaction_year=year,
+                        transaction_month=month,
+                        location_tag_id=location_tag_id,
+                        tenant_id=tenant_id,
+                        is_active=True
+                    )
+                    self.db.add(group)
+                else:
+                    # Existing group already has TransportTransactions; create a new group for these records only
+                    group = TraceabilityTransactionGroup(
+                        origin_id=origin_id,
+                        material_id=material_id,
+                        organization_id=organization_id,
+                        transaction_record_id=record_ids,
+                        transaction_carried_over=[],
+                        transaction_year=year,
+                        transaction_month=month,
+                        location_tag_id=location_tag_id,
+                        tenant_id=tenant_id,
+                        is_active=True
+                    )
+                    self.db.add(group)
+        except Exception as e:
+            logger.warning(
+                "Failed to upsert traceability_transaction_group for transaction %s: %s",
+                transaction.id, str(e), exc_info=True
+            )
+            # Don't fail transaction creation if traceability table is missing or upsert fails
+
+    def _transaction_date_year_month(self, dt: Optional[datetime]) -> Tuple[Optional[int], Optional[int]]:
+        """Return (year, month) for traceability grouping, in TRACEABILITY_DATE_TZ (e.g. 2026-01-01 00:00+07 -> 2026, 1)."""
+        if dt is None or not hasattr(dt, "year"):
+            return None, None
+        try:
+            from zoneinfo import ZoneInfo
+            tz = ZoneInfo(TRACEABILITY_DATE_TZ)
+        except ImportError:
+            import pytz
+            tz = pytz.timezone(TRACEABILITY_DATE_TZ)
+        if getattr(dt, "tzinfo", None) is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        local = dt.astimezone(tz)
+        return local.year, local.month
 
     def _transaction_to_dict(self, transaction: Transaction) -> Dict[str, Any]:
         """Convert Transaction object to dictionary"""
