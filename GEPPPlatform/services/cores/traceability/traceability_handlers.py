@@ -15,14 +15,12 @@ def handle_traceability_routes(event: Dict[str, Any], data: Dict[str, Any], **pa
     path = event.get("rawPath", "")
     method = params.get("method", "GET")
     query_params = params.get("query_params", {})
-    path_params = params.get("path_params", {})
 
     db_session = params.get("db_session")
     if not db_session:
         raise APIException("Database session not provided")
 
     current_user = params.get("current_user", {})
-    current_user_id = current_user.get("user_id")
     current_user_organization_id = current_user.get("organization_id")
 
     traceability_service = TraceabilityService(db_session)
@@ -57,36 +55,58 @@ def handle_traceability_routes(event: Dict[str, Any], data: Dict[str, Any], **pa
         result = traceability_service.get_destination_locations(organization_id=current_user_organization_id)
         return {"message": "Destination locations (for input options)", "data": result}
 
+    if path == "/api/traceability/hierarchy" and method == "GET":
+        result = traceability_service.get_traceability_hierarchy(organization_id=current_user_organization_id, **query_params)
+        return {"message": "Traceability hierarchy (tree)", "data": result["data"]}
+
     if path == "/api/traceability" and method == "POST":
-        # Body: record_id, weight, origin_id, vehicle_info, messenger_info, destination_id
+        # Body: either "transaction_group_id" (root) or "transport_transaction_id" (children of an arrived transport).
+        # With transport_transaction_id: use it as parent_id for all new rows and same transaction_group_id as parent.
         body = data or {}
-        record_id = body.get("record_id")
-        weight = body.get("weight")
-        origin_id = body.get("origin_id")
-        vehicle_info = body.get("vehicle_info")
-        messenger_info = body.get("messenger_info")
-        destination_id = body.get("destination_id")
-        if record_id is None or weight is None or origin_id is None or destination_id is None:
-            raise APIException(
-                "Missing required fields: record_id, weight, origin_id, destination_id",
-                status_code=400,
-            )
-        result = traceability_service.create_transport_transaction(
-            record_id=int(record_id),
-            weight=float(weight),
-            origin_id=int(origin_id),
-            destination_id=int(destination_id),
-            vehicle_info=vehicle_info,
-            messenger_info=messenger_info,
-            created_by_id=current_user_id,
+        data_list = body.get("data")
+        transaction_group_id = body.get("transaction_group_id")
+        transport_transaction_id = body.get("transport_transaction_id")
+        if not isinstance(data_list, list) or len(data_list) == 0:
+            raise APIException("Missing or empty required field: data (array of items with weight, origin_id)", status_code=400)
+        if transaction_group_id is None and transport_transaction_id is None:
+            raise APIException("Missing required field: transaction_group_id or transport_transaction_id", status_code=400)
+        if transaction_group_id is not None and transport_transaction_id is not None:
+            raise APIException("Provide either transaction_group_id or transport_transaction_id, not both", status_code=400)
+        result = traceability_service.create_transport_transactions(
+            data=data_list,
+            transaction_group_id=int(transaction_group_id) if transaction_group_id is not None else None,
             organization_id=current_user_organization_id,
+            transport_transaction_id=int(transport_transaction_id) if transport_transaction_id is not None else None,
         )
         if not result.get("success"):
-            raise APIException(result.get("message", "Failed to create transport transaction"), status_code=400)
+            raise APIException(result.get("message", "Failed to create transport transactions"), status_code=400)
         return {"message": result["message"], "data": result}
+
+    if path == "/api/traceability/export/pdf" and method == "GET":
+        from ..pdf_export_hub import generate_pdf_via_lambda
+        summary_result = traceability_service.get_traceability(organization_id=current_user_organization_id, **query_params)
+        hierarchy_result = traceability_service.get_traceability_hierarchy(organization_id=current_user_organization_id, **query_params)
+        payload = {
+            "hierarchy": hierarchy_result["data"],
+            "summary": summary_result.get("summary"),
+            "date_from": query_params.get("date_from"),
+            "date_to": query_params.get("date_to"),
+        }
+        return generate_pdf_via_lambda(
+            payload,
+            export_type="traceability",
+            default_filename_prefix="traceability_report",
+        )
 
     if path == "/api/traceability" and method == "GET":
         result = traceability_service.get_traceability(organization_id=current_user_organization_id, **query_params)
-        return {"message": "Traceability API", "data": result}
+        return {
+            "message": "Traceability API",
+            "data": result["data"],
+            "total_waste_weight": result["summary"]["total_waste_weight"],
+            "total_disposal": result["summary"]["total_disposal"],
+            "total_treatment": result["summary"]["total_treatment"],
+            "total_managed_waste": result["summary"]["total_managed_waste"],
+        }
 
     raise APIException(f"Not found: {method} {path}", status_code=404)
