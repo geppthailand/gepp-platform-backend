@@ -963,13 +963,13 @@ class UserService:
             ) in rows:
                 materials_map.setdefault(location_id, []).append({
                     'material_id': material_id,
-                    'name_en': name_en,
-                    'name_th': name_th,
-                    'category_id': category_id,
-                    'main_material_id': main_material_id,
-                    'unit_name_th': unit_name_th,
-                    'unit_name_en': unit_name_en,
-                    'unit_weight': float(unit_weight) if unit_weight is not None else None,
+                    'name_en': name_en or '',
+                    'name_th': name_th or '',
+                    'category_id': category_id or 0,
+                    'main_material_id': main_material_id or 0,
+                    'unit_name_th': unit_name_th or 'กิโลกรัม',
+                    'unit_name_en': unit_name_en or 'Kilogram',
+                    'unit_weight': float(unit_weight) if unit_weight is not None else 1.0,
                 })
 
         # Reduced response: only id, display_name, materials

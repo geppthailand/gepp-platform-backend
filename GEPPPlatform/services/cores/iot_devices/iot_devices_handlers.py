@@ -61,13 +61,13 @@ def handle_get_locations_by_membership(user_service: UserService, query_params: 
         for material in all_materials:
             material_obj = {
                 'material_id': material.id,
-                'name_en': material.name_en,
-                'name_th': material.name_th,
-                'category_id': material.category_id,
-                'main_material_id': material.main_material_id,
-                'unit_name_th': material.unit_name_th,
-                'unit_name_en': material.unit_name_en,
-                'unit_weight': float(material.unit_weight) if material.unit_weight is not None else None,
+                'name_en': material.name_en or '',
+                'name_th': material.name_th or '',
+                'category_id': material.category_id or 0,
+                'main_material_id': material.main_material_id or 0,
+                'unit_name_th': material.unit_name_th or 'กิโลกรัม',
+                'unit_name_en': material.unit_name_en or 'Kilogram',
+                'unit_weight': float(material.unit_weight) if material.unit_weight is not None else 1.0,
             }
             
             # Add category as object
@@ -274,9 +274,9 @@ def handle_iot_devices_routes(event: Dict[str, Any], data: Dict[str, Any], **com
                 'expires_in': 3600,  # 60 minutes in seconds
                 'user': {
                     'id': user.id,
-                    'email': user.email,
-                    'displayName': user.display_name,
-                    'organizationId': user.organization_id
+                    'email': user.email or '',
+                    'displayName': user.display_name or '',
+                    'organizationId': user.organization_id or 0
                 }
             }
         # Unknown route under /api/iot-devices

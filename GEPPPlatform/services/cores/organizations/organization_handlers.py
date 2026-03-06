@@ -314,6 +314,7 @@ def handle_get_organization_setup(org_service: OrganizationService, user_id: int
         # Extract organization data
         organization_data = {
             'id': organization.id,
+            'name': organization.name,
             'display_name': organization.organization_info.display_name if organization.organization_info else None
         }
 
