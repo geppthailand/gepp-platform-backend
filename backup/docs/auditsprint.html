@@ -1,0 +1,1309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GEPP AI Audit Sprint — 2026-02-19 → 2026-03-04</title>
+<style>
+  :root {
+    --green-900: #1a3a2a;
+    --green-800: #254d39;
+    --green-700: #2f6148;
+    --green-600: #3a7858;
+    --green-500: #54937a;
+    --green-400: #6fb394;
+    --green-300: #9ac7b5;
+    --green-200: #c5e0d5;
+    --green-100: #e8f4ef;
+    --green-50:  #f3faf6;
+    --red-500:   #de5f5f;
+    --red-100:   #fce8e8;
+    --blue-500:  #1e88e5;
+    --blue-100:  #dce9fc;
+    --amber-500: #f59e0b;
+    --amber-100: #fef3c7;
+    --gray-900:  #111827;
+    --gray-700:  #374151;
+    --gray-500:  #6b7280;
+    --gray-300:  #d1d5db;
+    --gray-200:  #e5e7eb;
+    --gray-100:  #f3f4f6;
+    --gray-50:   #f9fafb;
+    --white:     #ffffff;
+    --shadow-sm: 0 1px 2px rgba(0,0,0,.05);
+    --shadow-md: 0 4px 6px -1px rgba(0,0,0,.07), 0 2px 4px -2px rgba(0,0,0,.05);
+    --shadow-lg: 0 10px 15px -3px rgba(0,0,0,.08), 0 4px 6px -4px rgba(0,0,0,.04);
+    --radius:    10px;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: var(--gray-50);
+    color: var(--gray-900);
+    line-height: 1.6;
+  }
+
+  /* ---- Header ---- */
+  .header {
+    background: linear-gradient(135deg, var(--green-800) 0%, var(--green-600) 100%);
+    color: var(--white);
+    padding: 40px 32px 32px;
+    position: relative;
+    overflow: hidden;
+  }
+  .header::after {
+    content: '';
+    position: absolute;
+    top: -60%;
+    right: -10%;
+    width: 500px;
+    height: 500px;
+    border-radius: 50%;
+    background: rgba(255,255,255,.04);
+    pointer-events: none;
+  }
+  .header h1 { font-size: 28px; font-weight: 700; letter-spacing: -.3px; }
+  .header p  { font-size: 15px; opacity:.85; margin-top:6px; }
+  .header .meta { display:flex; gap:24px; margin-top:16px; font-size:13px; opacity:.75; flex-wrap:wrap; }
+  .header .meta span::before { content:''; display:inline-block; width:6px; height:6px; border-radius:50%; background:var(--green-300); margin-right:6px; vertical-align:middle; }
+
+  /* ---- Tabs ---- */
+  .tab-bar {
+    display: flex;
+    gap: 0;
+    background: var(--white);
+    border-bottom: 1px solid var(--gray-200);
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    box-shadow: var(--shadow-sm);
+  }
+  .tab-btn {
+    flex: 1;
+    padding: 14px 24px;
+    background: none;
+    border: none;
+    border-bottom: 3px solid transparent;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--gray-500);
+    transition: all .2s;
+    text-align: center;
+  }
+  .tab-btn:hover { color: var(--green-600); background: var(--green-50); }
+  .tab-btn.active { color: var(--green-700); border-bottom-color: var(--green-600); }
+  .tab-panel { display: none; padding: 32px; max-width: 1280px; margin: 0 auto; }
+  .tab-panel.active { display: block; }
+
+  /* ---- Cards ---- */
+  .card {
+    background: var(--white);
+    border-radius: var(--radius);
+    border: 1px solid var(--gray-200);
+    box-shadow: var(--shadow-sm);
+    padding: 24px;
+    margin-bottom: 24px;
+  }
+  .card h2 { font-size:18px; font-weight:700; color:var(--green-800); margin-bottom:4px; }
+  .card h3 { font-size:15px; font-weight:600; color:var(--green-700); margin:18px 0 8px; }
+  .card h4 { font-size:14px; font-weight:600; color:var(--green-600); margin:14px 0 6px; }
+  .card p, .card li { font-size:14px; color:var(--gray-700); }
+  .card ul { padding-left: 20px; }
+  .card ul li { margin-bottom:4px; }
+
+  /* ---- Badges ---- */
+  .badge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: .3px;
+  }
+  .badge-green  { background: var(--green-100); color: var(--green-700); }
+  .badge-blue   { background: var(--blue-100);  color: var(--blue-500); }
+  .badge-amber  { background: var(--amber-100); color: #92400e; }
+  .badge-red    { background: var(--red-100);    color: var(--red-500); }
+  .badge-gray   { background: var(--gray-100);   color: var(--gray-500); }
+
+  /* ---- Priority ---- */
+  .priority-high   { border-left: 4px solid var(--red-500); }
+  .priority-medium { border-left: 4px solid var(--amber-500); }
+  .priority-low    { border-left: 4px solid var(--blue-500); }
+
+  /* ---- Current State Box ---- */
+  .state-box {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 16px;
+    margin: 20px 0;
+  }
+  .state-item {
+    background: var(--green-50);
+    border: 1px solid var(--green-200);
+    border-radius: var(--radius);
+    padding: 16px;
+  }
+  .state-item .label { font-size:12px; color:var(--green-500); font-weight:600; text-transform:uppercase; letter-spacing:.5px; }
+  .state-item .value { font-size:20px; font-weight:700; color:var(--green-800); margin-top:4px; }
+  .state-item .desc  { font-size:12px; color:var(--gray-500); margin-top:2px; }
+
+  /* ---- Timeline ---- */
+  .timeline { position: relative; padding-left: 28px; margin: 20px 0; }
+  .timeline::before {
+    content: '';
+    position: absolute;
+    left: 8px;
+    top: 4px;
+    bottom: 4px;
+    width: 2px;
+    background: var(--green-200);
+  }
+  .tl-item {
+    position: relative;
+    margin-bottom: 28px;
+  }
+  .tl-item::before {
+    content: '';
+    position: absolute;
+    left: -24px;
+    top: 6px;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    border: 2px solid var(--green-400);
+    background: var(--white);
+  }
+  .tl-item.done::before { background: var(--green-500); border-color: var(--green-500); }
+  .tl-item .tl-date {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--green-600);
+    margin-bottom: 4px;
+  }
+  .tl-item .tl-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--gray-900);
+  }
+  .tl-item .tl-desc {
+    font-size: 13px;
+    color: var(--gray-500);
+    margin-top: 2px;
+  }
+
+  /* ---- Task Table ---- */
+  .task-table {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+    font-size: 13px;
+    margin-top: 12px;
+  }
+  .task-table th {
+    text-align: left;
+    padding: 10px 12px;
+    background: var(--green-50);
+    color: var(--green-700);
+    font-weight: 600;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: .4px;
+    border-bottom: 2px solid var(--green-200);
+  }
+  .task-table td {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--gray-200);
+    vertical-align: top;
+  }
+  .task-table tr:hover td { background: var(--green-50); }
+  .task-table .task-id { font-family: 'JetBrains Mono', monospace; font-size:12px; color:var(--gray-500); white-space:nowrap; }
+
+  /* ---- Flow Diagram ---- */
+  .flow-diagram {
+    display: flex;
+    align-items: flex-start;
+    gap: 0;
+    overflow-x: auto;
+    padding: 24px 0;
+  }
+  .flow-node {
+    min-width: 160px;
+    padding: 14px 18px;
+    border-radius: var(--radius);
+    text-align: center;
+    font-size: 13px;
+    font-weight: 600;
+    position: relative;
+    flex-shrink: 0;
+  }
+  .flow-node.primary   { background: var(--green-600); color: var(--white); }
+  .flow-node.secondary { background: var(--green-100); color: var(--green-800); border: 1px solid var(--green-300); }
+  .flow-node.accent    { background: var(--blue-100); color: var(--blue-500); border: 1px solid #b3d4f7; }
+  .flow-node.warning   { background: var(--amber-100); color: #92400e; border: 1px solid #fde68a; }
+  .flow-node .sub { font-size:11px; font-weight:400; margin-top:4px; opacity:.8; }
+  .flow-arrow {
+    display: flex;
+    align-items: center;
+    padding: 0 4px;
+    color: var(--gray-300);
+    font-size: 20px;
+    flex-shrink: 0;
+  }
+
+  /* ---- Arch Diagram ---- */
+  .arch-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 16px;
+    margin: 16px 0;
+  }
+  .arch-box {
+    background: var(--gray-50);
+    border: 1px solid var(--gray-200);
+    border-radius: var(--radius);
+    padding: 16px;
+  }
+  .arch-box.highlight { border-color: var(--green-400); background: var(--green-50); }
+  .arch-box h4 { font-size:13px; font-weight:700; color:var(--green-700); margin-bottom:6px; }
+  .arch-box ul { font-size:12px; padding-left:16px; }
+  .arch-box ul li { margin-bottom:2px; color:var(--gray-700); }
+
+  /* ---- Code block ---- */
+  .code-block {
+    background: var(--gray-900);
+    color: #e5e7eb;
+    padding: 16px 20px;
+    border-radius: 8px;
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-size: 12px;
+    line-height: 1.7;
+    overflow-x: auto;
+    margin: 12px 0;
+  }
+  .code-block .kw  { color: #c084fc; }
+  .code-block .str { color: #86efac; }
+  .code-block .cmt { color: #6b7280; font-style: italic; }
+  .code-block .fn  { color: #60a5fa; }
+
+  /* ---- Sprint Gantt ---- */
+  .gantt-container { overflow-x: auto; margin: 16px 0; }
+  .gantt {
+    display: grid;
+    grid-template-columns: 200px repeat(14, 1fr);
+    gap: 0;
+    min-width: 900px;
+    font-size: 12px;
+  }
+  .gantt .gh {
+    padding: 8px 6px;
+    font-weight: 600;
+    background: var(--green-50);
+    border-bottom: 2px solid var(--green-200);
+    text-align: center;
+    color: var(--green-700);
+    font-size: 11px;
+  }
+  .gantt .gh:first-child { text-align:left; padding-left:12px; }
+  .gantt .gr {
+    padding: 6px;
+    border-bottom: 1px solid var(--gray-100);
+    display: flex;
+    align-items: center;
+  }
+  .gantt .gr.label {
+    font-weight: 500;
+    color: var(--gray-700);
+    padding-left: 12px;
+    font-size: 12px;
+  }
+  .gantt .bar {
+    height: 20px;
+    border-radius: 4px;
+    width: 100%;
+  }
+  .bar-green  { background: var(--green-400); }
+  .bar-blue   { background: #60a5fa; }
+  .bar-amber  { background: #fbbf24; }
+  .bar-red    { background: #f87171; }
+  .bar-gray   { background: var(--gray-300); }
+  .weekend { background: var(--gray-100); }
+
+  /* ---- Responsive ---- */
+  @media (max-width: 768px) {
+    .header { padding: 24px 16px 20px; }
+    .header h1 { font-size: 22px; }
+    .tab-panel { padding: 20px 16px; }
+    .flow-diagram { flex-direction: column; align-items: stretch; }
+    .flow-arrow { transform: rotate(90deg); padding: 4px 0; justify-content: center; }
+    .state-box { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ============================================================ -->
+<!-- HEADER                                                        -->
+<!-- ============================================================ -->
+<div class="header">
+  <h1>GEPP AI Audit &amp; Anomaly Detection Sprint</h1>
+  <p>Sprint Plan — Default Audit Pipeline, Anomaly Detection, OpenRouter Migration &amp; Optimization</p>
+  <div class="meta">
+    <span>Sprint: 2026-02-19 → 2026-03-04 (14 days)</span>
+    <span>Team: AI / Backend / Frontend</span>
+    <span>Version: v2.0 Audit Pipeline</span>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- TABS                                                          -->
+<!-- ============================================================ -->
+<div class="tab-bar">
+  <button class="tab-btn active" onclick="switchTab('ai-audit')">AI Audit Pipeline</button>
+  <button class="tab-btn" onclick="switchTab('anomaly')">Anomaly Detection</button>
+</div>
+
+<!-- ============================================================ -->
+<!-- TAB 1 : AI AUDIT PIPELINE                                     -->
+<!-- ============================================================ -->
+<div id="ai-audit" class="tab-panel active">
+
+  <!-- Current State -->
+  <div class="card">
+    <h2>Current State — AI Audit System</h2>
+    <p>What we have today and what needs to be built next.</p>
+    <div class="state-box">
+      <div class="state-item">
+        <div class="label">BMA Rule Set</div>
+        <div class="value" style="color:var(--green-600)">Complete</div>
+        <div class="desc">2-step: Visibility → Classification<br>Gemini 2.0 Flash via LangChain</div>
+      </div>
+      <div class="state-item">
+        <div class="label">Default Rule Set</div>
+        <div class="value" style="color:var(--red-500)">Mock Only</div>
+        <div class="desc">Returns no_action placeholder<br>No actual AI processing</div>
+      </div>
+      <div class="state-item">
+        <div class="label">LLM Provider</div>
+        <div class="value" style="color:var(--amber-500)">Gemini Only</div>
+        <div class="desc">Single provider, no fallback<br>Direct API key auth</div>
+      </div>
+      <div class="state-item">
+        <div class="label">Evidence Matching</div>
+        <div class="value" style="color:var(--red-500)">Not Built</div>
+        <div class="desc">No weighing slip / Excel matching<br>No cross-reference pipeline</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Architecture Vision -->
+  <div class="card">
+    <h2>Target Architecture — Default Audit v2</h2>
+    <p>The default audit pipeline will serve <strong>all non-BMA organizations</strong>. It validates transactions against materials catalog, cross-references evidence documents, and provides confidence scoring.</p>
+
+    <h3>Data Flow: Default Audit v2 Pipeline</h3>
+    <div class="flow-diagram">
+      <div class="flow-node primary">Transaction<div class="sub">Records + Evidences</div></div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-node secondary">Step 1<br>Completeness<div class="sub">Material mapping<br>Weight validation</div></div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-node secondary">Step 2<br>Evidence Match<div class="sub">Weighing slip OCR<br>Excel parsing</div></div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-node accent">Step 3<br>AI Cross-Check<div class="sub">LLM reasoning<br>via OpenRouter</div></div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-node warning">Step 4<br>Scoring<div class="sub">Confidence %<br>Approve / Flag / Reject</div></div>
+    </div>
+
+    <h3>Architecture Components</h3>
+    <div class="arch-grid">
+      <div class="arch-box highlight">
+        <h4>OpenRouter Gateway (NEW)</h4>
+        <ul>
+          <li>Single abstraction for multi-model routing</li>
+          <li>Primary: Claude 3.5 Sonnet / Gemini Flash</li>
+          <li>Fallback chain: model A → model B → model C</li>
+          <li>Cost tracking per organization</li>
+          <li>Rate limiting &amp; quota enforcement</li>
+        </ul>
+      </div>
+      <div class="arch-box highlight">
+        <h4>Evidence Processor (NEW)</h4>
+        <ul>
+          <li>OCR for weighing slip images (Thai text)</li>
+          <li>Excel/CSV parser for daily/monthly logs</li>
+          <li>Structured data extraction</li>
+          <li>Cross-reference with transaction records</li>
+          <li>Delta detection (declared vs evidence)</li>
+        </ul>
+      </div>
+      <div class="arch-box">
+        <h4>Prompt Engine (UPGRADE)</h4>
+        <ul>
+          <li>YAML prompt templates (existing)</li>
+          <li>Add: default/ evidence matching prompts</li>
+          <li>Add: cross-reference analysis prompt</li>
+          <li>Add: statistical summary prompt</li>
+          <li>Prompt versioning (v1 → v2)</li>
+        </ul>
+      </div>
+      <div class="arch-box">
+        <h4>Audit Result Store (UPGRADE)</h4>
+        <ul>
+          <li>ai_audit_note JSONB (existing)</li>
+          <li>Add: evidence_match_score field</li>
+          <li>Add: evidence_details JSONB</li>
+          <li>Add: anomaly_flags JSONB</li>
+          <li>Historical audit versioning</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- OpenRouter Migration -->
+  <div class="card priority-high">
+    <h2>OpenRouter Migration Plan</h2>
+    <p>Replace direct Gemini API calls with OpenRouter for multi-model access, cost optimization, and fallback resilience.</p>
+
+    <h3>Why OpenRouter?</h3>
+    <ul>
+      <li><strong>Multi-model access</strong> — Use Claude, GPT-4o, Gemini, Llama from a single API</li>
+      <li><strong>Automatic fallback</strong> — If one provider is down, route to another</li>
+      <li><strong>Cost optimization</strong> — Choose cheaper models for simple tasks, powerful models for complex</li>
+      <li><strong>Unified billing</strong> — Single API key, one invoice</li>
+      <li><strong>Model comparison</strong> — A/B test different models on same prompts</li>
+    </ul>
+
+    <h3>Migration Steps</h3>
+    <div class="code-block">
+<span class="cmt"># Current: Direct Gemini via LangChain</span>
+<span class="kw">from</span> langchain_google_genai <span class="kw">import</span> ChatGoogleGenerativeAI
+model = ChatGoogleGenerativeAI(model=<span class="str">"gemini-2.0-flash"</span>, api_key=GEMINI_KEY)
+
+<span class="cmt"># Target: OpenRouter via LangChain OpenAI-compatible endpoint</span>
+<span class="kw">from</span> langchain_openai <span class="kw">import</span> ChatOpenAI
+model = ChatOpenAI(
+    model=<span class="str">"google/gemini-2.0-flash-001"</span>,  <span class="cmt"># or "anthropic/claude-3.5-sonnet"</span>
+    api_key=OPENROUTER_KEY,
+    base_url=<span class="str">"https://openrouter.ai/api/v1"</span>,
+    default_headers={<span class="str">"HTTP-Referer"</span>: <span class="str">"https://geppdata.com"</span>}
+)
+    </div>
+
+    <h3>Model Routing Strategy</h3>
+    <table class="task-table">
+      <tr><th>Task Type</th><th>Primary Model</th><th>Fallback</th><th>Cost/1M tokens</th></tr>
+      <tr>
+        <td>Image visibility check</td>
+        <td>google/gemini-2.0-flash</td>
+        <td>google/gemini-2.5-flash-lite</td>
+        <td>~$0.10 input / ~$0.40 output</td>
+      </tr>
+      <tr>
+        <td>Classification + reasoning</td>
+        <td>google/gemini-2.0-flash</td>
+        <td>google/gemini-2.5-flash-lite</td>
+        <td>~$3.00 input / ~$15.00 output</td>
+      </tr>
+      <tr>
+        <td>Evidence OCR extraction</td>
+        <td>google/gemini-2.0-flash</td>
+        <td>openai/gpt-4o-mini</td>
+        <td>~$0.10 input / ~$0.40 output</td>
+      </tr>
+      <tr>
+        <td>Cross-reference analysis</td>
+        <td>google/gemini-2.0-flash</td>
+        <td>google/gemini-2.5-flash-lite</td>
+        <td>~$3.00 input / ~$15.00 output</td>
+      </tr>
+      <tr>
+        <td>Anomaly summarization</td>
+        <td>google/gemini-2.0-flash</td>
+        <td>openai/gpt-4o-mini</td>
+        <td>~$0.10 input / ~$0.40 output</td>
+      </tr>
+    </table>
+  </div>
+
+  <!-- Default Audit Pipeline Tasks -->
+  <div class="card">
+    <h2>Default Audit v2 — Detailed Task Breakdown</h2>
+
+    <h3>Phase 1: Foundation &amp; OpenRouter (Days 1–3)</h3>
+    <table class="task-table">
+      <tr><th style="width:80px">Task ID</th><th>Description</th><th style="width:80px">Priority</th><th style="width:90px">Estimate</th></tr>
+      <tr>
+        <td class="task-id">AUD-001</td>
+        <td>
+          <strong>Create OpenRouter LLM adapter</strong><br>
+          Abstract LLM calls behind a provider-agnostic interface. Support model routing config per task type.
+          <br><code>backend/GEPPPlatform/services/ai/llm_provider.py</code>
+        </td>
+        <td><span class="badge badge-red">HIGH</span></td>
+        <td>4h</td>
+      </tr>
+      <tr>
+        <td class="task-id">AUD-002</td>
+        <td>
+          <strong>Migrate BMA audit to OpenRouter adapter</strong><br>
+          Replace direct <code>ChatGoogleGenerativeAI</code> with new adapter. Validate identical outputs. Keep Gemini as default model via OpenRouter.
+          <br><code>bma_audit_rule_set.py</code>
+        </td>
+        <td><span class="badge badge-red">HIGH</span></td>
+        <td>3h</td>
+      </tr>
+      <tr>
+        <td class="task-id">AUD-003</td>
+        <td>
+          <strong>Add OpenRouter env config &amp; fallback chain</strong><br>
+          <code>OPENROUTER_API_KEY</code>, model preferences per org, fallback order config in DB or env.
+        </td>
+        <td><span class="badge badge-red">HIGH</span></td>
+        <td>2h</td>
+      </tr>
+      <tr>
+        <td class="task-id">AUD-004</td>
+        <td>
+          <strong>Token usage &amp; cost tracking update</strong><br>
+          OpenRouter returns different usage format. Map to existing <code>audit_tokens</code> JSONB. Add cost_usd field.
+        </td>
+        <td><span class="badge badge-amber">MED</span></td>
+        <td>2h</td>
+      </tr>
+    </table>
+
+    <h3>Phase 2: Default Audit Core Logic (Days 3–6)</h3>
+    <table class="task-table">
+      <tr><th style="width:80px">Task ID</th><th>Description</th><th style="width:80px">Priority</th><th style="width:90px">Estimate</th></tr>
+      <tr>
+        <td class="task-id">AUD-005</td>
+        <td>
+          <strong>Implement default_audit_rule_set v2 — Step 1: Completeness</strong><br>
+          Validate transaction records against org's material catalog. Check: required materials present, quantities within reasonable range, weight calculations match unit_weight × quantity.
+          <br><code>default_audit_rule_set.py</code>
+        </td>
+        <td><span class="badge badge-red">HIGH</span></td>
+        <td>4h</td>
+      </tr>
+      <tr>
+        <td class="task-id">AUD-006</td>
+        <td>
+          <strong>Step 2: Evidence document processor</strong><br>
+          Parse evidence attachments: weighing slip images (OCR via Vision model), Excel/CSV files (openpyxl/pandas). Extract structured data: date, weight, material type, origin.
+          <br><code>backend/GEPPPlatform/services/ai/evidence_processor.py</code>
+        </td>
+        <td><span class="badge badge-red">HIGH</span></td>
+        <td>6h</td>
+      </tr>
+      <tr>
+        <td class="task-id">AUD-007</td>
+        <td>
+          <strong>Step 3: AI cross-reference analysis</strong><br>
+          Send extracted evidence data + transaction records to LLM. Prompt: compare declared quantities vs evidence, identify mismatches, provide confidence score.
+          <br>New prompts: <code>prompts/ai_audit_v1/default/cross_reference.yaml</code>
+        </td>
+        <td><span class="badge badge-red">HIGH</span></td>
+        <td>5h</td>
+      </tr>
+      <tr>
+        <td class="task-id">AUD-008</td>
+        <td>
+          <strong>Step 4: Confidence scoring &amp; decision engine</strong><br>
+          Combine completeness score + evidence match score + AI analysis score. Weighted average → final confidence. Thresholds: >80% auto-approve, 50–80% flag for review, <50% reject.
+        </td>
+        <td><span class="badge badge-amber">MED</span></td>
+        <td>3h</td>
+      </tr>
+      <tr>
+        <td class="task-id">AUD-009</td>
+        <td>
+          <strong>Write default audit prompts (YAML)</strong><br>
+          Create prompt templates for: evidence_extraction.yaml, cross_reference.yaml, summary_report.yaml. Thai + English language support.
+        </td>
+        <td><span class="badge badge-amber">MED</span></td>
+        <td>3h</td>
+      </tr>
+    </table>
+
+    <h3>Phase 3: Evidence Matching Pipeline (Days 6–9)</h3>
+    <table class="task-table">
+      <tr><th style="width:80px">Task ID</th><th>Description</th><th style="width:80px">Priority</th><th style="width:90px">Estimate</th></tr>
+      <tr>
+        <td class="task-id">AUD-010</td>
+        <td>
+          <strong>Weighing slip OCR pipeline</strong><br>
+          Download image from S3 → send to Vision model → extract: total weight, date, material description, origin/dest names. Handle Thai text. Return structured JSON.
+        </td>
+        <td><span class="badge badge-red">HIGH</span></td>
+        <td>5h</td>
+      </tr>
+      <tr>
+        <td class="task-id">AUD-011</td>
+        <td>
+          <strong>Excel/CSV evidence parser</strong><br>
+          Parse uploaded spreadsheets: detect date columns, weight columns, material columns. Map to standard schema. Support daily and monthly aggregation formats.
+        </td>
+        <td><span class="badge badge-amber">MED</span></td>
+        <td>4h</td>
+      </tr>
+      <tr>
+        <td class="task-id">AUD-012</td>
+        <td>
+          <strong>Evidence ↔ Transaction matching algorithm</strong><br>
+          Match evidence records to transactions by: date proximity (±1 day), material type, weight tolerance (±10%), origin location. Calculate match_score per record pair.
+        </td>
+        <td><span class="badge badge-red">HIGH</span></td>
+        <td>5h</td>
+      </tr>
+      <tr>
+        <td class="task-id">AUD-013</td>
+        <td>
+          <strong>DB schema: evidence_audit_results table</strong><br>
+          Store per-evidence matching results: evidence_id, transaction_record_id, match_score, extracted_data JSONB, delta_weight, delta_reason.
+        </td>
+        <td><span class="badge badge-amber">MED</span></td>
+        <td>2h</td>
+      </tr>
+    </table>
+
+    <h3>Phase 4: Frontend Integration (Days 9–12)</h3>
+    <table class="task-table">
+      <tr><th style="width:80px">Task ID</th><th>Description</th><th style="width:80px">Priority</th><th style="width:90px">Estimate</th></tr>
+      <tr>
+        <td class="task-id">AUD-014</td>
+        <td>
+          <strong>Audit result detail view — evidence matching UI</strong><br>
+          Show side-by-side: transaction declared values vs evidence extracted values. Highlight deltas. Color-code confidence.
+        </td>
+        <td><span class="badge badge-amber">MED</span></td>
+        <td>5h</td>
+      </tr>
+      <tr>
+        <td class="task-id">AUD-015</td>
+        <td>
+          <strong>Audit dashboard — default org statistics</strong><br>
+          Aggregate audit results for non-BMA orgs. Show: total audited, match rates, common issues, evidence quality scores.
+        </td>
+        <td><span class="badge badge-amber">MED</span></td>
+        <td>4h</td>
+      </tr>
+      <tr>
+        <td class="task-id">AUD-016</td>
+        <td>
+          <strong>Traceability timeline enhancement</strong><br>
+          Add evidence verification step to TraceabilityModal timeline. Show audit confidence at each chain-of-custody point.
+        </td>
+        <td><span class="badge badge-blue">LOW</span></td>
+        <td>3h</td>
+      </tr>
+    </table>
+
+    <h3>Phase 5: Optimization &amp; Testing (Days 12–14)</h3>
+    <table class="task-table">
+      <tr><th style="width:80px">Task ID</th><th>Description</th><th style="width:80px">Priority</th><th style="width:90px">Estimate</th></tr>
+      <tr>
+        <td class="task-id">AUD-017</td>
+        <td>
+          <strong>Prompt optimization — reduce token usage</strong><br>
+          Benchmark current prompts. Apply: shorter system messages, few-shot examples removal, structured output schemas. Target: 30% token reduction.
+        </td>
+        <td><span class="badge badge-amber">MED</span></td>
+        <td>3h</td>
+      </tr>
+      <tr>
+        <td class="task-id">AUD-018</td>
+        <td>
+          <strong>LLM response caching layer</strong><br>
+          Cache identical image+prompt pairs (hash-based). TTL: 24h. Avoid re-auditing same evidence. Redis or in-memory with LRU.
+        </td>
+        <td><span class="badge badge-amber">MED</span></td>
+        <td>3h</td>
+      </tr>
+      <tr>
+        <td class="task-id">AUD-019</td>
+        <td>
+          <strong>Integration test suite for default audit</strong><br>
+          Mock test cases like BMA's Audit/ directory. Cover: complete transactions, incomplete, mismatched evidence, Excel upload, edge cases.
+        </td>
+        <td><span class="badge badge-amber">MED</span></td>
+        <td>4h</td>
+      </tr>
+      <tr>
+        <td class="task-id">AUD-020</td>
+        <td>
+          <strong>A/B model comparison framework</strong><br>
+          Run same audit with 2 different models. Compare: accuracy, latency, cost. Log results for model selection optimization.
+        </td>
+        <td><span class="badge badge-blue">LOW</span></td>
+        <td>3h</td>
+      </tr>
+    </table>
+  </div>
+
+  <!-- Sprint Timeline (Audit) -->
+  <div class="card">
+    <h2>Sprint Timeline — AI Audit Pipeline</h2>
+    <div class="gantt-container">
+      <div class="gantt">
+        <!-- Header -->
+        <div class="gh">Task</div>
+        <div class="gh">19</div><div class="gh">20</div><div class="gh weekend">21</div><div class="gh weekend">22</div>
+        <div class="gh">23</div><div class="gh">24</div><div class="gh">25</div><div class="gh">26</div><div class="gh">27</div>
+        <div class="gh weekend">28</div><div class="gh weekend">1</div>
+        <div class="gh">2</div><div class="gh">3</div><div class="gh">4</div>
+
+        <!-- Phase 1 -->
+        <div class="gr label">OpenRouter Adapter</div>
+        <div class="gr"><div class="bar bar-green"></div></div>
+        <div class="gr"><div class="bar bar-green"></div></div>
+        <div class="gr weekend"></div><div class="gr weekend"></div>
+        <div class="gr"></div><div class="gr"></div><div class="gr"></div><div class="gr"></div><div class="gr"></div>
+        <div class="gr weekend"></div><div class="gr weekend"></div>
+        <div class="gr"></div><div class="gr"></div><div class="gr"></div>
+
+        <div class="gr label">BMA Migration</div>
+        <div class="gr"></div>
+        <div class="gr"><div class="bar bar-green"></div></div>
+        <div class="gr weekend"></div><div class="gr weekend"></div>
+        <div class="gr"><div class="bar bar-green"></div></div>
+        <div class="gr"></div><div class="gr"></div><div class="gr"></div><div class="gr"></div>
+        <div class="gr weekend"></div><div class="gr weekend"></div>
+        <div class="gr"></div><div class="gr"></div><div class="gr"></div>
+
+        <!-- Phase 2 -->
+        <div class="gr label">Default Step 1–2</div>
+        <div class="gr"></div><div class="gr"></div>
+        <div class="gr weekend"></div><div class="gr weekend"></div>
+        <div class="gr"><div class="bar bar-blue"></div></div>
+        <div class="gr"><div class="bar bar-blue"></div></div>
+        <div class="gr"><div class="bar bar-blue"></div></div>
+        <div class="gr"></div><div class="gr"></div>
+        <div class="gr weekend"></div><div class="gr weekend"></div>
+        <div class="gr"></div><div class="gr"></div><div class="gr"></div>
+
+        <div class="gr label">Default Step 3–4</div>
+        <div class="gr"></div><div class="gr"></div>
+        <div class="gr weekend"></div><div class="gr weekend"></div>
+        <div class="gr"></div><div class="gr"></div>
+        <div class="gr"><div class="bar bar-blue"></div></div>
+        <div class="gr"><div class="bar bar-blue"></div></div>
+        <div class="gr"><div class="bar bar-blue"></div></div>
+        <div class="gr weekend"></div><div class="gr weekend"></div>
+        <div class="gr"></div><div class="gr"></div><div class="gr"></div>
+
+        <!-- Phase 3 -->
+        <div class="gr label">Evidence Pipeline</div>
+        <div class="gr"></div><div class="gr"></div>
+        <div class="gr weekend"></div><div class="gr weekend"></div>
+        <div class="gr"></div><div class="gr"></div><div class="gr"></div>
+        <div class="gr"><div class="bar bar-amber"></div></div>
+        <div class="gr"><div class="bar bar-amber"></div></div>
+        <div class="gr weekend"></div><div class="gr weekend"></div>
+        <div class="gr"><div class="bar bar-amber"></div></div>
+        <div class="gr"></div><div class="gr"></div>
+
+        <!-- Phase 4 -->
+        <div class="gr label">Frontend UI</div>
+        <div class="gr"></div><div class="gr"></div>
+        <div class="gr weekend"></div><div class="gr weekend"></div>
+        <div class="gr"></div><div class="gr"></div><div class="gr"></div><div class="gr"></div><div class="gr"></div>
+        <div class="gr weekend"></div><div class="gr weekend"></div>
+        <div class="gr"><div class="bar bar-red"></div></div>
+        <div class="gr"><div class="bar bar-red"></div></div>
+        <div class="gr"><div class="bar bar-red"></div></div>
+
+        <!-- Phase 5 -->
+        <div class="gr label">Optimization &amp; Test</div>
+        <div class="gr"></div><div class="gr"></div>
+        <div class="gr weekend"></div><div class="gr weekend"></div>
+        <div class="gr"></div><div class="gr"></div><div class="gr"></div><div class="gr"></div><div class="gr"></div>
+        <div class="gr weekend"></div><div class="gr weekend"></div>
+        <div class="gr"></div>
+        <div class="gr"><div class="bar bar-gray"></div></div>
+        <div class="gr"><div class="bar bar-gray"></div></div>
+      </div>
+    </div>
+    <div style="display:flex; gap:16px; flex-wrap:wrap; margin-top:8px; font-size:12px; color:var(--gray-500);">
+      <span><span style="display:inline-block;width:12px;height:12px;border-radius:3px;background:var(--green-400);vertical-align:middle;margin-right:4px"></span>Phase 1: OpenRouter</span>
+      <span><span style="display:inline-block;width:12px;height:12px;border-radius:3px;background:#60a5fa;vertical-align:middle;margin-right:4px"></span>Phase 2: Default Audit</span>
+      <span><span style="display:inline-block;width:12px;height:12px;border-radius:3px;background:#fbbf24;vertical-align:middle;margin-right:4px"></span>Phase 3: Evidence Pipeline</span>
+      <span><span style="display:inline-block;width:12px;height:12px;border-radius:3px;background:#f87171;vertical-align:middle;margin-right:4px"></span>Phase 4: Frontend</span>
+      <span><span style="display:inline-block;width:12px;height:12px;border-radius:3px;background:var(--gray-300);vertical-align:middle;margin-right:4px"></span>Phase 5: Optimize</span>
+    </div>
+  </div>
+
+  <!-- Prompt Optimization Strategy -->
+  <div class="card">
+    <h2>Prompt &amp; LLM Optimization Strategy</h2>
+
+    <h3>Current Prompt Architecture (BMA)</h3>
+    <div class="flow-diagram">
+      <div class="flow-node secondary">visibility_check.yaml<div class="sub">~800 tokens input</div></div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-node secondary">extract.yaml<div class="sub">~1,200 tokens input</div></div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-node secondary">classify.yaml<div class="sub">~1,500 tokens input</div></div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-node secondary">output_format.yaml<div class="sub">~400 tokens input</div></div>
+    </div>
+
+    <h3>Optimization Targets</h3>
+    <table class="task-table">
+      <tr><th>Optimization</th><th>Current</th><th>Target</th><th>Impact</th></tr>
+      <tr>
+        <td><strong>Merge extract + classify</strong></td>
+        <td>2 LLM calls, ~2,700 tokens</td>
+        <td>1 LLM call, ~1,800 tokens</td>
+        <td>-33% latency, -30% cost</td>
+      </tr>
+      <tr>
+        <td><strong>Structured output (JSON mode)</strong></td>
+        <td>Free-text → regex parse</td>
+        <td>JSON schema enforcement</td>
+        <td>Eliminate parse errors (pe code)</td>
+      </tr>
+      <tr>
+        <td><strong>Image preprocessing</strong></td>
+        <td>Resize to 384px max</td>
+        <td>Resize to 512px + compress JPEG 85%</td>
+        <td>Better accuracy, similar token cost</td>
+      </tr>
+      <tr>
+        <td><strong>Prompt compression</strong></td>
+        <td>Verbose instructions</td>
+        <td>Concise + few-shot examples in YAML</td>
+        <td>-20% input tokens</td>
+      </tr>
+      <tr>
+        <td><strong>Batch API calls</strong></td>
+        <td>1 image per request</td>
+        <td>Up to 4 images per request (multi-turn)</td>
+        <td>-60% API calls for multi-material txns</td>
+      </tr>
+    </table>
+
+    <h3>Statistics &amp; Monitoring</h3>
+    <ul>
+      <li><strong>Per-org dashboards</strong>: Total audits, approval rate, avg confidence, cost breakdown</li>
+      <li><strong>Model performance</strong>: Accuracy by model, latency p50/p95/p99, error rates</li>
+      <li><strong>Prompt analytics</strong>: Token usage by prompt version, parse failure rates</li>
+      <li><strong>Evidence quality</strong>: OCR confidence scores, Excel parse success rates</li>
+    </ul>
+  </div>
+
+</div>
+
+<!-- ============================================================ -->
+<!-- TAB 2 : ANOMALY DETECTION                                     -->
+<!-- ============================================================ -->
+<div id="anomaly" class="tab-panel">
+
+  <!-- Current State -->
+  <div class="card">
+    <h2>Current State — Anomaly Detection</h2>
+    <p>What anomaly-related features exist today and what's planned.</p>
+    <div class="state-box">
+      <div class="state-item">
+        <div class="label">Image Anomaly (BMA)</div>
+        <div class="value" style="color:var(--green-600)">Basic</div>
+        <div class="desc">Visibility check: artificial/blur/opaque<br>Contamination detection: >50% / <50%</div>
+      </div>
+      <div class="state-item">
+        <div class="label">Statistical Anomaly</div>
+        <div class="value" style="color:var(--red-500)">Not Built</div>
+        <div class="desc">No outlier detection<br>No pattern analysis</div>
+      </div>
+      <div class="state-item">
+        <div class="label">Temporal Anomaly</div>
+        <div class="value" style="color:var(--red-500)">Not Built</div>
+        <div class="desc">No frequency analysis<br>No time-series patterns</div>
+      </div>
+      <div class="state-item">
+        <div class="label">Cross-Entity Anomaly</div>
+        <div class="value" style="color:var(--red-500)">Not Built</div>
+        <div class="desc">No duplicate detection<br>No inter-location comparison</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Anomaly Detection Architecture -->
+  <div class="card">
+    <h2>Anomaly Detection Architecture</h2>
+    <p>Multi-layer anomaly detection combining statistical analysis, temporal patterns, and AI reasoning.</p>
+
+    <h3>Detection Layers</h3>
+    <div class="arch-grid">
+      <div class="arch-box highlight">
+        <h4>Layer 1: Statistical (Real-time)</h4>
+        <ul>
+          <li>Z-score outlier detection on weight/quantity</li>
+          <li>IQR (Interquartile Range) for price validation</li>
+          <li>Per-material baseline: mean ± 2σ</li>
+          <li>Per-location volume baseline</li>
+          <li>Rolling 30-day moving average</li>
+          <li>Runs on every transaction insert/update</li>
+        </ul>
+      </div>
+      <div class="arch-box highlight">
+        <h4>Layer 2: Temporal (Batch)</h4>
+        <ul>
+          <li>Transaction frequency anomalies</li>
+          <li>Time-of-day patterns (unusual hours)</li>
+          <li>Day-of-week deviation</li>
+          <li>Seasonal trend breaks</li>
+          <li>Sudden volume spikes/drops</li>
+          <li>Runs every 6h as cron job</li>
+        </ul>
+      </div>
+      <div class="arch-box highlight">
+        <h4>Layer 3: Cross-Entity (Daily)</h4>
+        <ul>
+          <li>Duplicate transaction detection</li>
+          <li>Same-day same-material same-weight</li>
+          <li>Cross-location volume consistency</li>
+          <li>Material ratio drift detection</li>
+          <li>Evidence reuse detection (image hash)</li>
+          <li>Runs once per day</li>
+        </ul>
+      </div>
+      <div class="arch-box">
+        <h4>Layer 4: AI Reasoning (On-demand)</h4>
+        <ul>
+          <li>LLM reviews flagged transactions</li>
+          <li>Context-aware severity assessment</li>
+          <li>Natural language anomaly explanation</li>
+          <li>Recommendation for reviewer</li>
+          <li>Triggered when statistical flags accumulate</li>
+        </ul>
+      </div>
+    </div>
+
+    <h3>Data Flow: Anomaly Detection Pipeline</h3>
+    <div class="flow-diagram">
+      <div class="flow-node primary">Transaction<div class="sub">Insert / Update event</div></div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-node secondary">Layer 1<br>Stats Check<div class="sub">Z-score, IQR<br>Instant (&lt;100ms)</div></div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-node accent">Flag Store<div class="sub">anomaly_flags JSONB<br>on transaction</div></div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-node secondary">Layer 2–3<br>Batch Analysis<div class="sub">Temporal + Cross<br>Cron jobs</div></div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-node warning">Layer 4<br>AI Review<div class="sub">If 3+ flags<br>LLM reasoning</div></div>
+    </div>
+  </div>
+
+  <!-- Anomaly Detection Task Breakdown -->
+  <div class="card">
+    <h2>Anomaly Detection — Task Breakdown</h2>
+
+    <h3>Phase A: Statistical Engine (Days 1–4)</h3>
+    <table class="task-table">
+      <tr><th style="width:80px">Task ID</th><th>Description</th><th style="width:80px">Priority</th><th style="width:90px">Estimate</th></tr>
+      <tr>
+        <td class="task-id">ANO-001</td>
+        <td>
+          <strong>Build baseline statistics service</strong><br>
+          Calculate per-material, per-location baselines: mean weight, std deviation, typical quantity range. Store in <code>anomaly_baselines</code> table. Recalculate daily.
+          <br><code>backend/GEPPPlatform/services/ai/anomaly_stats.py</code>
+        </td>
+        <td><span class="badge badge-red">HIGH</span></td>
+        <td>5h</td>
+      </tr>
+      <tr>
+        <td class="task-id">ANO-002</td>
+        <td>
+          <strong>Z-score outlier detector</strong><br>
+          On transaction insert: compare weight vs baseline. Flag if |Z| > 2.5. Handle cold-start (fewer than 10 transactions → skip). Return anomaly_score float.
+        </td>
+        <td><span class="badge badge-red">HIGH</span></td>
+        <td>3h</td>
+      </tr>
+      <tr>
+        <td class="task-id">ANO-003</td>
+        <td>
+          <strong>Weight-quantity consistency check</strong><br>
+          Validate: declared_weight ≈ quantity × material.unit_weight (±15% tolerance). Flag large deviations. Differentiate between typo-like errors vs systematic bias.
+        </td>
+        <td><span class="badge badge-red">HIGH</span></td>
+        <td>3h</td>
+      </tr>
+      <tr>
+        <td class="task-id">ANO-004</td>
+        <td>
+          <strong>DB schema: anomaly_flags on transactions</strong><br>
+          Add <code>anomaly_flags JSONB</code> column to transactions table. Schema: <code>[{type, score, detail, detected_at, layer}]</code>. Migration script.
+        </td>
+        <td><span class="badge badge-red">HIGH</span></td>
+        <td>2h</td>
+      </tr>
+    </table>
+
+    <h3>Phase B: Temporal &amp; Cross-Entity (Days 4–7)</h3>
+    <table class="task-table">
+      <tr><th style="width:80px">Task ID</th><th>Description</th><th style="width:80px">Priority</th><th style="width:90px">Estimate</th></tr>
+      <tr>
+        <td class="task-id">ANO-005</td>
+        <td>
+          <strong>Transaction frequency analyzer</strong><br>
+          Per-location: calculate expected daily/weekly transaction count. Flag unusual spikes (>3× average) or drops (0 for 3+ consecutive days when normally active).
+        </td>
+        <td><span class="badge badge-amber">MED</span></td>
+        <td>4h</td>
+      </tr>
+      <tr>
+        <td class="task-id">ANO-006</td>
+        <td>
+          <strong>Duplicate transaction detector</strong><br>
+          Find potential duplicates: same origin + same date + same material + similar weight (±5%). Score similarity. Exclude known bulk/repeated patterns.
+        </td>
+        <td><span class="badge badge-red">HIGH</span></td>
+        <td>4h</td>
+      </tr>
+      <tr>
+        <td class="task-id">ANO-007</td>
+        <td>
+          <strong>Material ratio drift detection</strong><br>
+          Track per-location material distribution over time. If recyclable suddenly changes from 30% to 60% of total, flag as suspicious. Use chi-squared test.
+        </td>
+        <td><span class="badge badge-amber">MED</span></td>
+        <td>3h</td>
+      </tr>
+      <tr>
+        <td class="task-id">ANO-008</td>
+        <td>
+          <strong>Evidence reuse detection</strong><br>
+          Hash evidence images (perceptual hash). Detect if same image attached to multiple transactions. Flag potential photo reuse fraud.
+        </td>
+        <td><span class="badge badge-amber">MED</span></td>
+        <td>3h</td>
+      </tr>
+      <tr>
+        <td class="task-id">ANO-009</td>
+        <td>
+          <strong>Cron jobs for batch analysis</strong><br>
+          Schedule: frequency analysis every 6h, duplicate check daily, ratio drift weekly. Use existing cron infrastructure. Respect org timezone.
+        </td>
+        <td><span class="badge badge-amber">MED</span></td>
+        <td>2h</td>
+      </tr>
+    </table>
+
+    <h3>Phase C: AI Reasoning Layer (Days 7–10)</h3>
+    <table class="task-table">
+      <tr><th style="width:80px">Task ID</th><th>Description</th><th style="width:80px">Priority</th><th style="width:90px">Estimate</th></tr>
+      <tr>
+        <td class="task-id">ANO-010</td>
+        <td>
+          <strong>Anomaly summarization prompt</strong><br>
+          When a transaction accumulates 3+ anomaly flags, send context to LLM. Prompt: explain what's suspicious, severity assessment, recommended action.
+          <br><code>prompts/ai_audit_v1/default/anomaly_summary.yaml</code>
+        </td>
+        <td><span class="badge badge-amber">MED</span></td>
+        <td>4h</td>
+      </tr>
+      <tr>
+        <td class="task-id">ANO-011</td>
+        <td>
+          <strong>Organization-level anomaly report</strong><br>
+          Weekly aggregation: top anomalies by severity, recurring patterns, locations with most flags, material types with most issues. Send to LLM for executive summary.
+        </td>
+        <td><span class="badge badge-blue">LOW</span></td>
+        <td>4h</td>
+      </tr>
+      <tr>
+        <td class="task-id">ANO-012</td>
+        <td>
+          <strong>Anomaly → Audit integration</strong><br>
+          When anomaly score > threshold, auto-queue transaction for AI audit. Link anomaly flags to audit results. Show combined view in UI.
+        </td>
+        <td><span class="badge badge-amber">MED</span></td>
+        <td>3h</td>
+      </tr>
+    </table>
+
+    <h3>Phase D: Frontend Dashboard (Days 10–14)</h3>
+    <table class="task-table">
+      <tr><th style="width:80px">Task ID</th><th>Description</th><th style="width:80px">Priority</th><th style="width:90px">Estimate</th></tr>
+      <tr>
+        <td class="task-id">ANO-013</td>
+        <td>
+          <strong>Anomaly dashboard page</strong><br>
+          New page or tab: anomaly overview with KPIs (total flags, critical count, avg score), heatmap by location, trend chart over time.
+        </td>
+        <td><span class="badge badge-amber">MED</span></td>
+        <td>6h</td>
+      </tr>
+      <tr>
+        <td class="task-id">ANO-014</td>
+        <td>
+          <strong>Transaction anomaly badges in list view</strong><br>
+          Show anomaly indicator on transaction list. Tooltip with flag types. Sortable/filterable by anomaly score.
+        </td>
+        <td><span class="badge badge-amber">MED</span></td>
+        <td>3h</td>
+      </tr>
+      <tr>
+        <td class="task-id">ANO-015</td>
+        <td>
+          <strong>Anomaly detail drawer</strong><br>
+          Slide-out panel showing: all flags for a transaction, evidence comparison, AI reasoning summary, action buttons (dismiss/escalate/audit).
+        </td>
+        <td><span class="badge badge-amber">MED</span></td>
+        <td>4h</td>
+      </tr>
+      <tr>
+        <td class="task-id">ANO-016</td>
+        <td>
+          <strong>Anomaly notification system</strong><br>
+          Alert org admins when critical anomalies detected. In-app notification bell. Optional email digest (daily/weekly).
+        </td>
+        <td><span class="badge badge-blue">LOW</span></td>
+        <td>3h</td>
+      </tr>
+    </table>
+  </div>
+
+  <!-- Sprint Timeline (Anomaly) -->
+  <div class="card">
+    <h2>Sprint Timeline — Anomaly Detection</h2>
+    <div class="gantt-container">
+      <div class="gantt">
+        <!-- Header -->
+        <div class="gh">Task</div>
+        <div class="gh">19</div><div class="gh">20</div><div class="gh weekend">21</div><div class="gh weekend">22</div>
+        <div class="gh">23</div><div class="gh">24</div><div class="gh">25</div><div class="gh">26</div><div class="gh">27</div>
+        <div class="gh weekend">28</div><div class="gh weekend">1</div>
+        <div class="gh">2</div><div class="gh">3</div><div class="gh">4</div>
+
+        <!-- Phase A -->
+        <div class="gr label">Stats Engine</div>
+        <div class="gr"><div class="bar bar-green"></div></div>
+        <div class="gr"><div class="bar bar-green"></div></div>
+        <div class="gr weekend"></div><div class="gr weekend"></div>
+        <div class="gr"><div class="bar bar-green"></div></div>
+        <div class="gr"><div class="bar bar-green"></div></div>
+        <div class="gr"></div><div class="gr"></div><div class="gr"></div>
+        <div class="gr weekend"></div><div class="gr weekend"></div>
+        <div class="gr"></div><div class="gr"></div><div class="gr"></div>
+
+        <!-- Phase B -->
+        <div class="gr label">Temporal + Cross</div>
+        <div class="gr"></div><div class="gr"></div>
+        <div class="gr weekend"></div><div class="gr weekend"></div>
+        <div class="gr"></div><div class="gr"></div>
+        <div class="gr"><div class="bar bar-blue"></div></div>
+        <div class="gr"><div class="bar bar-blue"></div></div>
+        <div class="gr"><div class="bar bar-blue"></div></div>
+        <div class="gr weekend"></div><div class="gr weekend"></div>
+        <div class="gr"></div><div class="gr"></div><div class="gr"></div>
+
+        <!-- Phase C -->
+        <div class="gr label">AI Reasoning</div>
+        <div class="gr"></div><div class="gr"></div>
+        <div class="gr weekend"></div><div class="gr weekend"></div>
+        <div class="gr"></div><div class="gr"></div><div class="gr"></div><div class="gr"></div>
+        <div class="gr"><div class="bar bar-amber"></div></div>
+        <div class="gr weekend"></div><div class="gr weekend"></div>
+        <div class="gr"><div class="bar bar-amber"></div></div>
+        <div class="gr"></div><div class="gr"></div>
+
+        <!-- Phase D -->
+        <div class="gr label">Frontend UI</div>
+        <div class="gr"></div><div class="gr"></div>
+        <div class="gr weekend"></div><div class="gr weekend"></div>
+        <div class="gr"></div><div class="gr"></div><div class="gr"></div><div class="gr"></div><div class="gr"></div>
+        <div class="gr weekend"></div><div class="gr weekend"></div>
+        <div class="gr"></div>
+        <div class="gr"><div class="bar bar-red"></div></div>
+        <div class="gr"><div class="bar bar-red"></div></div>
+      </div>
+    </div>
+    <div style="display:flex; gap:16px; flex-wrap:wrap; margin-top:8px; font-size:12px; color:var(--gray-500);">
+      <span><span style="display:inline-block;width:12px;height:12px;border-radius:3px;background:var(--green-400);vertical-align:middle;margin-right:4px"></span>Phase A: Statistical</span>
+      <span><span style="display:inline-block;width:12px;height:12px;border-radius:3px;background:#60a5fa;vertical-align:middle;margin-right:4px"></span>Phase B: Temporal/Cross</span>
+      <span><span style="display:inline-block;width:12px;height:12px;border-radius:3px;background:#fbbf24;vertical-align:middle;margin-right:4px"></span>Phase C: AI Reasoning</span>
+      <span><span style="display:inline-block;width:12px;height:12px;border-radius:3px;background:#f87171;vertical-align:middle;margin-right:4px"></span>Phase D: Frontend</span>
+    </div>
+  </div>
+
+  <!-- Anomaly Types Reference -->
+  <div class="card">
+    <h2>Anomaly Types Reference</h2>
+    <table class="task-table">
+      <tr><th>Code</th><th>Type</th><th>Layer</th><th>Severity</th><th>Description</th></tr>
+      <tr>
+        <td class="task-id">WT_OUTLIER</td>
+        <td>Weight Outlier</td>
+        <td><span class="badge badge-green">L1</span></td>
+        <td><span class="badge badge-amber">MED</span></td>
+        <td>Weight exceeds ±2.5σ from material baseline at this location</td>
+      </tr>
+      <tr>
+        <td class="task-id">QT_MISMATCH</td>
+        <td>Quantity-Weight Mismatch</td>
+        <td><span class="badge badge-green">L1</span></td>
+        <td><span class="badge badge-red">HIGH</span></td>
+        <td>Declared weight differs >15% from qty × unit_weight</td>
+      </tr>
+      <tr>
+        <td class="task-id">FREQ_SPIKE</td>
+        <td>Frequency Spike</td>
+        <td><span class="badge badge-blue">L2</span></td>
+        <td><span class="badge badge-amber">MED</span></td>
+        <td>Transaction count >3× daily average for this location</td>
+      </tr>
+      <tr>
+        <td class="task-id">FREQ_DROP</td>
+        <td>Frequency Drop</td>
+        <td><span class="badge badge-blue">L2</span></td>
+        <td><span class="badge badge-blue">LOW</span></td>
+        <td>Zero transactions for 3+ consecutive active days</td>
+      </tr>
+      <tr>
+        <td class="task-id">DUP_SUSPECT</td>
+        <td>Duplicate Suspect</td>
+        <td><span class="badge badge-amber">L3</span></td>
+        <td><span class="badge badge-red">HIGH</span></td>
+        <td>Same origin + date + material + weight (±5%)</td>
+      </tr>
+      <tr>
+        <td class="task-id">RATIO_DRIFT</td>
+        <td>Material Ratio Drift</td>
+        <td><span class="badge badge-amber">L3</span></td>
+        <td><span class="badge badge-amber">MED</span></td>
+        <td>Material distribution shifted significantly vs 30-day baseline</td>
+      </tr>
+      <tr>
+        <td class="task-id">IMG_REUSE</td>
+        <td>Evidence Image Reuse</td>
+        <td><span class="badge badge-amber">L3</span></td>
+        <td><span class="badge badge-red">HIGH</span></td>
+        <td>Same evidence image hash found on different transactions</td>
+      </tr>
+      <tr>
+        <td class="task-id">TIME_ODD</td>
+        <td>Unusual Timestamp</td>
+        <td><span class="badge badge-blue">L2</span></td>
+        <td><span class="badge badge-blue">LOW</span></td>
+        <td>Transaction created outside normal business hours pattern</td>
+      </tr>
+    </table>
+  </div>
+
+</div>
+
+<!-- ============================================================ -->
+<!-- JavaScript                                                    -->
+<!-- ============================================================ -->
+<script>
+function switchTab(tabId) {
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+  document.getElementById(tabId).classList.add('active');
+  document.querySelector(`[onclick="switchTab('${tabId}')"]`).classList.add('active');
+}
+</script>
+
+</body>
+</html>

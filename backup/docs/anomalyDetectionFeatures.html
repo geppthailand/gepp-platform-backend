@@ -1,0 +1,1287 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GEPP Platform - Anomaly Detection Feature Proposal</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            color: #1e293b;
+            background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 60px 40px;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 3em;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.2);
+        }
+
+        .header p {
+            font-size: 1.3em;
+            opacity: 0.95;
+        }
+
+        .content {
+            padding: 40px;
+        }
+
+        .section {
+            margin-bottom: 50px;
+            background: #f8fafc;
+            border-radius: 15px;
+            padding: 30px;
+            border-left: 5px solid #667eea;
+        }
+
+        .section h2 {
+            color: #667eea;
+            font-size: 2em;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .section h3 {
+            color: #764ba2;
+            font-size: 1.5em;
+            margin: 25px 0 15px 0;
+            padding-left: 15px;
+            border-left: 3px solid #764ba2;
+        }
+
+        .section h4 {
+            color: #1e293b;
+            font-size: 1.2em;
+            margin: 20px 0 10px 0;
+            font-weight: 600;
+        }
+
+        .icon {
+            font-size: 1.5em;
+        }
+
+        .card {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            margin: 15px 0;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+            border: 1px solid #e2e8f0;
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+        }
+
+        .card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+        }
+
+        .card-header {
+            font-weight: 700;
+            font-size: 1.2em;
+            color: #667eea;
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .card-body {
+            color: #64748b;
+            line-height: 1.8;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 20px;
+            margin: 20px 0;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 5px 12px;
+            border-radius: 20px;
+            font-size: 0.85em;
+            font-weight: 600;
+            margin: 5px 5px 5px 0;
+        }
+
+        .badge-green {
+            background: #d1fae5;
+            color: #059669;
+        }
+
+        .badge-blue {
+            background: #dbeafe;
+            color: #3b82f6;
+        }
+
+        .badge-purple {
+            background: #e9d5ff;
+            color: #a855f7;
+        }
+
+        .badge-orange {
+            background: #fed7aa;
+            color: #ea580c;
+        }
+
+        .badge-red {
+            background: #fecaca;
+            color: #dc2626;
+        }
+
+        .feature-tier {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 40px;
+            border-radius: 15px;
+            margin: 30px 0;
+        }
+
+        .feature-tier h3 {
+            color: white;
+            border-left: 3px solid white;
+            font-size: 1.8em;
+        }
+
+        .tier-list {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-top: 20px;
+        }
+
+        .tier-card {
+            background: rgba(255,255,255,0.15);
+            backdrop-filter: blur(10px);
+            border-radius: 10px;
+            padding: 25px;
+            border: 1px solid rgba(255,255,255,0.2);
+        }
+
+        .tier-card h4 {
+            color: white;
+            font-size: 1.3em;
+            margin-bottom: 15px;
+        }
+
+        .tier-card ul {
+            list-style: none;
+            padding-left: 0;
+        }
+
+        .tier-card li {
+            padding: 8px 0;
+            padding-left: 25px;
+            position: relative;
+            color: rgba(255,255,255,0.95);
+        }
+
+        .tier-card li:before {
+            content: "✓";
+            position: absolute;
+            left: 0;
+            font-weight: bold;
+            color: #10b981;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+            background: white;
+            border-radius: 10px;
+            overflow: hidden;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+        }
+
+        th {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 15px;
+            text-align: left;
+            font-weight: 600;
+        }
+
+        td {
+            padding: 15px;
+            border-bottom: 1px solid #e2e8f0;
+        }
+
+        tr:last-child td {
+            border-bottom: none;
+        }
+
+        tr:hover {
+            background: #f8fafc;
+        }
+
+        .metric-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 15px;
+            margin: 20px 0;
+        }
+
+        .metric-card {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            border: 2px solid #e2e8f0;
+            text-align: center;
+        }
+
+        .metric-value {
+            font-size: 2em;
+            font-weight: bold;
+            color: #667eea;
+            margin: 10px 0;
+        }
+
+        .metric-label {
+            color: #64748b;
+            font-size: 0.9em;
+        }
+
+        .highlight {
+            background: #fef3c7;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-weight: 600;
+            color: #92400e;
+        }
+
+        .warning-box {
+            background: #fef3c7;
+            border-left: 4px solid #f59e0b;
+            padding: 20px;
+            border-radius: 8px;
+            margin: 20px 0;
+        }
+
+        .warning-box strong {
+            color: #92400e;
+        }
+
+        .info-box {
+            background: #dbeafe;
+            border-left: 4px solid #3b82f6;
+            padding: 20px;
+            border-radius: 8px;
+            margin: 20px 0;
+        }
+
+        .info-box strong {
+            color: #1e40af;
+        }
+
+        .success-box {
+            background: #d1fae5;
+            border-left: 4px solid #10b981;
+            padding: 20px;
+            border-radius: 8px;
+            margin: 20px 0;
+        }
+
+        .success-box strong {
+            color: #065f46;
+        }
+
+        code {
+            background: #1e293b;
+            color: #10b981;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9em;
+        }
+
+        pre {
+            background: #1e293b;
+            color: #e2e8f0;
+            padding: 20px;
+            border-radius: 10px;
+            overflow-x: auto;
+            margin: 20px 0;
+            border: 1px solid #334155;
+        }
+
+        .footer {
+            background: #1e293b;
+            color: white;
+            padding: 40px;
+            text-align: center;
+        }
+
+        .footer p {
+            opacity: 0.8;
+            margin-bottom: 10px;
+        }
+
+        @media print {
+            body {
+                background: white;
+                padding: 0;
+            }
+            .container {
+                box-shadow: none;
+            }
+            .card:hover {
+                transform: none;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <div class="header">
+            <h1>🔍 Anomaly Detection System</h1>
+            <p>GEPP Platform - Transaction Monitoring & Fraud Prevention</p>
+            <p style="font-size: 1em; margin-top: 10px; opacity: 0.8;">Intelligent Waste Transaction Monitoring with Minimal Cost</p>
+        </div>
+
+        <div class="content">
+            <!-- Executive Summary -->
+            <div class="section">
+                <h2><span class="icon">📊</span> Executive Summary</h2>
+                <div class="success-box">
+                    <strong>ภาพรวม:</strong> ระบบตรวจจับความผิดปกติในการสร้าง transaction โดยใช้ Statistical Models พื้นฐานเป็นหลัก ประหยัดค่าใช้จ่าย และเพิ่ม LLM เฉพาะกรณีที่สงสัย เพื่อวิเคราะห์เชิงลึก
+                </div>
+
+                <div class="metric-grid">
+                    <div class="metric-card">
+                        <div class="metric-label">Cost per Transaction</div>
+                        <div class="metric-value">~฿0.01</div>
+                        <div class="metric-label">Statistical Only</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-label">Flagged Transaction Cost</div>
+                        <div class="metric-value">~฿0.50</div>
+                        <div class="metric-label">Statistical + LLM</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-label">Detection Speed</div>
+                        <div class="metric-value">&lt;100ms</div>
+                        <div class="metric-label">Real-time</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-label">Expected Accuracy</div>
+                        <div class="metric-value">85-95%</div>
+                        <div class="metric-label">After Training</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ข้อมูลที่มีในระบบปัจจุบัน -->
+            <div class="section">
+                <h2><span class="icon">💾</span> ข้อมูลที่มีในระบบปัจจุบัน</h2>
+
+                <h3>Transaction & TransactionRecord Schema</h3>
+                <div class="card">
+                    <div class="card-header">📦 Transaction (รายการซื้อขาย/ส่งมอบขยะแต่ละครั้ง)</div>
+                    <div class="card-body">
+                        <strong>ข้อมูลตัวเลขที่สำคัญ:</strong>
+                        <ul style="list-style: none; padding-left: 0; margin-top: 10px;">
+                            <li>• <code>weight_kg</code> (DECIMAL 15,4): น้ำหนักรวมทั้งหมด (kg) ⭐ <span class="highlight">Primary Metric</span></li>
+                            <li>• <code>total_amount</code> (DECIMAL 15,4): มูลค่ารวมทั้งหมด (บาท)</li>
+                            <li>• <code>hazardous_level</code> (0-5): ระดับอันตราย</li>
+                            <li>• <code>transaction_records</code> (ARRAY): จำนวนรายการย่อย</li>
+                        </ul>
+
+                        <strong style="margin-top: 15px; display: block;">ข้อมูลบริบท:</strong>
+                        <ul style="list-style: none; padding-left: 0; margin-top: 10px;">
+                            <li>• <code>organization_id</code>: องค์กร</li>
+                            <li>• <code>origin_id</code>: สถานที่ต้นทาง</li>
+                            <li>• <code>transaction_date</code>: วันที่ทำรายการ</li>
+                            <li>• <code>transaction_method</code>: วิธีการ (origin/transport/transform/qr_input/scale_input)</li>
+                            <li>• <code>status</code>: สถานะ (draft/pending/approved/rejected/completed)</li>
+                            <li>• <code>images</code> (JSONB): รูปภาพประกอบ</li>
+                            <li>• <code>notes</code>: บันทึกเพิ่มเติม</li>
+                        </ul>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">📋 TransactionRecord (รายการย่อยแต่ละวัสดุ)</div>
+                    <div class="card-body">
+                        <strong>ข้อมูลตัวเลขที่สำคัญ:</strong>
+                        <ul style="list-style: none; padding-left: 0; margin-top: 10px;">
+                            <li>• <code>origin_weight_kg</code> (DECIMAL 15,4): น้ำหนัก (kg) ⭐ <span class="highlight">Primary Metric</span></li>
+                            <li>• <code>origin_quantity</code> (DECIMAL 15,4): ปริมาณ</li>
+                            <li>• <code>origin_price_per_unit</code> (DECIMAL 15,4): ราคาต่อหน่วย</li>
+                            <li>• <code>total_amount</code> (DECIMAL 15,4): มูลค่ารวม</li>
+                            <li>• <code>hazardous_level</code> (0-5): ระดับอันตราย</li>
+                        </ul>
+
+                        <strong style="margin-top: 15px; display: block;">ข้อมูลบริบท:</strong>
+                        <ul style="list-style: none; padding-left: 0; margin-top: 10px;">
+                            <li>• <code>material_id</code>: วัสดุเฉพาะเจาะจง</li>
+                            <li>• <code>main_material_id</code>: หมวดหมู่วัสดุหลัก</li>
+                            <li>• <code>category_id</code>: หมวดหมู่ใหญ่</li>
+                            <li>• <code>destination_id</code>: สถานที่ปลายทาง</li>
+                            <li>• <code>unit</code>: หน่วย (kg, ton, piece, etc.)</li>
+                        </ul>
+                    </div>
+                </div>
+
+                <h3>ข้อมูลอ้างอิง (Master Data)</h3>
+                <div class="grid">
+                    <div class="card">
+                        <div class="card-header">🏢 Organization</div>
+                        <div class="card-body">
+                            องค์กรที่ใช้งานระบบ พร้อมการตั้งค่า AI Audit
+                        </div>
+                    </div>
+                    <div class="card">
+                        <div class="card-header">📍 UserLocation</div>
+                        <div class="card-body">
+                            สถานที่/ผู้ใช้งาน มี hierarchy แบบ tree structure
+                        </div>
+                    </div>
+                    <div class="card">
+                        <div class="card-header">🎨 Material</div>
+                        <div class="card-body">
+                            วัสดุเฉพาะเจาะจง (Category → MainMaterial → Material)
+                        </div>
+                    </div>
+                    <div class="card">
+                        <div class="card-header">📦 MainMaterial</div>
+                        <div class="card-body">
+                            หมวดหมู่วัสดุหลัก เช่น PET Plastic, Cardboard
+                        </div>
+                    </div>
+                    <div class="card">
+                        <div class="card-header">🗂️ MaterialCategory</div>
+                        <div class="card-body">
+                            หมวดหมู่ใหญ่ เช่น Plastic, Paper, Metal
+                        </div>
+                    </div>
+                    <div class="card">
+                        <div class="card-header">📜 TransactionAudit</div>
+                        <div class="card-body">
+                            ประวัติการ audit (AI + Manual) พร้อม token usage
+                        </div>
+                    </div>
+                </div>
+
+                <div class="info-box">
+                    <strong>💡 Key Insight:</strong> ระบบมีข้อมูลครบถ้วนสำหรับการวิเคราะห์ anomaly ทั้ง numeric fields (weight, price, quantity), temporal data (transaction_date), และ contextual information (organization, location, material hierarchy)
+                </div>
+            </div>
+
+            <!-- แนวทางการตรวจจับความผิดปกติ -->
+            <div class="section">
+                <h2><span class="icon">🎯</span> แนวทางการตรวจจับความผิดปกติ</h2>
+
+                <h3>Level 1: Statistical Anomaly Detection (พื้นฐาน - ใช้ทุกรายการ)</h3>
+                <div class="card">
+                    <div class="card-header">📈 Z-Score & IQR Analysis</div>
+                    <div class="card-body">
+                        <p><strong>หลักการ:</strong> เปรียบเทียบข้อมูลปัจจุบันกับค่าเฉลี่ย (mean) และส่วนเบี่ยงเบนมาตรฐาน (std dev) ของข้อมูลในอดีต</p>
+
+                        <p style="margin-top: 15px;"><strong>Metrics ที่ตรวจสอบ:</strong></p>
+                        <ul style="margin-left: 20px; margin-top: 10px;">
+                            <li><strong>Weight Anomaly:</strong> น้ำหนักแต่ละรายการ vs ค่าเฉลี่ยของวัสดุชนิดนั้น</li>
+                            <li><strong>Price Anomaly:</strong> ราคาต่อหน่วย vs ราคาตลาดปกติ</li>
+                            <li><strong>Volume Anomaly:</strong> จำนวน records ต่อ transaction</li>
+                            <li><strong>Frequency Anomaly:</strong> จำนวนรายการต่อวัน/สัปดาห์</li>
+                            <li><strong>Time Pattern Anomaly:</strong> รายการนอกเวลาทำการ/วันหยุด</li>
+                        </ul>
+
+                        <p style="margin-top: 15px;"><strong>Thresholds:</strong></p>
+                        <ul style="margin-left: 20px; margin-top: 10px;">
+                            <li><span class="badge badge-green">ปกติ:</span> Z-score < 2 (within 95% confidence)</li>
+                            <li><span class="badge badge-orange">น่าสงสัย:</span> 2 ≤ Z-score < 3</li>
+                            <li><span class="badge badge-red">ผิดปกติมาก:</span> Z-score ≥ 3</li>
+                        </ul>
+
+                        <p style="margin-top: 15px;"><strong>ตัวอย่างการคำนวณ:</strong></p>
+                        <pre>
+z_score = (current_weight - mean_weight) / std_dev_weight
+
+# Example:
+# - Mean weight for PET plastic: 50 kg
+# - Std dev: 10 kg
+# - Current transaction: 85 kg
+# - Z-score = (85 - 50) / 10 = 3.5 (ผิดปกติมาก!)
+                        </pre>
+
+                        <div class="success-box" style="margin-top: 15px;">
+                            <strong>ข้อดี:</strong>
+                            <ul style="margin-left: 20px; margin-top: 10px;">
+                                <li>✓ รวดเร็วมาก (&lt;50ms per transaction)</li>
+                                <li>✓ ไม่มีค่าใช้จ่าย API</li>
+                                <li>✓ ทำงานแบบ real-time ได้</li>
+                                <li>✓ อธิบายได้ง่าย (explainable)</li>
+                            </ul>
+                        </div>
+
+                        <div class="warning-box" style="margin-top: 15px;">
+                            <strong>ข้อจำกัด:</strong>
+                            <ul style="margin-left: 20px; margin-top: 10px;">
+                                <li>⚠️ ต้องการข้อมูลในอดีตอย่างน้อย 30-60 รายการ</li>
+                                <li>⚠️ อาจมี false positive ในช่วงเปลี่ยนฤดูกาล</li>
+                                <li>⚠️ ไม่เข้าใจ context ที่ซับซ้อน</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+
+                <h3>Level 2: Time Series Analysis (กลาง - ใช้ทุกรายการ)</h3>
+                <div class="card">
+                    <div class="card-header">📉 Trend & Seasonality Detection</div>
+                    <div class="card-body">
+                        <p><strong>หลักการ:</strong> วิเคราะห์รูปแบบเชิงเวลา (temporal patterns) เพื่อหา trends และ seasonality</p>
+
+                        <p style="margin-top: 15px;"><strong>Patterns ที่ตรวจจับ:</strong></p>
+                        <ul style="margin-left: 20px; margin-top: 10px;">
+                            <li><strong>Sudden Spike:</strong> ปริมาณเพิ่มขึ้นกะทันหัน (เช่น 5x จากสัปดาห์ก่อน)</li>
+                            <li><strong>Sudden Drop:</strong> ปริมาณลดลงกะทันหัน (เช่น drop 80%)</li>
+                            <li><strong>Unusual Timing:</strong> รายการในเวลาผิดปกติ (เช่น 3 AM, วันหยุด)</li>
+                            <li><strong>Frequency Change:</strong> เปลี่ยนจาก daily → hourly หรือ weekly → daily</li>
+                            <li><strong>Gap Detection:</strong> ช่วงเงียบผิดปกติ (เช่น ไม่มีรายการ 7 วัน ทั้งที่ปกติทุกวัน)</li>
+                        </ul>
+
+                        <p style="margin-top: 15px;"><strong>Methods:</strong></p>
+                        <ul style="margin-left: 20px; margin-top: 10px;">
+                            <li><strong>Moving Average:</strong> เฉลี่ยเคลื่อนที่ 7/30 วัน</li>
+                            <li><strong>Exponential Smoothing:</strong> ให้น้ำหนักข้อมูลล่าสุดมากกว่า</li>
+                            <li><strong>Day-of-Week Pattern:</strong> เปรียบเทียบจันทร์ vs จันทร์ ไม่ใช่ จันทร์ vs อาทิตย์</li>
+                        </ul>
+
+                        <div class="success-box" style="margin-top: 15px;">
+                            <strong>ข้อดี:</strong>
+                            <ul style="margin-left: 20px; margin-top: 10px;">
+                                <li>✓ จับ sudden changes ได้ดีกว่า Z-score</li>
+                                <li>✓ เข้าใจ seasonality (เช่น สิ้นเดือนมีขยะเยอะ)</li>
+                                <li>✓ ยังคงรวดเร็วและไม่มีค่าใช้จ่าย</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+
+                <h3>Level 3: Rule-Based Detection (กลาง - ใช้ทุกรายการ)</h3>
+                <div class="card">
+                    <div class="card-header">⚖️ Business Rules & Constraints</div>
+                    <div class="card-body">
+                        <p><strong>หลักการ:</strong> ตรวจสอบตามกฎธุรกิจที่กำหนดไว้ล่วงหน้า</p>
+
+                        <p style="margin-top: 15px;"><strong>Rule Categories:</strong></p>
+
+                        <strong style="margin-top: 15px; display: block;">1. Physical Constraints:</strong>
+                        <ul style="margin-left: 20px; margin-top: 10px;">
+                            <li>• Weight must be positive (weight_kg > 0)</li>
+                            <li>• Weight must match material density expectations</li>
+                            <li>• Volume must be reasonable for container type</li>
+                            <li>• Hazardous level must match material type</li>
+                        </ul>
+
+                        <strong style="margin-top: 15px; display: block;">2. Business Constraints:</strong>
+                        <ul style="margin-left: 20px; margin-top: 10px;">
+                            <li>• Price must be within market range (min-max bounds)</li>
+                            <li>• Organization daily limits (max weight per day)</li>
+                            <li>• Location capacity constraints</li>
+                            <li>• Hazardous material requires special approval</li>
+                        </ul>
+
+                        <strong style="margin-top: 15px; display: block;">3. Relationship Constraints:</strong>
+                        <ul style="margin-left: 20px; margin-top: 10px;">
+                            <li>• Same origin shouldn't have drastically different prices</li>
+                            <li>• Same material shouldn't have wild weight variations</li>
+                            <li>• Destination must be logical for material type</li>
+                        </ul>
+
+                        <div class="success-box" style="margin-top: 15px;">
+                            <strong>ข้อดี:</strong>
+                            <ul style="margin-left: 20px; margin-top: 10px;">
+                                <li>✓ Explainable 100% (บอกได้ชัดว่าผิดกฎไหน)</li>
+                                <li>✓ False positive ต่ำมาก</li>
+                                <li>✓ Customizable ตาม business needs</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+
+                <h3>Level 4: LLM-Powered Deep Analysis (ขั้นสูง - ใช้เฉพาะรายการที่ flag)</h3>
+                <div class="card">
+                    <div class="card-header">🤖 AI-Powered Contextual Understanding</div>
+                    <div class="card-body">
+                        <p><strong>หลักการ:</strong> ใช้ LLM (Gemini 2.0 Flash) เพื่อวิเคราะห์เชิงลึกเฉพาะรายการที่ผ่าน Level 1-3 แล้วยังสงสัย</p>
+
+                        <p style="margin-top: 15px;"><strong>🎯 เมื่อไหร่ใช้ LLM:</strong></p>
+                        <ul style="margin-left: 20px; margin-top: 10px;">
+                            <li>✓ <span class="badge badge-orange">Level 1-3 flag เป็น "suspicious"</span></li>
+                            <li>✓ Multiple anomaly types detected พร้อมกัน</li>
+                            <li>✓ High-value transactions (&gt;100,000 บาท)</li>
+                            <li>✓ Hazardous materials involved</li>
+                            <li>✓ Cross-organization transactions</li>
+                        </ul>
+
+                        <p style="margin-top: 15px;"><strong>What LLM Analyzes:</strong></p>
+                        <ul style="margin-left: 20px; margin-top: 10px;">
+                            <li><strong>Images:</strong> ดูรูปภาพว่าสอดคล้องกับข้อมูลที่บันทึกหรือไม่</li>
+                            <li><strong>Notes:</strong> อ่าน notes หาคำอธิบาย/เหตุผลที่เป็นไปได้</li>
+                            <li><strong>Historical Context:</strong> ดูประวัติ 30-90 วันย้อนหลัง</li>
+                            <li><strong>Relationships:</strong> วิเคราะห์ความสัมพันธ์ระหว่าง origin-destination-material</li>
+                            <li><strong>Multi-factor Correlation:</strong> หาความสัมพันธ์ซับซ้อนที่ statistical model จับไม่ได้</li>
+                        </ul>
+
+                        <p style="margin-top: 15px;"><strong>Prompt Strategy (เพื่อลด token):</strong></p>
+                        <pre>
+You are a waste transaction auditor. Analyze this flagged transaction:
+
+**Current Transaction:**
+- ID: {transaction_id}
+- Weight: {weight_kg} kg (vs avg: {avg_weight} kg)
+- Price: {total_amount} THB
+- Material: {material_name}
+- Origin: {origin_name}
+- Date: {transaction_date}
+- Statistical Flags: {anomaly_flags}
+
+**Recent History (last 30 days):**
+{compact_history}
+
+**Images:** {image_urls}
+**Notes:** {notes}
+
+**Question:** Is this transaction legitimately unusual or potentially fraudulent?
+
+Respond in JSON:
+{
+  "is_suspicious": boolean,
+  "confidence": 0-100,
+  "reason": "brief explanation in Thai",
+  "recommended_action": "approve|review|reject"
+}
+                        </pre>
+
+                        <div class="success-box" style="margin-top: 15px;">
+                            <strong>ข้อดี:</strong>
+                            <ul style="margin-left: 20px; margin-top: 10px;">
+                                <li>✓ Contextual understanding (เข้าใจบริบท)</li>
+                                <li>✓ Image analysis (วิเคราะห์ภาพได้)</li>
+                                <li>✓ Natural language reasoning (อธิบายเหตุผลได้)</li>
+                                <li>✓ Catches complex fraud patterns</li>
+                            </ul>
+                        </div>
+
+                        <div class="warning-box" style="margin-top: 15px;">
+                            <strong>ข้อจำกัด & Cost Management:</strong>
+                            <ul style="margin-left: 20px; margin-top: 10px;">
+                                <li>⚠️ Cost: ~฿0.30-0.50 per transaction</li>
+                                <li>⚠️ Latency: 2-5 seconds</li>
+                                <li>⚠️ Token limits: Keep prompt under 4,000 tokens</li>
+                                <li>⚠️ Rate limits: Max 60 requests/minute</li>
+                            </ul>
+                            <p style="margin-top: 10px;"><strong>💡 Strategy:</strong> ใช้เฉพาะ 5-10% ของรายการที่ผ่าน statistical filter แล้ว → รักษา cost ให้ต่ำ</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Feature Tiers -->
+            <div class="feature-tier">
+                <h3>🎨 Feature Tiers: จากพื้นฐานสู่ระดับเจ๋ง</h3>
+
+                <div class="tier-list">
+                    <!-- Tier 1: Basic -->
+                    <div class="tier-card">
+                        <h4>⭐ Tier 1: Basic Detection</h4>
+                        <ul>
+                            <li>Z-score anomaly detection</li>
+                            <li>Weight/Price threshold checks</li>
+                            <li>Simple rule-based validation</li>
+                            <li>Daily/Weekly frequency monitoring</li>
+                            <li>Email alerts for flagged transactions</li>
+                        </ul>
+                        <div style="margin-top: 15px; padding: 10px; background: rgba(255,255,255,0.2); border-radius: 5px;">
+                            <strong>Cost:</strong> ~฿0.00 per transaction<br>
+                            <strong>Time to Deploy:</strong> 2 weeks
+                        </div>
+                    </div>
+
+                    <!-- Tier 2: Intermediate -->
+                    <div class="tier-card">
+                        <h4>⭐⭐ Tier 2: Smart Monitoring</h4>
+                        <ul>
+                            <li>Time series trend analysis</li>
+                            <li>Seasonality-aware detection</li>
+                            <li>Multi-factor correlation</li>
+                            <li>Location-based patterns</li>
+                            <li>Material mix analysis</li>
+                            <li>Dashboard with anomaly scores</li>
+                            <li>Configurable thresholds per org</li>
+                        </ul>
+                        <div style="margin-top: 15px; padding: 10px; background: rgba(255,255,255,0.2); border-radius: 5px;">
+                            <strong>Cost:</strong> ~฿0.01 per transaction<br>
+                            <strong>Time to Deploy:</strong> 4 weeks
+                        </div>
+                    </div>
+
+                    <!-- Tier 3: Advanced -->
+                    <div class="tier-card">
+                        <h4>⭐⭐⭐ Tier 3: AI-Powered Intelligence</h4>
+                        <ul>
+                            <li>All Tier 2 features</li>
+                            <li>LLM contextual analysis (for flagged)</li>
+                            <li>Image verification</li>
+                            <li>Historical pattern matching</li>
+                            <li>Predictive fraud scoring</li>
+                            <li>Automatic false positive learning</li>
+                            <li>Real-time risk dashboard</li>
+                            <li>Fraud investigation tools</li>
+                        </ul>
+                        <div style="margin-top: 15px; padding: 10px; background: rgba(255,255,255,0.2); border-radius: 5px;">
+                            <strong>Cost:</strong> ~฿0.05-0.10 per transaction<br>
+                            <strong>Time to Deploy:</strong> 6-8 weeks
+                        </div>
+                    </div>
+
+                    <!-- Tier 4: Premium -->
+                    <div class="tier-card">
+                        <h4>⭐⭐⭐⭐ Tier 4: Enterprise Suite (WOW Factor!)</h4>
+                        <ul>
+                            <li>All Tier 3 features</li>
+                            <li>ML-based fraud prediction model</li>
+                            <li>Graph network analysis (find fraud rings)</li>
+                            <li>Behavioral profiling per organization</li>
+                            <li>Anomaly explanation with reasoning</li>
+                            <li>Auto-suggest corrective actions</li>
+                            <li>Integration with external fraud databases</li>
+                            <li>Custom ML model training</li>
+                            <li>Executive fraud reports with insights</li>
+                        </ul>
+                        <div style="margin-top: 15px; padding: 10px; background: rgba(255,255,255,0.2); border-radius: 5px;">
+                            <strong>Cost:</strong> ~฿0.10-0.20 per transaction<br>
+                            <strong>Time to Deploy:</strong> 12+ weeks
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Implementation Plan -->
+            <div class="section">
+                <h2><span class="icon">🚀</span> แผนการพัฒนา (Recommended Path)</h2>
+
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Phase</th>
+                            <th>Duration</th>
+                            <th>Features</th>
+                            <th>Cost Impact</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>Phase 1</strong><br>Foundation</td>
+                            <td>2 weeks</td>
+                            <td>
+                                • Database schema for anomaly scores<br>
+                                • Statistical baseline calculation<br>
+                                • Z-score detection<br>
+                                • Basic alerting
+                            </td>
+                            <td style="color: #10b981;">฿0.00/txn</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Phase 2</strong><br>Smart Detection</td>
+                            <td>2 weeks</td>
+                            <td>
+                                • Time series analysis<br>
+                                • Rule-based validation<br>
+                                • Dashboard UI<br>
+                                • Configurable thresholds
+                            </td>
+                            <td style="color: #10b981;">฿0.01/txn</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Phase 3</strong><br>AI Integration</td>
+                            <td>3 weeks</td>
+                            <td>
+                                • LLM analysis for flagged transactions<br>
+                                • Image verification<br>
+                                • Historical context analysis<br>
+                                • False positive tracking
+                            </td>
+                            <td style="color: #f59e0b;">฿0.05-0.10/txn</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Phase 4</strong><br>Machine Learning</td>
+                            <td>4+ weeks</td>
+                            <td>
+                                • Custom ML model training<br>
+                                • Graph network analysis<br>
+                                • Behavioral profiling<br>
+                                • Predictive fraud scoring
+                            </td>
+                            <td style="color: #ea580c;">฿0.10-0.20/txn</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <div class="info-box">
+                    <strong>💡 Recommendation:</strong> เริ่มที่ Phase 1-2 (Tier 1-2) เพื่อสร้าง baseline และ validate approach ก่อน ใช้งานจริง 1-2 เดือน เก็บข้อมูล feedback จากผู้ใช้ แล้วค่อยขยายไป Phase 3-4 เมื่อมีความจำเป็น
+                </div>
+            </div>
+
+            <!-- Technical Architecture -->
+            <div class="section">
+                <h2><span class="icon">🏗️</span> สถาปัตยกรรมระบบ</h2>
+
+                <h3>Component Overview</h3>
+                <div class="grid">
+                    <div class="card">
+                        <div class="card-header">📊 Baseline Calculator Service</div>
+                        <div class="card-body">
+                            <strong>หน้าที่:</strong> คำนวณ baselines สำหรับแต่ละ organization/material/origin
+                            <ul style="margin-left: 20px; margin-top: 10px;">
+                                <li>• Daily cron job (ทำทุกคืน)</li>
+                                <li>• Calculate: mean, median, std dev, min, max</li>
+                                <li>• Rolling windows: 30/60/90 days</li>
+                                <li>• Store in <code>anomaly_baselines</code> table</li>
+                            </ul>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">🔍 Anomaly Detector Service</div>
+                        <div class="card-body">
+                            <strong>หน้าที่:</strong> ตรวจสอบ transaction ใหม่เมื่อสร้าง
+                            <ul style="margin-left: 20px; margin-top: 10px;">
+                                <li>• Called on transaction create/update</li>
+                                <li>• Run Level 1-3 checks (&lt;100ms)</li>
+                                <li>• Calculate anomaly_score (0-100)</li>
+                                <li>• Flag if score > threshold</li>
+                            </ul>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">🤖 LLM Analyzer Service</div>
+                        <div class="card-body">
+                            <strong>หน้าที่:</strong> Deep analysis ด้วย LLM
+                            <ul style="margin-left: 20px; margin-top: 10px;">
+                                <li>• Triggered for high-risk transactions</li>
+                                <li>• Fetch transaction + history + images</li>
+                                <li>• Call Gemini API with structured prompt</li>
+                                <li>• Parse JSON response</li>
+                            </ul>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">📈 Dashboard & Reports</div>
+                        <div class="card-body">
+                            <strong>หน้าที่:</strong> UI สำหรับดู/จัดการ anomalies
+                            <ul style="margin-left: 20px; margin-top: 10px;">
+                                <li>• List flagged transactions</li>
+                                <li>• Show anomaly scores & reasons</li>
+                                <li>• Approve/Reject actions</li>
+                                <li>• False positive feedback</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+
+                <h3>Database Schema Changes</h3>
+                <pre>
+-- New table: anomaly_baselines
+CREATE TABLE anomaly_baselines (
+    id BIGSERIAL PRIMARY KEY,
+    organization_id BIGINT NOT NULL,
+    material_id BIGINT,
+    origin_id BIGINT,
+    window_days INT NOT NULL, -- 30/60/90
+    metric_name VARCHAR(50) NOT NULL, -- weight_kg, price, frequency
+    mean_value DECIMAL(15,4),
+    median_value DECIMAL(15,4),
+    std_dev DECIMAL(15,4),
+    min_value DECIMAL(15,4),
+    max_value DECIMAL(15,4),
+    sample_count INT,
+    calculated_date TIMESTAMP,
+    created_date TIMESTAMP DEFAULT NOW(),
+    UNIQUE(organization_id, material_id, origin_id, window_days, metric_name)
+);
+
+-- New table: transaction_anomalies
+CREATE TABLE transaction_anomalies (
+    id BIGSERIAL PRIMARY KEY,
+    transaction_id BIGINT NOT NULL REFERENCES transactions(id),
+    anomaly_score DECIMAL(5,2) NOT NULL, -- 0-100
+    anomaly_types JSONB NOT NULL, -- ["weight_spike", "price_outlier"]
+    statistical_analysis JSONB, -- z-scores, thresholds, etc.
+    llm_analysis JSONB, -- LLM response if analyzed
+    status VARCHAR(20) DEFAULT 'pending', -- pending, approved, rejected, false_positive
+    reviewed_by BIGINT REFERENCES user_locations(id),
+    reviewed_date TIMESTAMP,
+    created_date TIMESTAMP DEFAULT NOW(),
+    INDEX idx_transaction_id (transaction_id),
+    INDEX idx_status (status),
+    INDEX idx_anomaly_score (anomaly_score)
+);
+
+-- Add fields to transactions table
+ALTER TABLE transactions ADD COLUMN anomaly_score DECIMAL(5,2);
+ALTER TABLE transactions ADD COLUMN anomaly_status VARCHAR(20); -- clean, flagged, under_review, confirmed_fraud
+ALTER TABLE transactions ADD COLUMN anomaly_checked_date TIMESTAMP;
+                </pre>
+            </div>
+
+            <!-- Cost Analysis -->
+            <div class="section">
+                <h2><span class="icon">💰</span> การวิเคราะห์ค่าใช้จ่าย</h2>
+
+                <h3>Scenario: 10,000 Transactions/Month</h3>
+
+                <div class="grid">
+                    <div class="metric-card">
+                        <div class="metric-label">Tier 1: Basic</div>
+                        <div class="metric-value">฿0</div>
+                        <div class="metric-label">100% Statistical</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-label">Tier 2: Smart</div>
+                        <div class="metric-value">฿100</div>
+                        <div class="metric-label">Infrastructure cost only</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-label">Tier 3: AI-Powered</div>
+                        <div class="metric-value">฿500-1,000</div>
+                        <div class="metric-label">10% flagged → LLM (1,000 calls × ฿0.50)</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-label">Tier 4: Enterprise</div>
+                        <div class="metric-value">฿1,000-2,000</div>
+                        <div class="metric-label">ML training + advanced features</div>
+                    </div>
+                </div>
+
+                <h3>Cost Breakdown (Tier 3 Example)</h3>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Component</th>
+                            <th>Unit Cost</th>
+                            <th>Volume</th>
+                            <th>Total</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>Statistical Analysis (Level 1-3)</td>
+                            <td>฿0.00</td>
+                            <td>10,000 transactions</td>
+                            <td style="color: #10b981;">฿0</td>
+                        </tr>
+                        <tr>
+                            <td>LLM Analysis (Gemini Flash)</td>
+                            <td>฿0.50/call</td>
+                            <td>1,000 flagged (10%)</td>
+                            <td style="color: #f59e0b;">฿500</td>
+                        </tr>
+                        <tr>
+                            <td>Image Analysis (if enabled)</td>
+                            <td>฿0.30/image</td>
+                            <td>500 images (5%)</td>
+                            <td style="color: #ea580c;">฿150</td>
+                        </tr>
+                        <tr>
+                            <td>Infrastructure (DB, compute)</td>
+                            <td>Fixed</td>
+                            <td>-</td>
+                            <td style="color: #3b82f6;">฿100-200</td>
+                        </tr>
+                        <tr>
+                            <td colspan="3" style="text-align: right;"><strong>Total Monthly Cost</strong></td>
+                            <td style="font-weight: bold; color: #667eea;">฿750-850</td>
+                        </tr>
+                        <tr>
+                            <td colspan="3" style="text-align: right;"><strong>Cost per Transaction</strong></td>
+                            <td style="font-weight: bold; color: #667eea;">฿0.075-0.085</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <div class="success-box">
+                    <strong>💡 Cost Optimization Strategies:</strong>
+                    <ul style="margin-left: 20px; margin-top: 10px;">
+                        <li>✓ Use statistical methods for 90-95% of transactions (free)</li>
+                        <li>✓ Cache LLM responses for similar patterns</li>
+                        <li>✓ Batch LLM calls during off-peak hours</li>
+                        <li>✓ Use smaller prompts (compress history data)</li>
+                        <li>✓ Adjust flagging threshold based on budget</li>
+                        <li>✓ Skip LLM for low-value transactions (&lt;1,000 THB)</li>
+                    </ul>
+                </div>
+            </div>
+
+            <!-- Limitations & Considerations -->
+            <div class="section">
+                <h2><span class="icon">⚠️</span> ข้อจำกัดและข้อควรระวัง</h2>
+
+                <div class="grid">
+                    <div class="card">
+                        <div class="card-header">📊 Data Requirements</div>
+                        <div class="card-body">
+                            <strong>ความท้าทาย:</strong>
+                            <ul style="margin-left: 20px; margin-top: 10px;">
+                                <li>• ต้องการข้อมูล historical อย่างน้อย 30-60 วัน</li>
+                                <li>• Organizations ใหม่จะไม่มี baseline</li>
+                                <li>• Seasonal patterns ต้องใช้ข้อมูล 1 ปี+</li>
+                            </ul>
+                            <strong style="margin-top: 10px; display: block;">วิธีแก้:</strong>
+                            <ul style="margin-left: 20px; margin-top: 10px;">
+                                <li>✓ ใช้ industry-wide baselines สำหรับ org ใหม่</li>
+                                <li>✓ Progressive learning (ปรับ baseline ทุกสัปดาห์)</li>
+                                <li>✓ Combine cross-organization patterns</li>
+                            </ul>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">🎯 False Positives</div>
+                        <div class="card-body">
+                            <strong>ความท้าทาย:</strong>
+                            <ul style="margin-left: 20px; margin-top: 10px;">
+                                <li>• Legitimate unusual transactions ถูก flag</li>
+                                <li>• Seasonal events (ปีใหม่, เทศกาล)</li>
+                                <li>• One-time large cleanups</li>
+                            </ul>
+                            <strong style="margin-top: 10px; display: block;">วิธีแก้:</strong>
+                            <ul style="margin-left: 20px; margin-top: 10px;">
+                                <li>✓ ให้ user mark "false positive" → ML learns</li>
+                                <li>✓ Allow "expected anomaly" notes</li>
+                                <li>✓ LLM reads notes for context</li>
+                            </ul>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">🕐 Real-time Performance</div>
+                        <div class="card-body">
+                            <strong>ความท้าทาย:</strong>
+                            <ul style="margin-left: 20px; margin-top: 10px;">
+                                <li>• Statistical checks: &lt;100ms ✓</li>
+                                <li>• LLM analysis: 2-5 seconds ⚠️</li>
+                                <li>• Image analysis: 3-8 seconds ⚠️</li>
+                            </ul>
+                            <strong style="margin-top: 10px; display: block;">วิธีแก้:</strong>
+                            <ul style="margin-left: 20px; margin-top: 10px;">
+                                <li>✓ Async LLM analysis (background job)</li>
+                                <li>✓ Show "Under Review" status</li>
+                                <li>✓ Prioritize high-risk transactions</li>
+                            </ul>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">🔄 Evolving Patterns</div>
+                        <div class="card-body">
+                            <strong>ความท้าทาย:</strong>
+                            <ul style="margin-left: 20px; margin-top: 10px;">
+                                <li>• Business grows → patterns change</li>
+                                <li>• New materials → no baseline</li>
+                                <li>• Fraudsters adapt to detection</li>
+                            </ul>
+                            <strong style="margin-top: 10px; display: block;">วิธีแก้:</strong>
+                            <ul style="margin-left: 20px; margin-top: 10px;">
+                                <li>✓ Continuous baseline updates (daily)</li>
+                                <li>✓ Adaptive thresholds (auto-tune)</li>
+                                <li>✓ Regular model retraining</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Competitive Advantages -->
+            <div class="section">
+                <h2><span class="icon">🏆</span> จุดเด่นที่ทำให้ลูกค้าชอบ</h2>
+
+                <div class="card">
+                    <div class="card-header">✨ Why Customers Will Love This</div>
+                    <div class="card-body">
+                        <div class="grid">
+                            <div>
+                                <h4>🛡️ Trust & Transparency</h4>
+                                <p>"รู้สึกปลอดภัย ระบบช่วยดูแล มั่นใจได้ว่าข้อมูลถูกต้อง"</p>
+                                <ul style="margin-left: 20px; margin-top: 10px;">
+                                    <li>• Real-time monitoring</li>
+                                    <li>• Explainable decisions</li>
+                                    <li>• Transparent scoring</li>
+                                </ul>
+                            </div>
+
+                            <div>
+                                <h4>⚡ Automatic & Effortless</h4>
+                                <p>"ไม่ต้องทำอะไร ระบบดูแลให้อัตโนมัติ แจ้งเตือนเมื่อมีปัญหา"</p>
+                                <ul style="margin-left: 20px; margin-top: 10px;">
+                                    <li>• Zero manual setup needed</li>
+                                    <li>• Auto-learns patterns</li>
+                                    <li>• Smart alerts only when necessary</li>
+                                </ul>
+                            </div>
+
+                            <div>
+                                <h4>💡 Intelligent Insights</h4>
+                                <p>"ได้ insights ที่ไม่เคยเห็น เข้าใจ patterns และ trends"</p>
+                                <ul style="margin-left: 20px; margin-top: 10px;">
+                                    <li>• Trend analysis</li>
+                                    <li>• Pattern discovery</li>
+                                    <li>• Actionable recommendations</li>
+                                </ul>
+                            </div>
+
+                            <div>
+                                <h4>💰 Cost-Effective</h4>
+                                <p>"ประหยัดค่าใช้จ่าย แต่ได้ผลลัพธ์ระดับ enterprise"</p>
+                                <ul style="margin-left: 20px; margin-top: 10px;">
+                                    <li>• Pay-per-use model</li>
+                                    <li>• No upfront investment</li>
+                                    <li>• ROI within 3-6 months</li>
+                                </ul>
+                            </div>
+
+                            <div>
+                                <h4>🎨 Beautiful Visualization</h4>
+                                <p>"Dashboard สวยงาม ดูง่าย เข้าใจได้ทันที"</p>
+                                <ul style="margin-left: 20px; margin-top: 10px;">
+                                    <li>• Interactive charts</li>
+                                    <li>• Heatmaps for hotspots</li>
+                                    <li>• Timeline views</li>
+                                </ul>
+                            </div>
+
+                            <div>
+                                <h4>🚀 Continuously Improving</h4>
+                                <p>"ยิ่งใช้นานยิ่งฉลาด เรียนรู้และปรับปรุงตลอดเวลา"</p>
+                                <ul style="margin-left: 20px; margin-top: 10px;">
+                                    <li>• ML model improvements</li>
+                                    <li>• Feedback loop learning</li>
+                                    <li>• New detection methods</li>
+                                </ul>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Next Steps -->
+            <div class="section">
+                <h2><span class="icon">🎯</span> ขั้นตอนถัดไป</h2>
+
+                <table>
+                    <thead>
+                        <tr>
+                            <th style="width: 10%;">Week</th>
+                            <th style="width: 30%;">Milestone</th>
+                            <th style="width: 40%;">Deliverables</th>
+                            <th style="width: 20%;">Owner</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>Week 1</strong></td>
+                            <td>Requirements Gathering</td>
+                            <td>
+                                • Stakeholder interviews<br>
+                                • Define success metrics<br>
+                                • Prioritize features<br>
+                                • Technical feasibility study
+                            </td>
+                            <td>Product Team</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Week 2-3</strong></td>
+                            <td>Phase 1 Development</td>
+                            <td>
+                                • Database schema design<br>
+                                • Baseline calculator service<br>
+                                • Z-score detector<br>
+                                • Basic alerting system
+                            </td>
+                            <td>Engineering Team</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Week 4</strong></td>
+                            <td>Testing & Refinement</td>
+                            <td>
+                                • Unit tests<br>
+                                • Integration tests<br>
+                                • Performance testing<br>
+                                • UAT with pilot users
+                            </td>
+                            <td>QA Team</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Week 5</strong></td>
+                            <td>Pilot Launch</td>
+                            <td>
+                                • Deploy to 2-3 pilot organizations<br>
+                                • Monitor performance<br>
+                                • Collect feedback<br>
+                                • Measure accuracy
+                            </td>
+                            <td>Product Team</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Week 6+</strong></td>
+                            <td>Iterate & Scale</td>
+                            <td>
+                                • Adjust thresholds based on feedback<br>
+                                • Fix bugs and edge cases<br>
+                                • Prepare Phase 2 features<br>
+                                • Document learnings
+                            </td>
+                            <td>Full Team</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <div class="info-box" style="margin-top: 30px;">
+                    <strong>📋 Recommended Decision:</strong> Start with <span class="highlight">Tier 2 (Smart Monitoring)</span> for maximum value-to-cost ratio. This provides 80% of the benefits at 10% of the cost compared to full ML approach. After 2-3 months of data collection and validation, evaluate whether to invest in Tier 3/4 based on ROI analysis.
+                </div>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <div class="footer">
+            <h3 style="margin-bottom: 20px; font-size: 1.5em;">📬 Contact & Questions</h3>
+            <p>GEPP Platform - Waste Management Intelligence</p>
+            <p>For technical details or demo request, contact the product team</p>
+            <p style="margin-top: 20px; opacity: 0.6;">Document Version 1.0 | Last Updated: December 2024</p>
+        </div>
+    </div>
+</body>
+</html>

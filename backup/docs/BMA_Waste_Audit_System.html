@@ -1,0 +1,1096 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BMA Waste Audit System - AI-Powered Quality Correction</title>
+    <style>
+        :root {
+            --primary: #10b981;
+            --primary-dark: #059669;
+            --bg-dark: #0f172a;
+            --bg-card: #1e293b;
+            --bg-code: #334155;
+            --text-primary: #f1f5f9;
+            --text-secondary: #94a3b8;
+            --border: #334155;
+            --accent-blue: #3b82f6;
+            --accent-purple: #8b5cf6;
+            --accent-orange: #f59e0b;
+            --accent-red: #ef4444;
+            --accent-green: #22c55e;
+            --recyclable: #3b82f6;
+            --general: #6b7280;
+            --organic: #84cc16;
+            --hazardous: #f59e0b;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, var(--bg-dark) 0%, #1a1f35 100%);
+            color: var(--text-primary);
+            line-height: 1.7;
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 40px 24px;
+        }
+
+        /* Header */
+        header {
+            text-align: center;
+            padding: 80px 0;
+            background: linear-gradient(180deg, rgba(16, 185, 129, 0.15) 0%, transparent 100%);
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 60px;
+        }
+
+        .badge {
+            display: inline-block;
+            background: linear-gradient(135deg, var(--primary), #34d399);
+            color: white;
+            padding: 6px 16px;
+            border-radius: 20px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            margin-bottom: 20px;
+        }
+
+        .logo {
+            font-size: 3rem;
+            font-weight: 800;
+            background: linear-gradient(135deg, var(--primary) 0%, #34d399 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            margin-bottom: 16px;
+        }
+
+        .subtitle {
+            font-size: 1.35rem;
+            color: var(--text-secondary);
+            max-width: 800px;
+            margin: 0 auto 24px;
+        }
+
+        .tech-badges {
+            display: flex;
+            gap: 12px;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+
+        .tech-badge {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            padding: 8px 16px;
+            border-radius: 8px;
+            font-size: 0.85rem;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        /* Navigation */
+        nav {
+            background: var(--bg-card);
+            border-radius: 16px;
+            padding: 20px;
+            margin-bottom: 48px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            justify-content: center;
+            border: 1px solid var(--border);
+            position: sticky;
+            top: 20px;
+            z-index: 100;
+            backdrop-filter: blur(10px);
+        }
+
+        nav a {
+            color: var(--text-secondary);
+            text-decoration: none;
+            padding: 10px 20px;
+            border-radius: 10px;
+            transition: all 0.2s;
+            font-size: 0.9rem;
+            font-weight: 500;
+        }
+
+        nav a:hover {
+            background: var(--primary);
+            color: white;
+        }
+
+        /* Sections */
+        section {
+            background: var(--bg-card);
+            border-radius: 20px;
+            padding: 40px;
+            margin-bottom: 40px;
+            border: 1px solid var(--border);
+        }
+
+        h2 {
+            font-size: 2rem;
+            margin-bottom: 32px;
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        h2 .icon {
+            width: 48px;
+            height: 48px;
+            background: linear-gradient(135deg, var(--primary), #34d399);
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.5rem;
+        }
+
+        h3 {
+            font-size: 1.4rem;
+            margin: 32px 0 20px;
+            color: var(--primary);
+            border-left: 4px solid var(--primary);
+            padding-left: 16px;
+        }
+
+        h4 {
+            font-size: 1.1rem;
+            margin: 24px 0 12px;
+            color: var(--text-primary);
+        }
+
+        p {
+            color: var(--text-secondary);
+            margin-bottom: 16px;
+            font-size: 1rem;
+            line-height: 1.8;
+        }
+
+        /* Flow Diagram */
+        .flow-diagram {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 20px;
+            flex-wrap: wrap;
+            padding: 40px 20px;
+            background: var(--bg-code);
+            border-radius: 16px;
+            margin: 24px 0;
+        }
+
+        .flow-step {
+            background: linear-gradient(135deg, var(--bg-card), rgba(16, 185, 129, 0.1));
+            border: 2px solid var(--border);
+            border-radius: 16px;
+            padding: 24px;
+            text-align: center;
+            min-width: 160px;
+            transition: all 0.3s;
+        }
+
+        .flow-step:hover {
+            border-color: var(--primary);
+            transform: translateY(-4px);
+        }
+
+        .flow-step .number {
+            width: 36px;
+            height: 36px;
+            background: var(--primary);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 12px;
+            font-weight: bold;
+            font-size: 1rem;
+        }
+
+        .flow-step .icon-lg {
+            font-size: 2rem;
+            margin-bottom: 12px;
+        }
+
+        .flow-step .label {
+            font-size: 0.95rem;
+            font-weight: 600;
+        }
+
+        .flow-step .sublabel {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            margin-top: 8px;
+        }
+
+        .flow-arrow {
+            color: var(--primary);
+            font-size: 2rem;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        /* Waste Type Cards */
+        .waste-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 20px;
+            margin: 32px 0;
+        }
+
+        @media (max-width: 1200px) {
+            .waste-grid { grid-template-columns: repeat(2, 1fr); }
+        }
+
+        @media (max-width: 600px) {
+            .waste-grid { grid-template-columns: 1fr; }
+        }
+
+        .waste-card {
+            border-radius: 16px;
+            padding: 28px;
+            border: 2px solid transparent;
+            transition: all 0.3s;
+        }
+
+        .waste-card:hover {
+            transform: translateY(-8px);
+        }
+
+        .waste-card.recyclable {
+            background: linear-gradient(135deg, rgba(59, 130, 246, 0.15), rgba(59, 130, 246, 0.05));
+            border-color: var(--recyclable);
+        }
+
+        .waste-card.general {
+            background: linear-gradient(135deg, rgba(107, 114, 128, 0.15), rgba(107, 114, 128, 0.05));
+            border-color: var(--general);
+        }
+
+        .waste-card.organic {
+            background: linear-gradient(135deg, rgba(132, 204, 22, 0.15), rgba(132, 204, 22, 0.05));
+            border-color: var(--organic);
+        }
+
+        .waste-card.hazardous {
+            background: linear-gradient(135deg, rgba(245, 158, 11, 0.15), rgba(245, 158, 11, 0.05));
+            border-color: var(--hazardous);
+        }
+
+        .waste-card .emoji {
+            font-size: 3rem;
+            margin-bottom: 16px;
+        }
+
+        .waste-card h4 {
+            font-size: 1.2rem;
+            margin-bottom: 8px;
+        }
+
+        .waste-card .thai {
+            font-size: 0.9rem;
+            color: var(--text-secondary);
+        }
+
+        /* JSON Code Block */
+        .code-block {
+            background: var(--bg-code);
+            border-radius: 12px;
+            padding: 24px;
+            overflow-x: auto;
+            font-family: 'JetBrains Mono', 'Fira Code', monospace;
+            font-size: 0.9rem;
+            line-height: 1.6;
+            border: 1px solid var(--border);
+            margin: 20px 0;
+            position: relative;
+        }
+
+        .code-block::before {
+            content: attr(data-lang);
+            position: absolute;
+            top: 8px;
+            right: 12px;
+            background: var(--primary);
+            color: white;
+            padding: 2px 10px;
+            border-radius: 4px;
+            font-size: 0.7rem;
+            font-weight: 600;
+        }
+
+        .code-block .key { color: #7dd3fc; }
+        .code-block .string { color: #86efac; }
+        .code-block .number { color: #fbbf24; }
+        .code-block .comment { color: #64748b; font-style: italic; }
+
+        /* Check Cases Table */
+        .check-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 24px 0;
+            font-size: 0.9rem;
+        }
+
+        .check-table th {
+            background: var(--bg-code);
+            padding: 16px;
+            text-align: left;
+            border-bottom: 2px solid var(--primary);
+            font-weight: 600;
+        }
+
+        .check-table td {
+            padding: 16px;
+            border-bottom: 1px solid var(--border);
+            vertical-align: top;
+        }
+
+        .check-table tr:hover {
+            background: rgba(16, 185, 129, 0.05);
+        }
+
+        .status-pass {
+            display: inline-block;
+            background: rgba(34, 197, 94, 0.2);
+            color: var(--accent-green);
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+
+        .status-warn {
+            display: inline-block;
+            background: rgba(245, 158, 11, 0.2);
+            color: var(--accent-orange);
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+
+        .status-reject {
+            display: inline-block;
+            background: rgba(239, 68, 68, 0.2);
+            color: var(--accent-red);
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+
+        code {
+            background: var(--bg-code);
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85rem;
+            color: var(--primary);
+        }
+
+        /* Response Mapping */
+        .response-card {
+            background: var(--bg-code);
+            border-radius: 12px;
+            padding: 24px;
+            margin: 16px 0;
+            border-left: 4px solid var(--primary);
+        }
+
+        .response-card.warn { border-left-color: var(--accent-orange); }
+        .response-card.reject { border-left-color: var(--accent-red); }
+
+        .response-code {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85rem;
+            color: var(--accent-purple);
+            margin-bottom: 12px;
+        }
+
+        .response-thai {
+            font-size: 1.1rem;
+            color: var(--text-primary);
+            background: rgba(16, 185, 129, 0.1);
+            padding: 16px;
+            border-radius: 8px;
+            margin-top: 12px;
+            line-height: 1.8;
+        }
+
+        .var {
+            background: var(--accent-purple);
+            color: white;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-weight: 600;
+        }
+
+        /* API Flow */
+        .api-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 24px;
+            margin: 32px 0;
+        }
+
+        @media (max-width: 900px) {
+            .api-grid { grid-template-columns: 1fr; }
+        }
+
+        .api-card {
+            background: var(--bg-code);
+            border-radius: 16px;
+            padding: 28px;
+            border: 1px solid var(--border);
+        }
+
+        .api-card h4 {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 16px;
+        }
+
+        .api-card .method {
+            background: var(--accent-blue);
+            color: white;
+            padding: 4px 10px;
+            border-radius: 6px;
+            font-size: 0.75rem;
+            font-weight: 700;
+        }
+
+        .api-card .method.post { background: var(--accent-green); }
+        .api-card .method.get { background: var(--accent-blue); }
+
+        .api-card .endpoint {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.9rem;
+            color: var(--primary);
+        }
+
+        /* Prompt Section */
+        .prompt-block {
+            background: linear-gradient(135deg, var(--bg-code), rgba(139, 92, 246, 0.1));
+            border-radius: 16px;
+            padding: 32px;
+            border: 2px solid var(--accent-purple);
+            margin: 24px 0;
+        }
+
+        .prompt-block h4 {
+            color: var(--accent-purple);
+            margin-bottom: 20px;
+        }
+
+        .prompt-block pre {
+            white-space: pre-wrap;
+            font-family: 'Inter', sans-serif;
+            font-size: 0.95rem;
+            line-height: 1.8;
+            color: var(--text-primary);
+        }
+
+        /* Footer */
+        footer {
+            text-align: center;
+            padding: 60px 0;
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+            border-top: 1px solid var(--border);
+            margin-top: 60px;
+        }
+
+        /* Architecture Diagram */
+        .arch-diagram {
+            background: var(--bg-code);
+            border-radius: 16px;
+            padding: 40px;
+            margin: 32px 0;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85rem;
+            white-space: pre;
+            overflow-x: auto;
+            line-height: 1.4;
+        }
+
+        /* Animated glow */
+        .glow {
+            box-shadow: 0 0 40px rgba(16, 185, 129, 0.2);
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="container">
+            <span class="badge">🤖 AI-Powered</span>
+            <div class="logo">BMA Waste Audit System</div>
+            <p class="subtitle">
+                Intelligent Waste Sorting Quality Assurance System for Bangkok Metropolitan Administration's Household Waste Fee Discount Program
+            </p>
+            <div class="tech-badges">
+                <div class="tech-badge">⚡ Gemini 2.5 Flash-Lite</div>
+                <div class="tech-badge">🖼️ Multimodal Vision</div>
+                <div class="tech-badge">🇹🇭 Thai Language Output</div>
+                <div class="tech-badge">📱 Mobile-First</div>
+            </div>
+        </div>
+    </header>
+
+    <div class="container">
+        <nav>
+            <a href="#overview">📋 Overview</a>
+            <a href="#flow">🔄 Audit Flow</a>
+            <a href="#schema">📝 JSON Schema</a>
+            <a href="#cases">✅ Check Cases</a>
+            <a href="#mapping">🗣️ Response Mapping</a>
+            <a href="#api">🔌 API</a>
+            <a href="#prompt">🧠 LLM Prompt</a>
+        </nav>
+
+        <!-- Overview Section -->
+        <section id="overview">
+            <h2><span class="icon">📋</span> System Overview</h2>
+            <p>
+                The AI Waste Audit System is part of Bangkok Metropolitan Administration's (BMA) household waste sorting incentive program. Households that correctly sort their waste according to standards receive discounts on waste collection fees.
+            </p>
+            
+            <h3>🎯 Business Requirements</h3>
+            <ul style="color: var(--text-secondary); margin-left: 24px;">
+                <li style="margin-bottom: 12px;">Households must submit images of <strong>at least 3 waste types</strong>: General, Recyclable, and Organic</li>
+                <li style="margin-bottom: 12px;">Hazardous waste is <strong>optional</strong>, but if submitted, it must be verified for compliance</li>
+                <li style="margin-bottom: 12px;">AI validates sorting accuracy and provides <strong>correction feedback</strong> in Thai language</li>
+            </ul>
+
+            <h3>🗂️ Waste Categories</h3>
+            <div class="waste-grid">
+                <div class="waste-card recyclable">
+                    <div class="emoji">♻️</div>
+                    <h4>Recyclable</h4>
+                    <div class="thai">Clean materials for recycling</div>
+                    <p style="font-size: 0.85rem; margin-top: 12px;">Plastic bottles, cans, cardboard boxes, glass</p>
+                </div>
+                <div class="waste-card general">
+                    <div class="emoji">🗑️</div>
+                    <h4>General</h4>
+                    <div class="thai">Non-recyclable, non-hazardous</div>
+                    <p style="font-size: 0.85rem; margin-top: 12px;">Tissues, soiled plastic bags, styrofoam</p>
+                </div>
+                <div class="waste-card organic">
+                    <div class="emoji">🍂</div>
+                    <h4>Organic</h4>
+                    <div class="thai">Compostable materials</div>
+                    <p style="font-size: 0.85rem; margin-top: 12px;">Food scraps, fruit peels, leaves</p>
+                </div>
+                <div class="waste-card hazardous">
+                    <div class="emoji">☠️</div>
+                    <h4>Hazardous</h4>
+                    <div class="thai">Dangerous materials</div>
+                    <p style="font-size: 0.85rem; margin-top: 12px;">Batteries, light bulbs, spray cans</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- Flow Section -->
+        <section id="flow">
+            <h2><span class="icon">🔄</span> Audit Flow</h2>
+            
+            <div class="flow-diagram">
+                <div class="flow-step">
+                    <div class="icon-lg">📱</div>
+                    <div class="label">User Upload</div>
+                    <div class="sublabel">Household ID + Images</div>
+                </div>
+                <span class="flow-arrow">→</span>
+                <div class="flow-step">
+                    <div class="icon-lg">🔍</div>
+                    <div class="label">Validate Input</div>
+                    <div class="sublabel">≥3 categories required</div>
+                </div>
+                <span class="flow-arrow">→</span>
+                <div class="flow-step">
+                    <div class="icon-lg">🤖</div>
+                    <div class="label">Gemini Analysis</div>
+                    <div class="sublabel">Vision + Text</div>
+                </div>
+                <span class="flow-arrow">→</span>
+                <div class="flow-step">
+                    <div class="icon-lg">📊</div>
+                    <div class="label">Generate Verdict</div>
+                    <div class="sublabel">Pass / Reject</div>
+                </div>
+                <span class="flow-arrow">→</span>
+                <div class="flow-step">
+                    <div class="icon-lg">🗣️</div>
+                    <div class="label">Thai Response</div>
+                    <div class="sublabel">Human-like feedback</div>
+                </div>
+            </div>
+
+            <div class="arch-diagram">
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                               BMA WASTE AUDIT ARCHITECTURE                              │
+├────────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                         │
+│   ┌──────────────────┐         ┌──────────────────┐         ┌──────────────────┐      │
+│   │   Mobile App     │  POST   │   Backend API    │  CALL   │   Gemini 2.5     │      │
+│   │   ─────────────  │───────►│   ─────────────  │───────►│   Flash-Lite     │       │
+│   │   • Household ID │         │   • Validate     │         │   ─────────────  │      │
+│   │   • Material Type│         │   • Route        │         │   • Image Analysis│     │
+│   │   • Image(s)     │         │   • Process      │         │   • Material ID   │     │
+│   └──────────────────┘         └──────────────────┘         │   • Quality Check │     │
+│            ▲                            │                   └──────────────────┘      │
+│            │                            │                            │                 │
+│            │                            ▼                            │                 │
+│            │                   ┌──────────────────┐                  │                 │
+│            │                   │   JSON Response  │◄─────────────────┘                 │
+│            │                   │   ─────────────  │                                    │
+│            │                   │   {status, remarks,                                   │
+│            │                   │    confidence...} │                                   │
+│            │                   └──────────────────┘                                    │
+│            │                            │                                              │
+│            │                            ▼                                              │
+│            │                   ┌──────────────────┐         ┌──────────────────┐      │
+│            │                   │  Response Mapper │───────►│   Lookup Table   │       │
+│            │                   │   ─────────────  │         │   ─────────────  │      │
+│            │                   │   remark_code →  │         │   Thai Templates │      │
+│            │                   │   Thai message   │         │   + Variables    │      │
+│            │                   └──────────────────┘         └──────────────────┘      │
+│            │                            │                                              │
+│            └────────────────────────────┘                                              │
+│                     Thai Response with Corrections                                     │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+            </div>
+        </section>
+
+        <!-- JSON Schema Section -->
+        <section id="schema">
+            <h2><span class="icon">📝</span> LLM Output JSON Schema</h2>
+            <p>Gemini returns audit results in a structured JSON format, enabling the backend to parse and convert to human-friendly Thai messages automatically.</p>
+            
+            <div class="code-block" data-lang="JSON">
+<span class="comment">// LLM Output Structure</span>
+{
+  <span class="key">"claimed_type"</span>: <span class="string">"recyclable"</span>,
+  <span class="key">"audit_status"</span>: <span class="string">"reject"</span>,  <span class="comment">// "pass" | "reject"</span>
+  <span class="key">"confidence_score"</span>: <span class="number">0.95</span>,
+  <span class="key">"remarks"</span>: [
+    {
+      <span class="key">"code"</span>: <span class="string">"wrong_category"</span>,
+      <span class="key">"severity"</span>: <span class="string">"critical"</span>,  <span class="comment">// "critical" = reject, "minor" = warning</span>
+      <span class="key">"details"</span>: {
+        <span class="key">"detected"</span>: <span class="string">"organic waste"</span>,
+        <span class="key">"reason"</span>: <span class="string">"visible food scraps on container"</span>
+      },
+      <span class="key">"correction_action"</span>: <span class="string">"Remove food scraps and wash the container."</span>
+    }
+  ]
+}
+            </div>
+
+            <h3>📊 Field Definitions</h3>
+            <table class="check-table">
+                <thead>
+                    <tr>
+                        <th>Field</th>
+                        <th>Type</th>
+                        <th>Description</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><code>claimed_type</code></td>
+                        <td>string</td>
+                        <td>Waste type claimed by user (recyclable, general, organic, hazardous)</td>
+                    </tr>
+                    <tr>
+                        <td><code>audit_status</code></td>
+                        <td>enum</td>
+                        <td>"pass" = approved, "reject" = needs correction</td>
+                    </tr>
+                    <tr>
+                        <td><code>confidence_score</code></td>
+                        <td>float</td>
+                        <td>AI confidence level (0.0 - 1.0)</td>
+                    </tr>
+                    <tr>
+                        <td><code>remarks[].code</code></td>
+                        <td>string</td>
+                        <td>Remark code for mapping to Thai template</td>
+                    </tr>
+                    <tr>
+                        <td><code>remarks[].severity</code></td>
+                        <td>enum</td>
+                        <td>"critical" = must fix, "minor" = warning only</td>
+                    </tr>
+                    <tr>
+                        <td><code>remarks[].details</code></td>
+                        <td>object</td>
+                        <td>Additional data for generating response message</td>
+                    </tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- Check Cases Section -->
+        <section id="cases">
+            <h2><span class="icon">✅</span> Check Cases by Material Type</h2>
+
+            <!-- Recyclable -->
+            <h3 style="border-left-color: var(--recyclable);">♻️ Recyclable Waste</h3>
+            <p><strong>Focus:</strong> Cleanliness and material purity</p>
+            
+            <table class="check-table">
+                <thead>
+                    <tr>
+                        <th>Status</th>
+                        <th>Remark Code</th>
+                        <th>Condition</th>
+                        <th>Details Required</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><span class="status-warn">⚠️ Warning</span></td>
+                        <td><code>recyclable_minor_stain</code></td>
+                        <td>Minor water stains or dust, labels still attached</td>
+                        <td>-</td>
+                    </tr>
+                    <tr>
+                        <td><span class="status-pass">✅ Pass</span></td>
+                        <td><code>recyclable_flattened</code></td>
+                        <td>Cans/boxes are crushed (good for space saving)</td>
+                        <td>-</td>
+                    </tr>
+                    <tr>
+                        <td><span class="status-reject">❌ Reject</span></td>
+                        <td><code>wrong_category</code></td>
+                        <td>Contains general waste (tissues, straws) or organic</td>
+                        <td><code>{"detected": "general waste"}</code></td>
+                    </tr>
+                    <tr>
+                        <td><span class="status-reject">❌ Reject</span></td>
+                        <td><code>recyclable_dirty</code></td>
+                        <td>Food residue/grease/liquid inside containers</td>
+                        <td><code>{"substance": "food grease"}</code></td>
+                    </tr>
+                    <tr>
+                        <td><span class="status-reject">❌ Reject</span></td>
+                        <td><code>hazardous_contamination</code></td>
+                        <td>Spray cans, batteries mixed in</td>
+                        <td><code>{"item": "spray can"}</code></td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <!-- General -->
+            <h3 style="border-left-color: var(--general);">🗑️ General Waste</h3>
+            <p><strong>Focus:</strong> No valuable or hazardous items mixed in</p>
+            
+            <table class="check-table">
+                <thead>
+                    <tr>
+                        <th>Status</th>
+                        <th>Remark Code</th>
+                        <th>Condition</th>
+                        <th>Details Required</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><span class="status-warn">⚠️ Warning</span></td>
+                        <td><code>general_contains_recyclable</code></td>
+                        <td>Contains 1-2 recyclable items (bottles/cans)</td>
+                        <td><code>{"item": "plastic bottle"}</code></td>
+                    </tr>
+                    <tr>
+                        <td><span class="status-reject">❌ Reject</span></td>
+                        <td><code>hazardous_contamination</code></td>
+                        <td>Light bulbs, batteries, electronics present</td>
+                        <td><code>{"item": "light bulb"}</code></td>
+                    </tr>
+                    <tr>
+                        <td><span class="status-reject">❌ Reject</span></td>
+                        <td><code>wrong_category</code></td>
+                        <td>Large amount of food waste (should go to organic)</td>
+                        <td><code>{"detected": "organic waste"}</code></td>
+                    </tr>
+                    <tr>
+                        <td><span class="status-reject">❌ Reject</span></td>
+                        <td><code>construction_waste</code></td>
+                        <td>Bricks, cement, large wood (requires special pickup)</td>
+                        <td>-</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <!-- Organic -->
+            <h3 style="border-left-color: var(--organic);">🍂 Organic Waste</h3>
+            <p><strong>Focus:</strong> Compostability</p>
+            
+            <table class="check-table">
+                <thead>
+                    <tr>
+                        <th>Status</th>
+                        <th>Remark Code</th>
+                        <th>Condition</th>
+                        <th>Details Required</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><span class="status-warn">⚠️ Warning</span></td>
+                        <td><code>organic_minor_plastic</code></td>
+                        <td>Small fruit stickers or plastic labels present</td>
+                        <td>-</td>
+                    </tr>
+                    <tr>
+                        <td><span class="status-warn">⚠️ Warning</span></td>
+                        <td><code>organic_hard_bone</code></td>
+                        <td>Large bones that decompose slowly</td>
+                        <td>-</td>
+                    </tr>
+                    <tr>
+                        <td><span class="status-reject">❌ Reject</span></td>
+                        <td><code>organic_in_plastic_bag</code></td>
+                        <td>Food waste tied inside a plastic bag</td>
+                        <td>-</td>
+                    </tr>
+                    <tr>
+                        <td><span class="status-reject">❌ Reject</span></td>
+                        <td><code>organic_contamination</code></td>
+                        <td>Plastic spoons, rubber bands, synthetic materials mixed in</td>
+                        <td><code>{"item": "plastic spoon"}</code></td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <!-- Hazardous -->
+            <h3 style="border-left-color: var(--hazardous);">☠️ Hazardous Waste</h3>
+            <p><strong>Focus:</strong> Safety and proper containment</p>
+            
+            <table class="check-table">
+                <thead>
+                    <tr>
+                        <th>Status</th>
+                        <th>Remark Code</th>
+                        <th>Condition</th>
+                        <th>Details Required</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><span class="status-warn">⚠️ Warning</span></td>
+                        <td><code>hazardous_mixed</code></td>
+                        <td>Batteries mixed with light bulbs (should be grouped)</td>
+                        <td>-</td>
+                    </tr>
+                    <tr>
+                        <td><span class="status-reject">❌ Reject</span></td>
+                        <td><code>hazardous_unsafe</code></td>
+                        <td>Broken glass/tubes without protective wrapping</td>
+                        <td><code>{"reason": "broken glass exposed"}</code></td>
+                    </tr>
+                    <tr>
+                        <td><span class="status-reject">❌ Reject</span></td>
+                        <td><code>hazardous_leaking</code></td>
+                        <td>Batteries or chemical bottles are leaking</td>
+                        <td>-</td>
+                    </tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- Thai Response Mapping -->
+        <section id="mapping">
+            <h2><span class="icon">🗣️</span> Thai Response Lookup Table</h2>
+            <p>Mapping table between LLM Remark Codes and natural Thai response messages with template variables.</p>
+
+            <div class="response-card reject">
+                <div class="response-code">wrong_category</div>
+                <p style="margin: 8px 0; font-size: 0.9rem;">Used when: Waste doesn't match claimed type</p>
+                <div class="response-thai">
+                    "The attached image is incorrect. Our system detected <span class="var">{detected}</span>. Please sort again correctly."
+                </div>
+            </div>
+
+            <div class="response-card reject">
+                <div class="response-code">recyclable_dirty</div>
+                <p style="margin: 8px 0; font-size: 0.9rem;">Used when: Recyclable has contamination</p>
+                <div class="response-thai">
+                    "Recyclable waste did not pass inspection due to <span class="var">{substance}</span> residue. Please wash and dry before resubmitting."
+                </div>
+            </div>
+
+            <div class="response-card warn">
+                <div class="response-code">recyclable_minor_stain</div>
+                <p style="margin: 8px 0; font-size: 0.9rem;">Used when: Minor staining (passed with advice)</p>
+                <div class="response-thai">
+                    "Passed! But next time, please rinse off minor stains for optimal recycling quality. 💚"
+                </div>
+            </div>
+
+            <div class="response-card reject">
+                <div class="response-code">hazardous_contamination</div>
+                <p style="margin: 8px 0; font-size: 0.9rem;">Used when: Hazardous item in wrong bin</p>
+                <div class="response-thai">
+                    "Danger! Found <span class="var">{item}</span> mixed in. This type of waste must be separated into the hazardous waste bin for collector safety. 🚨"
+                </div>
+            </div>
+
+            <div class="response-card warn">
+                <div class="response-code">general_contains_recyclable</div>
+                <p style="margin: 8px 0; font-size: 0.9rem;">Used when: Recyclable items in general waste</p>
+                <div class="response-thai">
+                    "Passed, but too bad! System found <span class="var">{item}</span> that could be recycled. Next time, separate them to earn points! ♻️"
+                </div>
+            </div>
+
+            <div class="response-card reject">
+                <div class="response-code">organic_in_plastic_bag</div>
+                <p style="margin: 8px 0; font-size: 0.9rem;">Used when: Food waste in plastic bag</p>
+                <div class="response-thai">
+                    "Organic waste did not pass because it is tied in a plastic bag. Please empty contents directly without the bag. 🍃"
+                </div>
+            </div>
+
+            <div class="response-card reject">
+                <div class="response-code">hazardous_unsafe</div>
+                <p style="margin: 8px 0; font-size: 0.9rem;">Used when: Unsafe hazardous packaging</p>
+                <div class="response-thai">
+                    "Did not pass due to <span class="var">{reason}</span> which could injure workers. Please wrap in newspaper or clearly label. ⚠️"
+                </div>
+            </div>
+
+            <div class="response-card reject">
+                <div class="response-code">construction_waste</div>
+                <p style="margin: 8px 0; font-size: 0.9rem;">Used when: Construction debris detected</p>
+                <div class="response-thai">
+                    "Sorry, the system does not support construction waste. Please contact your district office to arrange special collection. 🏗️"
+                </div>
+            </div>
+        </section>
+
+        <!-- API Section -->
+        <section id="api">
+            <h2><span class="icon">🔌</span> API Endpoints</h2>
+            
+            <div class="api-grid">
+                <div class="api-card">
+                    <h4><span class="method post">POST</span></h4>
+                    <div class="endpoint">/api/bma/audit/submit</div>
+                    <p style="margin-top: 12px; font-size: 0.9rem;">Submit waste images for audit</p>
+                    <div class="code-block" data-lang="Request" style="font-size: 0.8rem; padding: 16px;">
+{
+  "household_id": "BKK-1234",
+  "submissions": [
+    {
+      "type": "recyclable",
+      "image_url": "s3://..."
+    },
+    ...
+  ]
+}
+                    </div>
+                </div>
+                <div class="api-card">
+                    <h4><span class="method post">POST</span></h4>
+                    <div class="endpoint">/api/bma/audit/process</div>
+                    <p style="margin-top: 12px; font-size: 0.9rem;">Process with Gemini AI</p>
+                    <div class="code-block" data-lang="Internal" style="font-size: 0.8rem; padding: 16px;">
+{
+  "submission_id": "...",
+  "claimed_type": "recyclable",
+  "image_data": "base64..."
+}
+                    </div>
+                </div>
+                <div class="api-card">
+                    <h4><span class="method get">GET</span></h4>
+                    <div class="endpoint">/api/bma/audit/result/{id}</div>
+                    <p style="margin-top: 12px; font-size: 0.9rem;">Get audit result with Thai feedback</p>
+                    <div class="code-block" data-lang="Response" style="font-size: 0.8rem; padding: 16px;">
+{
+  "status": "reject",
+  "message_th": "...",
+  "corrections": [...]
+}
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- LLM Prompt Section -->
+        <section id="prompt">
+            <h2><span class="icon">🧠</span> Gemini System Prompt</h2>
+            <p>System prompt configuration for Gemini 2.5 Flash-Lite waste auditing behavior.</p>
+
+            <div class="prompt-block glow">
+                <h4>🔧 System Prompt Configuration</h4>
+                <pre>
+<strong>Role:</strong> You are an AI Waste Auditor for the Bangkok Metropolitan Administration (BMA).
+
+<strong>Task:</strong> Analyze the image of waste submitted by a household. 
+Compare the image content against the "Claimed Material Type".
+
+<strong>Input:</strong>
+- Claimed Type: {claimed_type} (e.g., recyclable, general, organic, hazardous)
+- Image: [Image Data Base64 or URL]
+
+<strong>Rules:</strong>
+1. Identify all visible items in the image
+2. Check for contamination (food, grease, liquid residue)
+3. Check for safety hazards (sharp objects, leaking chemicals)
+4. Determine if the waste matches the Claimed Type
+5. Provide correction actions if rejection
+
+<strong>Output Format (JSON Only):</strong>
+Return a JSON object with:
+- status: "pass" or "reject"
+- confidence_score: 0.0 - 1.0
+- remarks: array of {code, severity, details, correction_action}
+
+<strong>Valid Remark Codes:</strong>
+- wrong_category, recyclable_dirty, recyclable_minor_stain
+- hazardous_contamination, organic_in_plastic_bag, organic_contamination
+- general_contains_recyclable, hazardous_unsafe, hazardous_leaking
+- construction_waste
+
+<strong>Example Scenarios:</strong>
+• Claimed="recyclable" + Greasy pizza box → reject, recyclable_dirty, {"substance": "grease"}
+• Claimed="general" + Spray can visible → reject, hazardous_contamination, {"item": "spray can"}
+• Claimed="organic" + Food in plastic bag → reject, organic_in_plastic_bag
+                </pre>
+            </div>
+        </section>
+    </div>
+
+    <footer>
+        <div class="container">
+            <p>BMA Waste Audit System - AI-Powered Quality Correction</p>
+            <p style="margin-top: 8px;">Bangkok Metropolitan Administration × GEPP Platform</p>
+            <p style="margin-top: 8px; opacity: 0.6;">Version 1.0 | January 2026</p>
+        </div>
+    </footer>
+</body>
+</html>

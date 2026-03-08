@@ -1,0 +1,1496 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GEPP AI Manager: Powered by Gemini 2.5 Flash</title>
+
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- Alpine.js CDN -->
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+
+    <!-- Chart.js for visualizations -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <!-- Custom Tailwind Config -->
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        'gepp-green': '#10b981',
+                        'gepp-dark-green': '#059669',
+                        'gepp-light-green': '#d1fae5',
+                    }
+                }
+            }
+        }
+    </script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+
+        .gradient-bg {
+            background: linear-gradient(135deg, #059669 0%, #10b981 100%);
+        }
+
+        .glass-effect {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+
+        .card-hover {
+            transition: all 0.3s ease;
+        }
+
+        .card-hover:hover {
+            transform: translateY(-8px);
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+        }
+
+        .flow-arrow {
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 0.6; }
+            50% { opacity: 1; }
+        }
+
+        .pricing-badge {
+            position: absolute;
+            top: -12px;
+            right: 20px;
+            background: linear-gradient(135deg, #f59e0b 0%, #ef4444 100%);
+            color: white;
+            padding: 4px 16px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 700;
+            text-transform: uppercase;
+            box-shadow: 0 4px 12px rgba(239, 68, 68, 0.4);
+        }
+    </style>
+</head>
+
+<body class="bg-gray-50">
+    <!-- Hero Section -->
+    <section class="gradient-bg text-white py-20 relative overflow-hidden">
+        <div class="absolute inset-0 opacity-10">
+            <div class="absolute top-20 left-10 w-72 h-72 bg-white rounded-full mix-blend-multiply filter blur-xl animate-pulse"></div>
+            <div class="absolute bottom-20 right-10 w-96 h-96 bg-emerald-300 rounded-full mix-blend-multiply filter blur-xl animate-pulse delay-700"></div>
+        </div>
+
+        <div class="container mx-auto px-6 relative z-10">
+            <div class="text-center max-w-4xl mx-auto">
+                <div class="inline-block bg-white/20 backdrop-blur-sm px-4 py-2 rounded-full mb-6">
+                    <span class="text-sm font-semibold">⚡ Powered by Google Gemini 2.5 Flash</span>
+                </div>
+
+                <h1 class="text-5xl md:text-7xl font-bold mb-6 leading-tight">
+                    GEPP AI Manager
+                </h1>
+
+                <p class="text-xl md:text-2xl mb-8 text-emerald-50 font-light">
+                    Seamless Waste Intelligence on LINE
+                </p>
+
+                <p class="text-lg mb-10 max-w-2xl mx-auto text-emerald-100">
+                    เปลี่ยนการจัดการของเสียให้ง่ายดายด้วย AI ที่ตอบได้ทันที สร้างรายงาน และวิเคราะห์ข้อมูลผ่าน LINE
+                </p>
+
+                <div class="flex flex-wrap justify-center gap-4">
+                    <a href="#architecture" class="bg-white text-gepp-dark-green px-8 py-4 rounded-lg font-semibold hover:bg-emerald-50 transition shadow-lg">
+                        ดู Architecture
+                    </a>
+                    <a href="#calculator" class="bg-emerald-700 text-white px-8 py-4 rounded-lg font-semibold hover:bg-emerald-600 transition border-2 border-white/30">
+                        คำนวณต้นทุน AI
+                    </a>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Architecture Diagram Section -->
+    <section id="architecture" class="py-20 bg-white">
+        <div class="container mx-auto px-6">
+            <div class="text-center mb-16">
+                <h2 class="text-4xl font-bold text-gray-900 mb-4">System Architecture</h2>
+                <p class="text-xl text-gray-600">Data Flow with Gemini 2.5 Flash as the Intelligence Core</p>
+            </div>
+
+            <div class="max-w-6xl mx-auto">
+                <!-- Architecture Flow -->
+                <div class="grid grid-cols-1 md:grid-cols-5 gap-6 items-center">
+                    <!-- User (LINE App) -->
+                    <div class="text-center">
+                        <div class="bg-gradient-to-br from-green-400 to-emerald-600 p-8 rounded-2xl shadow-xl">
+                            <div class="text-6xl mb-3">📱</div>
+                            <h3 class="font-bold text-white text-lg">User</h3>
+                            <p class="text-emerald-100 text-sm mt-2">LINE App</p>
+                        </div>
+                    </div>
+
+                    <!-- Arrow -->
+                    <div class="flex justify-center">
+                        <svg class="w-12 h-12 text-gepp-green flow-arrow" fill="currentColor" viewBox="0 0 20 20">
+                            <path fill-rule="evenodd" d="M10.293 15.707a1 1 0 010-1.414L14.586 10l-4.293-4.293a1 1 0 111.414-1.414l5 5a1 1 0 010 1.414l-5 5a1 1 0 01-1.414 0z" clip-rule="evenodd"/>
+                            <path fill-rule="evenodd" d="M4.293 15.707a1 1 0 010-1.414L8.586 10 4.293 5.707a1 1 0 011.414-1.414l5 5a1 1 0 010 1.414l-5 5a1 1 0 01-1.414 0z" clip-rule="evenodd"/>
+                        </svg>
+                    </div>
+
+                    <!-- LINE Messaging API -->
+                    <div class="text-center">
+                        <div class="bg-gradient-to-br from-blue-400 to-indigo-600 p-8 rounded-2xl shadow-xl">
+                            <div class="text-6xl mb-3">🔗</div>
+                            <h3 class="font-bold text-white text-lg">LINE API</h3>
+                            <p class="text-blue-100 text-sm mt-2">Webhook</p>
+                        </div>
+                    </div>
+
+                    <!-- Arrow -->
+                    <div class="flex justify-center">
+                        <svg class="w-12 h-12 text-gepp-green flow-arrow" fill="currentColor" viewBox="0 0 20 20">
+                            <path fill-rule="evenodd" d="M10.293 15.707a1 1 0 010-1.414L14.586 10l-4.293-4.293a1 1 0 111.414-1.414l5 5a1 1 0 010 1.414l-5 5a1 1 0 01-1.414 0z" clip-rule="evenodd"/>
+                            <path fill-rule="evenodd" d="M4.293 15.707a1 1 0 010-1.414L8.586 10 4.293 5.707a1 1 0 011.414-1.414l5 5a1 1 0 010 1.414l-5 5a1 1 0 01-1.414 0z" clip-rule="evenodd"/>
+                        </svg>
+                    </div>
+
+                    <!-- GEPP Gateway -->
+                    <div class="text-center">
+                        <div class="bg-gradient-to-br from-purple-400 to-purple-700 p-8 rounded-2xl shadow-xl">
+                            <div class="text-6xl mb-3">🚀</div>
+                            <h3 class="font-bold text-white text-lg">Gateway</h3>
+                            <p class="text-purple-100 text-sm mt-2">FastAPI</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Second Row -->
+                <div class="mt-10 grid grid-cols-1 md:grid-cols-2 gap-8">
+                    <!-- Gemini Brain -->
+                    <div class="text-center">
+                        <div class="bg-gradient-to-br from-amber-400 via-orange-500 to-red-500 p-10 rounded-2xl shadow-2xl relative">
+                            <div class="absolute -top-3 -right-3">
+                                <span class="bg-white text-orange-600 px-3 py-1 rounded-full text-xs font-bold shadow-lg">⚡ 0.5s</span>
+                            </div>
+                            <div class="text-7xl mb-4">🧠</div>
+                            <h3 class="font-bold text-white text-2xl">Gemini 2.5 Flash</h3>
+                            <p class="text-orange-100 text-sm mt-3 mb-4">The Intelligence Engine</p>
+                            <div class="bg-white/20 backdrop-blur-sm rounded-lg p-3 text-left text-xs text-white">
+                                <div class="font-semibold mb-2">✨ Function Calling:</div>
+                                <ul class="space-y-1 ml-4">
+                                    <li>• Query Database</li>
+                                    <li>• Generate Reports</li>
+                                    <li>• Analyze Waste Data</li>
+                                    <li>• Vision Processing</li>
+                                </ul>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- PostgreSQL Database -->
+                    <div class="text-center">
+                        <div class="bg-gradient-to-br from-cyan-400 to-blue-600 p-10 rounded-2xl shadow-2xl">
+                            <div class="text-7xl mb-4">🗄️</div>
+                            <h3 class="font-bold text-white text-2xl">PostgreSQL</h3>
+                            <p class="text-blue-100 text-sm mt-3 mb-4">Data Layer + pgvector</p>
+                            <div class="bg-white/20 backdrop-blur-sm rounded-lg p-3 text-left text-xs text-white">
+                                <div class="font-semibold mb-2">📊 Data Sources:</div>
+                                <ul class="space-y-1 ml-4">
+                                    <li>• Transactions</li>
+                                    <li>• GRI Reports</li>
+                                    <li>• User Data</li>
+                                    <li>• Material Catalog</li>
+                                </ul>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Technology Highlights -->
+                <div class="mt-12 bg-gradient-to-r from-gepp-light-green to-emerald-100 rounded-xl p-8">
+                    <h4 class="text-center text-2xl font-bold text-gray-800 mb-6">Why Gemini 2.5 Flash?</h4>
+                    <div class="grid grid-cols-1 md:grid-cols-4 gap-6">
+                        <div class="text-center">
+                            <div class="bg-white rounded-lg p-4 shadow-md">
+                                <div class="text-3xl mb-2">⚡</div>
+                                <h5 class="font-semibold text-gray-800">Ultra-Fast</h5>
+                                <p class="text-sm text-gray-600 mt-1">&lt; 0.5s latency</p>
+                            </div>
+                        </div>
+                        <div class="text-center">
+                            <div class="bg-white rounded-lg p-4 shadow-md">
+                                <div class="text-3xl mb-2">💰</div>
+                                <h5 class="font-semibold text-gray-800">Cost-Effective</h5>
+                                <p class="text-sm text-gray-600 mt-1">$0.10/M tokens</p>
+                            </div>
+                        </div>
+                        <div class="text-center">
+                            <div class="bg-white rounded-lg p-4 shadow-md">
+                                <div class="text-3xl mb-2">👁️</div>
+                                <h5 class="font-semibold text-gray-800">Multimodal</h5>
+                                <p class="text-sm text-gray-600 mt-1">Text + Vision</p>
+                            </div>
+                        </div>
+                        <div class="text-center">
+                            <div class="bg-white rounded-lg p-4 shadow-md">
+                                <div class="text-3xl mb-2">📚</div>
+                                <h5 class="font-semibold text-gray-800">Large Context</h5>
+                                <p class="text-sm text-gray-600 mt-1">1M tokens</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Cost Calculator Section -->
+    <section id="calculator" class="py-20 bg-gradient-to-br from-gray-50 to-emerald-50">
+        <div class="container mx-auto px-6">
+            <div class="text-center mb-16">
+                <h2 class="text-4xl font-bold text-gray-900 mb-4">Real-time Cost Simulator</h2>
+                <p class="text-xl text-gray-600">Calculate AI operational costs and profit margins</p>
+            </div>
+
+            <div class="max-w-5xl mx-auto" x-data="{
+                managers: 5,
+                platformUsers: 100, // Total users on platform for LINE cost sharing
+
+                // Operations per manager per month (USER-INITIATED - Reply messages = FREE LINE)
+                generalQuestions: 50,
+                summaryReports: 10,
+                transactionQueries: 5,
+                transactionInserts: 3,
+                griReports: 1,
+                imageAnalyses: 20,
+                charts: 8,
+                alertChecks: 3,
+
+                // PROACTIVE PUSH MESSAGES (Bot-initiated = ฿0.05 each)
+                dailyAutoReports: 30,      // 1 per day × 30 days
+                proactiveAlerts: 10,       // Critical alerts per month
+
+                selectedPackage: 'pro',
+                packages: {
+                    starter: {
+                        name: 'Starter',
+                        price: 890,
+                        limit: 100,
+                        imageLimit: 0,
+                        pushLimit: 0  // No push messages
+                    },
+                    pro: {
+                        name: 'Pro',
+                        price: 3500,
+                        limit: 2000,
+                        imageLimit: 500,
+                        pushLimit: 100  // Max 100 push messages
+                    },
+                    enterprise: {
+                        name: 'Enterprise',
+                        price: 12000,
+                        limit: 999999,
+                        imageLimit: 999999,
+                        pushLimit: 999999
+                    }
+                },
+
+                // Cost per operation (in THB) - GEMINI ONLY
+                operationCosts: {
+                    generalQuestion: 0.007,
+                    summaryReport: 0.011,
+                    transactionQuery: 0.012,
+                    transactionInsert: 0.010,
+                    griReport: 0.013,
+                    imageAnalysis: 0.024,
+                    chart: 0.011,
+                    alertCheck: 0.011,
+                    // Push message costs
+                    dailyReport: 0.005,     // Gemini cost for auto-report
+                    proactiveAlert: 0.011   // Gemini cost for alert
+                },
+
+                // LINE Messaging API costs
+                linePushCost: 0.05,         // ฿0.05 per push message
+                lineBaseFee: 1780,          // ฿1,780/month Pro plan
+                lineFreeMessages: 35000,    // 35,000 free messages included
+
+                // Reply operations (user-initiated)
+                get totalReplyOperationsPerManager() {
+                    return this.generalQuestions + this.summaryReports +
+                           this.transactionQueries + this.transactionInserts +
+                           this.griReports + this.imageAnalyses +
+                           this.charts + this.alertChecks;
+                },
+
+                // Push operations (bot-initiated)
+                get totalPushOperationsPerManager() {
+                    return this.dailyAutoReports + this.proactiveAlerts;
+                },
+
+                // Total operations (reply + push)
+                get totalOperationsPerManager() {
+                    return this.totalReplyOperationsPerManager + this.totalPushOperationsPerManager;
+                },
+
+                get totalOperationsAllManagers() {
+                    return this.totalOperationsPerManager * this.managers;
+                },
+
+                get totalPushMessagesAllUsers() {
+                    return this.totalPushOperationsPerManager * this.managers;
+                },
+
+                get totalImageOperations() {
+                    return this.imageAnalyses * this.managers;
+                },
+
+                // Gemini AI costs per manager
+                get aiCostPerManager() {
+                    const replyCost = (
+                        this.generalQuestions * this.operationCosts.generalQuestion +
+                        this.summaryReports * this.operationCosts.summaryReport +
+                        this.transactionQueries * this.operationCosts.transactionQuery +
+                        this.transactionInserts * this.operationCosts.transactionInsert +
+                        this.griReports * this.operationCosts.griReport +
+                        this.imageAnalyses * this.operationCosts.imageAnalysis +
+                        this.charts * this.operationCosts.chart +
+                        this.alertChecks * this.operationCosts.alertCheck
+                    );
+
+                    const pushCost = (
+                        this.dailyAutoReports * this.operationCosts.dailyReport +
+                        this.proactiveAlerts * this.operationCosts.proactiveAlert
+                    );
+
+                    return replyCost + pushCost;
+                },
+
+                get totalAICostGEPP() {
+                    return this.aiCostPerManager * this.managers;
+                },
+
+                // LINE Messaging API costs (shared across platform)
+                get totalLineBaseFee() {
+                    return this.lineBaseFee;
+                },
+
+                get totalLinePushMessages() {
+                    return this.totalPushMessagesAllUsers;
+                },
+
+                get lineOverageMessages() {
+                    return Math.max(0, this.totalLinePushMessages - this.lineFreeMessages);
+                },
+
+                get lineOverageCost() {
+                    return this.lineOverageMessages * this.linePushCost;
+                },
+
+                get totalLineCost() {
+                    return this.totalLineBaseFee + this.lineOverageCost;
+                },
+
+                get lineCostPerManager() {
+                    // Shared across all platform users
+                    return this.totalLineCost / this.platformUsers;
+                },
+
+                get infrastructureCost() {
+                    // Base: ฿1.50/manager (shared infrastructure)
+                    return this.managers * 1.50;
+                },
+
+                get totalMonthlyCost() {
+                    return this.totalAICostGEPP + (this.lineCostPerManager * this.managers) + this.infrastructureCost;
+                },
+
+                get revenuePerMonth() {
+                    return this.packages[this.selectedPackage].price * this.managers;
+                },
+
+                get profitMargin() {
+                    return this.revenuePerMonth - this.totalMonthlyCost;
+                },
+
+                get profitPercentage() {
+                    return ((this.profitMargin / this.revenuePerMonth) * 100).toFixed(1);
+                },
+
+                get isWithinLimit() {
+                    return this.totalOperationsAllManagers <= this.packages[this.selectedPackage].limit;
+                },
+
+                get isImageWithinLimit() {
+                    return this.totalImageOperations <= this.packages[this.selectedPackage].imageLimit;
+                },
+
+                get isPushWithinLimit() {
+                    return this.totalPushMessagesAllUsers <= (this.packages[this.selectedPackage].pushLimit * this.managers);
+                },
+
+                get costBreakdown() {
+                    return {
+                        // Reply operations (Gemini only - LINE FREE)
+                        generalQuestions: this.generalQuestions * this.managers * this.operationCosts.generalQuestion,
+                        summaryReports: this.summaryReports * this.managers * this.operationCosts.summaryReport,
+                        transactionQueries: this.transactionQueries * this.managers * this.operationCosts.transactionQuery,
+                        transactionInserts: this.transactionInserts * this.managers * this.operationCosts.transactionInsert,
+                        griReports: this.griReports * this.managers * this.operationCosts.griReport,
+                        imageAnalyses: this.imageAnalyses * this.managers * this.operationCosts.imageAnalysis,
+                        charts: this.charts * this.managers * this.operationCosts.chart,
+                        alertChecks: this.alertChecks * this.managers * this.operationCosts.alertCheck,
+
+                        // Push operations (Gemini + LINE)
+                        dailyAutoReportsGemini: this.dailyAutoReports * this.managers * this.operationCosts.dailyReport,
+                        proactiveAlertsGemini: this.proactiveAlerts * this.managers * this.operationCosts.proactiveAlert,
+
+                        // LINE push message costs
+                        pushMessagesLine: this.totalPushMessagesAllUsers * this.linePushCost,
+                        lineBaseFee: this.lineCostPerManager * this.managers
+                    };
+                }
+            }">
+                <!-- Calculator Card -->
+                <div class="glass-effect rounded-2xl shadow-2xl p-8 mb-8">
+                    <h3 class="text-2xl font-bold text-gray-800 mb-6">📊 Input Parameters (Per Manager/Month)</h3>
+
+                    <!-- Number of Managers -->
+                    <div class="mb-6 grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <div>
+                            <label class="block text-gray-700 font-semibold mb-3">
+                                Number of Managers (This Subscription): <span class="text-gepp-green text-xl" x-text="managers"></span>
+                            </label>
+                            <input type="range" x-model.number="managers" min="1" max="50"
+                                   class="w-full h-3 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-gepp-green">
+                            <div class="flex justify-between text-xs text-gray-500 mt-1">
+                                <span>1</span>
+                                <span>25</span>
+                                <span>50</span>
+                            </div>
+                        </div>
+
+                        <div>
+                            <label class="block text-gray-700 font-semibold mb-3">
+                                Total Platform Users (LINE Cost Sharing): <span class="text-blue-600 text-xl" x-text="platformUsers"></span>
+                            </label>
+                            <input type="range" x-model.number="platformUsers" min="10" max="1000" step="10"
+                                   class="w-full h-3 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-500">
+                            <div class="flex justify-between text-xs text-gray-500 mt-1">
+                                <span>10</span>
+                                <span>500</span>
+                                <span>1000</span>
+                            </div>
+                            <p class="text-xs text-gray-500 mt-2">More users = Lower LINE cost per user (฿<span x-text="lineCostPerManager.toFixed(2)"></span>/user)</p>
+                        </div>
+                    </div>
+
+                    <div class="mb-6 bg-blue-50 border-2 border-blue-200 rounded-xl p-4">
+                        <h4 class="font-bold text-blue-900 mb-2">💡 User-Initiated vs Bot-Initiated Operations</h4>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+                            <div class="bg-white rounded-lg p-3">
+                                <div class="font-semibold text-green-700 mb-1">✅ Reply Messages (FREE LINE)</div>
+                                <p class="text-xs text-gray-600">User asks → Bot replies (no LINE cost, only Gemini)</p>
+                            </div>
+                            <div class="bg-white rounded-lg p-3">
+                                <div class="font-semibold text-orange-700 mb-1">⚠️ Push Messages (฿0.05 each)</div>
+                                <p class="text-xs text-gray-600">Bot sends proactive alerts/reports (LINE + Gemini cost)</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <!-- General Questions -->
+                        <div>
+                            <label class="block text-gray-600 text-sm font-medium mb-2">
+                                💬 General Questions: <span class="text-gepp-green font-bold" x-text="generalQuestions"></span>
+                                <span class="text-xs text-gray-400">(฿0.007/op)</span>
+                            </label>
+                            <input type="range" x-model.number="generalQuestions" min="0" max="200"
+                                   class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-500">
+                        </div>
+
+                        <!-- Summary Reports -->
+                        <div>
+                            <label class="block text-gray-600 text-sm font-medium mb-2">
+                                📄 Summary Reports: <span class="text-gepp-green font-bold" x-text="summaryReports"></span>
+                                <span class="text-xs text-gray-400">(฿0.011/op)</span>
+                            </label>
+                            <input type="range" x-model.number="summaryReports" min="0" max="100"
+                                   class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-green-500">
+                        </div>
+
+                        <!-- Transaction Queries -->
+                        <div>
+                            <label class="block text-gray-600 text-sm font-medium mb-2">
+                                🔍 Transaction Queries: <span class="text-gepp-green font-bold" x-text="transactionQueries"></span>
+                                <span class="text-xs text-gray-400">(฿0.012/op)</span>
+                            </label>
+                            <input type="range" x-model.number="transactionQueries" min="0" max="100"
+                                   class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-cyan-500">
+                        </div>
+
+                        <!-- Transaction Inserts -->
+                        <div>
+                            <label class="block text-gray-600 text-sm font-medium mb-2">
+                                ➕ Transaction Inserts: <span class="text-gepp-green font-bold" x-text="transactionInserts"></span>
+                                <span class="text-xs text-gray-400">(฿0.010/op)</span>
+                            </label>
+                            <input type="range" x-model.number="transactionInserts" min="0" max="100"
+                                   class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-indigo-500">
+                        </div>
+
+                        <!-- GRI Reports -->
+                        <div>
+                            <label class="block text-gray-600 text-sm font-medium mb-2">
+                                📊 GRI Reports: <span class="text-gepp-green font-bold" x-text="griReports"></span>
+                                <span class="text-xs text-gray-400">(฿0.013/op)</span>
+                            </label>
+                            <input type="range" x-model.number="griReports" min="0" max="20"
+                                   class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-purple-500">
+                        </div>
+
+                        <!-- Image Analyses -->
+                        <div>
+                            <label class="block text-gray-600 text-sm font-medium mb-2">
+                                📸 Image Analyses: <span class="text-gepp-green font-bold" x-text="imageAnalyses"></span>
+                                <span class="text-xs text-orange-500">(฿0.024/op) 🔥</span>
+                            </label>
+                            <input type="range" x-model.number="imageAnalyses" min="0" max="100"
+                                   class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-orange-500">
+                        </div>
+
+                        <!-- Charts -->
+                        <div>
+                            <label class="block text-gray-600 text-sm font-medium mb-2">
+                                📈 Charts/Visualizations: <span class="text-gepp-green font-bold" x-text="charts"></span>
+                                <span class="text-xs text-gray-400">(฿0.011/op)</span>
+                            </label>
+                            <input type="range" x-model.number="charts" min="0" max="50"
+                                   class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-teal-500">
+                        </div>
+
+                        <!-- Alert Checks -->
+                        <div>
+                            <label class="block text-gray-600 text-sm font-medium mb-2">
+                                🔔 Alert Checks (Reply): <span class="text-gepp-green font-bold" x-text="alertChecks"></span>
+                                <span class="text-xs text-gray-400">(฿0.011/op)</span>
+                            </label>
+                            <input type="range" x-model.number="alertChecks" min="0" max="50"
+                                   class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-red-500">
+                        </div>
+                    </div>
+
+                    <!-- PROACTIVE PUSH MESSAGES SECTION -->
+                    <div class="mt-8 bg-orange-50 border-2 border-orange-300 rounded-xl p-6">
+                        <h4 class="font-bold text-orange-900 mb-4 text-lg">
+                            ⚠️ Proactive Push Messages (Bot-Initiated) - Costs ฿0.05 per message
+                        </h4>
+
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                            <!-- Daily Auto Reports -->
+                            <div>
+                                <label class="block text-gray-700 text-sm font-medium mb-2">
+                                    📅 Daily Auto-Reports: <span class="text-orange-600 font-bold" x-text="dailyAutoReports"></span>
+                                    <span class="text-xs text-gray-600">(฿0.005 Gemini + ฿0.05 LINE = ฿0.055/op)</span>
+                                </label>
+                                <input type="range" x-model.number="dailyAutoReports" min="0" max="60"
+                                       class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-orange-500">
+                                <p class="text-xs text-gray-600 mt-1">Daily summary sent automatically (e.g., 30 = 1 per day)</p>
+                            </div>
+
+                            <!-- Proactive Alerts -->
+                            <div>
+                                <label class="block text-gray-700 text-sm font-medium mb-2">
+                                    🚨 Proactive Alerts: <span class="text-red-600 font-bold" x-text="proactiveAlerts"></span>
+                                    <span class="text-xs text-gray-600">(฿0.011 Gemini + ฿0.05 LINE = ฿0.061/op)</span>
+                                </label>
+                                <input type="range" x-model.number="proactiveAlerts" min="0" max="100"
+                                       class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-red-500">
+                                <p class="text-xs text-gray-600 mt-1">Critical alerts sent without user request</p>
+                            </div>
+                        </div>
+
+                        <div class="mt-4 bg-white rounded-lg p-4">
+                            <div class="flex justify-between items-center text-sm">
+                                <span class="font-semibold text-gray-700">Total Push Messages/Manager:</span>
+                                <span class="font-bold text-orange-600" x-text="totalPushOperationsPerManager"></span>
+                            </div>
+                            <div class="flex justify-between items-center text-sm mt-2">
+                                <span class="font-semibold text-gray-700">Total Push Messages (All Managers):</span>
+                                <span class="font-bold text-orange-600" x-text="totalPushMessagesAllUsers"></span>
+                            </div>
+                            <div class="flex justify-between items-center text-sm mt-2">
+                                <span class="font-semibold text-gray-700">Push Message Limit:</span>
+                                <span class="font-bold" :class="isPushWithinLimit ? 'text-green-600' : 'text-red-600'"
+                                      x-text="packages[selectedPackage].pushLimit === 999999 ? 'Unlimited' : (packages[selectedPackage].pushLimit * managers).toLocaleString()"></span>
+                            </div>
+                            <div x-show="!isPushWithinLimit" class="mt-3 bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">
+                                ⚠️ Push message usage exceeds package limit! Reduce push messages or upgrade package.
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Package Selection -->
+                    <div class="mt-8">
+                        <label class="block text-gray-700 font-semibold mb-3">Select Package Tier:</label>
+                        <div class="grid grid-cols-3 gap-4">
+                            <button @click="selectedPackage = 'starter'"
+                                    :class="selectedPackage === 'starter' ? 'bg-gepp-green text-white' : 'bg-white text-gray-700'"
+                                    class="py-3 px-4 rounded-lg font-semibold border-2 border-gepp-green transition">
+                                Starter<br><span class="text-sm">890 THB</span>
+                            </button>
+                            <button @click="selectedPackage = 'pro'"
+                                    :class="selectedPackage === 'pro' ? 'bg-gepp-green text-white' : 'bg-white text-gray-700'"
+                                    class="py-3 px-4 rounded-lg font-semibold border-2 border-gepp-green transition">
+                                Pro<br><span class="text-sm">3,500 THB</span>
+                            </button>
+                            <button @click="selectedPackage = 'enterprise'"
+                                    :class="selectedPackage === 'enterprise' ? 'bg-gepp-green text-white' : 'bg-white text-gray-700'"
+                                    class="py-3 px-4 rounded-lg font-semibold border-2 border-gepp-green transition">
+                                Enterprise<br><span class="text-sm">12,000 THB</span>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Results Dashboard -->
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+                    <!-- Usage Stats -->
+                    <div class="bg-white rounded-xl shadow-lg p-6">
+                        <h4 class="text-lg font-bold text-gray-800 mb-4 flex items-center">
+                            <span class="text-2xl mr-2">📈</span> Usage Statistics
+                        </h4>
+                        <div class="space-y-3">
+                            <div class="flex justify-between items-center pb-2 border-b">
+                                <span class="text-gray-600">Total Operations/Manager:</span>
+                                <span class="font-bold text-gray-900" x-text="totalOperationsPerManager.toLocaleString()"></span>
+                            </div>
+                            <div class="flex justify-between items-center pb-2">
+                                <span class="text-gray-600 text-sm">└─ Reply Ops (FREE LINE):</span>
+                                <span class="font-bold text-green-600 text-sm" x-text="totalReplyOperationsPerManager.toLocaleString()"></span>
+                            </div>
+                            <div class="flex justify-between items-center pb-2 border-b">
+                                <span class="text-gray-600 text-sm">└─ Push Ops (฿0.05 each):</span>
+                                <span class="font-bold text-orange-600 text-sm" x-text="totalPushOperationsPerManager.toLocaleString()"></span>
+                            </div>
+                            <div class="flex justify-between items-center pb-2 border-b">
+                                <span class="text-gray-600">Total All Managers:</span>
+                                <span class="font-bold text-gepp-green" x-text="totalOperationsAllManagers.toLocaleString()"></span>
+                            </div>
+                            <div class="flex justify-between items-center pb-2 border-b">
+                                <span class="text-gray-600 text-sm">└─ Images:</span>
+                                <span class="font-bold text-orange-600 text-sm" x-text="totalImageOperations.toLocaleString()"></span>
+                            </div>
+                            <div class="flex justify-between items-center pb-2 border-b">
+                                <span class="text-gray-600 text-sm">└─ Push Messages:</span>
+                                <span class="font-bold text-orange-600 text-sm" x-text="totalPushMessagesAllUsers.toLocaleString()"></span>
+                            </div>
+                            <div class="flex justify-between items-center pt-2">
+                                <span class="text-gray-600">Package Limit:</span>
+                                <span class="font-bold"
+                                      :class="isWithinLimit ? 'text-green-600' : 'text-red-600'"
+                                      x-text="packages[selectedPackage].limit === 999999 ? 'Unlimited' : packages[selectedPackage].limit.toLocaleString()"></span>
+                            </div>
+                            <div class="flex justify-between items-center">
+                                <span class="text-gray-600 text-sm">└─ Image Limit:</span>
+                                <span class="font-bold text-sm"
+                                      :class="isImageWithinLimit ? 'text-green-600' : 'text-red-600'"
+                                      x-text="packages[selectedPackage].imageLimit === 999999 ? 'Unlimited' : (packages[selectedPackage].imageLimit === 0 ? 'Not Allowed' : packages[selectedPackage].imageLimit.toLocaleString())"></span>
+                            </div>
+                            <div class="flex justify-between items-center">
+                                <span class="text-gray-600 text-sm">└─ Push Limit:</span>
+                                <span class="font-bold text-sm"
+                                      :class="isPushWithinLimit ? 'text-green-600' : 'text-red-600'"
+                                      x-text="packages[selectedPackage].pushLimit === 999999 ? 'Unlimited' : (packages[selectedPackage].pushLimit * managers).toLocaleString()"></span>
+                            </div>
+                            <div x-show="!isWithinLimit || !isImageWithinLimit || !isPushWithinLimit" class="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">
+                                ⚠️ Usage exceeds package limit! Consider upgrading.
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Cost Breakdown by Operation -->
+                    <div class="bg-white rounded-xl shadow-lg p-6">
+                        <h4 class="text-lg font-bold text-gray-800 mb-4 flex items-center">
+                            <span class="text-2xl mr-2">💰</span> Complete Cost Breakdown
+                        </h4>
+                        <div class="space-y-2 text-sm">
+                            <!-- Gemini AI Costs (Reply Operations) -->
+                            <div class="bg-green-50 rounded-lg p-2 mb-2">
+                                <div class="font-semibold text-green-800 text-xs mb-1">✅ Reply Operations (Gemini Only - LINE FREE)</div>
+                            </div>
+                            <div class="flex justify-between items-center">
+                                <span class="text-gray-600 text-xs">💬 Questions:</span>
+                                <span class="font-mono text-gray-900 text-xs">฿<span x-text="costBreakdown.generalQuestions.toFixed(2)"></span></span>
+                            </div>
+                            <div class="flex justify-between items-center">
+                                <span class="text-gray-600 text-xs">📄 Reports:</span>
+                                <span class="font-mono text-gray-900 text-xs">฿<span x-text="costBreakdown.summaryReports.toFixed(2)"></span></span>
+                            </div>
+                            <div class="flex justify-between items-center">
+                                <span class="text-gray-600 text-xs">🔍 TX Queries:</span>
+                                <span class="font-mono text-gray-900 text-xs">฿<span x-text="costBreakdown.transactionQueries.toFixed(2)"></span></span>
+                            </div>
+                            <div class="flex justify-between items-center">
+                                <span class="text-gray-600 text-xs">➕ TX Inserts:</span>
+                                <span class="font-mono text-gray-900 text-xs">฿<span x-text="costBreakdown.transactionInserts.toFixed(2)"></span></span>
+                            </div>
+                            <div class="flex justify-between items-center">
+                                <span class="text-gray-600 text-xs">📊 GRI Reports:</span>
+                                <span class="font-mono text-gray-900 text-xs">฿<span x-text="costBreakdown.griReports.toFixed(2)"></span></span>
+                            </div>
+                            <div class="flex justify-between items-center">
+                                <span class="text-gray-600 text-xs">📸 Images:</span>
+                                <span class="font-mono text-orange-600 font-bold text-xs">฿<span x-text="costBreakdown.imageAnalyses.toFixed(2)"></span></span>
+                            </div>
+                            <div class="flex justify-between items-center">
+                                <span class="text-gray-600 text-xs">📈 Charts:</span>
+                                <span class="font-mono text-gray-900 text-xs">฿<span x-text="costBreakdown.charts.toFixed(2)"></span></span>
+                            </div>
+                            <div class="flex justify-between items-center pb-2">
+                                <span class="text-gray-600 text-xs">🔔 Alert Checks:</span>
+                                <span class="font-mono text-gray-900 text-xs">฿<span x-text="costBreakdown.alertChecks.toFixed(2)"></span></span>
+                            </div>
+
+                            <!-- Push Operations -->
+                            <div class="bg-orange-50 rounded-lg p-2 mb-2 mt-3">
+                                <div class="font-semibold text-orange-800 text-xs mb-1">⚠️ Push Operations (Gemini + LINE)</div>
+                            </div>
+                            <div class="flex justify-between items-center">
+                                <span class="text-gray-600 text-xs">📅 Daily Reports (Gemini):</span>
+                                <span class="font-mono text-gray-900 text-xs">฿<span x-text="costBreakdown.dailyAutoReportsGemini.toFixed(2)"></span></span>
+                            </div>
+                            <div class="flex justify-between items-center">
+                                <span class="text-gray-600 text-xs">🚨 Alerts (Gemini):</span>
+                                <span class="font-mono text-gray-900 text-xs">฿<span x-text="costBreakdown.proactiveAlertsGemini.toFixed(2)"></span></span>
+                            </div>
+                            <div class="flex justify-between items-center pb-2 border-b">
+                                <span class="text-orange-700 text-xs font-semibold">LINE Push (<span x-text="totalPushMessagesAllUsers"></span> msgs):</span>
+                                <span class="font-mono text-orange-600 font-bold text-xs">฿<span x-text="(totalPushMessagesAllUsers * linePushCost).toFixed(2)"></span></span>
+                            </div>
+
+                            <!-- Totals -->
+                            <div class="flex justify-between items-center pt-2">
+                                <span class="font-semibold text-gray-800 text-xs">Total Gemini AI:</span>
+                                <span class="font-bold text-blue-600 font-mono text-xs">฿<span x-text="totalAICostGEPP.toFixed(2)"></span></span>
+                            </div>
+                            <div class="flex justify-between items-center">
+                                <span class="font-semibold text-gray-800 text-xs">LINE API (shared ÷<span x-text="platformUsers"></span>):</span>
+                                <span class="font-bold text-orange-600 font-mono text-xs">฿<span x-text="(lineCostPerManager * managers).toFixed(2)"></span></span>
+                            </div>
+                            <div class="flex justify-between items-center pb-2 border-b">
+                                <span class="font-semibold text-gray-800 text-xs">Infrastructure:</span>
+                                <span class="font-bold text-gray-900 font-mono text-xs">฿<span x-text="infrastructureCost.toFixed(2)"></span></span>
+                            </div>
+                            <div class="flex justify-between items-center pt-2 text-base border-t-2">
+                                <span class="font-bold text-gray-800">Total Cost:</span>
+                                <span class="font-bold text-red-600 font-mono">฿<span x-text="totalMonthlyCost.toFixed(2)"></span></span>
+                            </div>
+                        </div>
+
+                        <!-- LINE Cost Details -->
+                        <div class="mt-4 bg-blue-50 rounded-lg p-3 text-xs">
+                            <div class="font-semibold text-blue-900 mb-2">LINE Cost Breakdown:</div>
+                            <div class="flex justify-between text-gray-700">
+                                <span>Base Fee (Pro Plan):</span>
+                                <span class="font-mono">฿<span x-text="lineBaseFee.toFixed(2)"></span></span>
+                            </div>
+                            <div class="flex justify-between text-gray-700">
+                                <span>Free Messages:</span>
+                                <span class="font-mono"><span x-text="lineFreeMessages.toLocaleString()"></span></span>
+                            </div>
+                            <div class="flex justify-between text-gray-700">
+                                <span>Your Push Messages:</span>
+                                <span class="font-mono" :class="totalLinePushMessages > lineFreeMessages ? 'text-red-600 font-bold' : 'text-green-600'">
+                                    <span x-text="totalLinePushMessages.toLocaleString()"></span>
+                                </span>
+                            </div>
+                            <div x-show="lineOverageMessages > 0" class="flex justify-between text-red-700 font-semibold">
+                                <span>Overage:</span>
+                                <span class="font-mono">+฿<span x-text="lineOverageCost.toFixed(2)"></span></span>
+                            </div>
+                            <div class="flex justify-between text-gray-700 border-t pt-2 mt-2 font-semibold">
+                                <span>Total LINE Cost:</span>
+                                <span class="font-mono">฿<span x-text="totalLineCost.toFixed(2)"></span></span>
+                            </div>
+                            <div class="flex justify-between text-blue-900 font-bold">
+                                <span>Per User (÷<span x-text="platformUsers"></span>):</span>
+                                <span class="font-mono">฿<span x-text="lineCostPerManager.toFixed(2)"></span></span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Profit Analysis -->
+                <div class="bg-gradient-to-br from-gepp-green to-emerald-600 rounded-2xl shadow-2xl p-8 text-white">
+                    <h3 class="text-2xl font-bold mb-6 flex items-center justify-center">
+                        <span class="text-3xl mr-3">💰</span> Profit Analysis
+                    </h3>
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                        <div class="bg-white/20 backdrop-blur-sm rounded-xl p-6 text-center">
+                            <div class="text-sm text-emerald-100 mb-2">Monthly Revenue</div>
+                            <div class="text-3xl font-bold" x-text="'฿' + revenuePerMonth.toLocaleString()"></div>
+                            <div class="text-xs text-emerald-100 mt-2" x-text="managers + ' managers × ฿' + packages[selectedPackage].price.toLocaleString()"></div>
+                        </div>
+                        <div class="bg-white/20 backdrop-blur-sm rounded-xl p-6 text-center">
+                            <div class="text-sm text-emerald-100 mb-2">Total Costs</div>
+                            <div class="text-3xl font-bold">฿<span x-text="(totalMonthlyCost * 33).toLocaleString('en-US', {maximumFractionDigits: 0})"></span></div>
+                            <div class="text-xs text-emerald-100 mt-2">≈ $<span x-text="totalMonthlyCost.toFixed(2)"></span> (@ 33 THB/USD)</div>
+                        </div>
+                        <div class="bg-white/20 backdrop-blur-sm rounded-xl p-6 text-center">
+                            <div class="text-sm text-emerald-100 mb-2">Net Profit</div>
+                            <div class="text-3xl font-bold"
+                                 :class="profitMargin > 0 ? 'text-white' : 'text-red-300'"
+                                 x-text="'฿' + ((revenuePerMonth - (totalMonthlyCost * 33))).toLocaleString('en-US', {maximumFractionDigits: 0})"></div>
+                            <div class="text-xs mt-2">
+                                <span class="bg-white/30 px-3 py-1 rounded-full" x-text="profitPercentage + '% margin'"></span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="mt-6 text-center text-sm text-emerald-100">
+                        <span x-show="profitMargin > 0">✅ Profitable business model with healthy margins</span>
+                        <span x-show="profitMargin <= 0" class="text-red-300">⚠️ Consider increasing package price or reducing infrastructure costs</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Pricing Packages Section -->
+    <section id="pricing" class="py-20 bg-white">
+        <div class="container mx-auto px-6">
+            <div class="text-center mb-16">
+                <h2 class="text-4xl font-bold text-gray-900 mb-4">Package Strategy</h2>
+                <p class="text-xl text-gray-600">Flexible tiers designed for every business size</p>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-8 max-w-6xl mx-auto">
+                <!-- Starter Package -->
+                <div class="bg-white rounded-2xl shadow-xl p-8 border-2 border-gray-200 card-hover relative">
+                    <div class="text-center">
+                        <div class="text-5xl mb-4">🌱</div>
+                        <h3 class="text-2xl font-bold text-gray-800 mb-2">Starter</h3>
+                        <p class="text-gray-600 mb-4">Small Business</p>
+                        <div class="mb-6">
+                            <span class="text-4xl font-bold text-gepp-green">฿890</span>
+                            <span class="text-gray-600">/month</span>
+                        </div>
+                    </div>
+
+                    <ul class="space-y-3 mb-8">
+                        <li class="flex items-start">
+                            <svg class="w-6 h-6 text-gepp-green mr-2 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                                <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
+                            </svg>
+                            <span class="text-gray-700">Text Chat Support</span>
+                        </li>
+                        <li class="flex items-start">
+                            <svg class="w-6 h-6 text-gepp-green mr-2 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                                <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
+                            </svg>
+                            <span class="text-gray-700">Daily Text Summary</span>
+                        </li>
+                        <li class="flex items-start">
+                            <svg class="w-6 h-6 text-gepp-green mr-2 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                                <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
+                            </svg>
+                            <span class="text-gray-700">Basic Waste Reports</span>
+                        </li>
+                        <li class="flex items-start">
+                            <svg class="w-6 h-6 text-gepp-green mr-2 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                                <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
+                            </svg>
+                            <span class="text-gray-700"><strong>Limit: 100 requests/mo</strong></span>
+                        </li>
+                    </ul>
+
+                    <button class="w-full bg-gray-200 text-gray-700 py-3 rounded-lg font-semibold hover:bg-gray-300 transition">
+                        Choose Starter
+                    </button>
+                </div>
+
+                <!-- Pro Package (Most Popular) -->
+                <div class="bg-gradient-to-br from-gepp-green to-emerald-600 rounded-2xl shadow-2xl p-8 border-2 border-gepp-green card-hover relative transform scale-105">
+                    <div class="pricing-badge">Most Popular</div>
+
+                    <div class="text-center text-white">
+                        <div class="text-5xl mb-4">🏭</div>
+                        <h3 class="text-2xl font-bold mb-2">Pro</h3>
+                        <p class="text-emerald-100 mb-4">Factory / Office</p>
+                        <div class="mb-6">
+                            <span class="text-4xl font-bold">฿3,500</span>
+                            <span class="text-emerald-100">/month</span>
+                        </div>
+                    </div>
+
+                    <ul class="space-y-3 mb-8 text-white">
+                        <li class="flex items-start">
+                            <svg class="w-6 h-6 mr-2 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                                <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
+                            </svg>
+                            <span><strong>Vision AI (Snap & Sort)</strong></span>
+                        </li>
+                        <li class="flex items-start">
+                            <svg class="w-6 h-6 mr-2 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                                <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
+                            </svg>
+                            <span>Flex Message Charts</span>
+                        </li>
+                        <li class="flex items-start">
+                            <svg class="w-6 h-6 mr-2 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                                <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
+                            </svg>
+                            <span>Real-time Alerts</span>
+                        </li>
+                        <li class="flex items-start">
+                            <svg class="w-6 h-6 mr-2 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                                <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
+                            </svg>
+                            <span>Weekly GRI Summaries</span>
+                        </li>
+                        <li class="flex items-start">
+                            <svg class="w-6 h-6 mr-2 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                                <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
+                            </svg>
+                            <span><strong>Limit: 2,000 requests/mo</strong></span>
+                        </li>
+                    </ul>
+
+                    <button class="w-full bg-white text-gepp-green py-3 rounded-lg font-semibold hover:bg-emerald-50 transition">
+                        Choose Pro ⭐
+                    </button>
+                </div>
+
+                <!-- Enterprise Package -->
+                <div class="bg-white rounded-2xl shadow-xl p-8 border-2 border-purple-200 card-hover relative">
+                    <div class="text-center">
+                        <div class="text-5xl mb-4">🏢</div>
+                        <h3 class="text-2xl font-bold text-gray-800 mb-2">Enterprise</h3>
+                        <p class="text-gray-600 mb-4">Industrial</p>
+                        <div class="mb-6">
+                            <span class="text-4xl font-bold text-purple-600">฿12,000+</span>
+                            <span class="text-gray-600">/month</span>
+                        </div>
+                    </div>
+
+                    <ul class="space-y-3 mb-8">
+                        <li class="flex items-start">
+                            <svg class="w-6 h-6 text-purple-600 mr-2 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                                <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
+                            </svg>
+                            <span class="text-gray-700"><strong>Video Analysis</strong></span>
+                        </li>
+                        <li class="flex items-start">
+                            <svg class="w-6 h-6 text-purple-600 mr-2 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                                <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
+                            </svg>
+                            <span class="text-gray-700">Custom LIFF Dashboard</span>
+                        </li>
+                        <li class="flex items-start">
+                            <svg class="w-6 h-6 text-purple-600 mr-2 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                                <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
+                            </svg>
+                            <span class="text-gray-700">GRI Report Generation</span>
+                        </li>
+                        <li class="flex items-start">
+                            <svg class="w-6 h-6 text-purple-600 mr-2 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                                <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
+                            </svg>
+                            <span class="text-gray-700">Dedicated Support</span>
+                        </li>
+                        <li class="flex items-start">
+                            <svg class="w-6 h-6 text-purple-600 mr-2 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                                <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
+                            </svg>
+                            <span class="text-gray-700"><strong>Unlimited Requests</strong></span>
+                        </li>
+                    </ul>
+
+                    <button class="w-full bg-purple-600 text-white py-3 rounded-lg font-semibold hover:bg-purple-700 transition">
+                        Contact Sales
+                    </button>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Cost Per Operation Table -->
+    <section class="py-20 bg-gray-50">
+        <div class="container mx-auto px-6">
+            <div class="text-center mb-12">
+                <h2 class="text-4xl font-bold text-gray-900 mb-4">Cost Per Operation Breakdown</h2>
+                <p class="text-xl text-gray-600">Detailed pricing for each action type</p>
+            </div>
+
+            <div class="max-w-6xl mx-auto">
+                <!-- Cost Table -->
+                <div class="bg-white rounded-2xl shadow-xl overflow-hidden">
+                    <table class="w-full">
+                        <thead class="bg-gradient-to-r from-gepp-green to-emerald-600 text-white">
+                            <tr>
+                                <th class="px-6 py-4 text-left font-semibold">Operation Type</th>
+                                <th class="px-6 py-4 text-left font-semibold">Description</th>
+                                <th class="px-6 py-4 text-center font-semibold">Input Tokens</th>
+                                <th class="px-6 py-4 text-center font-semibold">Output Tokens</th>
+                                <th class="px-6 py-4 text-right font-semibold">Total Cost (THB)</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-gray-200">
+                            <tr class="hover:bg-gray-50 transition">
+                                <td class="px-6 py-4">
+                                    <div class="flex items-center">
+                                        <span class="text-2xl mr-3">💬</span>
+                                        <span class="font-semibold text-gray-800">General Question</span>
+                                    </div>
+                                </td>
+                                <td class="px-6 py-4 text-gray-600 text-sm">
+                                    Simple text query (e.g., "What is hazardous waste?")
+                                </td>
+                                <td class="px-6 py-4 text-center text-gray-700 font-mono">1,145</td>
+                                <td class="px-6 py-4 text-center text-gray-700 font-mono">250</td>
+                                <td class="px-6 py-4 text-right font-bold text-gray-900">฿0.007</td>
+                            </tr>
+                            <tr class="hover:bg-gray-50 transition">
+                                <td class="px-6 py-4">
+                                    <div class="flex items-center">
+                                        <span class="text-2xl mr-3">📄</span>
+                                        <span class="font-semibold text-gray-800">Summary Report</span>
+                                    </div>
+                                </td>
+                                <td class="px-6 py-4 text-gray-600 text-sm">
+                                    Generate waste summary (Python function + AI formatting)
+                                </td>
+                                <td class="px-6 py-4 text-center text-gray-700 font-mono">2,470</td>
+                                <td class="px-6 py-4 text-center text-gray-700 font-mono">180</td>
+                                <td class="px-6 py-4 text-right font-bold text-gray-900">฿0.011</td>
+                            </tr>
+                            <tr class="hover:bg-gray-50 transition">
+                                <td class="px-6 py-4">
+                                    <div class="flex items-center">
+                                        <span class="text-2xl mr-3">🔍</span>
+                                        <span class="font-semibold text-gray-800">Transaction Query</span>
+                                    </div>
+                                </td>
+                                <td class="px-6 py-4 text-gray-600 text-sm">
+                                    Search/view specific transaction by ID
+                                </td>
+                                <td class="px-6 py-4 text-center text-gray-700 font-mono">2,580</td>
+                                <td class="px-6 py-4 text-center text-gray-700 font-mono">235</td>
+                                <td class="px-6 py-4 text-right font-bold text-gray-900">฿0.012</td>
+                            </tr>
+                            <tr class="hover:bg-gray-50 transition">
+                                <td class="px-6 py-4">
+                                    <div class="flex items-center">
+                                        <span class="text-2xl mr-3">➕</span>
+                                        <span class="font-semibold text-gray-800">Transaction Insert</span>
+                                    </div>
+                                </td>
+                                <td class="px-6 py-4 text-gray-600 text-sm">
+                                    Record new waste transaction (text input only)
+                                </td>
+                                <td class="px-6 py-4 text-center text-gray-700 font-mono">2,390</td>
+                                <td class="px-6 py-4 text-center text-gray-700 font-mono">180</td>
+                                <td class="px-6 py-4 text-right font-bold text-gray-900">฿0.010</td>
+                            </tr>
+                            <tr class="hover:bg-gray-50 transition">
+                                <td class="px-6 py-4">
+                                    <div class="flex items-center">
+                                        <span class="text-2xl mr-3">🔔</span>
+                                        <span class="font-semibold text-gray-800">Alert Check</span>
+                                    </div>
+                                </td>
+                                <td class="px-6 py-4 text-gray-600 text-sm">
+                                    Check for real-time waste alerts
+                                </td>
+                                <td class="px-6 py-4 text-center text-gray-700 font-mono">2,415</td>
+                                <td class="px-6 py-4 text-center text-gray-700 font-mono">210</td>
+                                <td class="px-6 py-4 text-right font-bold text-gray-900">฿0.011</td>
+                            </tr>
+                            <tr class="hover:bg-gray-50 transition">
+                                <td class="px-6 py-4">
+                                    <div class="flex items-center">
+                                        <span class="text-2xl mr-3">📈</span>
+                                        <span class="font-semibold text-gray-800">Chart Generation</span>
+                                    </div>
+                                </td>
+                                <td class="px-6 py-4 text-gray-600 text-sm">
+                                    Create visual chart (Python generates image)
+                                </td>
+                                <td class="px-6 py-4 text-center text-gray-700 font-mono">2,370</td>
+                                <td class="px-6 py-4 text-center text-gray-700 font-mono">250</td>
+                                <td class="px-6 py-4 text-right font-bold text-gray-900">฿0.011</td>
+                            </tr>
+                            <tr class="hover:bg-gray-50 transition">
+                                <td class="px-6 py-4">
+                                    <div class="flex items-center">
+                                        <span class="text-2xl mr-3">📊</span>
+                                        <span class="font-semibold text-gray-800">GRI Report</span>
+                                    </div>
+                                </td>
+                                <td class="px-6 py-4 text-gray-600 text-sm">
+                                    Generate GRI 306 annual sustainability report
+                                </td>
+                                <td class="px-6 py-4 text-center text-gray-700 font-mono">2,775</td>
+                                <td class="px-6 py-4 text-center text-gray-700 font-mono">290</td>
+                                <td class="px-6 py-4 text-right font-bold text-gray-900">฿0.013</td>
+                            </tr>
+                            <tr class="bg-orange-50 hover:bg-orange-100 transition">
+                                <td class="px-6 py-4">
+                                    <div class="flex items-center">
+                                        <span class="text-2xl mr-3">📸</span>
+                                        <span class="font-semibold text-gray-800">Image Analysis</span>
+                                    </div>
+                                </td>
+                                <td class="px-6 py-4 text-gray-600 text-sm">
+                                    Snap waste photo → AI identifies material type (Reply)
+                                </td>
+                                <td class="px-6 py-4 text-center text-orange-700 font-mono font-bold">5,770</td>
+                                <td class="px-6 py-4 text-center text-orange-700 font-mono font-bold">340</td>
+                                <td class="px-6 py-4 text-right font-bold text-orange-600 text-lg">฿0.024</td>
+                            </tr>
+                            <tr class="bg-red-50 hover:bg-red-100 transition border-t-4 border-red-300">
+                                <td class="px-6 py-4">
+                                    <div class="flex items-center">
+                                        <span class="text-2xl mr-3">📅</span>
+                                        <span class="font-semibold text-gray-800">Daily Auto-Report (Push)</span>
+                                    </div>
+                                </td>
+                                <td class="px-6 py-4 text-gray-600 text-sm">
+                                    Bot sends daily summary automatically (Gemini + LINE)
+                                </td>
+                                <td class="px-6 py-4 text-center text-gray-700 font-mono">1,125</td>
+                                <td class="px-6 py-4 text-center text-gray-700 font-mono">100</td>
+                                <td class="px-6 py-4 text-right">
+                                    <div class="text-xs text-gray-600">Gemini: ฿0.005</div>
+                                    <div class="text-xs text-red-600 font-bold">LINE: +฿0.05</div>
+                                    <div class="font-bold text-red-600 text-lg">= ฿0.055</div>
+                                </td>
+                            </tr>
+                            <tr class="bg-red-50 hover:bg-red-100 transition">
+                                <td class="px-6 py-4">
+                                    <div class="flex items-center">
+                                        <span class="text-2xl mr-3">🚨</span>
+                                        <span class="font-semibold text-gray-800">Proactive Alert (Push)</span>
+                                    </div>
+                                </td>
+                                <td class="px-6 py-4 text-gray-600 text-sm">
+                                    Bot sends critical alert without user request
+                                </td>
+                                <td class="px-6 py-4 text-center text-gray-700 font-mono">2,415</td>
+                                <td class="px-6 py-4 text-center text-gray-700 font-mono">210</td>
+                                <td class="px-6 py-4 text-right">
+                                    <div class="text-xs text-gray-600">Gemini: ฿0.011</div>
+                                    <div class="text-xs text-red-600 font-bold">LINE: +฿0.05</div>
+                                    <div class="font-bold text-red-600 text-lg">= ฿0.061</div>
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Key Insights -->
+                <div class="mt-8 grid grid-cols-1 md:grid-cols-3 gap-6">
+                    <div class="bg-blue-50 rounded-xl p-6 border-2 border-blue-200">
+                        <h4 class="font-bold text-blue-900 mb-2 flex items-center">
+                            <span class="text-2xl mr-2">💰</span> Text Operations
+                        </h4>
+                        <p class="text-sm text-blue-800 mb-2">Average cost: <strong>฿0.011</strong></p>
+                        <p class="text-xs text-blue-700">Most common operations (questions, reports, queries)</p>
+                    </div>
+
+                    <div class="bg-orange-50 rounded-xl p-6 border-2 border-orange-200">
+                        <h4 class="font-bold text-orange-900 mb-2 flex items-center">
+                            <span class="text-2xl mr-2">📸</span> Vision Operations
+                        </h4>
+                        <p class="text-sm text-orange-800 mb-2">Cost: <strong>฿0.024</strong> (3x higher)</p>
+                        <p class="text-xs text-orange-700">Image processing requires more tokens</p>
+                    </div>
+
+                    <div class="bg-green-50 rounded-xl p-6 border-2 border-green-200">
+                        <h4 class="font-bold text-green-900 mb-2 flex items-center">
+                            <span class="text-2xl mr-2">📊</span> Cost Efficiency
+                        </h4>
+                        <p class="text-sm text-green-800 mb-2">Context Caching: <strong>75% savings</strong></p>
+                        <p class="text-xs text-green-700">Reuse system prompts across conversations</p>
+                    </div>
+                </div>
+
+                <!-- Example Calculations -->
+                <div class="mt-8 bg-gradient-to-br from-gray-800 to-gray-900 rounded-2xl p-8 text-white">
+                    <h3 class="text-2xl font-bold mb-6 text-center">💡 Real-World Cost Examples</h3>
+
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                        <!-- Starter User -->
+                        <div class="bg-white/10 backdrop-blur-sm rounded-xl p-6">
+                            <h4 class="font-bold text-emerald-400 mb-3">Starter Package User</h4>
+                            <div class="space-y-2 text-sm">
+                                <div class="flex justify-between">
+                                    <span>70 questions</span>
+                                    <span class="font-mono">฿0.49</span>
+                                </div>
+                                <div class="flex justify-between">
+                                    <span>20 reports</span>
+                                    <span class="font-mono">฿0.22</span>
+                                </div>
+                                <div class="flex justify-between">
+                                    <span>10 queries</span>
+                                    <span class="font-mono">฿0.12</span>
+                                </div>
+                                <div class="flex justify-between border-t border-white/30 pt-2 font-bold">
+                                    <span>Total (100 ops)</span>
+                                    <span class="font-mono text-emerald-400">฿0.83</span>
+                                </div>
+                                <div class="flex justify-between">
+                                    <span>Revenue</span>
+                                    <span class="font-mono">฿890</span>
+                                </div>
+                                <div class="flex justify-between text-lg">
+                                    <span>Profit</span>
+                                    <span class="font-mono text-emerald-400">฿838</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Pro User -->
+                        <div class="bg-white/10 backdrop-blur-sm rounded-xl p-6 border-2 border-emerald-400">
+                            <h4 class="font-bold text-emerald-400 mb-3">Pro Package User ⭐</h4>
+                            <div class="space-y-2 text-sm">
+                                <div class="flex justify-between">
+                                    <span>500 questions</span>
+                                    <span class="font-mono">฿3.50</span>
+                                </div>
+                                <div class="flex justify-between">
+                                    <span>100 reports</span>
+                                    <span class="font-mono">฿1.10</span>
+                                </div>
+                                <div class="flex justify-between">
+                                    <span>200 images 📸</span>
+                                    <span class="font-mono text-orange-400">฿4.80</span>
+                                </div>
+                                <div class="flex justify-between">
+                                    <span>100 others</span>
+                                    <span class="font-mono">฿1.10</span>
+                                </div>
+                                <div class="flex justify-between border-t border-white/30 pt-2 font-bold">
+                                    <span>Total (900 ops)</span>
+                                    <span class="font-mono text-emerald-400">฿10.50</span>
+                                </div>
+                                <div class="flex justify-between">
+                                    <span>Revenue</span>
+                                    <span class="font-mono">฿3,500</span>
+                                </div>
+                                <div class="flex justify-between text-lg">
+                                    <span>Profit</span>
+                                    <span class="font-mono text-emerald-400">฿3,340</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Enterprise User -->
+                        <div class="bg-white/10 backdrop-blur-sm rounded-xl p-6">
+                            <h4 class="font-bold text-purple-400 mb-3">Enterprise User</h4>
+                            <div class="space-y-2 text-sm">
+                                <div class="flex justify-between">
+                                    <span>2,000 questions</span>
+                                    <span class="font-mono">฿14.00</span>
+                                </div>
+                                <div class="flex justify-between">
+                                    <span>500 reports</span>
+                                    <span class="font-mono">฿5.50</span>
+                                </div>
+                                <div class="flex justify-between">
+                                    <span>1,000 images 📸</span>
+                                    <span class="font-mono text-orange-400">฿24.00</span>
+                                </div>
+                                <div class="flex justify-between">
+                                    <span>500 others</span>
+                                    <span class="font-mono">฿5.50</span>
+                                </div>
+                                <div class="flex justify-between border-t border-white/30 pt-2 font-bold">
+                                    <span>Total (4,000 ops)</span>
+                                    <span class="font-mono text-purple-400">฿49.00</span>
+                                </div>
+                                <div class="flex justify-between">
+                                    <span>Revenue</span>
+                                    <span class="font-mono">฿12,000</span>
+                                </div>
+                                <div class="flex justify-between text-lg">
+                                    <span>Profit</span>
+                                    <span class="font-mono text-purple-400">฿11,450</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="mt-6 text-center text-emerald-400 text-sm">
+                        ✅ All scenarios show >94% profit margins
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Technology Stack Section -->
+    <section class="py-20 bg-gradient-to-br from-gray-900 to-gray-800 text-white">
+        <div class="container mx-auto px-6">
+            <div class="text-center mb-16">
+                <h2 class="text-4xl font-bold mb-4">Technology Stack</h2>
+                <p class="text-xl text-gray-300">Built with modern, scalable technologies</p>
+            </div>
+
+            <div class="max-w-5xl mx-auto grid grid-cols-1 md:grid-cols-3 gap-8">
+                <!-- Backend -->
+                <div class="bg-white/10 backdrop-blur-sm rounded-xl p-6 border border-white/20">
+                    <h3 class="text-xl font-bold mb-4 text-emerald-400">Backend</h3>
+                    <ul class="space-y-2 text-gray-300">
+                        <li class="flex items-center">
+                            <span class="mr-2">🐍</span> Python 3.11+ FastAPI
+                        </li>
+                        <li class="flex items-center">
+                            <span class="mr-2">🧠</span> Google Gemini 2.5 Flash
+                        </li>
+                        <li class="flex items-center">
+                            <span class="mr-2">🗄️</span> PostgreSQL + pgvector
+                        </li>
+                        <li class="flex items-center">
+                            <span class="mr-2">☁️</span> Google Cloud Run
+                        </li>
+                        <li class="flex items-center">
+                            <span class="mr-2">🔐</span> JWT Authentication
+                        </li>
+                    </ul>
+                </div>
+
+                <!-- Frontend -->
+                <div class="bg-white/10 backdrop-blur-sm rounded-xl p-6 border border-white/20">
+                    <h3 class="text-xl font-bold mb-4 text-blue-400">Frontend</h3>
+                    <ul class="space-y-2 text-gray-300">
+                        <li class="flex items-center">
+                            <span class="mr-2">⚛️</span> LIFF (LINE Frontend)
+                        </li>
+                        <li class="flex items-center">
+                            <span class="mr-2">📱</span> Vue.js 3 / React 18
+                        </li>
+                        <li class="flex items-center">
+                            <span class="mr-2">🎨</span> Tailwind CSS
+                        </li>
+                        <li class="flex items-center">
+                            <span class="mr-2">📊</span> Chart.js / D3.js
+                        </li>
+                        <li class="flex items-center">
+                            <span class="mr-2">🔄</span> Flex Message Builder
+                        </li>
+                    </ul>
+                </div>
+
+                <!-- DevOps & Integrations -->
+                <div class="bg-white/10 backdrop-blur-sm rounded-xl p-6 border border-white/20">
+                    <h3 class="text-xl font-bold mb-4 text-orange-400">DevOps & Integrations</h3>
+                    <ul class="space-y-2 text-gray-300">
+                        <li class="flex items-center">
+                            <span class="mr-2">🐳</span> Docker Containerization
+                        </li>
+                        <li class="flex items-center">
+                            <span class="mr-2">💬</span> LINE Messaging API
+                        </li>
+                        <li class="flex items-center">
+                            <span class="mr-2">📁</span> Google Cloud Storage
+                        </li>
+                        <li class="flex items-center">
+                            <span class="mr-2">🔔</span> LINE Notify
+                        </li>
+                        <li class="flex items-center">
+                            <span class="mr-2">📈</span> Cloud Monitoring
+                        </li>
+                    </ul>
+                </div>
+            </div>
+
+            <!-- Why Gemini 2.5 Flash Detailed -->
+            <div class="mt-16 max-w-4xl mx-auto">
+                <div class="bg-gradient-to-r from-orange-500 to-red-500 rounded-2xl p-8 shadow-2xl">
+                    <h3 class="text-2xl font-bold mb-6 text-center">🚀 Why Gemini 2.5 Flash is Perfect for LINE Chatbot</h3>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6 text-white">
+                        <div>
+                            <h4 class="font-bold mb-2">⚡ Extreme Speed</h4>
+                            <p class="text-sm text-orange-100">
+                                < 0.5 second latency ensures instant responses on LINE. Users get real-time answers without waiting.
+                            </p>
+                        </div>
+                        <div>
+                            <h4 class="font-bold mb-2">💰 Low Cost</h4>
+                            <p class="text-sm text-orange-100">
+                                At $0.10 per million input tokens, it's 5-10x cheaper than competitors while maintaining quality.
+                            </p>
+                        </div>
+                        <div>
+                            <h4 class="font-bold mb-2">👁️ Native Multimodal</h4>
+                            <p class="text-sm text-orange-100">
+                                Process text and images simultaneously. Snap a photo of waste, get instant AI classification.
+                            </p>
+                        </div>
+                        <div>
+                            <h4 class="font-bold mb-2">📚 1M Token Context</h4>
+                            <p class="text-sm text-orange-100">
+                                Can analyze entire monthly reports or massive datasets in a single query with full context.
+                            </p>
+                        </div>
+                    </div>
+
+                    <div class="mt-6 bg-white/20 backdrop-blur-sm rounded-lg p-4 text-center">
+                        <p class="text-sm text-white">
+                            <strong>Function Calling (Tools)</strong> allows Gemini to intelligently query your database,
+                            generate charts, and return structured Flex Messages - all autonomously.
+                        </p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Footer CTA -->
+    <section class="gradient-bg text-white py-16">
+        <div class="container mx-auto px-6 text-center">
+            <h2 class="text-3xl font-bold mb-4">Ready to Transform Waste Management?</h2>
+            <p class="text-xl text-emerald-100 mb-8">
+                Start with GEPP AI Manager on LINE today. Fast, intelligent, and cost-effective.
+            </p>
+            <div class="flex flex-wrap justify-center gap-4">
+                <button class="bg-white text-gepp-dark-green px-8 py-4 rounded-lg font-semibold hover:bg-emerald-50 transition shadow-lg">
+                    Schedule Demo
+                </button>
+                <button class="bg-emerald-700 text-white px-8 py-4 rounded-lg font-semibold hover:bg-emerald-600 transition border-2 border-white/30">
+                    Contact Sales
+                </button>
+            </div>
+
+            <div class="mt-12 text-sm text-emerald-100">
+                <p>Powered by Google Gemini 2.5 Flash | Built by GEPP Sa-Ard Team</p>
+            </div>
+        </div>
+    </section>
+
+    <!-- Sources Section -->
+    <section class="bg-gray-100 py-8">
+        <div class="container mx-auto px-6">
+            <h3 class="text-lg font-semibold text-gray-700 mb-3">📚 Research Sources:</h3>
+            <ul class="text-sm text-gray-600 space-y-1">
+                <li>• <a href="https://ai.google.dev/gemini-api/docs/pricing" target="_blank" class="text-gepp-green hover:underline">Gemini Developer API pricing | Google AI for Developers</a></li>
+                <li>• <a href="https://www.aifreeapi.com/en/posts/gemini-api-pricing-2026" target="_blank" class="text-gepp-green hover:underline">Gemini API Pricing 2026: Complete Per-1M-Token Cost Guide with Calculator</a></li>
+                <li>• <a href="https://costgoat.com/pricing/gemini-api" target="_blank" class="text-gepp-green hover:underline">Gemini API Pricing Calculator & Cost Guide (Feb 2026)</a></li>
+                <li>• <a href="https://cloud.google.com/vertex-ai/generative-ai/pricing" target="_blank" class="text-gepp-green hover:underline">Vertex AI Pricing | Google Cloud</a></li>
+            </ul>
+        </div>
+    </section>
+</body>
+</html>

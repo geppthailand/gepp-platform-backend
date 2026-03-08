@@ -1,0 +1,648 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GEPP Platform - Architecture Documentation</title>
+    <style>
+        :root {
+            --primary: #10b981;
+            --primary-dark: #059669;
+            --bg-dark: #0f172a;
+            --bg-card: #1e293b;
+            --bg-code: #334155;
+            --text-primary: #f1f5f9;
+            --text-secondary: #94a3b8;
+            --border: #334155;
+            --accent-blue: #3b82f6;
+            --accent-purple: #8b5cf6;
+            --accent-orange: #f59e0b;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, var(--bg-dark) 0%, #1a1f35 100%);
+            color: var(--text-primary);
+            line-height: 1.7;
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 40px 24px;
+        }
+
+        /* Header */
+        header {
+            text-align: center;
+            padding: 60px 0;
+            background: linear-gradient(180deg, rgba(16, 185, 129, 0.1) 0%, transparent 100%);
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 40px;
+        }
+
+        .logo {
+            font-size: 3rem;
+            font-weight: 800;
+            background: linear-gradient(135deg, var(--primary) 0%, #34d399 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            margin-bottom: 16px;
+        }
+
+        .subtitle {
+            font-size: 1.25rem;
+            color: var(--text-secondary);
+            max-width: 600px;
+            margin: 0 auto;
+        }
+
+        /* Navigation */
+        nav {
+            background: var(--bg-card);
+            border-radius: 12px;
+            padding: 16px 24px;
+            margin-bottom: 40px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            justify-content: center;
+            border: 1px solid var(--border);
+        }
+
+        nav a {
+            color: var(--text-secondary);
+            text-decoration: none;
+            padding: 8px 16px;
+            border-radius: 8px;
+            transition: all 0.2s;
+            font-size: 0.9rem;
+        }
+
+        nav a:hover {
+            background: var(--primary);
+            color: white;
+        }
+
+        /* Sections */
+        section {
+            background: var(--bg-card);
+            border-radius: 16px;
+            padding: 32px;
+            margin-bottom: 32px;
+            border: 1px solid var(--border);
+        }
+
+        h2 {
+            font-size: 1.75rem;
+            margin-bottom: 24px;
+            padding-bottom: 12px;
+            border-bottom: 2px solid var(--primary);
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        h2::before {
+            content: '';
+            width: 8px;
+            height: 8px;
+            background: var(--primary);
+            border-radius: 50%;
+        }
+
+        h3 {
+            font-size: 1.25rem;
+            margin: 24px 0 16px;
+            color: var(--primary);
+        }
+
+        p {
+            color: var(--text-secondary);
+            margin-bottom: 16px;
+        }
+
+        /* Architecture Diagram */
+        .diagram {
+            background: var(--bg-code);
+            border-radius: 12px;
+            padding: 24px;
+            overflow-x: auto;
+            font-family: 'JetBrains Mono', 'Fira Code', monospace;
+            font-size: 0.85rem;
+            line-height: 1.4;
+            white-space: pre;
+            color: var(--text-primary);
+            border: 1px solid var(--border);
+        }
+
+        /* Tech Stack Grid */
+        .tech-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 24px;
+            margin-top: 24px;
+        }
+
+        .tech-card {
+            background: var(--bg-code);
+            border-radius: 12px;
+            padding: 24px;
+            border: 1px solid var(--border);
+        }
+
+        .tech-card h4 {
+            font-size: 1.1rem;
+            margin-bottom: 16px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .tech-card h4 .icon {
+            width: 32px;
+            height: 32px;
+            background: var(--primary);
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1rem;
+        }
+
+        .tech-card table {
+            width: 100%;
+        }
+
+        .tech-card td {
+            padding: 8px 0;
+            font-size: 0.9rem;
+        }
+
+        .tech-card td:first-child {
+            color: var(--text-secondary);
+        }
+
+        .tech-card td:last-child {
+            color: var(--primary);
+            font-weight: 500;
+        }
+
+        /* Feature Cards */
+        .feature-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 24px;
+        }
+
+        .feature-card {
+            background: linear-gradient(135deg, var(--bg-code) 0%, rgba(16, 185, 129, 0.05) 100%);
+            border-radius: 16px;
+            padding: 28px;
+            border: 1px solid var(--border);
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .feature-card:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 12px 40px rgba(16, 185, 129, 0.15);
+        }
+
+        .feature-card .icon {
+            width: 48px;
+            height: 48px;
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.5rem;
+            margin-bottom: 16px;
+        }
+
+        .feature-card.transactions .icon { background: linear-gradient(135deg, #3b82f6, #60a5fa); }
+        .feature-card.ai-audit .icon { background: linear-gradient(135deg, #8b5cf6, #a78bfa); }
+        .feature-card.gri .icon { background: linear-gradient(135deg, #10b981, #34d399); }
+        .feature-card.esg .icon { background: linear-gradient(135deg, #f59e0b, #fbbf24); }
+        .feature-card.setup .icon { background: linear-gradient(135deg, #ef4444, #f87171); }
+
+        .feature-card h4 {
+            font-size: 1.2rem;
+            margin-bottom: 12px;
+        }
+
+        .feature-card p {
+            font-size: 0.9rem;
+            margin-bottom: 16px;
+        }
+
+        .feature-card ul {
+            list-style: none;
+            padding: 0;
+        }
+
+        .feature-card li {
+            padding: 6px 0;
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .feature-card li::before {
+            content: '✓';
+            color: var(--primary);
+            font-weight: bold;
+        }
+
+        /* Flow Diagram */
+        .flow-section {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 16px;
+            align-items: center;
+            justify-content: center;
+            padding: 24px 0;
+        }
+
+        .flow-step {
+            background: var(--bg-code);
+            border-radius: 12px;
+            padding: 16px 24px;
+            text-align: center;
+            border: 1px solid var(--border);
+            min-width: 140px;
+        }
+
+        .flow-step .number {
+            width: 28px;
+            height: 28px;
+            background: var(--primary);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 8px;
+            font-weight: bold;
+            font-size: 0.85rem;
+        }
+
+        .flow-step .label {
+            font-size: 0.9rem;
+            font-weight: 500;
+        }
+
+        .flow-arrow {
+            color: var(--primary);
+            font-size: 1.5rem;
+        }
+
+        /* Table */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 16px 0;
+        }
+
+        th, td {
+            padding: 12px 16px;
+            text-align: left;
+            border-bottom: 1px solid var(--border);
+        }
+
+        th {
+            background: var(--bg-code);
+            color: var(--primary);
+            font-weight: 600;
+        }
+
+        td {
+            color: var(--text-secondary);
+        }
+
+        td code {
+            background: var(--bg-code);
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85rem;
+            color: var(--primary);
+        }
+
+        /* Status badges */
+        .badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+
+        .badge.pending { background: #fef3c7; color: #92400e; }
+        .badge.waiting { background: #dbeafe; color: #1e40af; }
+        .badge.review { background: #fce7f3; color: #9d174d; }
+        .badge.approved { background: #d1fae5; color: #065f46; }
+        .badge.rejected { background: #fee2e2; color: #991b1b; }
+
+        /* Footer */
+        footer {
+            text-align: center;
+            padding: 40px 0;
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+            border-top: 1px solid var(--border);
+            margin-top: 40px;
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .container { padding: 20px 16px; }
+            section { padding: 24px; }
+            .feature-grid { grid-template-columns: 1fr; }
+            .flow-section { flex-direction: column; }
+            .flow-arrow { transform: rotate(90deg); }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="container">
+            <div class="logo">🌱 GEPP Platform</div>
+            <p class="subtitle">Green Environment & Plastic Platform - Comprehensive Waste Management and ESG Solution</p>
+        </div>
+    </header>
+
+    <div class="container">
+        <nav>
+            <a href="#architecture">Architecture</a>
+            <a href="#tech-stack">Tech Stack</a>
+            <a href="#features">Features</a>
+            <a href="#ai-audit">AI Auditing</a>
+            <a href="#gri">GRI Reporting</a>
+            <a href="#api">API</a>
+            <a href="#deployment">Deployment</a>
+        </nav>
+
+        <!-- Architecture Section -->
+        <section id="architecture">
+            <h2>System Architecture</h2>
+            <p>GEPP Platform is a comprehensive waste management and ESG platform designed for organizations to track, manage, and report on waste transactions with AI-powered insights.</p>
+            
+            <div class="diagram">
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                               GEPP Platform Architecture                              │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                       │
+│   ┌─────────────────────┐          REST API          ┌───────────────────────────┐  │
+│   │   Frontend (React)  │ ◄─────────────────────────►│    Backend (Python)       │  │
+│   │   gepp-business-v2  │                            │     AWS Lambda            │  │
+│   │   ┌───────────────┐ │                            │   ┌─────────────────────┐ │  │
+│   │   │ Transactions  │ │                            │   │   Transaction Mgmt  │ │  │
+│   │   │ Reports/GRI   │ │                            │   │   AI Audit Engine   │ │  │
+│   │   │ Setup/Config  │ │                            │   │   GRI Reporting     │ │  │
+│   │   │ G360 AI Chat  │ │                            │   │   ESG Analytics     │ │  │
+│   │   └───────────────┘ │                            │   └─────────────────────┘ │  │
+│   └─────────────────────┘                            └───────────────────────────┘  │
+│            │                                                      │                  │
+│            ▼                                                      ▼                  │
+│   ┌─────────────────────┐                            ┌───────────────────────────┐  │
+│   │   Mobile Input (QR) │                            │     AI/ML Services        │  │
+│   │   Public Access     │                            │   Google Vertex AI        │  │
+│   └─────────────────────┘                            │   (Gemini Pro Vision)     │  │
+│                                                      └───────────────────────────┘  │
+│                                                                   │                  │
+│                                                                   ▼                  │
+│                                                      ┌───────────────────────────┐  │
+│                                                      │   PostgreSQL + pgvector   │  │
+│                                                      │   AWS S3 (File Storage)   │  │
+│                                                      └───────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+            </div>
+        </section>
+
+        <!-- Technology Stack -->
+        <section id="tech-stack">
+            <h2>Technology Stack</h2>
+            <div class="tech-grid">
+                <div class="tech-card">
+                    <h4><span class="icon">⚛️</span> Frontend</h4>
+                    <table>
+                        <tr><td>Framework</td><td>React 18+ with TypeScript</td></tr>
+                        <tr><td>Build Tool</td><td>Vite</td></tr>
+                        <tr><td>State</td><td>TanStack Query</td></tr>
+                        <tr><td>UI Library</td><td>Ant Design</td></tr>
+                        <tr><td>Routing</td><td>React Router v7</td></tr>
+                        <tr><td>i18n</td><td>i18next (TH/EN)</td></tr>
+                        <tr><td>Testing</td><td>Playwright</td></tr>
+                    </table>
+                </div>
+                <div class="tech-card">
+                    <h4><span class="icon">🐍</span> Backend</h4>
+                    <table>
+                        <tr><td>Runtime</td><td>Python 3.x</td></tr>
+                        <tr><td>Framework</td><td>AWS Lambda</td></tr>
+                        <tr><td>Database</td><td>PostgreSQL + pgvector</td></tr>
+                        <tr><td>ORM</td><td>SQLAlchemy</td></tr>
+                        <tr><td>Auth</td><td>JWT with Refresh</td></tr>
+                        <tr><td>Storage</td><td>AWS S3</td></tr>
+                        <tr><td>AI/ML</td><td>Vertex AI (Gemini)</td></tr>
+                    </table>
+                </div>
+            </div>
+        </section>
+
+        <!-- Core Features -->
+        <section id="features">
+            <h2>Core Features</h2>
+            <div class="feature-grid">
+                <div class="feature-card transactions">
+                    <div class="icon">📦</div>
+                    <h4>Transaction Management</h4>
+                    <p>Complete waste transaction lifecycle with CRUD operations and status tracking.</p>
+                    <ul>
+                        <li>Create transactions with line items</li>
+                        <li>Status workflow (pending → approved)</li>
+                        <li>File attachments & photos</li>
+                        <li>Mobile QR code input</li>
+                    </ul>
+                </div>
+                <div class="feature-card ai-audit">
+                    <div class="icon">🤖</div>
+                    <h4>AI-Powered Auditing</h4>
+                    <p>Automated transaction validation using Google Vertex AI with two-phase processing.</p>
+                    <ul>
+                        <li>Image analysis & material detection</li>
+                        <li>Weight anomaly detection</li>
+                        <li>Price validation</li>
+                        <li>Duplicate detection</li>
+                    </ul>
+                </div>
+                <div class="feature-card gri">
+                    <div class="icon">📊</div>
+                    <h4>GRI Sustainability Reporting</h4>
+                    <p>GRI 306 (Waste) standards compliance with automated data aggregation.</p>
+                    <ul>
+                        <li>GRI 306-1: Waste Impacts</li>
+                        <li>GRI 306-2: Management</li>
+                        <li>GRI 306-3: Waste by Type</li>
+                        <li>PDF report generation</li>
+                    </ul>
+                </div>
+                <div class="feature-card esg">
+                    <div class="icon">🌍</div>
+                    <h4>G360 AI ESG Consulting</h4>
+                    <p>Interactive AI assistant for sustainability guidance and recommendations.</p>
+                    <ul>
+                        <li>ESG score analysis</li>
+                        <li>Improvement recommendations</li>
+                        <li>Compliance guidance</li>
+                        <li>Carbon footprint insights</li>
+                    </ul>
+                </div>
+                <div class="feature-card setup">
+                    <div class="icon">⚙️</div>
+                    <h4>Setup & Configuration</h4>
+                    <p>Multi-tenant organization management with hierarchical structure.</p>
+                    <ul>
+                        <li>Role-based access control (RBAC)</li>
+                        <li>Location hierarchy (tree)</li>
+                        <li>Audit rule configuration</li>
+                        <li>Material catalog management</li>
+                    </ul>
+                </div>
+            </div>
+        </section>
+
+        <!-- AI Audit Pipeline -->
+        <section id="ai-audit">
+            <h2>AI Audit Pipeline</h2>
+            <p>Two-phase processing for accurate transaction validation:</p>
+            
+            <div class="flow-section">
+                <div class="flow-step">
+                    <div class="number">1</div>
+                    <div class="label">Submit Transaction</div>
+                </div>
+                <span class="flow-arrow">→</span>
+                <div class="flow-step">
+                    <div class="number">2</div>
+                    <div class="label">Image Extraction</div>
+                </div>
+                <span class="flow-arrow">→</span>
+                <div class="flow-step">
+                    <div class="number">3</div>
+                    <div class="label">Material Analysis</div>
+                </div>
+                <span class="flow-arrow">→</span>
+                <div class="flow-step">
+                    <div class="number">4</div>
+                    <div class="label">Rule Judgment</div>
+                </div>
+                <span class="flow-arrow">→</span>
+                <div class="flow-step">
+                    <div class="number">5</div>
+                    <div class="label">Verdict</div>
+                </div>
+            </div>
+
+            <h3>Transaction Statuses</h3>
+            <table>
+                <thead>
+                    <tr><th>Status</th><th>Description</th><th>Badge</th></tr>
+                </thead>
+                <tbody>
+                    <tr><td><code>pending</code></td><td>Newly created, awaiting processing</td><td><span class="badge pending">Pending</span></td></tr>
+                    <tr><td><code>waiting_ai</code></td><td>Submitted for AI audit</td><td><span class="badge waiting">Waiting AI</span></td></tr>
+                    <tr><td><code>in_review</code></td><td>Flagged for manual review</td><td><span class="badge review">In Review</span></td></tr>
+                    <tr><td><code>approved</code></td><td>Passed audit, finalized</td><td><span class="badge approved">Approved</span></td></tr>
+                    <tr><td><code>rejected</code></td><td>Failed audit, requires correction</td><td><span class="badge rejected">Rejected</span></td></tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- GRI Reporting -->
+        <section id="gri">
+            <h2>GRI 306 Sustainability Reporting</h2>
+            <p>Compliance with Global Reporting Initiative (GRI) waste management standards:</p>
+            
+            <div class="tech-grid">
+                <div class="tech-card">
+                    <h4>📋 GRI 306-1</h4>
+                    <p style="color: var(--text-secondary); font-size: 0.9rem;">Waste generation and significant waste-related impacts</p>
+                </div>
+                <div class="tech-card">
+                    <h4>🔄 GRI 306-2</h4>
+                    <p style="color: var(--text-secondary); font-size: 0.9rem;">Management of significant waste-related impacts</p>
+                </div>
+                <div class="tech-card">
+                    <h4>📊 GRI 306-3</h4>
+                    <p style="color: var(--text-secondary); font-size: 0.9rem;">Waste generated by type and disposal method</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- API Structure -->
+        <section id="api">
+            <h2>API Structure</h2>
+            <table>
+                <thead>
+                    <tr><th>Category</th><th>Endpoints</th><th>Description</th></tr>
+                </thead>
+                <tbody>
+                    <tr><td>Auth</td><td><code>/api/auth/*</code></td><td>Login, register, token refresh</td></tr>
+                    <tr><td>Transactions</td><td><code>/api/transactions/*</code></td><td>CRUD operations</td></tr>
+                    <tr><td>Audit</td><td><code>/api/transaction_audit/*</code></td><td>AI audit processing</td></tr>
+                    <tr><td>Audit Rules</td><td><code>/api/audit/*</code></td><td>Rule configuration</td></tr>
+                    <tr><td>GRI</td><td><code>/api/gri/*</code></td><td>Sustainability reporting</td></tr>
+                    <tr><td>Reports</td><td><code>/api/reports/*</code></td><td>Report generation</td></tr>
+                    <tr><td>Locations</td><td><code>/api/locations/*</code></td><td>Site management</td></tr>
+                    <tr><td>Users</td><td><code>/api/users/*</code></td><td>User management</td></tr>
+                    <tr><td>Mobile</td><td><code>/api/input-channel/*</code></td><td>QR code mobile input</td></tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- Deployment -->
+        <section id="deployment">
+            <h2>Deployment Architecture</h2>
+            <div class="diagram">
+┌─────────────────────────────────────────────────────────────────────┐
+│                         AWS Cloud                                    │
+│                                                                      │
+│  ┌───────────────┐    ┌───────────────┐    ┌───────────────┐       │
+│  │  CloudFront   │───►│  S3 (Static)  │    │  S3 (Files)   │       │
+│  │  (CDN)        │    │  Frontend     │    │  Uploads      │       │
+│  └───────────────┘    └───────────────┘    └───────────────┘       │
+│         │                                                           │
+│         ▼                                                           │
+│  ┌───────────────┐    ┌───────────────┐    ┌───────────────┐       │
+│  │  API Gateway  │───►│    Lambda     │───►│     RDS       │       │
+│  │               │    │  (Backend)    │    │  PostgreSQL   │       │
+│  └───────────────┘    └───────────────┘    └───────────────┘       │
+│                              │                                      │
+│                              ▼                                      │
+│                       ┌───────────────┐                            │
+│                       │  Vertex AI    │                            │
+│                       │  (Gemini)     │                            │
+│                       └───────────────┘                            │
+└─────────────────────────────────────────────────────────────────────┘
+            </div>
+        </section>
+    </div>
+
+    <footer>
+        <div class="container">
+            <p>GEPP Platform Architecture Documentation</p>
+            <p>Version 1.0 | Last Updated: January 2026</p>
+        </div>
+    </footer>
+</body>
+</html>
