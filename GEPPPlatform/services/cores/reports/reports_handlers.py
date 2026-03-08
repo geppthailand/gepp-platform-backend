@@ -247,49 +247,24 @@ def _get_general_waste_mm_id(db) -> Optional[int]:
 
 def _split_waste_to_energy(material_map: Dict[str, float], cat_mm_map: Dict[Tuple[int, int], float],
                            general_waste_mm_id: Optional[int], category_names: Dict[int, str]) -> Dict[str, float]:
-    """Split 'Waste to Energy' out of General Waste in a material_map keyed by category name.
+    """Normalize 'Waste to Energy' category name in material_map.
 
-    Any record under category_id=4 whose main_material_id != GENERAL_WASTE main_material
-    is reclassified as 'Waste to Energy'.
+    Ensures the Waste To Energy category (id=9) uses a consistent display name.
+    Materials under General Waste (cat_id=4) are kept as-is to match legacy report behavior.
 
     Args:
         material_map: {category_name: weight} dict (mutated in place and returned)
         cat_mm_map: {(category_id, main_material_id): weight} tracking dict
-        general_waste_mm_id: the main_material_id for GENERAL_WASTE (from DB or fallback)
+        general_waste_mm_id: the main_material_id for GENERAL_WASTE (unused, kept for API compat)
         category_names: {category_id: name} mapping
 
     Returns:
-        The updated material_map with Waste to Energy split out.
+        The updated material_map.
     """
-    if general_waste_mm_id is None:
-        # Fallback: pick the main_material with the most weight under category 4
-        cat4_pairs = {mm_id: w for (c, mm_id), w in cat_mm_map.items() if c == _GENERAL_WASTE_CAT_ID}
-        if cat4_pairs:
-            general_waste_mm_id = max(cat4_pairs, key=cat4_pairs.get)
-        else:
-            return material_map
-
-    wte_weight = 0.0
-    for (cat_id, mm_id), weight in cat_mm_map.items():
-        if cat_id == _GENERAL_WASTE_CAT_ID and mm_id != general_waste_mm_id and weight > 0:
-            wte_weight += weight
-
-    if wte_weight > 0:
-        # Subtract from General Waste entry
-        gw_name = category_names.get(_GENERAL_WASTE_CAT_ID, 'General Waste')
-        if gw_name in material_map:
-            material_map[gw_name] = material_map[gw_name] - wte_weight
-            if material_map[gw_name] <= 0:
-                del material_map[gw_name]
-
-    # Merge actual "Waste To Energy" category (id=9) into the WTE bucket
+    # Normalize Waste To Energy category name from DB to consistent display name
     wte_db_name = category_names.get(_WASTE_TO_ENERGY_CAT_ID, 'Waste To Energy')
-    if wte_db_name in material_map:
-        wte_weight += material_map.pop(wte_db_name)
-
-    # Add combined Waste To Energy entry
-    if wte_weight > 0:
-        material_map['Waste To Energy'] = wte_weight
+    if wte_db_name in material_map and wte_db_name != 'Waste To Energy':
+        material_map['Waste To Energy'] = material_map.pop(wte_db_name)
 
     return material_map
 
@@ -427,7 +402,6 @@ def _handle_overview_report(
     recyclable_ghg_reduction = 0.0
     origin_waste_map = {}
     category_waste_map = {}
-    cat_mm_waste_map = {}   # (cat_id, main_mat_id) -> weight for split-out detection
     month_totals_by_year = {}
     tx_ids = set()
     tx_approved = set()
@@ -483,9 +457,6 @@ def _handle_overview_report(
         # Category proportions
         if cat_id is not None:
             category_waste_map[cat_id] = category_waste_map.get(cat_id, 0.0) + weight
-            if main_mat_id is not None:
-                key = (cat_id, main_mat_id)
-                cat_mm_waste_map[key] = cat_mm_waste_map.get(key, 0.0) + weight
 
     recycle_rate = ((recyclable_waste / total_waste) * 100) if total_waste > 0 else 0.0
 
@@ -521,35 +492,8 @@ def _handle_overview_report(
             for m in sorted(monthly.keys())
         ]
 
-    # Split "Waste to Energy" out of General Waste (category_id=4).
-    # In the old DB, "Waste to Energy" was its own material_category. In the new DB, those
-    # materials were merged under General Waste. We identify them by: any record under
-    # category_id=4 whose main_material_id is NOT the "General Waste" main_material (GENERAL_WASTE).
-    _general_waste_mm_id = _get_general_waste_mm_id(reports_service.db)
-
-    # Fallback: if query fails, try to detect from data (most weight under cat=4)
-    if _general_waste_mm_id is None:
-        cat4_pairs = {mm_id: w for (c, mm_id), w in cat_mm_waste_map.items() if c == _GENERAL_WASTE_CAT_ID}
-        if cat4_pairs:
-            _general_waste_mm_id = max(cat4_pairs, key=cat4_pairs.get)
-
-    # Accumulate waste-to-energy weight: everything under General Waste category
-    # that does NOT belong to the "General Waste" main_material
-    wte_weight = 0.0
-    if _general_waste_mm_id is not None:
-        for (cat_id, mm_id), weight in cat_mm_waste_map.items():
-            if cat_id == _GENERAL_WASTE_CAT_ID and mm_id != _general_waste_mm_id and weight > 0:
-                wte_weight += weight
-
-    # Subtract waste-to-energy from General Waste category
-    if wte_weight > 0:
-        category_waste_map[_GENERAL_WASTE_CAT_ID] = category_waste_map.get(_GENERAL_WASTE_CAT_ID, 0.0) - wte_weight
-
-    # Merge actual "Waste To Energy" category (id=9) into the split WTE bucket
-    # so it doesn't appear as a separate row
-    if _WASTE_TO_ENERGY_CAT_ID in category_waste_map:
-        wte_weight += category_waste_map.pop(_WASTE_TO_ENERGY_CAT_ID)
-
+    # Keep category assignments as-is (matching legacy report behavior).
+    # Waste To Energy materials already have their own category_id=9.
     # Remove zero/negative category entries
     category_waste_map = {k: v for k, v in category_waste_map.items() if v > 0}
 
@@ -564,14 +508,6 @@ def _handle_overview_report(
         }
         for cid, total in category_waste_map.items()
     ]
-    # Add "Waste to Energy" as a separate entry if it has weight
-    if wte_weight > 0:
-        waste_type_proportions.append({
-            'category_id': _WASTE_TO_ENERGY_CAT_ID,
-            'category_name': 'Waste To Energy',
-            'total_waste': round(wte_weight * 100) / 100,
-            'proportion_percent': (wte_weight / total_waste * 100) if total_waste > 0 else 0.0,
-        })
     waste_type_proportions.sort(key=lambda x: x['total_waste'], reverse=True)
 
     return {
