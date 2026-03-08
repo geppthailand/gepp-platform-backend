@@ -179,6 +179,10 @@ def handle_user_routes(event: Dict[str, Any], data: Dict[str, Any], **params) ->
         # Create new user
         return handle_create_user(user_service, data, current_user_id)
 
+    elif '/api/locations/orphans' == path and method == 'GET':
+        # Get orphan locations with search, type filter, pagination
+        return handle_get_orphan_locations(user_service, query_params, current_user)
+
     elif '/api/locations' == path and method == 'GET':
         # Get user locations (is_location = True)
         return handle_get_locations(db_session, user_service, query_params, current_user, headers)
@@ -893,6 +897,47 @@ def handle_get_locations(db_session, user_service: UserService, query_params: Di
 
     except Exception as e:
         raise APIException(f'Error fetching locations: {str(e)}')
+
+
+def handle_get_orphan_locations(
+    user_service: UserService,
+    query_params: Dict[str, Any],
+    current_user: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Handle GET /api/locations/orphans - Get orphan locations with search, type filter, pagination."""
+    try:
+        organization_id = current_user.get('organization_id') if current_user else None
+        if not organization_id:
+            raise NotFoundException('User is not part of any organization')
+
+        search = query_params.get('search', '').strip() or None
+        types_param = query_params.get('types', '').strip()
+        types = [t.strip() for t in types_param.split(',') if t.strip()] if types_param else None
+        page = int(query_params.get('page', '1'))
+        page_size = int(query_params.get('page_size', '20'))
+
+        # Clamp page_size
+        if page_size < 1:
+            page_size = 1
+        elif page_size > 100:
+            page_size = 100
+
+        result = user_service.get_orphan_locations(
+            organization_id=organization_id,
+            search=search,
+            types=types,
+            page=page,
+            page_size=page_size,
+        )
+
+        return {
+            'success': True,
+            **result,
+            'message': f'Retrieved {len(result["data"])} orphan locations',
+        }
+
+    except Exception as e:
+        raise APIException(f'Error fetching orphan locations: {str(e)}')
 
 
 def handle_update_location(

@@ -730,6 +730,60 @@ class UserCRUD:
 
         return query.all()
 
+    def get_orphan_locations(
+        self,
+        organization_id: int,
+        setup_location_ids: List[int],
+        search: Optional[str] = None,
+        types: Optional[List[str]] = None,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> Tuple[List[UserLocation], int]:
+        """
+        Get orphan locations (not in organization_setup) with search, type filter, and pagination.
+        Returns (locations, total_count).
+        """
+        query = self.db.query(UserLocation).options(
+            joinedload(UserLocation.province),
+            joinedload(UserLocation.district),
+            joinedload(UserLocation.subdistrict),
+        ).filter(
+            and_(
+                UserLocation.organization_id == organization_id,
+                UserLocation.is_location == True,
+                UserLocation.is_active == True,
+                UserLocation.type != 'hub-main',
+            )
+        )
+
+        # Exclude locations that are in the setup tree
+        if setup_location_ids:
+            query = query.filter(~UserLocation.id.in_(setup_location_ids))
+
+        # Search by name_th / name_en / display_name
+        if search:
+            like_pattern = f'%{search}%'
+            query = query.filter(
+                or_(
+                    UserLocation.name_th.ilike(like_pattern),
+                    UserLocation.name_en.ilike(like_pattern),
+                    UserLocation.display_name.ilike(like_pattern),
+                )
+            )
+
+        # Filter by types
+        if types:
+            query = query.filter(UserLocation.type.in_(types))
+
+        # Get total count before pagination
+        total = query.count()
+
+        # Apply pagination
+        query = query.order_by(desc(UserLocation.created_date))
+        query = query.offset((page - 1) * page_size).limit(page_size)
+
+        return query.all(), total
+
     def get_locations_by_member(
         self,
         member_user_id: int,
