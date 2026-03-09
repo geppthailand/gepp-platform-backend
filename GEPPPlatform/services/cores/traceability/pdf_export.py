@@ -14,6 +14,27 @@ from reportlab.pdfbase.ttfonts import TTFont
 
 PAGE_WIDTH_IN = 11.69
 PAGE_HEIGHT_IN = 8.27
+
+_THAI_MONTHS = [
+    "", "มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน",
+    "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม",
+]
+
+
+def _format_thai_date(date_str: str) -> str:
+    """Convert date string (YYYY-MM-DD or YYYY-MM) to Thai month+year format."""
+    if not date_str:
+        return ""
+    try:
+        parts = date_str.strip().split("-")
+        y = int(parts[0])
+        m = int(parts[1]) if len(parts) >= 2 else 0
+        thai_year = y + 543
+        if 1 <= m <= 12:
+            return f"{_THAI_MONTHS[m]} {thai_year}"
+        return str(thai_year)
+    except (ValueError, IndexError):
+        return date_str
 PRIMARY = colors.HexColor("#54937a")
 padding = 0.50 * inch
 
@@ -83,12 +104,14 @@ def _draw_header(pdf, page_width_points: float, page_height_points: float, data:
         location_text = str(location_data) if location_data else "ทั้งหมด"
     date_from = data.get("date_from") or ""
     date_to = data.get("date_to") or ""
-    if date_from and date_to:
-        date_text = f"{date_from} - {date_to}"
-    elif date_from:
-        date_text = date_from
-    elif date_to:
-        date_text = date_to
+    thai_from = _format_thai_date(date_from)
+    thai_to = _format_thai_date(date_to)
+    if thai_from and thai_to:
+        date_text = f"{thai_from} - {thai_to}" if thai_from != thai_to else thai_from
+    elif thai_from:
+        date_text = thai_from
+    elif thai_to:
+        date_text = thai_to
     else:
         date_text = "ทั้งหมด"
     pdf.setFillColor(PRIMARY)
@@ -232,6 +255,103 @@ def _all_leaves_managed(transport_children: list) -> bool:
     )
 
 
+def _collect_transit_info(transports: list) -> list:
+    """Collect unique 'messenger (vehicle)' strings from all nodes in a transport tree."""
+    seen = set()
+    results = []
+
+    def _walk(nodes):
+        for t in nodes:
+            if not isinstance(t, dict):
+                continue
+            meta = t.get("meta_data") or {}
+            if isinstance(meta, str):
+                try:
+                    import json as _json
+                    meta = _json.loads(meta)
+                except Exception:
+                    meta = {}
+            if not isinstance(meta, dict):
+                meta = {}
+            raw_m = meta.get("messenger_info")
+            if isinstance(raw_m, str):
+                m_name = raw_m
+            elif isinstance(raw_m, dict):
+                m_name = raw_m.get("name") or raw_m.get("messenger_name") or ""
+            else:
+                m_name = ""
+            raw_v = meta.get("vehicle_info")
+            if isinstance(raw_v, str):
+                v_plate = raw_v
+            elif isinstance(raw_v, dict):
+                v_plate = raw_v.get("license_plate") or raw_v.get("plate") or raw_v.get("name") or ""
+            else:
+                v_plate = ""
+            if m_name or v_plate:
+                if m_name and v_plate:
+                    info = f"{m_name} ({v_plate})"
+                elif m_name:
+                    info = m_name
+                else:
+                    info = v_plate
+                if info not in seen:
+                    seen.add(info)
+                    results.append(info)
+            if t.get("children"):
+                _walk(t["children"])
+
+    _walk(transports)
+    return results
+
+
+def _collect_disposal_methods(transports: list, group_weight: float = 0) -> list:
+    """Collect unique disposal methods from leaf nodes with their summed percentage_of_group and weight.
+    Leaves without a disposal_method are summed into a 'pending' entry.
+    Returns list of dicts: [{"method": str, "percentage_of_group": float, "weight": float, "pending": bool}, ...]
+    """
+    method_data: dict = {}
+    pending_pct = 0.0
+    pending_weight = 0.0
+
+    def _walk(nodes):
+        nonlocal pending_pct, pending_weight
+        for t in nodes:
+            if not isinstance(t, dict):
+                continue
+            children = t.get("children") or []
+            if children:
+                _walk(children)
+            else:
+                method = t.get("disposal_method") or ""
+                pct = float(t.get("percentage_of_group") or 0)
+                w = float(t.get("weight") or 0)
+                if method:
+                    if method not in method_data:
+                        method_data[method] = {"pct": 0.0, "weight": 0.0}
+                    method_data[method]["pct"] += pct
+                    method_data[method]["weight"] += w
+                else:
+                    pending_pct += pct
+                    pending_weight += w
+
+    _walk(transports)
+    assigned_pct = sum(d["pct"] for d in method_data.values()) + pending_pct
+    unaccounted = round(100.0 - assigned_pct, 2) if assigned_pct < 99.99 else 0.0
+    total_pending_pct = round(pending_pct + max(unaccounted, 0), 2)
+
+    assigned_weight = sum(d["weight"] for d in method_data.values()) + pending_weight
+    unaccounted_weight = round(group_weight - assigned_weight, 2) if group_weight > assigned_weight else 0.0
+    total_pending_weight = round(pending_weight + max(unaccounted_weight, 0), 2)
+
+    results = [
+        {"method": m, "percentage_of_group": round(d["pct"], 2), "weight": round(d["weight"], 2), "pending": False}
+        for m, d in method_data.items()
+    ]
+    if total_pending_pct > 0:
+        results.append({"method": "กำลังรอการจัดการ", "percentage_of_group": total_pending_pct, "weight": total_pending_weight, "pending": True})
+    return results
+
+
 def _build_chart_rows(hierarchy_data: list):
     """Build flat rows and origin-groups from hierarchy data for the flow chart.
     Returns (rows, groups) where rows is a flat list of dicts and groups is a list of lists of indices (grouped by origin).
@@ -247,13 +367,17 @@ def _build_chart_rows(hierarchy_data: list):
                 continue
             idx = len(rows)
             group_indices.append(idx)
+            group_transports = group_node.get("children") or []
+            group_w = float(group_node.get("weight") or group_node.get("total_weight_kg") or 0)
             rows.append({
                 "origin": origin_node.get("origin") or {"display_name": origin_node.get("name", "-")},
                 "origin_id": origin_node.get("origin_id"),
                 "origin_weight": origin_node.get("weight", 0),
                 "material": group_node.get("material") or {},
-                "weight": group_node.get("weight") or group_node.get("total_weight_kg") or 0,
-                "is_managed": _all_leaves_managed(group_node.get("children") or []),
+                "weight": group_w,
+                "is_managed": _all_leaves_managed(group_transports),
+                "transit_info": _collect_transit_info(group_transports),
+                "disposal_methods": _collect_disposal_methods(group_transports, group_w),
             })
         if group_indices:
             groups.append(group_indices)
@@ -271,7 +395,7 @@ def _draw_flow_chart(
     original_indices_override: list = None,
 ) -> None:
     """
-    Draw flowchart inside the box: Origin | Group/Material | In Transit | Status.
+    Draw flowchart inside the box: Origin | Group/Material | Delivered By | Status.
     records: flat list of dicts from _build_chart_rows (origin, material, weight, is_managed).
     groups_override: list of lists of indices grouped by origin.
     """
@@ -379,7 +503,7 @@ def _draw_flow_chart(
         pdf.line(cx0 + inset, divider_y, cx0 + col_w0 - inset, divider_y)
 
         # Total weight centered below divider
-        weight_label = f"Total quantity  {_fmt_num(total_weight)} kg"
+        weight_label = f"ปริมาณรวม  {_fmt_num(total_weight)} กก."
         label_y = divider_y - 0.14 * inch
         try:
             pdf.setFont("IBMPlexSansThai-Regular", 7)
@@ -438,7 +562,7 @@ def _draw_flow_chart(
                 pdf.setFont("Helvetica", 8)
             pdf.drawString(cx1 + accent_w + 0.12 * inch, row_y + node_h / 2 - 0.04 * inch, mat_name[:20])
             # Weight pill upper-right
-            pill_text = f"{_fmt_num(w)} kg"
+            pill_text = f"{_fmt_num(w)} กก."
             pill_w = 0.52 * inch
             pill_h_m = 0.20 * inch
             pill_x = cx1 + col_w_rest - pill_w - 0.08 * inch
@@ -456,51 +580,63 @@ def _draw_flow_chart(
                 ptw = pdf.stringWidth(pill_text, "Helvetica-Bold", 7)
             pdf.drawString(pill_x + (pill_w - ptw) / 2, pill_y_m + 0.07 * inch, pill_text)
 
-            # --- Column 2: In Transit (smaller rectangle) ---
-            transit_h = node_h * 0.5
-            transit_y = row_y + (node_h - transit_h) / 2
+            # --- Column 2: Delivered By (per group, height fits content) ---
+            transit_info_list = rec.get("transit_info") or []
+            n_info = len(transit_info_list)
+            max_display = min(n_info, 8)
+            has_overflow = n_info > max_display
+            line_spacing_t = 0.12 * inch
+            top_pad_t = 0.15 * inch
+            bottom_pad_t = 0.10 * inch
+            title_gap_t = 0.16 * inch
+            if max_display > 0:
+                items_h = title_gap_t + max_display * line_spacing_t
+                if has_overflow:
+                    items_h += line_spacing_t
+                transit_card_h = top_pad_t + items_h + bottom_pad_t
+            else:
+                transit_card_h = 0.35 * inch
+            transit_card_y = mid_y - transit_card_h / 2
             pdf.setFillColor(fill_white)
             pdf.setStrokeColor(stroke_orange)
             pdf.setLineWidth(0.5)
-            pdf.roundRect(cx2, transit_y, col_w_rest, transit_h, node_radius)
+            pdf.roundRect(cx2, transit_card_y, col_w_rest, transit_card_h, node_radius)
             pdf.setFillColor(stroke_orange)
             try:
                 pdf.setFont("IBMPlexSansThai-Bold", 7)
             except Exception:
                 pdf.setFont("Helvetica-Bold", 7)
-            transit_label = "In Transit"
+            transit_title = "จัดส่งโดย"
             try:
-                tw = pdf.stringWidth(transit_label, "IBMPlexSansThai-Bold", 7)
+                ttw = pdf.stringWidth(transit_title, "IBMPlexSansThai-Bold", 7)
             except Exception:
-                tw = pdf.stringWidth(transit_label, "Helvetica-Bold", 7)
-            pdf.drawString(cx2 + (col_w_rest - tw) / 2, transit_y + transit_h / 2 - 0.04 * inch, transit_label)
+                ttw = pdf.stringWidth(transit_title, "Helvetica-Bold", 7)
+            title_y_t = transit_card_y + transit_card_h - top_pad_t
+            pdf.drawString(cx2 + (col_w_rest - ttw) / 2, title_y_t, transit_title)
+            if max_display > 0:
+                try:
+                    pdf.setFont("IBMPlexSansThai-Regular", 6)
+                except Exception:
+                    pdf.setFont("Helvetica", 6)
+                pdf.setFillColor(colors.HexColor("#595959"))
+                line_y_t = title_y_t - title_gap_t
+                for ti in range(max_display):
+                    pdf.drawString(cx2 + 0.08 * inch, line_y_t, f"\u2022 {_safe(transit_info_list[ti])[:28]}")
+                    line_y_t -= line_spacing_t
+                if has_overflow:
+                    pdf.setFillColor(colors.HexColor("#999999"))
+                    pdf.drawString(cx2 + 0.08 * inch, line_y_t, f"+{n_info - max_display} เพิ่มเติม")
 
-            # --- Column 3: Status (same size as transit node) ---
-            status_h = transit_h
-            status_y = row_y + (node_h - status_h) / 2
+            # --- Column 3: Disposal Method(s) ---
+            disposal_methods = rec.get("disposal_methods") or []
             status_border = colors.HexColor("#a4e1af")
             status_text_color = colors.HexColor("#7bbfa5")
-            if is_managed:
-                pdf.setFillColor(fill_white)
-                pdf.setStrokeColor(status_border)
-                pdf.setLineWidth(0.5)
-                pdf.roundRect(cx3, status_y, col_w_rest, status_h, node_radius)
-                # Icon on the left, text on the right
-                status_icon_sz = status_h * 0.6
-                status_icon_x = cx3 + 0.08 * inch
-                status_icon_y = status_y + (status_h - status_icon_sz) / 2
-                if os.path.exists(recycle_path):
-                    try:
-                        pdf.drawImage(recycle_path, status_icon_x, status_icon_y, width=status_icon_sz, height=status_icon_sz, mask="auto")
-                    except Exception:
-                        pass
-                pdf.setFillColor(status_text_color)
-                try:
-                    pdf.setFont("IBMPlexSansThai-Bold", 7)
-                except Exception:
-                    pdf.setFont("Helvetica-Bold", 7)
-                pdf.drawString(status_icon_x + status_icon_sz + 0.06 * inch, status_y + status_h / 2 - 0.04 * inch, "Done Managing")
-            else:
+            method_node_h = 0.34 * inch
+            method_gap_v = 0.06 * inch
+
+            if not disposal_methods:
+                status_h = node_h * 0.5
+                status_y = row_y + (node_h - status_h) / 2
                 pdf.setDash(3, 3)
                 pdf.setFillColor(fill_white)
                 pdf.setStrokeColor(status_border)
@@ -512,24 +648,115 @@ def _draw_flow_chart(
                     pdf.setFont("IBMPlexSansThai-Regular", 7)
                 except Exception:
                     pdf.setFont("Helvetica", 7)
-                status_label = "Waiting for Management"
+                status_label = "กำลังรอการจัดการ"
                 try:
                     sw = pdf.stringWidth(status_label, "IBMPlexSansThai-Regular", 7)
                 except Exception:
                     sw = pdf.stringWidth(status_label, "Helvetica", 7)
                 pdf.drawString(cx3 + (col_w_rest - sw) / 2, status_y + status_h / 2 - 0.04 * inch, status_label)
+            else:
+                n_methods = len(disposal_methods)
+                total_methods_h = n_methods * method_node_h + (n_methods - 1) * method_gap_v
+                methods_top_y = mid_y + total_methods_h / 2
+                method_mid_ys = []
 
-            # --- Connector lines: Material -> In Transit -> Status ---
+                for mi, dm in enumerate(disposal_methods):
+                    m_y = methods_top_y - mi * (method_node_h + method_gap_v) - method_node_h
+                    m_mid = m_y + method_node_h / 2
+                    method_mid_ys.append(m_mid)
+                    method_name = _safe(dm.get("method", "-"))
+                    pct = dm.get("percentage_of_group", 0)
+                    dm_weight = dm.get("weight", 0)
+                    is_pending = dm.get("pending", False)
+
+                    pdf.setFillColor(fill_white)
+                    pdf.setStrokeColor(status_border)
+                    pdf.setLineWidth(0.5)
+                    if is_pending:
+                        pdf.setDash(3, 3)
+                    pdf.roundRect(cx3, m_y, col_w_rest, method_node_h, node_radius)
+                    if is_pending:
+                        pdf.setDash()
+
+                    pct_text = f"{pct}%"
+                    pill_w_s = 0.38 * inch
+                    pill_h_s = 0.14 * inch
+                    pill_x_s = cx3 + col_w_rest - pill_w_s - 0.05 * inch
+                    pill_y_s = m_y + method_node_h - pill_h_s - 0.04 * inch
+
+                    text_x = cx3 + 0.06 * inch
+                    max_text_w = pill_x_s - text_x - 0.04 * inch
+                    name_y = m_y + method_node_h - 0.12 * inch
+                    pdf.setFillColor(status_text_color)
+                    try:
+                        pdf.setFont("IBMPlexSansThai-Regular", 6)
+                    except Exception:
+                        pdf.setFont("Helvetica", 6)
+                    display_name = method_name
+                    try:
+                        font_name = "IBMPlexSansThai-Regular"
+                        while pdf.stringWidth(display_name, font_name, 6) > max_text_w and len(display_name) > 1:
+                            display_name = display_name[:-1]
+                    except Exception:
+                        display_name = method_name[:30]
+                    pdf.drawString(text_x, name_y, display_name)
+
+                    weight_text = f"{_fmt_num(dm_weight)} กก."
+                    weight_y = name_y - 0.12 * inch
+                    pdf.setFillColor(colors.HexColor("#999999"))
+                    try:
+                        pdf.setFont("IBMPlexSansThai-Regular", 5.5)
+                    except Exception:
+                        pdf.setFont("Helvetica", 5.5)
+                    pdf.drawString(text_x, weight_y, weight_text)
+
+                    pdf.setFillColor(status_border)
+                    pdf.roundRect(pill_x_s, pill_y_s, pill_w_s, pill_h_s, pill_h_s / 2, fill=1, stroke=0)
+                    pdf.setFillColor(fill_white)
+                    try:
+                        pdf.setFont("IBMPlexSansThai-Bold", 6)
+                    except Exception:
+                        pdf.setFont("Helvetica-Bold", 6)
+                    try:
+                        pw = pdf.stringWidth(pct_text, "IBMPlexSansThai-Bold", 6)
+                    except Exception:
+                        pw = pdf.stringWidth(pct_text, "Helvetica-Bold", 6)
+                    pdf.drawString(pill_x_s + (pill_w_s - pw) / 2, pill_y_s + 0.04 * inch, pct_text)
+
+                if n_methods > 1:
+                    x_junc_s = (x_end2 + cx3) / 2
+                    pdf.setStrokeColor(stroke_green)
+                    pdf.setLineWidth(0.8)
+                    pdf.line(x_junc_s, method_mid_ys[-1], x_junc_s, method_mid_ys[0])
+                    for mi_c, m_mid in enumerate(method_mid_ys):
+                        if disposal_methods[mi_c].get("pending"):
+                            pdf.setStrokeColor(stroke_grey)
+                            pdf.setDash(3, 3)
+                            pdf.line(x_junc_s, m_mid, cx3, m_mid)
+                            pdf.setDash()
+                            pdf.setStrokeColor(stroke_green)
+                        else:
+                            pdf.line(x_junc_s, m_mid, cx3, m_mid)
+
+            # --- Connector lines: Material -> Delivered By -> Status ---
             pdf.setStrokeColor(stroke_green)
             pdf.setLineWidth(0.8)
             pdf.line(x_end1, mid_y, x_start2, mid_y)
-            if is_managed:
-                pdf.line(x_end2, mid_y, x_start3, mid_y)
-            else:
+            if not disposal_methods:
                 pdf.setStrokeColor(stroke_grey)
                 pdf.setDash(3, 3)
                 pdf.line(x_end2, mid_y, x_start3, mid_y)
                 pdf.setDash()
+            elif len(disposal_methods) == 1:
+                if disposal_methods[0].get("pending"):
+                    pdf.setStrokeColor(stroke_grey)
+                    pdf.setDash(3, 3)
+                    pdf.line(x_end2, mid_y, cx3, mid_y)
+                    pdf.setDash()
+                else:
+                    pdf.line(x_end2, mid_y, cx3, mid_y)
+            else:
+                pdf.line(x_end2, mid_y, x_junc_s, mid_y)
 
 
 # Item details table: full hierarchy tree
@@ -539,12 +766,12 @@ TABLE_ROW_ALT = colors.HexColor("#f9f9f9")
 TABLE_ROW_HEIGHT = 0.32 * inch
 TABLE_TITLE_GAP = 0.2 * inch
 TABLE_CORNER_RADIUS = 0.08 * inch
-TABLE_HEADERS = ["Material Type", "Weight kg.", "Origin", "Destination", "Delivered By", "Disposal method", "Status"]
+TABLE_HEADERS = ["ประเภทวัสดุ", "น้ำหนัก (กก.)", "ต้นทาง", "ปลายทาง", "จัดส่งโดย", "วิธีการกำจัด", "สถานะ"]
 TABLE_COL_RATIOS = [3.0, 0.8, 1.8, 1.5, 1.5, 1.8, 0.8]
 _STATUS_PILLS = {
-    "completed": (colors.HexColor("#d4edda"), colors.HexColor("#155724"), "Completed"),
-    "in_transit": (colors.HexColor("#cce5ff"), colors.HexColor("#004085"), "In transit"),
-    "idle":       (colors.HexColor("#e2e3e5"), colors.HexColor("#383d41"), "Idle"),
+    "completed": (colors.HexColor("#d4edda"), colors.HexColor("#155724"), "เสร็จสิ้น"),
+    "in_transit": (colors.HexColor("#cce5ff"), colors.HexColor("#004085"), "กำลังขนส่ง"),
+    "idle":       (colors.HexColor("#e2e3e5"), colors.HexColor("#383d41"), "รอดำเนินการ"),
 }
 _INDENT_STEP = 0.18 * inch
 _ACCENT_COLOR = colors.HexColor("#85bbae")
