@@ -245,6 +245,7 @@ class TraceabilityService:
                 TransportTransaction.organization_id == organization_id,
                 TransportTransaction.is_active == True,
                 TransportTransaction.deleted_date.is_(None),
+                TransportTransaction.status != "idle",
             )
             .all()
         )
@@ -308,6 +309,19 @@ class TraceabilityService:
                 "children": [],
             }
 
+        def _annotate_percentages(
+            children: List[Dict[str, Any]], parent_pct_of_group: float
+        ) -> None:
+            siblings_total = sum(float(n.get("weight") or 0) for n in children)
+            for node in children:
+                w = float(node.get("weight") or 0)
+                pct_of_parent = round((w / siblings_total) * 100, 2) if siblings_total else 0.0
+                pct_of_group = round(pct_of_parent * parent_pct_of_group / 100, 2)
+                node["percentage_of_parent"] = pct_of_parent
+                node["percentage_of_group"] = pct_of_group
+                if node.get("children"):
+                    _annotate_percentages(node["children"], pct_of_group)
+
         def build_tree(transports: List[Any]) -> List[Dict[str, Any]]:
             if not transports:
                 return []
@@ -352,6 +366,9 @@ class TraceabilityService:
             elif "weight" not in group_dict:
                 group_dict["weight"] = group_dict.get("total_weight_kg", 0)
             group_dict["children"] = build_tree(transports)
+            group_dict["percentage_of_parent"] = 100.0
+            group_dict["percentage_of_group"] = 100.0
+            _annotate_percentages(group_dict["children"], 100.0)
             groups_with_children.append(group_dict)
 
         # Hierarchy: Location (origin) -> Group -> TransportTransaction tree
@@ -693,6 +710,7 @@ class TraceabilityService:
                 "record_ids": record_ids_g,
                 "origin": origin,
                 "material": material,
+                "source": "group",
             })
         return out
 
@@ -775,6 +793,7 @@ class TraceabilityService:
                 "transaction_group_id": r.transaction_group_id,
                 "status": r.status,
                 "arrival_date": r.arrival_date.isoformat() if r.arrival_date else None,
+                "source": "arrived_transport",
             })
         return out
 
