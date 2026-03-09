@@ -67,6 +67,9 @@ class ReportsService:
                     TransactionRecord.status.is_(None)
                 ),
             )
+            # Filter by active organization_setup locations
+            query = self._apply_active_setup_filter(query, organization_id)
+
             # Log member filter: whether it's applied and for which user
             _apply_member = self._should_filter_reports_by_member(current_user_id)
             logger.info(
@@ -412,6 +415,9 @@ class ReportsService:
                 ),
             )
 
+            # Filter by active organization_setup locations
+            query = self._apply_active_setup_filter(query, organization_id)
+
             # Apply filters
             if filters:
                 if filters.get('origin_combos'):
@@ -506,6 +512,64 @@ class ReportsService:
             return True
         except Exception:
             return True
+
+    def _get_active_setup_location_ids(self, organization_id: int) -> Optional[set]:
+        """
+        Get all location IDs from the active organization_setup (root_nodes + hub_node).
+        Returns None if no active setup found (meaning no filtering should be applied).
+        Returns a set of ints representing all nodeIds in the active setup.
+        """
+        setup = self.db.query(OrganizationSetup).filter(
+            OrganizationSetup.organization_id == organization_id,
+            OrganizationSetup.is_active == True,
+            OrganizationSetup.deleted_date.is_(None)
+        ).order_by(OrganizationSetup.created_date.desc()).first()
+
+        if not setup:
+            return None
+
+        ids = set()
+
+        def _collect_all_ids(nodes):
+            if not nodes:
+                return
+            for node in nodes:
+                nid = node.get('nodeId')
+                if nid is not None:
+                    ids.add(int(nid) if isinstance(nid, str) else nid)
+                if node.get('children'):
+                    _collect_all_ids(node['children'])
+
+        root_nodes = setup.root_nodes if isinstance(setup.root_nodes, list) else []
+        _collect_all_ids(root_nodes)
+
+        hub_node = setup.hub_node if isinstance(setup.hub_node, dict) else {}
+        if hub_node.get('children'):
+            _collect_all_ids(hub_node['children'])
+
+        return ids if ids else None
+
+    def _apply_active_setup_filter(self, query, organization_id: int):
+        """
+        Filter query to only include transactions where origin_id is in the
+        active organization_setup, and destination_id (on TransactionRecord) is
+        either NULL or also in the active setup.
+        """
+        active_ids = self._get_active_setup_location_ids(organization_id)
+        if active_ids is None:
+            return query
+
+        active_list = list(active_ids)
+        logger.info(f"[REPORTS] Applying active setup filter: {len(active_list)} location IDs for org {organization_id}")
+
+        query = query.filter(Transaction.origin_id.in_(active_list))
+        query = query.filter(
+            or_(
+                TransactionRecord.destination_id.is_(None),
+                TransactionRecord.destination_id.in_(active_list)
+            )
+        )
+        return query
 
     def _resolve_descendant_ids(self, organization_id: int, origin_ids: List[int]) -> List[int]:
         """
@@ -655,6 +719,11 @@ class ReportsService:
                     Transaction.tenant_id
                 ).filter(*base_filter)
                 combos_result = self._apply_member_filter_to_transaction_query(combos_query, current_user_id).distinct().all()
+
+            # Filter combos to only include origins in the active organization_setup
+            active_setup_ids = self._get_active_setup_location_ids(organization_id)
+            if active_setup_ids is not None:
+                combos_result = [row for row in combos_result if row[0] in active_setup_ids]
 
             origin_ids = list({row[0] for row in combos_result if row[0] is not None})
             tag_ids = list({row[1] for row in combos_result if row[1] is not None})
@@ -865,6 +934,8 @@ class ReportsService:
                 ),
             )
             transaction_records_query = self._apply_member_filter_to_transaction_query(transaction_records_query, current_user_id)
+            # Filter by active organization_setup locations
+            transaction_records_query = self._apply_active_setup_filter(transaction_records_query, organization_id)
             # Apply optional filters
             if filters:
                 # Origin combos (multiple composites: "2507||1,2507|46|")

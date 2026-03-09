@@ -909,6 +909,52 @@ class UserService:
 
         return location_data
 
+    def get_orphan_locations(
+        self,
+        organization_id: int,
+        search: Optional[str] = None,
+        types: Optional[List[str]] = None,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> Dict[str, Any]:
+        """
+        Get orphan locations (in DB but not in organization_setup) with search, type filter, pagination.
+        """
+        setup_location_ids = self._get_setup_location_ids(organization_id) or []
+
+        locations, total = self.crud.get_orphan_locations(
+            organization_id=organization_id,
+            setup_location_ids=setup_location_ids,
+            search=search,
+            types=types,
+            page=page,
+            page_size=page_size,
+        )
+
+        data = []
+        for loc in locations:
+            data.append({
+                'id': loc.id,
+                'name_th': loc.name_th,
+                'name_en': loc.name_en,
+                'display_name': loc.display_name,
+                'type': loc.type,
+                'is_location': loc.is_location,
+                'deleted_date': loc.deleted_date.isoformat() if loc.deleted_date else None,
+                'address': loc.address,
+                'province': loc.province.name_th if loc.province else None,
+                'district': loc.district.name_th if loc.district else None,
+                'subdistrict': loc.subdistrict.name_th if loc.subdistrict else None,
+            })
+
+        return {
+            'data': data,
+            'total': total,
+            'page': page,
+            'page_size': page_size,
+            'total_pages': (total + page_size - 1) // page_size,
+        }
+
     def get_locations_by_member(
         self,
         member_user_id: int,

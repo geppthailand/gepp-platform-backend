@@ -1,0 +1,597 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GEPP AI Manager: Cost Calculator (Simplified)</title>
+
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- Alpine.js CDN -->
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+
+    <!-- Custom Tailwind Config -->
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        'gepp-green': '#10b981',
+                        'gepp-dark-green': '#059669',
+                        'gepp-light-green': '#d1fae5',
+                    }
+                }
+            }
+        }
+    </script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+
+        .gradient-bg {
+            background: linear-gradient(135deg, #059669 0%, #10b981 100%);
+        }
+
+        .glass-effect {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+
+        .card-hover {
+            transition: all 0.3s ease;
+        }
+
+        .card-hover:hover {
+            transform: translateY(-8px);
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+        }
+    </style>
+</head>
+
+<body class="bg-gray-50">
+    <!-- Hero Section -->
+    <section class="gradient-bg text-white py-16">
+        <div class="container mx-auto px-6">
+            <div class="text-center max-w-4xl mx-auto">
+                <h1 class="text-5xl md:text-6xl font-bold mb-4">GEPP AI Manager</h1>
+                <p class="text-xl mb-6 text-emerald-50">Powered by Gemini 2.5 Flash</p>
+                <p class="text-lg text-emerald-100">
+                    💰 Cost Calculator แบบง่าย - คำนวณต้นทุนตาม Feature Package
+                </p>
+            </div>
+        </div>
+    </section>
+
+    <!-- Cost Calculator Section -->
+    <section class="py-20 bg-gray-50">
+        <div class="container mx-auto px-6">
+            <div class="text-center mb-12">
+                <h2 class="text-4xl font-bold text-gray-900 mb-4">📊 Cost Calculator by Feature</h2>
+                <p class="text-xl text-gray-600">เลือก Package และจำนวน User เพื่อดูต้นทุนทันที</p>
+            </div>
+
+            <div class="max-w-6xl mx-auto" x-data="{
+                // User inputs
+                managers: 5,
+                platformUsers: 100,
+                selectedPackage: 'pro',
+
+                // Package definitions with usage patterns
+                packages: {
+                    starter: {
+                        name: 'Starter',
+                        price: 890,
+                        description: 'Reply-Only (ไม่มี Push)',
+                        features: {
+                            replyOperations: 100,
+                            pushMessages: 0,
+                            imageAnalysis: 0
+                        },
+                        color: 'gray'
+                    },
+                    pro: {
+                        name: 'Pro',
+                        price: 3500,
+                        description: 'Reply + Daily Summary + Alerts',
+                        features: {
+                            replyOperations: 900,
+                            pushMessages: 70,
+                            imageAnalysis: 200
+                        },
+                        color: 'green'
+                    },
+                    enterprise: {
+                        name: 'Enterprise',
+                        price: 12000,
+                        description: 'Unlimited Everything',
+                        features: {
+                            replyOperations: 8000,
+                            pushMessages: 2000,
+                            imageAnalysis: 1000
+                        },
+                        color: 'purple'
+                    }
+                },
+
+                // Cost constants
+                costs: {
+                    replyOperationAvg: 0.011,  // Average Gemini cost per reply operation
+                    imageAnalysis: 0.024,      // Gemini cost for image
+                    pushMessageGemini: 0.008,  // Average Gemini cost for push
+                    pushMessageLine: 0.05,     // LINE API cost per push
+                    lineBaseFee: 1780,         // LINE Pro plan base fee
+                    lineFreeMessages: 35000    // Free messages in LINE Pro plan
+                },
+
+                // Computed properties
+                get currentPackage() {
+                    return this.packages[this.selectedPackage];
+                },
+
+                get replyOps() {
+                    return this.currentPackage.features.replyOperations * this.managers;
+                },
+
+                get pushOps() {
+                    return this.currentPackage.features.pushMessages * this.managers;
+                },
+
+                get imageOps() {
+                    return this.currentPackage.features.imageAnalysis * this.managers;
+                },
+
+                // Cost calculations
+                get geminiCostReply() {
+                    return (this.replyOps - this.imageOps) * this.costs.replyOperationAvg;
+                },
+
+                get geminiCostImage() {
+                    return this.imageOps * this.costs.imageAnalysis;
+                },
+
+                get geminiCostPush() {
+                    return this.pushOps * this.costs.pushMessageGemini;
+                },
+
+                get totalGeminiCost() {
+                    return this.geminiCostReply + this.geminiCostImage + this.geminiCostPush;
+                },
+
+                get linePushCost() {
+                    return this.pushOps * this.costs.pushMessageLine;
+                },
+
+                get totalLinePushMessagesAllUsers() {
+                    return this.pushOps; // Already multiplied by managers
+                },
+
+                get lineOverageMessages() {
+                    return Math.max(0, this.totalLinePushMessagesAllUsers - this.costs.lineFreeMessages);
+                },
+
+                get lineOverageCost() {
+                    return this.lineOverageMessages * this.costs.pushMessageLine;
+                },
+
+                get totalLineCost() {
+                    return this.costs.lineBaseFee + this.lineOverageCost;
+                },
+
+                get lineCostPerUser() {
+                    return this.totalLineCost / this.platformUsers;
+                },
+
+                get lineCostForManagers() {
+                    return this.lineCostPerUser * this.managers;
+                },
+
+                get infrastructureCost() {
+                    return this.managers * 1.50;
+                },
+
+                get totalMonthlyCost() {
+                    return this.totalGeminiCost + this.lineCostForManagers + this.infrastructureCost;
+                },
+
+                get revenue() {
+                    return this.currentPackage.price * this.managers;
+                },
+
+                get profit() {
+                    return this.revenue - this.totalMonthlyCost;
+                },
+
+                get profitMargin() {
+                    return ((this.profit / this.revenue) * 100).toFixed(1);
+                }
+            }">
+                <!-- Package Selection Cards -->
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-12">
+                    <!-- Starter -->
+                    <div @click="selectedPackage = 'starter'"
+                         :class="selectedPackage === 'starter' ? 'ring-4 ring-gray-400 shadow-2xl' : 'shadow-lg'"
+                         class="bg-white rounded-2xl p-6 cursor-pointer card-hover relative">
+                        <div class="text-center">
+                            <div class="text-5xl mb-3">🌱</div>
+                            <h3 class="text-2xl font-bold text-gray-800 mb-2">Starter</h3>
+                            <div class="text-3xl font-bold text-gray-700 mb-4">฿890<span class="text-sm">/mo</span></div>
+                            <p class="text-sm text-gray-600 mb-4">Reply-Only (ไม่มี Push)</p>
+                        </div>
+                        <div class="bg-gray-50 rounded-lg p-4 text-sm space-y-2">
+                            <div class="flex justify-between">
+                                <span class="text-gray-600">Reply Operations:</span>
+                                <span class="font-bold">100</span>
+                            </div>
+                            <div class="flex justify-between">
+                                <span class="text-gray-600">Push Messages:</span>
+                                <span class="font-bold text-red-600">0</span>
+                            </div>
+                            <div class="flex justify-between">
+                                <span class="text-gray-600">Images:</span>
+                                <span class="font-bold text-red-600">0</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Pro -->
+                    <div @click="selectedPackage = 'pro'"
+                         :class="selectedPackage === 'pro' ? 'ring-4 ring-gepp-green shadow-2xl' : 'shadow-lg'"
+                         class="bg-gradient-to-br from-gepp-light-green to-white rounded-2xl p-6 cursor-pointer card-hover relative">
+                        <div class="absolute -top-3 -right-3 bg-gradient-to-r from-orange-500 to-red-500 text-white px-3 py-1 rounded-full text-xs font-bold">
+                            POPULAR
+                        </div>
+                        <div class="text-center">
+                            <div class="text-5xl mb-3">🏭</div>
+                            <h3 class="text-2xl font-bold text-gray-800 mb-2">Pro</h3>
+                            <div class="text-3xl font-bold text-gepp-green mb-4">฿3,500<span class="text-sm">/mo</span></div>
+                            <p class="text-sm text-gray-600 mb-4">Reply + Daily Summary + Alerts</p>
+                        </div>
+                        <div class="bg-white rounded-lg p-4 text-sm space-y-2">
+                            <div class="flex justify-between">
+                                <span class="text-gray-600">Reply Operations:</span>
+                                <span class="font-bold text-green-600">900</span>
+                            </div>
+                            <div class="flex justify-between">
+                                <span class="text-gray-600">Push Messages:</span>
+                                <span class="font-bold text-orange-600">70</span>
+                            </div>
+                            <div class="flex justify-between">
+                                <span class="text-gray-600">Images:</span>
+                                <span class="font-bold text-green-600">200</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Enterprise -->
+                    <div @click="selectedPackage = 'enterprise'"
+                         :class="selectedPackage === 'enterprise' ? 'ring-4 ring-purple-500 shadow-2xl' : 'shadow-lg'"
+                         class="bg-white rounded-2xl p-6 cursor-pointer card-hover relative">
+                        <div class="text-center">
+                            <div class="text-5xl mb-3">🏢</div>
+                            <h3 class="text-2xl font-bold text-gray-800 mb-2">Enterprise</h3>
+                            <div class="text-3xl font-bold text-purple-600 mb-4">฿12,000<span class="text-sm">/mo</span></div>
+                            <p class="text-sm text-gray-600 mb-4">Unlimited Everything</p>
+                        </div>
+                        <div class="bg-purple-50 rounded-lg p-4 text-sm space-y-2">
+                            <div class="flex justify-between">
+                                <span class="text-gray-600">Reply Operations:</span>
+                                <span class="font-bold text-purple-600">8,000</span>
+                            </div>
+                            <div class="flex justify-between">
+                                <span class="text-gray-600">Push Messages:</span>
+                                <span class="font-bold text-purple-600">2,000</span>
+                            </div>
+                            <div class="flex justify-between">
+                                <span class="text-gray-600">Images:</span>
+                                <span class="font-bold text-purple-600">1,000</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Input Controls -->
+                <div class="bg-white rounded-2xl shadow-xl p-8 mb-8">
+                    <h3 class="text-2xl font-bold text-gray-800 mb-6">📊 Calculate Your Costs</h3>
+
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+                        <!-- Managers -->
+                        <div>
+                            <label class="block text-gray-700 font-semibold mb-3">
+                                จำนวน Managers (ที่จ่าย Subscription):
+                                <span class="text-gepp-green text-2xl" x-text="managers"></span>
+                            </label>
+                            <input type="range" x-model.number="managers" min="1" max="100"
+                                   class="w-full h-3 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-gepp-green">
+                            <div class="flex justify-between text-xs text-gray-500 mt-1">
+                                <span>1</span>
+                                <span>50</span>
+                                <span>100</span>
+                            </div>
+                        </div>
+
+                        <!-- Platform Users -->
+                        <div>
+                            <label class="block text-gray-700 font-semibold mb-3">
+                                Total Platform Users (แชร์ค่า LINE):
+                                <span class="text-blue-600 text-2xl" x-text="platformUsers"></span>
+                            </label>
+                            <input type="range" x-model.number="platformUsers" min="10" max="1000" step="10"
+                                   class="w-full h-3 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-500">
+                            <div class="flex justify-between text-xs text-gray-500 mt-1">
+                                <span>10</span>
+                                <span>500</span>
+                                <span>1000</span>
+                            </div>
+                            <p class="text-sm text-gray-600 mt-2">
+                                ค่า LINE ต่อ User: <span class="font-bold text-blue-600">฿<span x-text="lineCostPerUser.toFixed(2)"></span></span>
+                            </p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Results -->
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                    <!-- Usage Summary -->
+                    <div class="bg-white rounded-xl shadow-lg p-6">
+                        <h4 class="text-lg font-bold text-gray-800 mb-4">📈 Usage</h4>
+                        <div class="space-y-3">
+                            <div class="flex justify-between">
+                                <span class="text-gray-600 text-sm">Reply Ops:</span>
+                                <span class="font-bold text-green-600" x-text="replyOps.toLocaleString()"></span>
+                            </div>
+                            <div class="flex justify-between">
+                                <span class="text-gray-600 text-sm">└─ Images:</span>
+                                <span class="font-bold text-orange-600 text-sm" x-text="imageOps.toLocaleString()"></span>
+                            </div>
+                            <div class="flex justify-between border-t pt-2">
+                                <span class="text-gray-600 text-sm">Push Messages:</span>
+                                <span class="font-bold text-orange-600" x-text="pushOps.toLocaleString()"></span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Cost Breakdown -->
+                    <div class="bg-white rounded-xl shadow-lg p-6">
+                        <h4 class="text-lg font-bold text-gray-800 mb-4">💰 Costs</h4>
+                        <div class="space-y-3 text-sm">
+                            <div class="flex justify-between">
+                                <span class="text-gray-600">Gemini AI:</span>
+                                <span class="font-mono text-blue-600 font-bold">฿<span x-text="totalGeminiCost.toFixed(2)"></span></span>
+                            </div>
+                            <div class="flex justify-between">
+                                <span class="text-gray-600">LINE API:</span>
+                                <span class="font-mono text-orange-600 font-bold">฿<span x-text="lineCostForManagers.toFixed(2)"></span></span>
+                            </div>
+                            <div class="flex justify-between">
+                                <span class="text-gray-600">Infrastructure:</span>
+                                <span class="font-mono text-gray-700">฿<span x-text="infrastructureCost.toFixed(2)"></span></span>
+                            </div>
+                            <div class="flex justify-between border-t pt-2">
+                                <span class="font-semibold text-gray-800">Total:</span>
+                                <span class="font-mono font-bold text-red-600">฿<span x-text="totalMonthlyCost.toFixed(2)"></span></span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Profit -->
+                    <div class="bg-gradient-to-br from-gepp-green to-emerald-600 rounded-xl shadow-lg p-6 text-white">
+                        <h4 class="text-lg font-bold mb-4">💎 Profit</h4>
+                        <div class="space-y-3">
+                            <div class="flex justify-between text-sm">
+                                <span>Revenue:</span>
+                                <span class="font-mono font-bold">฿<span x-text="revenue.toLocaleString()"></span></span>
+                            </div>
+                            <div class="flex justify-between text-sm">
+                                <span>Cost:</span>
+                                <span class="font-mono">฿<span x-text="totalMonthlyCost.toFixed(0)"></span></span>
+                            </div>
+                            <div class="flex justify-between border-t border-white/30 pt-2">
+                                <span class="font-semibold">Profit:</span>
+                                <span class="font-mono font-bold text-xl">฿<span x-text="profit.toFixed(0)"></span></span>
+                            </div>
+                            <div class="text-center mt-3">
+                                <div class="bg-white/20 rounded-lg py-2 px-4">
+                                    <span class="text-2xl font-bold" x-text="profitMargin + '%'"></span>
+                                    <div class="text-xs mt-1">Margin</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Detailed Cost Breakdown -->
+                <div class="bg-white rounded-2xl shadow-xl p-8">
+                    <h3 class="text-2xl font-bold text-gray-800 mb-6">🔍 Detailed Breakdown</h3>
+
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+                        <!-- Gemini Costs -->
+                        <div>
+                            <h4 class="font-bold text-blue-700 mb-3 flex items-center">
+                                <span class="text-2xl mr-2">🧠</span> Gemini AI Costs
+                            </h4>
+                            <div class="bg-blue-50 rounded-lg p-4 space-y-2 text-sm">
+                                <div class="flex justify-between">
+                                    <span class="text-gray-700">Text Operations:</span>
+                                    <span class="font-mono text-gray-900">฿<span x-text="geminiCostReply.toFixed(2)"></span></span>
+                                </div>
+                                <div class="flex justify-between">
+                                    <span class="text-gray-700">Image Analysis:</span>
+                                    <span class="font-mono text-orange-600 font-bold">฿<span x-text="geminiCostImage.toFixed(2)"></span></span>
+                                </div>
+                                <div class="flex justify-between">
+                                    <span class="text-gray-700">Push Messages:</span>
+                                    <span class="font-mono text-gray-900">฿<span x-text="geminiCostPush.toFixed(2)"></span></span>
+                                </div>
+                                <div class="flex justify-between border-t border-blue-200 pt-2 font-bold">
+                                    <span class="text-gray-800">Total Gemini:</span>
+                                    <span class="font-mono text-blue-600">฿<span x-text="totalGeminiCost.toFixed(2)"></span></span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- LINE Costs -->
+                        <div>
+                            <h4 class="font-bold text-orange-700 mb-3 flex items-center">
+                                <span class="text-2xl mr-2">📱</span> LINE API Costs
+                            </h4>
+                            <div class="bg-orange-50 rounded-lg p-4 space-y-2 text-sm">
+                                <div class="flex justify-between">
+                                    <span class="text-gray-700">Base Fee (Pro Plan):</span>
+                                    <span class="font-mono text-gray-900">฿<span x-text="costs.lineBaseFee.toLocaleString()"></span></span>
+                                </div>
+                                <div class="flex justify-between">
+                                    <span class="text-gray-700">Free Messages:</span>
+                                    <span class="font-mono text-green-600"><span x-text="costs.lineFreeMessages.toLocaleString()"></span></span>
+                                </div>
+                                <div class="flex justify-between">
+                                    <span class="text-gray-700">Your Push Messages:</span>
+                                    <span class="font-mono" :class="totalLinePushMessagesAllUsers > costs.lineFreeMessages ? 'text-red-600 font-bold' : 'text-green-600'">
+                                        <span x-text="totalLinePushMessagesAllUsers.toLocaleString()"></span>
+                                    </span>
+                                </div>
+                                <div x-show="lineOverageMessages > 0" class="flex justify-between text-red-700 font-semibold">
+                                    <span>Overage Cost:</span>
+                                    <span class="font-mono">+฿<span x-text="lineOverageCost.toFixed(2)"></span></span>
+                                </div>
+                                <div class="flex justify-between border-t border-orange-200 pt-2">
+                                    <span class="text-gray-700">Total LINE Cost:</span>
+                                    <span class="font-mono text-gray-900">฿<span x-text="totalLineCost.toFixed(2)"></span></span>
+                                </div>
+                                <div class="flex justify-between font-bold">
+                                    <span class="text-gray-800">Per User (÷<span x-text="platformUsers"></span>):</span>
+                                    <span class="font-mono text-orange-600">฿<span x-text="lineCostPerUser.toFixed(2)"></span></span>
+                                </div>
+                                <div class="flex justify-between font-bold border-t border-orange-200 pt-2">
+                                    <span class="text-gray-800">For <span x-text="managers"></span> Managers:</span>
+                                    <span class="font-mono text-orange-600">฿<span x-text="lineCostForManagers.toFixed(2)"></span></span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Key Insight -->
+                    <div class="mt-6 bg-gradient-to-r from-green-50 to-blue-50 rounded-lg p-6 border-2 border-green-200">
+                        <h5 class="font-bold text-gray-800 mb-2">💡 Key Insight:</h5>
+                        <p class="text-sm text-gray-700">
+                            ยิ่งมี Platform Users เยอะ ค่า LINE ต่อคนยิ่งถูก! ที่ <span class="font-bold text-blue-600"><span x-text="platformUsers"></span> users</span>
+                            ค่า LINE เหลือแค่ <span class="font-bold text-orange-600">฿<span x-text="lineCostPerUser.toFixed(2)"></span>/user</span>
+                            <span x-show="profitMargin > 90" class="ml-2 text-green-600 font-bold">→ Profit Margin สูงมาก!</span>
+                        </p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Package Comparison Table -->
+    <section class="py-20 bg-white">
+        <div class="container mx-auto px-6">
+            <div class="text-center mb-12">
+                <h2 class="text-4xl font-bold text-gray-900 mb-4">📦 Package Comparison</h2>
+                <p class="text-xl text-gray-600">เปรียบเทียบ Features และต้นทุนแต่ละ Package</p>
+            </div>
+
+            <div class="max-w-6xl mx-auto overflow-x-auto">
+                <table class="w-full bg-white rounded-2xl shadow-xl overflow-hidden">
+                    <thead class="bg-gradient-to-r from-gepp-green to-emerald-600 text-white">
+                        <tr>
+                            <th class="px-6 py-4 text-left">Feature</th>
+                            <th class="px-6 py-4 text-center">Starter</th>
+                            <th class="px-6 py-4 text-center bg-green-700">Pro ⭐</th>
+                            <th class="px-6 py-4 text-center">Enterprise</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-gray-200">
+                        <tr>
+                            <td class="px-6 py-4 font-semibold">Price</td>
+                            <td class="px-6 py-4 text-center">฿890/mo</td>
+                            <td class="px-6 py-4 text-center bg-green-50 font-bold text-green-700">฿3,500/mo</td>
+                            <td class="px-6 py-4 text-center">฿12,000/mo</td>
+                        </tr>
+                        <tr class="bg-gray-50">
+                            <td class="px-6 py-4 font-semibold">Reply Operations</td>
+                            <td class="px-6 py-4 text-center">100</td>
+                            <td class="px-6 py-4 text-center bg-green-50 font-bold">900</td>
+                            <td class="px-6 py-4 text-center font-bold">8,000</td>
+                        </tr>
+                        <tr>
+                            <td class="px-6 py-4 font-semibold">Push Messages</td>
+                            <td class="px-6 py-4 text-center text-red-600">❌ 0</td>
+                            <td class="px-6 py-4 text-center bg-green-50 font-bold text-green-700">✅ 70</td>
+                            <td class="px-6 py-4 text-center font-bold text-green-700">✅ 2,000</td>
+                        </tr>
+                        <tr class="bg-gray-50">
+                            <td class="px-6 py-4 font-semibold">Image Analysis</td>
+                            <td class="px-6 py-4 text-center text-red-600">❌ 0</td>
+                            <td class="px-6 py-4 text-center bg-green-50 font-bold text-green-700">✅ 200</td>
+                            <td class="px-6 py-4 text-center font-bold text-green-700">✅ 1,000</td>
+                        </tr>
+                        <tr>
+                            <td class="px-6 py-4 font-semibold">Gemini Cost (5 users)</td>
+                            <td class="px-6 py-4 text-center">~฿4</td>
+                            <td class="px-6 py-4 text-center bg-green-50 font-bold">~฿55</td>
+                            <td class="px-6 py-4 text-center">~฿440</td>
+                        </tr>
+                        <tr class="bg-gray-50">
+                            <td class="px-6 py-4 font-semibold">LINE Cost (5 users, 100 total)</td>
+                            <td class="px-6 py-4 text-center">~฿89</td>
+                            <td class="px-6 py-4 text-center bg-green-50 font-bold">~฿89</td>
+                            <td class="px-6 py-4 text-center">~฿89</td>
+                        </tr>
+                        <tr>
+                            <td class="px-6 py-4 font-semibold">Total Cost (5 users)</td>
+                            <td class="px-6 py-4 text-center font-bold">~฿101</td>
+                            <td class="px-6 py-4 text-center bg-green-50 font-bold text-red-600">~฿152</td>
+                            <td class="px-6 py-4 text-center font-bold">~฿537</td>
+                        </tr>
+                        <tr class="bg-green-50 font-bold">
+                            <td class="px-6 py-4">Profit (5 users)</td>
+                            <td class="px-6 py-4 text-center text-green-700">฿4,349 (97.7%)</td>
+                            <td class="px-6 py-4 text-center bg-green-100 text-green-700 text-lg">฿17,348 (99.1%) ⭐</td>
+                            <td class="px-6 py-4 text-center text-green-700">฿59,463 (99.1%)</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="mt-8 max-w-4xl mx-auto bg-gradient-to-r from-green-50 to-emerald-50 rounded-xl p-6 border-2 border-green-200">
+                <h3 class="font-bold text-gray-800 mb-3">✅ Conclusion:</h3>
+                <ul class="space-y-2 text-gray-700">
+                    <li>• <strong>Starter:</strong> เหมาะกับธุรกิจเล็ก ไม่ต้องการ Push Messages</li>
+                    <li>• <strong>Pro:</strong> ⭐ Best Value! รองรับ Daily Summary + Alerts + Images</li>
+                    <li>• <strong>Enterprise:</strong> สำหรับโรงงานใหญ่ ต้องการ Automation เต็มรูปแบบ</li>
+                    <li>• <strong>LINE Cost แชร์กันได้:</strong> ยิ่งมี Users เยอะ ค่า LINE ต่อคนยิ่งถูก!</li>
+                </ul>
+            </div>
+        </div>
+    </section>
+
+    <!-- Footer -->
+    <section class="gradient-bg text-white py-12">
+        <div class="container mx-auto px-6 text-center">
+            <h3 class="text-2xl font-bold mb-4">Ready to Start?</h3>
+            <p class="text-emerald-100 mb-6">Profit Margin 95-99% ทุก Package!</p>
+            <button class="bg-white text-gepp-dark-green px-8 py-4 rounded-lg font-semibold hover:bg-emerald-50 transition shadow-lg">
+                Contact Sales
+            </button>
+        </div>
+    </section>
+
+    <!-- Sources -->
+    <section class="bg-gray-100 py-6">
+        <div class="container mx-auto px-6">
+            <h3 class="text-sm font-semibold text-gray-700 mb-2">📚 Research Sources:</h3>
+            <ul class="text-xs text-gray-600 space-y-1">
+                <li>• <a href="https://ai.google.dev/gemini-api/docs/pricing" target="_blank" class="text-gepp-green hover:underline">Gemini API Pricing</a></li>
+                <li>• <a href="https://developers.line.biz/en/docs/messaging-api/pricing/" target="_blank" class="text-gepp-green hover:underline">LINE Messaging API Pricing</a></li>
+            </ul>
+        </div>
+    </section>
+</body>
+</html>

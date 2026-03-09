@@ -1,0 +1,1460 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GEPP Platform - Web Transaction Validation & Anomaly Detection</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            color: #1e293b;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1600px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            color: white;
+            padding: 60px 40px;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 3em;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.2);
+        }
+
+        .header .subtitle {
+            font-size: 1.3em;
+            opacity: 0.95;
+            margin-bottom: 10px;
+        }
+
+        .header .description {
+            font-size: 1em;
+            opacity: 0.85;
+        }
+
+        .content {
+            padding: 40px;
+        }
+
+        .section {
+            margin-bottom: 50px;
+            background: #f8fafc;
+            border-radius: 15px;
+            padding: 30px;
+            border-left: 5px solid #f5576c;
+        }
+
+        .section h2 {
+            color: #f5576c;
+            font-size: 2em;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .section h3 {
+            color: #f093fb;
+            font-size: 1.5em;
+            margin: 25px 0 15px 0;
+            padding-left: 15px;
+            border-left: 3px solid #f093fb;
+        }
+
+        .section h4 {
+            color: #1e293b;
+            font-size: 1.2em;
+            margin: 20px 0 10px 0;
+            font-weight: 600;
+        }
+
+        .icon {
+            font-size: 1.5em;
+        }
+
+        .card {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            margin: 15px 0;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+            border: 1px solid #e2e8f0;
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+        }
+
+        .card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+        }
+
+        .card-header {
+            font-weight: 700;
+            font-size: 1.2em;
+            color: #f5576c;
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .card-body {
+            color: #64748b;
+            line-height: 1.8;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 20px;
+            margin: 20px 0;
+        }
+
+        .grid-2 {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 20px;
+            margin: 20px 0;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 5px 12px;
+            border-radius: 20px;
+            font-size: 0.85em;
+            font-weight: 600;
+            margin: 5px 5px 5px 0;
+        }
+
+        .badge-green {
+            background: #d1fae5;
+            color: #059669;
+        }
+
+        .badge-blue {
+            background: #dbeafe;
+            color: #3b82f6;
+        }
+
+        .badge-purple {
+            background: #e9d5ff;
+            color: #a855f7;
+        }
+
+        .badge-orange {
+            background: #fed7aa;
+            color: #ea580c;
+        }
+
+        .badge-red {
+            background: #fecaca;
+            color: #dc2626;
+        }
+
+        .badge-pink {
+            background: #fce7f3;
+            color: #ec4899;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+            background: white;
+            border-radius: 10px;
+            overflow: hidden;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+        }
+
+        th {
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            color: white;
+            padding: 15px;
+            text-align: left;
+            font-weight: 600;
+        }
+
+        td {
+            padding: 15px;
+            border-bottom: 1px solid #e2e8f0;
+        }
+
+        tr:last-child td {
+            border-bottom: none;
+        }
+
+        tr:hover {
+            background: #f8fafc;
+        }
+
+        .metric-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 15px;
+            margin: 20px 0;
+        }
+
+        .metric-card {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            border: 2px solid #e2e8f0;
+            text-align: center;
+        }
+
+        .metric-value {
+            font-size: 2em;
+            font-weight: bold;
+            color: #f5576c;
+            margin: 10px 0;
+        }
+
+        .metric-label {
+            color: #64748b;
+            font-size: 0.9em;
+        }
+
+        .highlight {
+            background: #fef3c7;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-weight: 600;
+            color: #92400e;
+        }
+
+        .warning-box {
+            background: #fef3c7;
+            border-left: 4px solid #f59e0b;
+            padding: 20px;
+            border-radius: 8px;
+            margin: 20px 0;
+        }
+
+        .warning-box strong {
+            color: #92400e;
+        }
+
+        .info-box {
+            background: #dbeafe;
+            border-left: 4px solid #3b82f6;
+            padding: 20px;
+            border-radius: 8px;
+            margin: 20px 0;
+        }
+
+        .info-box strong {
+            color: #1e40af;
+        }
+
+        .success-box {
+            background: #d1fae5;
+            border-left: 4px solid #10b981;
+            padding: 20px;
+            border-radius: 8px;
+            margin: 20px 0;
+        }
+
+        .success-box strong {
+            color: #065f46;
+        }
+
+        .danger-box {
+            background: #fecaca;
+            border-left: 4px solid #dc2626;
+            padding: 20px;
+            border-radius: 8px;
+            margin: 20px 0;
+        }
+
+        .danger-box strong {
+            color: #991b1b;
+        }
+
+        code {
+            background: #1e293b;
+            color: #10b981;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9em;
+        }
+
+        pre {
+            background: #1e293b;
+            color: #e2e8f0;
+            padding: 20px;
+            border-radius: 10px;
+            overflow-x: auto;
+            margin: 20px 0;
+            border: 1px solid #334155;
+        }
+
+        .detection-level {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            border-radius: 15px;
+            margin: 20px 0;
+        }
+
+        .detection-level h3 {
+            color: white;
+            border-left: 3px solid white;
+            font-size: 1.6em;
+        }
+
+        .rule-card {
+            background: rgba(255,255,255,0.1);
+            backdrop-filter: blur(10px);
+            border-radius: 10px;
+            padding: 20px;
+            margin: 15px 0;
+            border: 1px solid rgba(255,255,255,0.2);
+        }
+
+        .rule-card h4 {
+            color: white;
+            margin-bottom: 10px;
+        }
+
+        .rule-card ul {
+            list-style: none;
+            padding-left: 0;
+        }
+
+        .rule-card li {
+            padding: 5px 0;
+            padding-left: 20px;
+            position: relative;
+            color: rgba(255,255,255,0.95);
+        }
+
+        .rule-card li:before {
+            content: "→";
+            position: absolute;
+            left: 0;
+            font-weight: bold;
+        }
+
+        .example-form {
+            background: #fff;
+            border: 2px solid #f093fb;
+            border-radius: 10px;
+            padding: 20px;
+            margin: 20px 0;
+        }
+
+        .form-field {
+            margin: 15px 0;
+        }
+
+        .form-label {
+            font-weight: 600;
+            color: #1e293b;
+            display: block;
+            margin-bottom: 5px;
+        }
+
+        .form-input {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #cbd5e1;
+            border-radius: 5px;
+        }
+
+        .footer {
+            background: #1e293b;
+            color: white;
+            padding: 40px;
+            text-align: center;
+        }
+
+        .footer p {
+            opacity: 0.8;
+            margin-bottom: 10px;
+        }
+
+        @media print {
+            body {
+                background: white;
+                padding: 0;
+            }
+            .container {
+                box-shadow: none;
+            }
+            .card:hover {
+                transform: none;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <div class="header">
+            <h1>📝 Web Transaction Validation</h1>
+            <p class="subtitle">Real-time Data Quality & Anomaly Detection</p>
+            <p class="description">ตรวจจับความผิดปกติในการกรอกข้อมูล Transaction บน Web Form</p>
+        </div>
+
+        <div class="content">
+            <!-- Executive Summary -->
+            <div class="section">
+                <h2><span class="icon">🎯</span> ภาพรวม</h2>
+                <div class="success-box">
+                    <strong>วัตถุประสงค์:</strong> ตรวจสอบความถูกต้องและความผิดปกติของข้อมูล Transaction ที่ผู้ใช้กรอกผ่าน Web Form แบบ Real-time เพื่อป้องกันข้อมูลผิดพลาด ฉ้อโกง และเพิ่มคุณภาพข้อมูล
+                </div>
+
+                <h3>📋 ข้อมูลที่ผู้ใช้กรอกบน Web Form</h3>
+                <div class="example-form">
+                    <div class="form-field">
+                        <label class="form-label">📍 ประเภทสถานที่</label>
+                        <select class="form-input">
+                            <option>กรุณาเลือกสถานที่</option>
+                            <option>สาขา</option>
+                            <option>อาคาร</option>
+                            <option>ชั้น</option>
+                            <option>ห้อง</option>
+                        </select>
+                    </div>
+                    <div class="form-field">
+                        <label class="form-label">📌 เลือกสถานที่เฉพาะ</label>
+                        <select class="form-input">
+                            <option>กรุณาเลือกสถานที่</option>
+                        </select>
+                    </div>
+                    <div class="form-field">
+                        <label class="form-label">📦 รายการวัสดุ</label>
+                        <table style="margin: 10px 0;">
+                            <thead>
+                                <tr>
+                                    <th style="width: 5%;">#</th>
+                                    <th style="width: 20%;">วันที่</th>
+                                    <th style="width: 30%;">ประเภทวัสดุ</th>
+                                    <th style="width: 15%;">ปริมาณ</th>
+                                    <th style="width: 15%;">ราคา</th>
+                                    <th style="width: 10%;">ราคารวม</th>
+                                    <th style="width: 5%;">ดำเนินการ</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr>
+                                    <td>1</td>
+                                    <td><input type="date" class="form-input" placeholder="เลือกวันที่"></td>
+                                    <td><select class="form-input"><option>เลือกประเภทวัสดุ</option></select></td>
+                                    <td><input type="number" class="form-input" value="0" step="0.01"></td>
+                                    <td><input type="number" class="form-input" value="0.00" step="0.01"></td>
+                                    <td style="text-align: right; font-weight: bold;">0.00</td>
+                                    <td style="text-align: center;">−</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                        <button style="padding: 10px 20px; border: 2px dashed #cbd5e1; background: transparent; border-radius: 5px; cursor: pointer;">+ เพิ่มวัสดุ</button>
+                    </div>
+                </div>
+
+                <h3>🔍 ข้อมูลที่ระบบจะตรวจสอบ</h3>
+                <div class="grid">
+                    <div class="card">
+                        <div class="card-header">📍 Location Context</div>
+                        <div class="card-body">
+                            <ul style="list-style: none; padding: 0;">
+                                <li>• <code>organization_id</code>: องค์กร</li>
+                                <li>• <code>origin_id</code>: สถานที่ต้นทาง (user_location)</li>
+                                <li>• <code>location_type</code>: ประเภท (สาขา/อาคาร/ชั้น/ห้อง)</li>
+                                <li>• <code>hierarchy</code>: โครงสร้างลำดับชั้น</li>
+                            </ul>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">📦 Material Records (แต่ละรายการ)</div>
+                        <div class="card-body">
+                            <ul style="list-style: none; padding: 0;">
+                                <li>• <code>transaction_date</code>: วันที่ทำรายการ</li>
+                                <li>• <code>material_id</code>: ประเภทวัสดุ</li>
+                                <li>• <code>origin_weight_kg</code>: ปริมาณ (kg)</li>
+                                <li>• <code>origin_price_per_unit</code>: ราคาต่อหน่วย</li>
+                                <li>• <code>total_amount</code>: ราคารวม</li>
+                            </ul>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">📊 Transaction Aggregate</div>
+                        <div class="card-body">
+                            <ul style="list-style: none; padding: 0;">
+                                <li>• <code>weight_kg</code>: น้ำหนักรวมทั้งหมด</li>
+                                <li>• <code>total_amount</code>: มูลค่ารวม</li>
+                                <li>• <code>record_count</code>: จำนวนรายการย่อย</li>
+                                <li>• <code>material_mix</code>: ส่วนผสมของวัสดุ</li>
+                            </ul>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">👤 User Context</div>
+                        <div class="card-body">
+                            <ul style="list-style: none; padding: 0;">
+                                <li>• <code>created_by</code>: ผู้สร้างรายการ</li>
+                                <li>• <code>created_date</code>: เวลาที่สร้าง</li>
+                                <li>• <code>user_role</code>: บทบาทผู้ใช้</li>
+                                <li>• <code>device_info</code>: อุปกรณ์ที่ใช้กรอก</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Detection Categories -->
+            <div class="section">
+                <h2><span class="icon">🔍</span> หมวดหมู่การตรวจจับความผิดปกติ</h2>
+
+                <h3>Category 1: ความครบถ้วน (Completeness Validation)</h3>
+                <div class="detection-level">
+                    <h3>✅ ตรวจสอบข้อมูลที่จำเป็นต้องมี</h3>
+
+                    <div class="rule-card">
+                        <h4>🚨 1.1 Required Fields</h4>
+                        <ul>
+                            <li><strong>Location:</strong> ต้องเลือก origin_id (ไม่สามารถเป็นค่าว่างได้)</li>
+                            <li><strong>Material Records:</strong> ต้องมีอย่างน้อย 1 รายการ</li>
+                            <li><strong>Date:</strong> transaction_date ต้องไม่เป็นค่าว่าง</li>
+                            <li><strong>Material Type:</strong> material_id ต้องถูกเลือก</li>
+                            <li><strong>Weight/Quantity:</strong> origin_weight_kg > 0</li>
+                        </ul>
+                        <div class="danger-box" style="margin-top: 15px;">
+                            <strong>❌ Error Message:</strong> "กรุณากรอกข้อมูลให้ครบถ้วน: [รายการที่ขาด]"
+                        </div>
+                    </div>
+
+                    <div class="rule-card">
+                        <h4>⚠️ 1.2 Recommended Fields</h4>
+                        <ul>
+                            <li><strong>Price:</strong> origin_price_per_unit แนะนำให้กรอก (บางวัสดุอาจไม่มีราคา)</li>
+                            <li><strong>Notes:</strong> หากมี anomaly ควรมี notes อธิบาย</li>
+                            <li><strong>Images:</strong> สำหรับรายการมูลค่าสูง (>5,000 บาท) ควรมีภาพประกอบ</li>
+                        </ul>
+                        <div class="warning-box" style="margin-top: 15px;">
+                            <strong>⚠️ Warning Message:</strong> "แนะนำให้กรอกข้อมูลเพิ่มเติม: [รายการที่แนะนำ]"
+                        </div>
+                    </div>
+                </div>
+
+                <h3>Category 2: ความถูกต้อง (Data Correctness)</h3>
+                <div class="detection-level">
+                    <h3>✅ ตรวจสอบความถูกต้องของข้อมูล</h3>
+
+                    <div class="rule-card">
+                        <h4>🔢 2.1 Numeric Constraints</h4>
+                        <ul>
+                            <li><strong>Weight:</strong> origin_weight_kg > 0 และ < 10,000 kg</li>
+                            <li><strong>Price:</strong> origin_price_per_unit >= 0 และ < 1,000,000 บาท/หน่วย</li>
+                            <li><strong>Total Amount:</strong> total_amount = weight × price (ต้องตรงกัน)</li>
+                            <li><strong>Negative Values:</strong> ไม่อนุญาตให้มีค่าติดลบ</li>
+                        </ul>
+                        <div class="danger-box" style="margin-top: 15px;">
+                            <strong>❌ Error Examples:</strong><br>
+                            • "น้ำหนัก -5 kg: ค่าติดลบไม่ถูกต้อง"<br>
+                            • "ราคา 1,500,000 บาท/kg: เกินขีดจำกัด"<br>
+                            • "ราคารวมไม่ตรงกับการคำนวณ (50 kg × 10 บาท ≠ 600 บาท)"
+                        </div>
+                    </div>
+
+                    <div class="rule-card">
+                        <h4>📅 2.2 Date/Time Validation</h4>
+                        <ul>
+                            <li><strong>Date Range:</strong> transaction_date ต้องไม่เป็นอนาคต</li>
+                            <li><strong>Past Limit:</strong> ไม่ควรย้อนหลังเกิน 90 วัน (ปรับได้ตาม policy)</li>
+                            <li><strong>Duplicate Detection:</strong> ไม่ควรมี 2 transactions จากสถานที่เดียวกันใน 1 ชั่วโมง</li>
+                            <li><strong>Working Hours:</strong> แจ้งเตือนถ้ากรอกนอกเวลาทำการ (22:00-06:00)</li>
+                        </ul>
+                        <div class="warning-box" style="margin-top: 15px;">
+                            <strong>⚠️ Warning Examples:</strong><br>
+                            • "วันที่ 15 ต.ค. 2566: ย้อนหลัง 120 วัน ควรตรวจสอบ"<br>
+                            • "เวลา 02:35: นอกเวลาทำการ อาจไม่ปกติ"<br>
+                            • "พบรายการซ้ำจากสถานที่เดียวกัน 30 นาทีที่แล้ว"
+                        </div>
+                    </div>
+
+                    <div class="rule-card">
+                        <h4>🎯 2.3 Material-Specific Rules</h4>
+                        <ul>
+                            <li><strong>Material Compatibility:</strong> ตรวจสอบว่าวัสดุสามารถอยู่ที่ location นี้ได้หรือไม่</li>
+                            <li><strong>Hazardous Materials:</strong> วัสดุอันตราย (material.hazardous_level > 0) ต้องมี special approval</li>
+                            <li><strong>Price Range:</strong> ราคาต้องอยู่ในช่วง min-max ของวัสดุนั้น (จาก master data)</li>
+                            <li><strong>Unit Mismatch:</strong> หน่วยต้องตรงกับที่วัสดุกำหนด (kg, piece, ton)</li>
+                        </ul>
+                        <div class="danger-box" style="margin-top: 15px;">
+                            <strong>❌ Error Examples:</strong><br>
+                            • "วัสดุอันตราย (แบตเตอรี่) ต้องได้รับอนุมัติพิเศษ"<br>
+                            • "ราคา PET Plastic 150 บาท/kg: สูงกว่าช่วงปกติ (5-50 บาท/kg)"<br>
+                            • "วัสดุนี้ใช้หน่วย 'piece' ไม่ใช่ 'kg'"
+                        </div>
+                    </div>
+                </div>
+
+                <h3>Category 3: ความผิดปกติทางสถิติ (Statistical Anomaly)</h3>
+                <div class="detection-level">
+                    <h3>📊 เปรียบเทียบกับข้อมูลในอดีต</h3>
+
+                    <div class="rule-card">
+                        <h4>📈 3.1 Transaction-Level Anomaly (รายการเดียว)</h4>
+                        <ul>
+                            <li><strong>Weight Outlier:</strong> น้ำหนักต่างจากค่าเฉลี่ยมาก (Z-score > 3)</li>
+                            <li><strong>Price Outlier:</strong> ราคาต่างจากราคาตลาดมาก</li>
+                            <li><strong>Record Count:</strong> จำนวน records ต่อ transaction แปลกผิดปกติ</li>
+                            <li><strong>Material Mix:</strong> ส่วนผสมของวัสดุผิดปกติ</li>
+                        </ul>
+
+                        <pre>
+# Example: Weight Anomaly Detection
+SELECT
+    AVG(weight_kg) as mean_weight,
+    STDDEV(weight_kg) as std_weight
+FROM transactions
+WHERE organization_id = ?
+  AND material_id = ?
+  AND transaction_date >= NOW() - INTERVAL '60 days';
+
+# Calculate Z-score
+z_score = (current_weight - mean_weight) / std_weight
+
+# Flag if Z-score > 3
+IF z_score > 3:
+    WARNING: "น้ำหนัก {current_weight} kg สูงผิดปกติ (เฉลี่ย {mean_weight} kg, Z={z_score:.2f})"
+                        </pre>
+
+                        <div class="warning-box" style="margin-top: 15px;">
+                            <strong>⚠️ Warning Examples:</strong><br>
+                            • "น้ำหนัก PET Plastic 250 kg: สูงกว่าค่าเฉลี่ย 50 kg (Z=4.5) 🚨"<br>
+                            • "ราคา 8 บาท/kg: ต่ำกว่าช่วงปกติ 15-25 บาท/kg"<br>
+                            • "มีรายการย่อย 25 รายการ: มากกว่าปกติ (เฉลี่ย 3-5 รายการ)"
+                        </div>
+                    </div>
+
+                    <div class="rule-card">
+                        <h4>📆 3.2 Batch-Level Anomaly (ภาพรวมรายวัน/สัปดาห์/เดือน)</h4>
+                        <ul>
+                            <li><strong>Daily Volume Spike:</strong> ปริมาณรวมต่อวันเพิ่มขึ้นกะทันหัน (>200% จากเฉลี่ย)</li>
+                            <li><strong>Frequency Anomaly:</strong> จำนวนรายการต่อวันผิดปกติ (เช่น 50 รายการ/วัน ทั้งที่ปกติ 5-10)</li>
+                            <li><strong>Temporal Pattern:</strong> เวลากรอกข้อมูลแปลกผิดปกติ (เช่น กรอกข้อมูล 30 วันในคราวเดียว)</li>
+                            <li><strong>Location Pattern:</strong> สถานที่เดียวกันมีรายการมากผิดปกติ</li>
+                        </ul>
+
+                        <pre>
+# Example: Daily Volume Spike Detection
+WITH daily_stats AS (
+    SELECT
+        DATE(transaction_date) as txn_date,
+        SUM(weight_kg) as daily_weight
+    FROM transactions
+    WHERE organization_id = ?
+      AND transaction_date >= NOW() - INTERVAL '30 days'
+    GROUP BY DATE(transaction_date)
+)
+SELECT
+    AVG(daily_weight) as avg_daily,
+    STDDEV(daily_weight) as std_daily
+FROM daily_stats;
+
+# Check today's total
+today_weight = SUM(weight_kg WHERE DATE(transaction_date) = TODAY)
+spike_ratio = today_weight / avg_daily
+
+IF spike_ratio > 2:
+    WARNING: "ปริมาณวันนี้ {today_weight} kg: สูงกว่าเฉลี่ย {avg_daily} kg ({spike_ratio:.1f}x) 🚨"
+                        </pre>
+
+                        <div class="warning-box" style="margin-top: 15px;">
+                            <strong>⚠️ Warning Examples:</strong><br>
+                            • "ปริมาณวันนี้ 1,200 kg: สูงกว่าค่าเฉลี่ย 300 kg (4x) 🚨"<br>
+                            • "มีรายการ 45 รายการวันนี้: มากกว่าปกติ 8-12 รายการ"<br>
+                            • "ผู้ใช้ A กรอกข้อมูล 20 รายการในรอบ 5 นาที: อาจเป็น bulk import"<br>
+                            • "สถานที่ 'ชั้น 3 ห้อง 301' มี 8 รายการวันนี้: ผิดปกติ (ปกติ 1-2 รายการ/สัปดาห์)"
+                        </div>
+                    </div>
+
+                    <div class="rule-card">
+                        <h4>🔄 3.3 Trend & Pattern Detection</h4>
+                        <ul>
+                            <li><strong>Sudden Change:</strong> พฤติกรรมเปลี่ยนแปลงกะทันหัน</li>
+                            <li><strong>Gradual Increase:</strong> ปริมาณเพิ่มขึ้นทีละน้อยแต่ต่อเนื่อง</li>
+                            <li><strong>Seasonality Break:</strong> ผิดจาก pattern ตามฤดูกาล</li>
+                            <li><strong>Gap Detection:</strong> ช่วงเงียบผิดปกติ (เช่น ไม่มีข้อมูล 7 วัน)</li>
+                        </ul>
+
+                        <div class="info-box" style="margin-top: 15px;">
+                            <strong>💡 Analysis Methods:</strong><br>
+                            • <strong>Moving Average (7-day, 30-day):</strong> เฉลี่ยเคลื่อนที่เพื่อหา trend<br>
+                            • <strong>Week-over-Week Comparison:</strong> เปรียบเทียบสัปดาห์นี้ vs สัปดาห์ก่อน<br>
+                            • <strong>Day-of-Week Pattern:</strong> เปรียบเทียบจันทร์ vs จันทร์ ไม่ใช่ จันทร์ vs อาทิตย์
+                        </div>
+                    </div>
+                </div>
+
+                <h3>Category 4: การตรวจจับการฉ้อโกง (Fraud Detection)</h3>
+                <div class="detection-level">
+                    <h3>🚨 Suspicious Patterns</h3>
+
+                    <div class="rule-card">
+                        <h4>💰 4.1 Financial Fraud Indicators</h4>
+                        <ul>
+                            <li><strong>Round Numbers:</strong> ราคาเป็นเลขกลมๆ มากเกินไป (เช่น 1000, 5000, 10000)</li>
+                            <li><strong>Consistent Pricing:</strong> ราคาเท่ากันหมดทุกครั้ง (ไม่มีความแปรปรวน)</li>
+                            <li><strong>Just Below Threshold:</strong> มูลค่าต่ำกว่าเกณฑ์นิดหน่อย (เช่น threshold 10,000 → input 9,999)</li>
+                            <li><strong>Price Manipulation:</strong> ปรับราคาให้ได้มูลค่าที่ต้องการ</li>
+                            <li><strong>Fake Transactions:</strong> รายการที่มี pattern เหมือนกันมาก</li>
+                        </ul>
+
+                        <div class="danger-box" style="margin-top: 15px;">
+                            <strong>🚨 Red Flags:</strong><br>
+                            • "ราคา 10,000 บาท (เลขกลม) ปรากฏ 5 ครั้งติดต่อกัน"<br>
+                            • "มูลค่า 9,950 บาท: ต่ำกว่า threshold 10,000 นิดหน่อย 🚨"<br>
+                            • "ผู้ใช้ B กรอกรายการ 15 รายการ มูลค่ารวม 149,500 บาท ในวันเดียว"<br>
+                            • "ราคา PET ของ User A = 50 บาท/kg ทุกครั้ง (15 ครั้ง) ไม่มีความผันแปร"
+                        </div>
+                    </div>
+
+                    <div class="rule-card">
+                        <h4>👤 4.2 User Behavior Anomaly</h4>
+                        <ul>
+                            <li><strong>Bulk Entry:</strong> กรอกข้อมูลจำนวนมากในเวลาสั้น</li>
+                            <li><strong>Off-Hours Activity:</strong> กรอกข้อมูลนอกเวลาทำการบ่อย</li>
+                            <li><strong>Location Hopping:</strong> สลับ location บ่อยผิดปกติ</li>
+                            <li><strong>Copy-Paste Pattern:</strong> ข้อมูลเหมือนกันมาก (น้ำหนัก, ราคา)</li>
+                            <li><strong>New User Spike:</strong> ผู้ใช้ใหม่กรอกข้อมูลปริมาณมาก</li>
+                        </ul>
+
+                        <div class="warning-box" style="margin-top: 15px;">
+                            <strong>⚠️ Warning Examples:</strong><br>
+                            • "User C กรอก 25 รายการในรอบ 3 นาที (เฉลี่ย 7.2 วินาที/รายการ)"<br>
+                            • "User D กรอกข้อมูลเวลา 23:45-01:30 (3 ครั้งในสัปดาห์นี้)"<br>
+                            • "น้ำหนัก 45.50 kg ปรากฏ 8 ครั้ง: อาจ copy-paste"
+                        </div>
+                    </div>
+
+                    <div class="rule-card">
+                        <h4>🔗 4.3 Relationship Anomaly</h4>
+                        <ul>
+                            <li><strong>Same Origin-Destination:</strong> ใช้คู่เดิมซ้ำๆ ผิดปกติ</li>
+                            <li><strong>Material Concentration:</strong> วัสดุ 1 ชนิดเป็นส่วนใหญ่ (>80%)</li>
+                            <li><strong>Cross-Organization:</strong> มี pattern เหมือนกันระหว่าง org (อาจเป็น organized fraud)</li>
+                            <li><strong>Coordinated Activity:</strong> หลายผู้ใช้กรอกข้อมูลพร้อมกัน</li>
+                        </ul>
+
+                        <div class="info-box" style="margin-top: 15px;">
+                            <strong>💡 Advanced Detection:</strong><br>
+                            • <strong>Graph Analysis:</strong> วิเคราะห์ network ระหว่าง user-location-material<br>
+                            • <strong>Clustering:</strong> จัดกลุ่มพฤติกรรมที่น่าสงสัย<br>
+                            • <strong>Correlation:</strong> หาความสัมพันธ์ที่ไม่ปกติ
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Detection Levels & Response -->
+            <div class="section">
+                <h2><span class="icon">⚙️</span> ระดับการตรวจจับและการตอบสนอง</h2>
+
+                <table>
+                    <thead>
+                        <tr>
+                            <th style="width: 15%;">Severity</th>
+                            <th style="width: 25%;">Trigger Condition</th>
+                            <th style="width: 35%;">UI Response</th>
+                            <th style="width: 25%;">Action Required</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><span class="badge badge-red">🚨 BLOCKER</span></td>
+                            <td>
+                                • Required field missing<br>
+                                • Negative values<br>
+                                • Invalid date (future)<br>
+                                • Calculation mismatch
+                            </td>
+                            <td>
+                                <strong>❌ Block Submit</strong><br>
+                                แสดง error message แดง<br>
+                                ปิดปุ่ม "สร้าง" จนกว่าแก้ไข
+                            </td>
+                            <td>
+                                <strong>MUST FIX</strong><br>
+                                ผู้ใช้ต้องแก้ไขก่อนส่ง
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><span class="badge badge-orange">⚠️ WARNING</span></td>
+                            <td>
+                                • Z-score > 3<br>
+                                • Price outlier<br>
+                                • Off-hours entry<br>
+                                • Past date > 90 days
+                            </td>
+                            <td>
+                                <strong>⚠️ Show Warning</strong><br>
+                                แสดงกล่องเตือนสีเหลือง<br>
+                                แนะนำให้ใส่ notes อธิบาย
+                            </td>
+                            <td>
+                                <strong>SHOULD FIX</strong><br>
+                                แนะนำแก้ไข แต่สามารถส่งได้<br>
+                                ถ้ามี notes อธิบาย
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><span class="badge badge-blue">ℹ️ INFO</span></td>
+                            <td>
+                                • Recommended field empty<br>
+                                • Slight price difference<br>
+                                • Normal statistics
+                            </td>
+                            <td>
+                                <strong>ℹ️ Show Info</strong><br>
+                                แสดงกล่องข้อมูลสีฟ้า<br>
+                                ไม่บล็อกการทำงาน
+                            </td>
+                            <td>
+                                <strong>OPTIONAL</strong><br>
+                                ผู้ใช้เลือกได้ว่าจะปรับหรือไม่
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><span class="badge badge-purple">🔍 FLAGGED</span></td>
+                            <td>
+                                • Fraud indicators<br>
+                                • Multiple red flags<br>
+                                • High-value transaction<br>
+                                • Batch anomaly
+                            </td>
+                            <td>
+                                <strong>🔍 Allow but Flag</strong><br>
+                                ส่งได้ แต่ระบบจะ flag ไว้<br>
+                                แจ้งเตือน admin/supervisor
+                            </td>
+                            <td>
+                                <strong>REVIEW REQUIRED</strong><br>
+                                Admin ต้อง review ก่อน approve<br>
+                                อาจต้องมี audit trail
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <h3>🎨 UI/UX Design Recommendations</h3>
+                <div class="grid">
+                    <div class="card">
+                        <div class="card-header">1️⃣ Real-time Validation</div>
+                        <div class="card-body">
+                            <strong>Validate as User Types:</strong>
+                            <ul style="margin-left: 20px; margin-top: 10px;">
+                                <li>• Weight input: แสดง comparison กับค่าเฉลี่ยทันที</li>
+                                <li>• Price input: แสดงช่วงราคาปกติ</li>
+                                <li>• Date input: เตือนถ้าย้อนหลังมาก</li>
+                                <li>• Auto-calculate total amount</li>
+                            </ul>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">2️⃣ Smart Suggestions</div>
+                        <div class="card-body">
+                            <strong>Help User Correct Data:</strong>
+                            <ul style="margin-left: 20px; margin-top: 10px;">
+                                <li>• แสดงค่าเฉลี่ยใต้ input field</li>
+                                <li>• Suggest typical price range</li>
+                                <li>• Auto-fill based on history</li>
+                                <li>• Show similar transactions</li>
+                            </ul>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">3️⃣ Visual Indicators</div>
+                        <div class="card-body">
+                            <strong>Color-coded Feedback:</strong>
+                            <ul style="margin-left: 20px; margin-top: 10px;">
+                                <li>• 🔴 Red border: Error (must fix)</li>
+                                <li>• 🟡 Yellow background: Warning</li>
+                                <li>• 🔵 Blue icon: Info</li>
+                                <li>• ✅ Green checkmark: Valid</li>
+                            </ul>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">4️⃣ Batch Warnings</div>
+                        <div class="card-body">
+                            <strong>Summary-level Alerts:</strong>
+                            <ul style="margin-left: 20px; margin-top: 10px;">
+                                <li>• "ปริมาณวันนี้สูงกว่าปกติ 3x"</li>
+                                <li>• "คุณกรอก 5 รายการแล้ว (เฉลี่ย 2/วัน)"</li>
+                                <li>• "สถานที่นี้มี 3 รายการแล้ววันนี้"</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Technical Implementation -->
+            <div class="section">
+                <h2><span class="icon">🏗️</span> สถาปัตยกรรมและการพัฒนา</h2>
+
+                <h3>Frontend Implementation (React)</h3>
+                <pre>
+// Example: Real-time Weight Validation
+const WeightInput = ({ materialId, locationId, value, onChange }) =&gt; {
+  const [anomalyScore, setAnomalyScore] = useState(null);
+  const [baseline, setBaseline] = useState(null);
+
+  useEffect(() =&gt; {
+    // Fetch baseline on mount
+    fetchBaseline(materialId, locationId).then(setBaseline);
+  }, [materialId, locationId]);
+
+  useEffect(() =&gt; {
+    // Calculate anomaly score on value change
+    if (baseline &amp;&amp; value) {
+      const zScore = (value - baseline.mean) / baseline.stdDev;
+      setAnomalyScore({
+        zScore,
+        severity: zScore &gt; 3 ? 'error' : zScore &gt; 2 ? 'warning' : 'normal'
+      });
+    }
+  }, [value, baseline]);
+
+  return (
+    &lt;div className={`weight-input ${anomalyScore?.severity}`}&gt;
+      &lt;input
+        type="number"
+        value={value}
+        onChange={(e) =&gt; onChange(e.target.value)}
+      /&gt;
+      {baseline &amp;&amp; (
+        &lt;span className="baseline-hint"&gt;
+          เฉลี่ย: {baseline.mean.toFixed(2)} kg
+        &lt;/span&gt;
+      )}
+      {anomalyScore?.severity === 'error' &amp;&amp; (
+        &lt;div className="error-message"&gt;
+          ⚠️ น้ำหนักสูงผิดปกติ (Z={anomalyScore.zScore.toFixed(2)})
+        &lt;/div&gt;
+      )}
+    &lt;/div&gt;
+  );
+};
+                </pre>
+
+                <h3>Backend API Design</h3>
+                <pre>
+# Endpoint: POST /api/transactions/validate
+# Real-time validation before saving
+
+{
+  "organization_id": 8,
+  "origin_id": 12345,
+  "records": [
+    {
+      "material_id": 298,
+      "weight_kg": 250.5,
+      "price_per_unit": 35.00,
+      "transaction_date": "2024-12-20"
+    }
+  ]
+}
+
+# Response:
+{
+  "valid": false,
+  "overall_score": 75,  # 0-100 (100 = clean)
+  "issues": [
+    {
+      "field": "records[0].weight_kg",
+      "severity": "warning",
+      "code": "weight_outlier",
+      "message": "น้ำหนัก 250.5 kg สูงกว่าค่าเฉลี่ย 50 kg (Z=4.2)",
+      "suggestion": "ตรวจสอบน้ำหนักอีกครั้ง หรือใส่ notes อธิบาย",
+      "baseline": {
+        "mean": 50.2,
+        "std_dev": 12.5,
+        "z_score": 4.2
+      }
+    },
+    {
+      "field": "records[0].price_per_unit",
+      "severity": "info",
+      "code": "price_above_avg",
+      "message": "ราคา 35 บาท/kg สูงกว่าค่าเฉลี่ย 25 บาท/kg",
+      "suggestion": "ราคาสูงกว่าปกติ 40%",
+      "baseline": {
+        "mean": 25.0,
+        "min": 15.0,
+        "max": 45.0
+      }
+    }
+  ],
+  "batch_analysis": {
+    "today_count": 8,
+    "avg_daily_count": 3,
+    "today_weight": 450,
+    "avg_daily_weight": 150,
+    "warnings": [
+      "ปริมาณวันนี้สูงกว่าปกติ 3x"
+    ]
+  }
+}
+                </pre>
+
+                <h3>Database Schema Extensions</h3>
+                <pre>
+-- Table: anomaly_baselines (เก็บ baseline สำหรับการเปรียบเทียบ)
+CREATE TABLE anomaly_baselines (
+    id BIGSERIAL PRIMARY KEY,
+    organization_id BIGINT NOT NULL,
+    material_id BIGINT,
+    origin_id BIGINT,
+    window_days INT NOT NULL, -- 30/60/90
+
+    -- Statistical metrics
+    metric_name VARCHAR(50) NOT NULL, -- weight_kg, price, frequency
+    mean_value DECIMAL(15,4),
+    median_value DECIMAL(15,4),
+    std_dev DECIMAL(15,4),
+    min_value DECIMAL(15,4),
+    max_value DECIMAL(15,4),
+    q1_value DECIMAL(15,4),  -- 25th percentile
+    q3_value DECIMAL(15,4),  -- 75th percentile
+    sample_count INT,
+
+    calculated_date TIMESTAMP,
+    created_date TIMESTAMP DEFAULT NOW(),
+    UNIQUE(organization_id, material_id, origin_id, window_days, metric_name)
+);
+
+-- Table: transaction_validations (เก็บผล validation ของแต่ละ transaction)
+CREATE TABLE transaction_validations (
+    id BIGSERIAL PRIMARY KEY,
+    transaction_id BIGINT NOT NULL REFERENCES transactions(id),
+
+    -- Overall scores
+    validity_score DECIMAL(5,2) NOT NULL, -- 0-100
+    anomaly_score DECIMAL(5,2) NOT NULL, -- 0-100
+    fraud_score DECIMAL(5,2) NOT NULL, -- 0-100
+
+    -- Issues found
+    blocker_count INT DEFAULT 0,
+    warning_count INT DEFAULT 0,
+    info_count INT DEFAULT 0,
+
+    -- Detailed issues (JSONB)
+    issues JSONB NOT NULL, -- Array of issue objects
+
+    -- Batch context
+    batch_analysis JSONB, -- Daily/weekly stats
+
+    -- Status
+    validation_status VARCHAR(20) DEFAULT 'pending', -- pending, approved, flagged, rejected
+    reviewed_by BIGINT REFERENCES user_locations(id),
+    reviewed_date TIMESTAMP,
+    review_notes TEXT,
+
+    created_date TIMESTAMP DEFAULT NOW(),
+    INDEX idx_transaction_id (transaction_id),
+    INDEX idx_validity_score (validity_score),
+    INDEX idx_anomaly_score (anomaly_score),
+    INDEX idx_fraud_score (fraud_score),
+    INDEX idx_validation_status (validation_status)
+);
+
+-- Table: validation_rules (เก็บ configuration ของกฎการตรวจสอบ)
+CREATE TABLE validation_rules (
+    id BIGSERIAL PRIMARY KEY,
+    organization_id BIGINT NOT NULL,
+    rule_code VARCHAR(50) NOT NULL, -- weight_outlier, price_outlier, etc.
+    rule_type VARCHAR(20) NOT NULL, -- completeness, correctness, anomaly, fraud
+    severity VARCHAR(20) NOT NULL, -- blocker, warning, info
+
+    -- Rule configuration (JSONB)
+    config JSONB NOT NULL, -- Thresholds, parameters
+
+    is_enabled BOOLEAN DEFAULT true,
+    created_date TIMESTAMP DEFAULT NOW(),
+    updated_date TIMESTAMP,
+    UNIQUE(organization_id, rule_code)
+);
+
+-- Example rule config:
+INSERT INTO validation_rules (organization_id, rule_code, rule_type, severity, config) VALUES
+(8, 'weight_z_score', 'anomaly', 'warning', '{
+    "threshold": 3.0,
+    "window_days": 60,
+    "min_samples": 30,
+    "message_template": "น้ำหนัก {value} kg สูงผิดปกติ (Z={z_score:.2f})"
+}');
+                </pre>
+
+                <h3>Services Architecture</h3>
+                <div class="grid">
+                    <div class="card">
+                        <div class="card-header">1️⃣ Baseline Calculator Service</div>
+                        <div class="card-body">
+                            <strong>หน้าที่:</strong> คำนวณ baselines ทุกคืน
+                            <ul style="margin-left: 20px; margin-top: 10px;">
+                                <li>• Cron job ทำงาน 02:00 ทุกวัน</li>
+                                <li>• คำนวณ mean, std dev, percentiles</li>
+                                <li>• Rolling windows: 30/60/90 days</li>
+                                <li>• Group by: org, material, location</li>
+                            </ul>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">2️⃣ Real-time Validator Service</div>
+                        <div class="card-body">
+                            <strong>หน้าที่:</strong> ตรวจสอบ transaction แบบ real-time
+                            <ul style="margin-left: 20px; margin-top: 10px;">
+                                <li>• ถูกเรียกจาก frontend (ก่อน submit)</li>
+                                <li>• Run ทุก validation rules</li>
+                                <li>• Return issues + suggestions</li>
+                                <li>• Response time &lt; 200ms</li>
+                            </ul>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">3️⃣ Batch Analyzer Service</div>
+                        <div class="card-body">
+                            <strong>หน้าที่:</strong> วิเคราะห์ภาพรวมรายวัน/สัปดาห์
+                            <ul style="margin-left: 20px; margin-top: 10px;">
+                                <li>• คำนวณ daily/weekly aggregates</li>
+                                <li>• Detect batch-level anomalies</li>
+                                <li>• Generate summary reports</li>
+                                <li>• Alert admins if needed</li>
+                            </ul>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">4️⃣ Fraud Detection Service</div>
+                        <div class="card-body">
+                            <strong>หน้าที่:</strong> ตรวจจับ fraud patterns
+                            <ul style="margin-left: 20px; margin-top: 10px;">
+                                <li>• Run fraud detection algorithms</li>
+                                <li>• Graph analysis (user-location)</li>
+                                <li>• Clustering suspicious behavior</li>
+                                <li>• Flag high-risk transactions</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Implementation Roadmap -->
+            <div class="section">
+                <h2><span class="icon">🗓️</span> แผนการพัฒนา (8 สัปดาห์)</h2>
+
+                <table>
+                    <thead>
+                        <tr>
+                            <th style="width: 10%;">สัปดาห์</th>
+                            <th style="width: 25%;">Milestone</th>
+                            <th style="width: 45%;">Deliverables</th>
+                            <th style="width: 20%;">Owner</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>W1</strong></td>
+                            <td>Foundation</td>
+                            <td>
+                                • Database schema design<br>
+                                • Create validation_rules table<br>
+                                • Define rule configurations<br>
+                                • API endpoint design
+                            </td>
+                            <td>Backend Team</td>
+                        </tr>
+                        <tr>
+                            <td><strong>W2</strong></td>
+                            <td>Baseline Service</td>
+                            <td>
+                                • Implement baseline calculator<br>
+                                • Create cron job<br>
+                                • Calculate initial baselines<br>
+                                • Test with historical data
+                            </td>
+                            <td>Backend Team</td>
+                        </tr>
+                        <tr>
+                            <td><strong>W3</strong></td>
+                            <td>Validation Rules (Category 1-2)</td>
+                            <td>
+                                • Completeness validation<br>
+                                • Correctness validation<br>
+                                • Numeric constraints<br>
+                                • Date/time validation
+                            </td>
+                            <td>Backend Team</td>
+                        </tr>
+                        <tr>
+                            <td><strong>W4</strong></td>
+                            <td>Statistical Anomaly (Category 3)</td>
+                            <td>
+                                • Z-score calculation<br>
+                                • IQR-based detection<br>
+                                • Transaction-level checks<br>
+                                • Batch-level analysis
+                            </td>
+                            <td>Backend Team</td>
+                        </tr>
+                        <tr>
+                            <td><strong>W5</strong></td>
+                            <td>Frontend Integration</td>
+                            <td>
+                                • Real-time validation UI<br>
+                                • Error/Warning displays<br>
+                                • Smart suggestions<br>
+                                • Visual indicators
+                            </td>
+                            <td>Frontend Team</td>
+                        </tr>
+                        <tr>
+                            <td><strong>W6</strong></td>
+                            <td>Fraud Detection (Category 4)</td>
+                            <td>
+                                • Financial fraud indicators<br>
+                                • User behavior analysis<br>
+                                • Pattern detection<br>
+                                • Flagging system
+                            </td>
+                            <td>Backend Team</td>
+                        </tr>
+                        <tr>
+                            <td><strong>W7</strong></td>
+                            <td>Testing & Refinement</td>
+                            <td>
+                                • Unit tests (all rules)<br>
+                                • Integration tests<br>
+                                • UAT with pilot users<br>
+                                • Performance optimization
+                            </td>
+                            <td>QA Team</td>
+                        </tr>
+                        <tr>
+                            <td><strong>W8</strong></td>
+                            <td>Launch & Monitoring</td>
+                            <td>
+                                • Deploy to production<br>
+                                • Monitor performance<br>
+                                • Collect user feedback<br>
+                                • Adjust thresholds
+                            </td>
+                            <td>Full Team</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Cost & ROI -->
+            <div class="section">
+                <h2><span class="icon">💰</span> ค่าใช้จ่ายและผลตอบแทน</h2>
+
+                <h3>💵 Development Cost (One-time)</h3>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Component</th>
+                            <th>Effort (Days)</th>
+                            <th>Cost Estimate</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>Database Schema & Migration</td>
+                            <td>3 days</td>
+                            <td>฿30,000</td>
+                        </tr>
+                        <tr>
+                            <td>Baseline Calculator Service</td>
+                            <td>5 days</td>
+                            <td>฿50,000</td>
+                        </tr>
+                        <tr>
+                            <td>Validation Rules (Cat 1-3)</td>
+                            <td>10 days</td>
+                            <td>฿100,000</td>
+                        </tr>
+                        <tr>
+                            <td>Fraud Detection (Cat 4)</td>
+                            <td>7 days</td>
+                            <td>฿70,000</td>
+                        </tr>
+                        <tr>
+                            <td>Frontend Integration</td>
+                            <td>8 days</td>
+                            <td>฿80,000</td>
+                        </tr>
+                        <tr>
+                            <td>Testing & QA</td>
+                            <td>5 days</td>
+                            <td>฿30,000</td>
+                        </tr>
+                        <tr>
+                            <td>Documentation</td>
+                            <td>2 days</td>
+                            <td>฿10,000</td>
+                        </tr>
+                        <tr style="background: #f8fafc; font-weight: bold;">
+                            <td colspan="2">Total Development Cost</td>
+                            <td style="color: #f5576c;">฿370,000</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <h3>📊 Operating Cost (Monthly)</h3>
+                <div class="metric-grid">
+                    <div class="metric-card">
+                        <div class="metric-label">Database Storage</div>
+                        <div class="metric-value">฿500</div>
+                        <div class="metric-label">Additional tables & indexes</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-label">Compute (Cron Jobs)</div>
+                        <div class="metric-value">฿300</div>
+                        <div class="metric-label">Baseline calculation</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-label">API Calls</div>
+                        <div class="metric-value">฿0</div>
+                        <div class="metric-label">No external APIs (100% in-house)</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-label">Total Monthly Cost</div>
+                        <div class="metric-value">฿800</div>
+                        <div class="metric-label">~฿10,000/year</div>
+                    </div>
+                </div>
+
+                <h3>💎 ROI Analysis</h3>
+                <div class="success-box">
+                    <strong>🎯 Expected Benefits:</strong>
+                    <ul style="margin-left: 20px; margin-top: 10px;">
+                        <li><strong>Data Quality:</strong> ลดข้อมูลผิดพลาด 70-80%</li>
+                        <li><strong>Fraud Prevention:</strong> ป้องกันการฉ้อโกง ประหยัด ~฿50,000-100,000/เดือน</li>
+                        <li><strong>Time Savings:</strong> ลดเวลาตรวจสอบด้วยตนเอง 60% (10 ชม/สัปดาห์ → 4 ชม/สัปดาห์)</li>
+                        <li><strong>Trust & Confidence:</strong> เพิ่มความเชื่อมั่นในระบบ</li>
+                        <li><strong>Audit Readiness:</strong> พร้อมสำหรับการ audit ตลอดเวลา</li>
+                    </ul>
+                </div>
+
+                <div class="info-box">
+                    <strong>📈 Break-even Analysis:</strong><br>
+                    • Development cost: ฿370,000<br>
+                    • Monthly savings: ฿50,000 (fraud prevention) + ฿15,000 (time savings) = ฿65,000<br>
+                    • Break-even: 370,000 / 65,000 = <span class="highlight">5.7 เดือน</span><br>
+                    • ROI (Year 1): (65,000 × 12 - 370,000 - 10,000) / 370,000 = <span class="highlight">+102%</span>
+                </div>
+            </div>
+
+            <!-- Next Steps -->
+            <div class="section">
+                <h2><span class="icon">🚀</span> ขั้นตอนถัดไป</h2>
+
+                <div class="grid-2">
+                    <div class="card">
+                        <div class="card-header">📋 ขั้นตอนที่ 1: Validation</div>
+                        <div class="card-body">
+                            <strong>Validate Concept กับผู้ใช้:</strong>
+                            <ul style="margin-left: 20px; margin-top: 10px;">
+                                <li>• นำเสนอ use cases กับทีม</li>
+                                <li>• สัมภาษณ์ผู้ใช้ปัจจุบัน (pain points)</li>
+                                <li>• Prioritize features (must-have vs nice-to-have)</li>
+                                <li>• Define success metrics</li>
+                            </ul>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">🔬 ขั้นตอนที่ 2: Pilot</div>
+                        <div class="card-body">
+                            <strong>Pilot กับ 2-3 organizations:</strong>
+                            <ul style="margin-left: 20px; margin-top: 10px;">
+                                <li>• เริ่มด้วย Category 1-2 (basic validation)</li>
+                                <li>• เก็บข้อมูล feedback และ false positives</li>
+                                <li>• ปรับ thresholds ตาม feedback</li>
+                                <li>• Measure impact (error rate, time savings)</li>
+                            </ul>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">📈 ขั้นตอนที่ 3: Scale</div>
+                        <div class="card-body">
+                            <strong>Scale to All Organizations:</strong>
+                            <ul style="margin-left: 20px; margin-top: 10px;">
+                                <li>• เพิ่ม Category 3 (statistical anomaly)</li>
+                                <li>• เพิ่ม Category 4 (fraud detection)</li>
+                                <li>• Implement ML models (optional)</li>
+                                <li>• Build admin dashboard</li>
+                            </ul>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">🔄 ขั้นตอนที่ 4: Iterate</div>
+                        <div class="card-body">
+                            <strong>Continuous Improvement:</strong>
+                            <ul style="margin-left: 20px; margin-top: 10px;">
+                                <li>• Monitor performance metrics</li>
+                                <li>• Collect user feedback</li>
+                                <li>• Adjust rules & thresholds</li>
+                                <li>• Add new detection methods</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="info-box" style="margin-top: 30px;">
+                    <strong>💡 Recommended Decision:</strong> เริ่มที่ <span class="highlight">Category 1-2 (Completeness & Correctness)</span> ก่อน เพราะ:<br>
+                    • ผลลัพธ์ชัดเจน explainable 100%<br>
+                    • False positive ต่ำมาก<br>
+                    • ไม่ต้องใช้ historical data (ใช้ได้ทันที)<br>
+                    • ค่าใช้จ่าย 0 บาท (ไม่มี API cost)<br>
+                    • Deliver value ได้เร็ว (2-3 สัปดาห์)<br>
+                    <br>
+                    หลังจากนั้น ค่อยเพิ่ม Category 3-4 ตาม feedback และ data availability
+                </div>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <div class="footer">
+            <h3 style="margin-bottom: 20px; font-size: 1.5em;">✉️ Questions & Feedback</h3>
+            <p>GEPP Platform - Web Transaction Validation System</p>
+            <p>For technical details or demo request, contact the product team</p>
+            <p style="margin-top: 20px; opacity: 0.6;">Document Version 2.0 - Web Form Focus | Last Updated: December 2024</p>
+        </div>
+    </div>
+</body>
+</html>

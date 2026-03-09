@@ -179,6 +179,10 @@ def handle_user_routes(event: Dict[str, Any], data: Dict[str, Any], **params) ->
         # Create new user
         return handle_create_user(user_service, data, current_user_id)
 
+    elif '/api/locations/orphans' == path and method == 'GET':
+        # Get orphan locations with search, type filter, pagination
+        return handle_get_orphan_locations(user_service, query_params, current_user)
+
     elif '/api/locations' == path and method == 'GET':
         # Get user locations (is_location = True)
         return handle_get_locations(db_session, user_service, query_params, current_user, headers)
@@ -192,6 +196,11 @@ def handle_user_routes(event: Dict[str, Any], data: Dict[str, Any], **params) ->
         # Migrate transactions to new location: /api/locations/{location_id}/migrate-transactions
         location_id = path.split('/locations/')[1].split('/')[0]
         return handle_migrate_location_transactions(db_session, location_id, data, current_user_organization_id)
+
+    elif '/api/locations/' in path and '/restore' in path and method == 'POST':
+        # Restore a soft-deleted location (recycle bin): /api/locations/{location_id}/restore
+        location_id = path.split('/locations/')[1].split('/')[0]
+        return handle_restore_location(db_session, location_id, current_user_organization_id)
 
     elif '/api/locations/' in path and '/delete-with-transactions' in path and method == 'DELETE':
         # Delete location and all its transactions: /api/locations/{location_id}/delete-with-transactions
@@ -890,6 +899,47 @@ def handle_get_locations(db_session, user_service: UserService, query_params: Di
         raise APIException(f'Error fetching locations: {str(e)}')
 
 
+def handle_get_orphan_locations(
+    user_service: UserService,
+    query_params: Dict[str, Any],
+    current_user: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Handle GET /api/locations/orphans - Get orphan locations with search, type filter, pagination."""
+    try:
+        organization_id = current_user.get('organization_id') if current_user else None
+        if not organization_id:
+            raise NotFoundException('User is not part of any organization')
+
+        search = query_params.get('search', '').strip() or None
+        types_param = query_params.get('types', '').strip()
+        types = [t.strip() for t in types_param.split(',') if t.strip()] if types_param else None
+        page = int(query_params.get('page', '1'))
+        page_size = int(query_params.get('page_size', '20'))
+
+        # Clamp page_size
+        if page_size < 1:
+            page_size = 1
+        elif page_size > 100:
+            page_size = 100
+
+        result = user_service.get_orphan_locations(
+            organization_id=organization_id,
+            search=search,
+            types=types,
+            page=page,
+            page_size=page_size,
+        )
+
+        return {
+            'success': True,
+            **result,
+            'message': f'Retrieved {len(result["data"])} orphan locations',
+        }
+
+    except Exception as e:
+        raise APIException(f'Error fetching orphan locations: {str(e)}')
+
+
 def handle_update_location(
     db_session,
     location_id: str,
@@ -1262,12 +1312,59 @@ def handle_migrate_location_transactions(
         raise APIException(f'Failed to migrate transactions: {str(e)}')
 
 
+def handle_restore_location(
+    db_session,
+    location_id: str,
+    organization_id: int
+) -> Dict[str, Any]:
+    """Handle POST /api/locations/{location_id}/restore - Restore a soft-deleted location (set deleted_date to NULL)"""
+    try:
+        from GEPPPlatform.models.users.user_location import UserLocation
+        from sqlalchemy import and_
+
+        location = db_session.query(UserLocation).filter(
+            and_(
+                UserLocation.id == int(location_id),
+                UserLocation.organization_id == organization_id,
+                UserLocation.is_location == True
+            )
+        ).first()
+
+        if not location:
+            raise NotFoundException(f'Location not found: {location_id}')
+
+        if location.deleted_date is None:
+            # Already active, nothing to do
+            return {
+                'success': True,
+                'location_id': int(location_id),
+                'message': f'Location {location_id} is already active'
+            }
+
+        # Restore: clear deleted_date
+        location.deleted_date = None
+        db_session.commit()
+
+        return {
+            'success': True,
+            'location_id': int(location_id),
+            'location_name': location.display_name or location.name_en or location.name_th,
+            'message': f'Location {location_id} restored successfully'
+        }
+
+    except NotFoundException:
+        raise
+    except Exception as e:
+        db_session.rollback()
+        raise APIException(f'Failed to restore location: {str(e)}')
+
+
 def handle_delete_location_with_transactions(
     db_session,
     location_id: str,
     organization_id: int
 ) -> Dict[str, Any]:
-    """Handle DELETE /api/locations/{location_id}/delete-with-transactions - Soft delete location, descendants, and their transactions"""
+    """Handle DELETE /api/locations/{location_id}/delete-with-transactions - Soft delete location and descendants (transactions are preserved)"""
     try:
         from GEPPPlatform.models.transactions.transactions import Transaction
         from GEPPPlatform.models.users.user_location import UserLocation
@@ -1343,20 +1440,10 @@ def handle_delete_location_with_transactions(
                     all_location_ids = found_ids
         
         now = datetime.utcnow()
-        deleted_transactions_count = 0
-        
-        # Soft delete all transactions for these locations
+
+        # Soft delete only the locations — do NOT cascade-delete transactions.
+        # Transactions that reference these locations (origin or destination) must be preserved.
         if all_location_ids:
-            deleted_transactions_count = db_session.query(Transaction).filter(
-                and_(
-                    Transaction.origin_id.in_(all_location_ids),
-                    Transaction.deleted_date.is_(None)
-                )
-            ).update({
-                'deleted_date': now
-            }, synchronize_session=False)
-            
-            # Soft delete all the locations
             db_session.query(UserLocation).filter(
                 and_(
                     UserLocation.id.in_(all_location_ids),
@@ -1371,10 +1458,10 @@ def handle_delete_location_with_transactions(
         return {
             'success': True,
             'deleted_locations_count': len(all_location_ids),
-            'deleted_transactions_count': deleted_transactions_count,
+            'deleted_transactions_count': 0,
             'location_id': int(location_id),
             'location_name': location_name,
-            'message': f'Successfully deleted {len(all_location_ids)} location(s) and {deleted_transactions_count} transaction(s)'
+            'message': f'Successfully deleted {len(all_location_ids)} location(s)'
         }
 
     except NotFoundException:
