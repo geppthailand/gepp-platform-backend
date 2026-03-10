@@ -6,7 +6,7 @@ from typing import Dict, Any
 import logging
 import traceback
 import os
-from sqlalchemy import and_, desc
+from sqlalchemy import and_, desc, func
 
 from .transaction_audit_service import TransactionAuditService
 from ....models.logs.transaction_audit_history import TransactionAuditHistory
@@ -115,6 +115,20 @@ def handle_transaction_audit_routes(event: Dict[str, Any], data: Dict[str, Any],
                 query_params,
                 current_user_organization_id,
                 current_user_id
+            )
+
+        elif path == '/api/transaction_audit/audit_queue_batches' and method == 'GET':
+            return handle_get_audit_queue_batches(
+                db_session,
+                query_params,
+                current_user_organization_id
+            )
+
+        elif path == '/api/transaction_audit/cancel_audit_batch' and method == 'POST':
+            return handle_cancel_audit_batch(
+                db_session,
+                data,
+                current_user_organization_id
             )
 
         else:
@@ -478,6 +492,9 @@ def handle_get_unaudited_transactions(
         total_count = query.count()
         total_pages = (total_count + page_size - 1) // page_size if page_size > 0 else 0
 
+        # Get all matching transaction IDs (for select-all across pages)
+        all_matching_ids = [tid for (tid,) in query.with_entities(Transaction.id).order_by(desc(Transaction.id)).all()]
+
         # Get paginated results
         offset = (page - 1) * page_size
         transactions = query.order_by(desc(Transaction.id)).offset(offset).limit(page_size).all()
@@ -590,7 +607,8 @@ def handle_get_unaudited_transactions(
                     'has_next': page < total_pages,
                     'has_prev': page > 1
                 },
-                'location_options': location_options
+                'location_options': location_options,
+                'all_transaction_ids': all_matching_ids
             }
         }
 
@@ -686,6 +704,194 @@ def handle_get_queued_transactions(
         logger.error(f"Error fetching queued transactions: {str(e)}")
         logger.error(f"Traceback: {traceback.format_exc()}")
         raise APIException(f'Failed to fetch queued transactions: {str(e)}')
+
+
+def handle_get_audit_queue_batches(
+    db_session: Any,
+    query_params: Dict[str, Any],
+    organization_id: int
+) -> Dict[str, Any]:
+    """
+    Handle GET /api/transaction_audit/audit_queue_batches
+    Returns transaction_audit_history batches with status pending/in_progress,
+    including basic transaction info for each batch's transaction IDs.
+    """
+    try:
+        from ....models.users.user_location import UserLocation
+        from ....models.cores.references import Material
+
+        page = max(int(query_params.get('page', 1)), 1)
+        page_size = min(int(query_params.get('page_size', 20)), 50)
+
+        # Query audit history batches with pending/in_progress status
+        query = db_session.query(TransactionAuditHistory).filter(
+            and_(
+                TransactionAuditHistory.organization_id == organization_id,
+                TransactionAuditHistory.status.in_(['pending', 'in_progress']),
+                TransactionAuditHistory.deleted_date.is_(None)
+            )
+        ).order_by(desc(TransactionAuditHistory.created_date))
+
+        total_count = query.count()
+        total_pages = (total_count + page_size - 1) // page_size if page_size > 0 else 0
+
+        offset = (page - 1) * page_size
+        batches = query.offset(offset).limit(page_size).all()
+
+        # Collect all transaction IDs across all batches
+        all_tx_ids = set()
+        for batch in batches:
+            if batch.transactions:
+                all_tx_ids.update(batch.transactions)
+
+        # Batch fetch all transactions
+        tx_map = {}
+        if all_tx_ids:
+            txns = db_session.query(Transaction).filter(
+                Transaction.id.in_(all_tx_ids)
+            ).all()
+
+            # Fetch origin names
+            origin_ids = {t.origin_id for t in txns if t.origin_id}
+            origin_name_map = {}
+            if origin_ids:
+                origins = db_session.query(UserLocation).filter(UserLocation.id.in_(origin_ids)).all()
+                origin_name_map = {o.id: (o.name_en or o.name_th or f'ID:{o.id}') for o in origins}
+
+            # Fetch material names from first record
+            first_record_ids = []
+            for t in txns:
+                if t.transaction_records:
+                    first_record_ids.append(t.transaction_records[0])
+
+            material_map_by_tx = {}
+            if first_record_ids:
+                records = db_session.query(TransactionRecord).filter(TransactionRecord.id.in_(first_record_ids)).all()
+                mat_ids = {r.material_id for r in records if r.material_id}
+                mat_name_map = {}
+                if mat_ids:
+                    materials = db_session.query(Material).filter(Material.id.in_(mat_ids)).all()
+                    mat_name_map = {m.id: (m.name_en or m.name_th or f'Material {m.id}') for m in materials}
+                for r in records:
+                    material_map_by_tx[r.created_transaction_id] = mat_name_map.get(r.material_id, '-')
+
+            for t in txns:
+                tx_map[t.id] = {
+                    'id': t.id,
+                    'transaction_date': t.transaction_date.isoformat() if t.transaction_date else None,
+                    'status': t.status.value if hasattr(t.status, 'value') else str(t.status),
+                    'ai_audit_status': t.ai_audit_status.value if hasattr(t.ai_audit_status, 'value') else None,
+                    'weight_kg': float(t.weight_kg) if t.weight_kg else 0,
+                    'total_amount': float(t.total_amount) if t.total_amount else 0,
+                    'origin_name': origin_name_map.get(t.origin_id, '-'),
+                    'material_name': material_map_by_tx.get(t.id, '-'),
+                }
+
+        # Build response
+        batch_list = []
+        for batch in batches:
+            batch_tx_ids = batch.transactions or []
+            batch_transactions = sorted(
+                [tx_map[tid] for tid in batch_tx_ids if tid in tx_map],
+                key=lambda x: x['id']
+            )
+
+            batch_list.append({
+                'id': batch.id,
+                'status': batch.status,
+                'total_transactions': batch.total_transactions or len(batch_tx_ids),
+                'processed_transactions': batch.processed_transactions or 0,
+                'approved_count': batch.approved_count or 0,
+                'rejected_count': batch.rejected_count or 0,
+                'triggered_by_user_id': batch.triggered_by_user_id,
+                'started_at': batch.started_at.isoformat() if batch.started_at else None,
+                'created_date': batch.created_date.isoformat() if batch.created_date else None,
+                'transactions': batch_transactions,
+            })
+
+        return {
+            'success': True,
+            'data': {
+                'batches': batch_list,
+                'pagination': {
+                    'page': page,
+                    'page_size': page_size,
+                    'total_count': total_count,
+                    'total_pages': total_pages,
+                    'has_next': page < total_pages,
+                    'has_prev': page > 1
+                }
+            }
+        }
+
+    except Exception as e:
+        logger.error(f"Error fetching audit queue batches: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise APIException(f'Failed to fetch audit queue batches: {str(e)}')
+
+
+def handle_cancel_audit_batch(
+    db_session: Any,
+    data: Dict[str, Any],
+    organization_id: int
+) -> Dict[str, Any]:
+    """
+    Handle POST /api/transaction_audit/cancel_audit_batch
+    Cancel an audit batch: set status to 'cancelled' and revert transactions' ai_audit_status to null.
+    """
+    try:
+        batch_id = data.get('batch_id')
+        if not batch_id:
+            raise ValidationException('batch_id is required')
+
+        batch = db_session.query(TransactionAuditHistory).filter(
+            and_(
+                TransactionAuditHistory.id == batch_id,
+                TransactionAuditHistory.organization_id == organization_id,
+                TransactionAuditHistory.deleted_date.is_(None)
+            )
+        ).first()
+
+        if not batch:
+            raise NotFoundException(f'Audit batch #{batch_id} not found')
+
+        if batch.status not in ('pending', 'in_progress'):
+            raise ValidationException(f'Cannot cancel batch with status: {batch.status}')
+
+        # Revert transactions' ai_audit_status to null
+        tx_ids = batch.transactions or []
+        if tx_ids:
+            db_session.query(Transaction).filter(
+                Transaction.id.in_(tx_ids)
+            ).update(
+                {Transaction.ai_audit_status: AIAuditStatus.null},
+                synchronize_session='fetch'
+            )
+
+        # Set batch status to cancelled
+        batch.status = 'cancelled'
+        batch.deleted_date = func.now()
+
+        db_session.commit()
+
+        logger.info(f"Cancelled audit batch #{batch_id}, reverted {len(tx_ids)} transactions")
+
+        return {
+            'success': True,
+            'message': f'Cancelled audit batch #{batch_id}',
+            'data': {
+                'batch_id': batch_id,
+                'reverted_count': len(tx_ids)
+            }
+        }
+
+    except (APIException, ValidationException, NotFoundException):
+        raise
+    except Exception as e:
+        db_session.rollback()
+        logger.error(f"Error cancelling audit batch: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise APIException(f'Failed to cancel audit batch: {str(e)}')
 
 
 def handle_process_audit_queue(db_session: Any) -> Dict[str, Any]:
