@@ -101,6 +101,22 @@ def handle_transaction_audit_routes(event: Dict[str, Any], data: Dict[str, Any],
                 current_user_id
             )
 
+        elif path == '/api/transaction_audit/unaudited_transactions' and method == 'GET':
+            return handle_get_unaudited_transactions(
+                db_session,
+                query_params,
+                current_user_organization_id,
+                current_user_id
+            )
+
+        elif path == '/api/transaction_audit/queued_transactions' and method == 'GET':
+            return handle_get_queued_transactions(
+                db_session,
+                query_params,
+                current_user_organization_id,
+                current_user_id
+            )
+
         else:
             # Route not found
             raise NotFoundException(f'Transaction audit route not found: {method} {path}')
@@ -384,6 +400,292 @@ def handle_add_ai_audit_queue(
         logger.error(f"Error queueing transactions for AI audit: {str(e)}")
         logger.error(f"Traceback: {traceback.format_exc()}")
         raise APIException(f'Failed to queue transactions for AI audit: {str(e)}')
+
+
+def handle_get_unaudited_transactions(
+    db_session: Any,
+    query_params: Dict[str, Any],
+    organization_id: int,
+    current_user_id: Any = None
+) -> Dict[str, Any]:
+    """
+    Handle GET /api/transaction_audit/unaudited_transactions - Get transactions with ai_audit_status = null
+
+    Query parameters:
+    - date_from: str (ISO date) - Filter transactions from this date
+    - date_to: str (ISO date) - Filter transactions to this date
+    - location_ids: str - Comma-separated list of origin location IDs (multi-select)
+    - page: int - Page number for pagination (default: 1)
+    - page_size: int - Items per page (default: 50, max: 100)
+
+    Returns paginated list of unaudited transactions for the queue modal.
+    """
+    try:
+        from sqlalchemy import String, exists
+        from ....models.subscriptions.organizations import OrganizationSetup
+        from ....models.users.user_location import UserLocation
+
+        page = max(int(query_params.get('page', 1)), 1)
+        page_size = min(int(query_params.get('page_size', 50)), 100)
+
+        # Base query: only transactions with ai_audit_status = null (not yet audited)
+        query = db_session.query(Transaction).filter(
+            and_(
+                Transaction.organization_id == organization_id,
+                Transaction.ai_audit_status == AIAuditStatus.null,
+                Transaction.deleted_date.is_(None)
+            )
+        )
+
+        query = _apply_member_filter_to_transaction_query(query, db_session, current_user_id)
+
+        # Date filters
+        date_from_dt, date_to_dt = _parse_audit_report_date_range(query_params)
+        if date_from_dt is not None or date_to_dt is not None:
+            record_date_filter = and_(
+                TransactionRecord.created_transaction_id == Transaction.id,
+                TransactionRecord.is_active == True
+            )
+            if date_from_dt is not None:
+                record_date_filter = and_(record_date_filter, TransactionRecord.transaction_date >= date_from_dt)
+            if date_to_dt is not None:
+                record_date_filter = and_(record_date_filter, TransactionRecord.transaction_date <= date_to_dt)
+            query = query.filter(exists().where(record_date_filter))
+
+        # Status filter (comma-separated, e.g. "pending,rejected,approved")
+        statuses_str = query_params.get('statuses', '')
+        if statuses_str:
+            try:
+                status_values = [s.strip() for s in statuses_str.split(',') if s.strip()]
+                if status_values:
+                    status_enums = [TransactionStatus(s) for s in status_values if s in TransactionStatus.__members__]
+                    if status_enums:
+                        query = query.filter(Transaction.status.in_(status_enums))
+            except (ValueError, TypeError):
+                pass
+
+        # Location IDs filter (multi-select, comma-separated)
+        location_ids_str = query_params.get('location_ids', '')
+        if location_ids_str:
+            try:
+                location_ids = [int(lid.strip()) for lid in location_ids_str.split(',') if lid.strip()]
+                if location_ids:
+                    query = query.filter(Transaction.origin_id.in_(location_ids))
+            except (ValueError, TypeError):
+                pass
+
+        # Get total count
+        total_count = query.count()
+        total_pages = (total_count + page_size - 1) // page_size if page_size > 0 else 0
+
+        # Get paginated results
+        offset = (page - 1) * page_size
+        transactions = query.order_by(desc(Transaction.id)).offset(offset).limit(page_size).all()
+
+        # Build transaction list items with origin_name and material_name
+        transaction_list = _build_audit_transaction_list_items(transactions)
+
+        # Enrich with origin_name and material_name
+        if transactions:
+            # Batch fetch origin names
+            origin_ids_set = {t.origin_id for t in transactions if t.origin_id}
+            origin_name_map = {}
+            if origin_ids_set:
+                origins = db_session.query(UserLocation).filter(UserLocation.id.in_(origin_ids_set)).all()
+                origin_name_map = {o.id: (o.name_en or o.name_th or f'ID:{o.id}') for o in origins}
+
+            # Batch fetch material names from first record of each transaction
+            from ....models.cores.references import Material
+            all_record_ids = []
+            for t in transactions:
+                if t.transaction_records:
+                    all_record_ids.append(t.transaction_records[0])  # first record
+            material_map_by_tx = {}
+            if all_record_ids:
+                records = db_session.query(TransactionRecord).filter(TransactionRecord.id.in_(all_record_ids)).all()
+                mat_ids = {r.material_id for r in records if r.material_id}
+                mat_name_map = {}
+                if mat_ids:
+                    materials = db_session.query(Material).filter(Material.id.in_(mat_ids)).all()
+                    mat_name_map = {m.id: (m.name_en or m.name_th or f'Material {m.id}') for m in materials}
+                for r in records:
+                    material_map_by_tx[r.created_transaction_id] = mat_name_map.get(r.material_id, '-')
+
+            # Attach to transaction_list
+            for i, t in enumerate(transactions):
+                transaction_list[i]['origin_name'] = origin_name_map.get(t.origin_id, '-')
+                transaction_list[i]['material_name'] = material_map_by_tx.get(t.id, '-')
+
+        # Build location options for filter dropdown
+        location_combos = db_session.query(
+            Transaction.origin_id
+        ).filter(
+            and_(
+                Transaction.organization_id == organization_id,
+                Transaction.ai_audit_status == AIAuditStatus.null,
+                Transaction.deleted_date.is_(None),
+                Transaction.origin_id.isnot(None)
+            )
+        ).distinct().all()
+
+        origin_ids = list({row[0] for row in location_combos if row[0] is not None})
+        location_options = []
+
+        if origin_ids:
+            origin_locations = db_session.query(UserLocation).filter(
+                UserLocation.id.in_(origin_ids)
+            ).all()
+
+            # Build location paths
+            org_setup = db_session.query(OrganizationSetup).filter(
+                and_(
+                    OrganizationSetup.organization_id == organization_id,
+                    OrganizationSetup.is_active == True
+                )
+            ).first()
+            if not org_setup:
+                org_setup = db_session.query(OrganizationSetup).filter(
+                    OrganizationSetup.organization_id == organization_id
+                ).order_by(OrganizationSetup.created_date.desc()).first()
+
+            location_paths = {}
+            if org_setup and org_setup.root_nodes:
+                all_locations = db_session.query(UserLocation).filter(
+                    and_(
+                        UserLocation.organization_id == organization_id,
+                        UserLocation.deleted_date.is_(None)
+                    )
+                ).all()
+                loc_names = {loc.id: (loc.name_en or loc.name_th or f'ID:{loc.id}') for loc in all_locations}
+
+                def build_paths(nodes, parent_path=""):
+                    for node in (nodes or []):
+                        node_id = node.get('id')
+                        if node_id is not None:
+                            name = loc_names.get(node_id, f'ID:{node_id}')
+                            path = f"{parent_path} > {name}" if parent_path else name
+                            location_paths[node_id] = path
+                            build_paths(node.get('children', []), path)
+
+                build_paths(org_setup.root_nodes)
+
+            for loc in origin_locations:
+                loc_name = location_paths.get(loc.id) or loc.name_en or loc.name_th or f'ID:{loc.id}'
+                location_options.append({
+                    'id': loc.id,
+                    'name': loc_name
+                })
+
+            location_options.sort(key=lambda x: x['name'])
+
+        return {
+            'success': True,
+            'data': {
+                'transactions': transaction_list,
+                'pagination': {
+                    'page': page,
+                    'page_size': page_size,
+                    'total_count': total_count,
+                    'total_pages': total_pages,
+                    'has_next': page < total_pages,
+                    'has_prev': page > 1
+                },
+                'location_options': location_options
+            }
+        }
+
+    except Exception as e:
+        logger.error(f"Error fetching unaudited transactions: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise APIException(f'Failed to fetch unaudited transactions: {str(e)}')
+
+
+def handle_get_queued_transactions(
+    db_session: Any,
+    query_params: Dict[str, Any],
+    organization_id: int,
+    current_user_id: Any = None
+) -> Dict[str, Any]:
+    """
+    Handle GET /api/transaction_audit/queued_transactions - Get transactions with ai_audit_status = 'queued'
+
+    Returns paginated list of queued transactions with material and origin info.
+    """
+    try:
+        from ....models.users.user_location import UserLocation
+        from ....models.cores.references import Material
+
+        page = max(int(query_params.get('page', 1)), 1)
+        page_size = min(int(query_params.get('page_size', 50)), 100)
+
+        # Base query: only queued transactions
+        query = db_session.query(Transaction).filter(
+            and_(
+                Transaction.organization_id == organization_id,
+                Transaction.ai_audit_status == AIAuditStatus.queued,
+                Transaction.deleted_date.is_(None)
+            )
+        )
+
+        query = _apply_member_filter_to_transaction_query(query, db_session, current_user_id)
+
+        # Get total count
+        total_count = query.count()
+        total_pages = (total_count + page_size - 1) // page_size if page_size > 0 else 0
+
+        # Get paginated results
+        offset = (page - 1) * page_size
+        transactions = query.order_by(desc(Transaction.id)).offset(offset).limit(page_size).all()
+
+        # Build transaction list
+        transaction_list = _build_audit_transaction_list_items(transactions)
+
+        # Enrich with origin_name and material_name
+        if transactions:
+            origin_ids_set = {t.origin_id for t in transactions if t.origin_id}
+            origin_name_map = {}
+            if origin_ids_set:
+                origins = db_session.query(UserLocation).filter(UserLocation.id.in_(origin_ids_set)).all()
+                origin_name_map = {o.id: (o.name_en or o.name_th or f'ID:{o.id}') for o in origins}
+
+            all_record_ids = []
+            for t in transactions:
+                if t.transaction_records:
+                    all_record_ids.append(t.transaction_records[0])
+            material_map_by_tx = {}
+            if all_record_ids:
+                records = db_session.query(TransactionRecord).filter(TransactionRecord.id.in_(all_record_ids)).all()
+                mat_ids = {r.material_id for r in records if r.material_id}
+                mat_name_map = {}
+                if mat_ids:
+                    materials = db_session.query(Material).filter(Material.id.in_(mat_ids)).all()
+                    mat_name_map = {m.id: (m.name_en or m.name_th or f'Material {m.id}') for m in materials}
+                for r in records:
+                    material_map_by_tx[r.created_transaction_id] = mat_name_map.get(r.material_id, '-')
+
+            for i, t in enumerate(transactions):
+                transaction_list[i]['origin_name'] = origin_name_map.get(t.origin_id, '-')
+                transaction_list[i]['material_name'] = material_map_by_tx.get(t.id, '-')
+
+        return {
+            'success': True,
+            'data': {
+                'transactions': transaction_list,
+                'pagination': {
+                    'page': page,
+                    'page_size': page_size,
+                    'total_count': total_count,
+                    'total_pages': total_pages,
+                    'has_next': page < total_pages,
+                    'has_prev': page > 1
+                }
+            }
+        }
+
+    except Exception as e:
+        logger.error(f"Error fetching queued transactions: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise APIException(f'Failed to fetch queued transactions: {str(e)}')
 
 
 def handle_process_audit_queue(db_session: Any) -> Dict[str, Any]:
