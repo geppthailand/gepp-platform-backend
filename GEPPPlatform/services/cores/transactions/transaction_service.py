@@ -148,10 +148,6 @@ class TransactionService:
             transaction.destination_ids = destination_ids
             self._calculate_transaction_totals(transaction)
 
-            # Upsert traceability_transaction_group(s) for this origin/material/tag/tenant and month/year
-            if transaction_record_ids:
-                self._upsert_traceability_groups_for_transaction(transaction, transaction_record_ids)
-
             # Handle file uploads if provided
             if transaction_data.get('file_uploads') and transaction.id:
                 try:
