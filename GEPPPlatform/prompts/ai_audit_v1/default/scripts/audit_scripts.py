@@ -386,6 +386,10 @@ def _process_single_transaction(
             image_data, config['doc_type_specs'], llm, db, total_token_usage
         )
 
+        # Commit File.observation updates immediately so they persist
+        # even if later steps (matching/composing) fail
+        db.commit()
+
         # === Step 7: Check required docs ===
         doc_check = _step7_check_required_docs(
             classified_evidence, config['doc_requires'],
