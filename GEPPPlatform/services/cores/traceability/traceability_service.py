@@ -166,22 +166,62 @@ class TraceabilityService:
                 return None
             return txn_map.get(max(candidate_ids))
 
+        _DIVERTED = {
+            "Preparation for reuse", "Recycling (Own)",
+            "Other recover operation", "Recycle",
+        }
+        _DIRECTED = {
+            "Composted by municipality", "Municipality receive",
+            "Incineration without energy", "Incineration with energy",
+        }
+
+        hierarchy_result = self.get_traceability_hierarchy(organization_id, **kwargs)
+        hierarchy_data = hierarchy_result.get("data") or []
+
         total_waste_weight = sum(float(getattr(r, "origin_weight_kg", None) or 0) for r in records)
-        total_disposal = 0.0
-        total_treatment = 0.0
-        for r in records:
-            txn = get_display_transport_txn(r)
-            if txn:
-                if getattr(txn, "disposal_method", None):
-                    total_disposal += float(getattr(r, "origin_weight_kg", None) or 0)
-                if getattr(txn, "treatment_method", None):
-                    total_treatment += float(getattr(r, "origin_weight_kg", None) or 0)
-        total_managed_waste = total_disposal + total_treatment
+        treatment_w = 0.0
+        disposal_w = 0.0
+        total_group_weight = 0.0
+
+        def _sum_leaves(nodes, group_weight):
+            nonlocal treatment_w, disposal_w
+            for t in nodes:
+                if not isinstance(t, dict):
+                    continue
+                children = t.get("children") or []
+                if children:
+                    _sum_leaves(children, group_weight)
+                else:
+                    method = t.get("disposal_method") or ""
+                    pct = float(t.get("percentage_of_group") or 0)
+                    w = pct / 100 * group_weight
+                    if method in _DIVERTED:
+                        treatment_w += w
+                    elif method in _DIRECTED:
+                        disposal_w += w
+
+        for origin_node in hierarchy_data:
+            if not isinstance(origin_node, dict):
+                continue
+            for group_node in origin_node.get("children") or []:
+                if not isinstance(group_node, dict):
+                    continue
+                gw = float(group_node.get("weight") or group_node.get("total_weight_kg") or 0)
+                total_group_weight += gw
+                _sum_leaves(group_node.get("children") or [], gw)
+
+        scale = total_waste_weight / total_group_weight if total_group_weight > 0 else 0
+        total_treatment = round(treatment_w * scale, 2)
+        total_disposal = round(disposal_w * scale, 2)
+
+        total_treatment = round(total_treatment, 2)
+        total_disposal = round(total_disposal, 2)
+        total_managed_waste = round(total_treatment + total_disposal, 2)
 
         return {
             "data": [arr0, arr1, arr2],
             "summary": {
-                "total_waste_weight": total_waste_weight,
+                "total_waste_weight": round(total_waste_weight, 2),
                 "total_disposal": total_disposal,
                 "total_treatment": total_treatment,
                 "total_managed_waste": total_managed_waste,
@@ -396,6 +436,186 @@ class TraceabilityService:
                 "children": group_children,
             })
         return {"data": out}
+
+    def get_traceability_hierarchy_per_row(
+        self,
+        organization_id: Optional[int] = None,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """
+        Build a hierarchy for *each* transport transaction row in the database.
+
+        The result is a list where each element corresponds to a single
+        TransportTransaction from the organization and date filters.  Every
+        returned transaction is treated as a root node and its descendants
+        (children, grandchildren, etc.) are nested recursively under it.  This
+        is useful when the caller wants a row‑centric view of the traceability
+        tree instead of the group/origin grouping provided by
+        :meth:`get_traceability_hierarchy`.
+
+        Query parameters accepted through ``kwargs`` are the same as for
+        :meth:`get_traceability_hierarchy` with the exception that ``date_from``
+        and ``date_to`` filter the *updated_date* of the root transactions
+        rather than constraining by calendar month.  The returned list is
+        ordered by ``updated_date`` descending.
+        """
+        if organization_id is None:
+            return {"data": []}
+
+        # date filters operate on updated_date
+        date_from = kwargs.get("date_from")
+        date_to = kwargs.get("date_to")
+        def _parse_dt(val: Any) -> Optional[datetime]:
+            if not val:
+                return None
+            try:
+                return datetime.fromisoformat(str(val).replace("Z", "+00:00"))
+            except (ValueError, TypeError):
+                return None
+
+        df = _parse_dt(date_from)
+        dt = _parse_dt(date_to)
+
+        # load all transports for org so we can build full child trees
+        transports = (
+            self.db.query(TransportTransaction)
+            .filter(
+                TransportTransaction.organization_id == organization_id,
+                TransportTransaction.is_active == True,
+                TransportTransaction.deleted_date.is_(None),
+            )
+            .all()
+        )
+        if not transports:
+            return {"data": []}
+
+        # build lookup maps for tree construction
+        by_parent: Dict[Optional[int], List[Any]] = {}
+        id_map: Dict[int, Any] = {}
+        location_ids = set()
+        material_ids = set()
+        for t in transports:
+            id_map[t.id] = t
+            pid = t.parent_id
+            by_parent.setdefault(pid, []).append(t)
+            if t.origin_id:
+                location_ids.add(t.origin_id)
+            dest = getattr(t, "destination_id", None)
+            if dest:
+                location_ids.add(dest)
+            if t.material_id:
+                material_ids.add(t.material_id)
+
+        # gather location/material metadata just as in get_traceability_hierarchy
+        path_map: Dict[int, str] = {}
+        location_map: Dict[int, Any] = {}
+        if location_ids:
+            from ..users.user_service import UserService
+
+            user_service = UserService(self.db)
+            path_map = user_service._build_location_paths(
+                organization_id, [{"id": lid} for lid in location_ids]
+            ) or {}
+            locs = (
+                self.db.query(UserLocation)
+                .filter(UserLocation.id.in_(location_ids))
+                .all()
+            )
+            location_map = {loc.id: loc for loc in locs}
+
+        from ....models.cores.references import Material
+
+        material_map: Dict[int, Any] = {}
+        if material_ids:
+            mats = (
+                self.db.query(Material).filter(Material.id.in_(material_ids)).all()
+            )
+            material_map = {m.id: m for m in mats}
+
+        def transport_to_node(r: Any) -> Dict[str, Any]:
+            origin = None
+            if r.origin_id and r.origin_id in location_map:
+                origin = self._location_to_dict(
+                    location_map[r.origin_id], path=path_map.get(r.origin_id, "")
+                )
+            destination = None
+            dest_id = getattr(r, "destination_id", None)
+            if dest_id and dest_id in location_map:
+                destination = self._location_to_dict(
+                    location_map[dest_id], path=path_map.get(dest_id, "")
+                )
+            material = None
+            if r.material_id and r.material_id in material_map:
+                material = self._material_to_dict(material_map[r.material_id])
+            return {
+                "id": r.id,
+                "transport_transaction_id": r.id,
+                "parent_id": r.parent_id,
+                "origin_id": r.origin_id,
+                "destination_id": dest_id,
+                "weight": float(r.weight) if r.weight is not None else None,
+                "status": r.status,
+                "arrival_date": r.arrival_date.isoformat() if r.arrival_date else None,
+                "disposal_method": r.disposal_method,
+                "meta_data": r.meta_data or {},
+                "is_root": r.is_root,
+                "origin": origin,
+                "destination": destination,
+                "material": material,
+                "children": [],
+            }
+
+        def _build_shallow(root: Any) -> Dict[str, Any]:
+            node = transport_to_node(root)
+            children = by_parent.get(root.id, [])
+            children = sorted(
+                children,
+                key=lambda x: x.updated_date or datetime.min,
+                reverse=True,
+            )
+            child_nodes = []
+            for child in children:
+                child_node = transport_to_node(child)
+                del child_node["children"]
+                child_nodes.append(child_node)
+            node["children"] = child_nodes
+            return node
+
+        # pick roots using the date filters
+        roots = transports
+        if df is not None:
+            roots = [t for t in roots if t.updated_date and t.updated_date >= df]
+        if dt is not None:
+            roots = [t for t in roots if t.updated_date and t.updated_date <= dt]
+        # order the root list by updated_date descending
+        roots = sorted(
+            roots, key=lambda x: x.updated_date or datetime.min, reverse=True
+        )
+
+        # pagination
+        try:
+            page = max(1, int(kwargs.get("page", 1)))
+        except (ValueError, TypeError):
+            page = 1
+        try:
+            page_size = max(1, min(100, int(kwargs.get("page_size", 10))))
+        except (ValueError, TypeError):
+            page_size = 20
+
+        total_items = len(roots)
+        total_pages = (total_items + page_size - 1) // page_size if total_items > 0 else 0
+        start = (page - 1) * page_size
+        end = start + page_size
+        paginated_roots = roots[start:end]
+
+        data = [_build_shallow(r) for r in paginated_roots]
+        return {
+            "data": data,
+            "page": page,
+            "page_size": page_size,
+            "total_items": total_items,
+            "total_pages": total_pages,
+        }
 
     def _parse_month_range(self, date_from: Any, date_to: Any) -> Tuple[Optional[int], Optional[int]]:
         """Parse date_from as start of month; return (year, month) in TRACEABILITY_DATE_TZ so 2026-03-01T00:00:00+07:00 -> (2026, 3)."""
@@ -815,6 +1035,10 @@ class TraceabilityService:
         if not rows:
             return []
         location_ids = {r.origin_id for r in rows if r.origin_id is not None}
+        for r in rows:
+            dest_id = getattr(r, "destination_id", None)
+            if dest_id is not None:
+                location_ids.add(dest_id)
         material_ids = {r.material_id for r in rows if r.material_id is not None}
         path_map: Dict[int, str] = {}
         if location_ids:
@@ -835,6 +1059,10 @@ class TraceabilityService:
             origin = None
             if r.origin_id and r.origin_id in location_map:
                 origin = self._location_to_dict(location_map[r.origin_id], path=path_map.get(r.origin_id, ""))
+            dest_id = getattr(r, "destination_id", None)
+            destination = None
+            if dest_id and dest_id in location_map:
+                destination = self._location_to_dict(location_map[dest_id], path=path_map.get(dest_id, ""))
             material = None
             if r.material_id and r.material_id in material_map:
                 material = self._material_to_dict(material_map[r.material_id])
@@ -842,7 +1070,7 @@ class TraceabilityService:
                 "id": r.id,
                 "transaction_group_id": r.transaction_group_id,
                 "origin_id": r.origin_id,
-                "destination_id": getattr(r, "destination_id", None),
+                "destination_id": dest_id,
                 "material_id": r.material_id,
                 "weight": float(r.weight) if r.weight is not None else None,
                 "meta_data": r.meta_data or {},
@@ -855,6 +1083,7 @@ class TraceabilityService:
                 "created_date": r.created_date.isoformat() if r.created_date else None,
                 "updated_date": r.updated_date.isoformat() if r.updated_date else None,
                 "origin": origin,
+                "destination": destination,
                 "material": material,
             })
         return out
@@ -879,6 +1108,10 @@ class TraceabilityService:
         if not rows:
             return []
         location_ids = {r.origin_id for r in rows if r.origin_id is not None}
+        for r in rows:
+            dest_id = getattr(r, "destination_id", None)
+            if dest_id is not None:
+                location_ids.add(dest_id)
         material_ids = {r.material_id for r in rows if r.material_id is not None}
         path_map: Dict[int, str] = {}
         if location_ids:
@@ -899,6 +1132,10 @@ class TraceabilityService:
             origin = None
             if r.origin_id and r.origin_id in location_map:
                 origin = self._location_to_dict(location_map[r.origin_id], path=path_map.get(r.origin_id, ""))
+            dest_id = getattr(r, "destination_id", None)
+            destination = None
+            if dest_id and dest_id in location_map:
+                destination = self._location_to_dict(location_map[dest_id], path=path_map.get(dest_id, ""))
             material = None
             if r.material_id and r.material_id in material_map:
                 material = self._material_to_dict(material_map[r.material_id])
@@ -906,7 +1143,7 @@ class TraceabilityService:
                 "id": r.id,
                 "transaction_group_id": r.transaction_group_id,
                 "origin_id": r.origin_id,
-                "destination_id": getattr(r, "destination_id", None),
+                "destination_id": dest_id,
                 "material_id": r.material_id,
                 "weight": float(r.weight) if r.weight is not None else None,
                 "meta_data": r.meta_data or {},
@@ -919,6 +1156,7 @@ class TraceabilityService:
                 "created_date": r.created_date.isoformat() if r.created_date else None,
                 "updated_date": r.updated_date.isoformat() if r.updated_date else None,
                 "origin": origin,
+                "destination": destination,
                 "material": material,
             })
         return out
@@ -1234,6 +1472,125 @@ class TraceabilityService:
             "ids": created_ids,
         }
 
+    def update_transport_transactions(
+        self,
+        data: List[Dict[str, Any]],
+        organization_id: int,
+    ) -> Dict[str, Any]:
+        """
+        Update transport transaction rows.
+        Each item must have transport_transaction_id plus optional fields to update.
+        If the transaction has descendants (children, grandchildren, etc.), all are soft-deleted first.
+        """
+        if not data:
+            return {"success": False, "message": "data array is required and must not be empty"}
+
+        now = datetime.now(timezone.utc)
+        updated_ids: List[int] = []
+
+        for item in data:
+            tt_id = item.get("transport_transaction_id")
+            if tt_id is None:
+                return {"success": False, "message": "Each item must have transport_transaction_id", "ids": updated_ids}
+            try:
+                tt_id = int(tt_id)
+            except (TypeError, ValueError):
+                return {"success": False, "message": "transport_transaction_id must be an integer", "ids": updated_ids}
+
+            row = (
+                self.db.query(TransportTransaction)
+                .filter(
+                    TransportTransaction.id == tt_id,
+                    TransportTransaction.organization_id == organization_id,
+                    TransportTransaction.is_active == True,
+                    TransportTransaction.deleted_date.is_(None),
+                )
+                .first()
+            )
+            if not row:
+                return {"success": False, "message": f"Transport transaction {tt_id} not found or access denied", "ids": updated_ids}
+
+            # Recursively soft-delete all descendants
+            self._soft_delete_descendants(tt_id, now)
+
+            # Update fields
+            if "weight" in item and item["weight"] is not None:
+                try:
+                    row.weight = Decimal(str(item["weight"]))
+                except (TypeError, ValueError):
+                    return {"success": False, "message": "weight must be a number", "ids": updated_ids}
+
+            if "origin_id" in item and item["origin_id"] is not None:
+                try:
+                    row.origin_id = int(item["origin_id"])
+                except (TypeError, ValueError):
+                    return {"success": False, "message": "origin_id must be an integer", "ids": updated_ids}
+
+            if "destination_id" in item:
+                if item["destination_id"] is not None:
+                    try:
+                        row.destination_id = int(item["destination_id"])
+                    except (TypeError, ValueError):
+                        return {"success": False, "message": "destination_id must be an integer", "ids": updated_ids}
+                else:
+                    row.destination_id = None
+
+            if "material_id" in item:
+                row.material_id = int(item["material_id"]) if item["material_id"] is not None else None
+
+            if "disposal_method" in item:
+                row.disposal_method = (item["disposal_method"] or "").strip() or None
+
+            # Update meta_data for vehicle_info / messenger_info
+            meta_data = dict(row.meta_data) if row.meta_data else {}
+            if "vehicle_info" in item:
+                if item["vehicle_info"] is not None:
+                    meta_data["vehicle_info"] = item["vehicle_info"]
+                else:
+                    meta_data.pop("vehicle_info", None)
+            if "messenger_info" in item:
+                if item["messenger_info"] is not None:
+                    meta_data["messenger_info"] = item["messenger_info"]
+                else:
+                    meta_data.pop("messenger_info", None)
+            if "destination_id" in item:
+                if item["destination_id"] is not None:
+                    meta_data["destination_id"] = int(item["destination_id"])
+                else:
+                    meta_data.pop("destination_id", None)
+            row.meta_data = meta_data if meta_data else None
+
+            # Update status based on destination
+            has_destination = row.destination_id is not None
+            row.status = "in_transit" if has_destination else "idle"
+            row.arrival_date = None
+
+            self.db.flush()
+            updated_ids.append(tt_id)
+
+        return {
+            "success": True,
+            "message": "Transport transactions updated",
+            "ids": updated_ids,
+        }
+
+    def _soft_delete_descendants(self, parent_id: int, now: datetime) -> None:
+        """Recursively soft-delete all descendants of a transport transaction."""
+        children = (
+            self.db.query(TransportTransaction)
+            .filter(
+                TransportTransaction.parent_id == parent_id,
+                TransportTransaction.is_active == True,
+                TransportTransaction.deleted_date.is_(None),
+            )
+            .all()
+        )
+        for child in children:
+            self._soft_delete_descendants(child.id, now)
+            child.is_active = False
+            child.deleted_date = now
+        self.db.flush()
+
     def confirm_arrival(
         self,
         transaction_id: int,
@@ -1258,6 +1615,7 @@ class TraceabilityService:
         now = datetime.now(timezone.utc)
         row.arrival_date = now
         row.status = "arrived"
+        row.updated_date = now
         self.db.flush()
         return {
             "success": True,
@@ -1267,66 +1625,83 @@ class TraceabilityService:
             "status": row.status,
         }
 
-    def go_back_one_step(
+    def revert_transaction(
         self,
         transaction_id: int,
         organization_id: int,
     ) -> Dict[str, Any]:
         """
-        Go back one step for a transport transaction. Same path, two cases:
-        - If transaction has arrival_date: remove it (set to None).
-        - If transaction does not have arrival_date: soft delete the transaction, and for each
-          record in transaction_records remove this txn from traceability and set destination_id to None.
+        Revert a transport transaction and its related tree.
+
+        1. Soft-delete the selected TransportTransaction.
+        2. Soft-delete all its children/descendants.
+        3. Soft-delete all its siblings (same parent_id) and their descendants.
+        4. If the selected transaction has a parent, set the parent status to 'idle'
+           and clear its arrival evidence (arrival_date).
         """
-        transaction = (
-            self.db.query(Transaction)
+        row = (
+            self.db.query(TransportTransaction)
             .filter(
-                Transaction.id == transaction_id,
-                Transaction.organization_id == organization_id,
-                Transaction.deleted_date.is_(None),
+                TransportTransaction.id == transaction_id,
+                TransportTransaction.organization_id == organization_id,
+                TransportTransaction.is_active == True,
+                TransportTransaction.deleted_date.is_(None),
             )
             .first()
         )
-        if not transaction:
-            return {"success": False, "message": "Transaction not found or access denied", "transaction_id": transaction_id}
-        if getattr(transaction, "transaction_method", None) != "transport":
-            return {"success": False, "message": "Transaction is not a transport transaction", "transaction_id": transaction_id}
+        if not row:
+            return {"success": False, "message": "Transport transaction not found or access denied", "transaction_id": transaction_id}
 
-        has_arrival = getattr(transaction, "arrival_date", None) is not None
-        if has_arrival:
-            transaction.arrival_date = None
-            self.db.flush()
-            return {
-                "success": True,
-                "message": "Arrival date removed",
-                "transaction_id": transaction_id,
-                "action": "removed_arrival_date",
-            }
-        # No arrival_date: soft delete transaction and revert records
-        transaction.deleted_date = datetime.now(timezone.utc)
-        record_ids = list(transaction.transaction_records or [])
-        for record_id in record_ids:
-            record = (
-                self.db.query(TransactionRecord)
+        now = datetime.now(timezone.utc)
+        parent_id = row.parent_id
+        deleted_ids = []
+
+        # 1. Soft-delete descendants of the selected transaction
+        self._soft_delete_descendants(row.id, now)
+
+        # 2. Soft-delete siblings and their descendants
+        if parent_id is not None:
+            # Siblings share the same parent
+            siblings = (
+                self.db.query(TransportTransaction)
                 .filter(
-                    TransactionRecord.id == record_id,
-                    TransactionRecord.is_active == True,
-                    TransactionRecord.deleted_date.is_(None),
+                    TransportTransaction.parent_id == parent_id,
+                    TransportTransaction.id != transaction_id,
+                    TransportTransaction.is_active == True,
+                    TransportTransaction.deleted_date.is_(None),
                 )
-                .first()
+                .all()
             )
-            if record:
-                traceability = list(record.traceability or [])
-                if transaction_id in traceability:
-                    traceability.remove(transaction_id)
-                    record.traceability = sorted(traceability) if traceability else []
-                record.destination_id = None
+        else:
+            # No parent: siblings are other root transactions in the same group
+            siblings = (
+                self.db.query(TransportTransaction)
+                .filter(
+                    TransportTransaction.transaction_group_id == row.transaction_group_id,
+                    TransportTransaction.parent_id.is_(None),
+                    TransportTransaction.id != transaction_id,
+                    TransportTransaction.is_active == True,
+                    TransportTransaction.deleted_date.is_(None),
+                )
+                .all()
+            )
+        for sibling in siblings:
+            self._soft_delete_descendants(sibling.id, now)
+            sibling.is_active = False
+            sibling.deleted_date = now
+            deleted_ids.append(sibling.id)
+
+        # 3. Soft-delete the selected transaction itself
+        row.is_active = False
+        row.deleted_date = now
+        deleted_ids.append(row.id)
+
         self.db.flush()
         return {
             "success": True,
-            "message": "Transport transaction removed and record(s) reverted",
+            "message": "Transaction reverted successfully",
             "transaction_id": transaction_id,
-            "action": "soft_deleted_transaction",
+            "deleted_ids": deleted_ids,
         }
 
     def _record_to_dict(
