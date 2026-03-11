@@ -307,3 +307,24 @@ def cron_process_audits(event, context):
             'success': False,
             'error': str(e)
         }
+
+    # --- Default AI Audit (OpenRouter / Grok) ---
+    # Processes from transaction_audit_history queue, separate from BMA audit above
+    try:
+        openrouter_key = os.getenv('OPENROUTER_API_KEY')
+        if openrouter_key:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info("Starting default AI audit processing from transaction_audit_history queue")
+
+            from GEPPPlatform.prompts.ai_audit_v1.default.scripts.audit_scripts import run_default_audit
+            from GEPPPlatform.database import db_manager
+
+            default_result = run_default_audit(db_manager.get_session_factory)
+            logger.info(f"Default AI audit completed: {json.dumps(default_result, default=str)}")
+    except Exception as e:
+        import logging
+        import traceback
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error in default AI audit: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")

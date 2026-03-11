@@ -1,0 +1,42 @@
+_type: prompt
+input_variables:
+  - transaction_data
+  - extracted_evidence
+  - columns_to_check
+template: |
+  Role: Transaction Data Auditor
+  Task: Compare extracted evidence data against the transaction record and determine if each field is satisfied by the evidence.
+
+  **Transaction Data:**
+  {transaction_data}
+
+  **Extracted Evidence (from all documents attached to this transaction):**
+  {extracted_evidence}
+
+  **Columns to Verify:** {columns_to_check}
+
+  **Matching Rules:**
+  1. **origin_id**: Match the origin_name against any seller/origin name found in evidence. Names may differ slightly (e.g. "GEPP Recycling Co." vs "บริษัท GEPP รีไซเคิล"). Allow reasonable fuzzy matching for Thai/English name variations.
+  2. **destination_ids**: Match destination names against buyer/destination names in evidence (e.g. receipts, weight tickets). Note: origin and destination may appear swapped in some documents - allow this ambiguity if names match.
+  3. **weight_kg**: Sum of all material weights from evidence should approximately match (within 5% tolerance).
+  4. **total_amount**: Grand total from evidence should approximately match (within 5% tolerance).
+  5. **transaction_date**: Date from evidence should match or be within 3 days of the transaction date.
+
+  **For list-type evidence data (e.g. materials list from receipts):**
+  - Search through ALL items in the list to find relevant matches.
+  - Aggregate values where appropriate (e.g. sum weights across all materials).
+
+  **OUTPUT FORMAT (JSON ONLY - NO PREAMBLE):**
+  Return ONLY the raw JSON object:
+  {{
+    "<column_name>": {{
+      "satisfy": <bool - evidence contains relevant data for this field>,
+      "match": <bool - the evidence data matches the transaction data>,
+      "evidence_value": "<what was found in evidence>",
+      "transaction_value": "<what the transaction record says>",
+      "note": "<brief explanation of matching result>"
+    }},
+    ...
+  }}
+
+  Only include columns from the Columns to Verify list.

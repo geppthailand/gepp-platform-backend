@@ -1,0 +1,45 @@
+_type: prompt
+input_variables:
+  - record_data
+  - extracted_evidence
+  - columns_to_check
+template: |
+  Role: Transaction Record Data Auditor
+  Task: Compare extracted evidence data against a single transaction record (one material line) and determine if each field is satisfied by the evidence.
+
+  **Transaction Record Data (one material):**
+  {record_data}
+
+  **Extracted Evidence (from transaction-level AND record-level documents):**
+  {extracted_evidence}
+
+  **Columns to Verify:** {columns_to_check}
+
+  **Matching Rules:**
+  1. **material_id**: Match the material_name against material names found in evidence. Names may differ between Thai and English or use different terminology (e.g. "Plastic PET Bottles" ≈ "ขวด PET", "Cardboard" ≈ "กระดาษลัง"). Allow reasonable fuzzy matching.
+  2. **origin_weight_kg**: Find the weight for this specific material in the evidence. Evidence may contain a list of materials - find the one matching this material_name. Weight must be in kg (evidence should already be converted). Allow 5% tolerance.
+  3. **origin_quantity**: Match quantity/count for this material if present in evidence. Allow 5% tolerance.
+  4. **origin_price_per_unit**: Match the unit price (per kg or per piece) for this material. This is NOT the line total. Allow 5% tolerance.
+  5. **total_amount**: Match the line total for this specific material (not the grand total). Allow 5% tolerance.
+  6. **transaction_date**: Date from evidence should match or be within 3 days. Check both transaction-level and record-level evidence dates.
+  7. **destination_id**: Match destination_name against buyer/company names in evidence.
+
+  **For list-type evidence data (e.g. materials list from a receipt):**
+  - Search through ALL items in the materials list to find the one matching this record's material.
+  - Material name matching should be fuzzy - the same material may have different names in different languages or formats.
+  - If no matching material is found in the list, mark satisfy as false.
+
+  **OUTPUT FORMAT (JSON ONLY - NO PREAMBLE):**
+  Return ONLY the raw JSON object:
+  {{
+    "<column_name>": {{
+      "satisfy": <bool - evidence contains relevant data for this field>,
+      "match": <bool - the evidence data matches the record data>,
+      "evidence_value": "<what was found in evidence for this material>",
+      "record_value": "<what the transaction record says>",
+      "note": "<brief explanation of matching result>"
+    }},
+    ...
+  }}
+
+  Only include columns from the Columns to Verify list.

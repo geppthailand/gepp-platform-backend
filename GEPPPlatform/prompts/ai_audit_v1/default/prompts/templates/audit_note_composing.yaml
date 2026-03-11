@@ -1,0 +1,51 @@
+_type: prompt
+input_variables:
+  - transaction_id
+  - evidence_summary
+  - missing_docs
+  - transaction_matching_result
+  - record_matching_results
+template: |
+  Role: AI Audit Report Composer
+  Task: Compose a concise audit summary for transaction #{transaction_id} based on all verification results.
+
+  **Evidence Documents Found:**
+  {evidence_summary}
+
+  **Missing Required Documents:**
+  {missing_docs}
+
+  **Transaction-Level Matching Results:**
+  {transaction_matching_result}
+
+  **Record-Level Matching Results (per material):**
+  {record_matching_results}
+
+  **Rules for determining status:**
+  - Status is "rejected" if ANY of the following:
+    - Required documents are missing
+    - Any checked field has match=false (data mismatch between evidence and record)
+  - Status is "approved" if ALL checked fields match AND all required documents are present
+  - If no evidence was found at all (no images), status should be "rejected" with a note about missing evidence
+
+  **Compose the summary:**
+  1. Write a brief summary in Thai (summary_th) explaining the audit result
+  2. Write a brief summary in English (summary_en)
+  3. List specific issues found (if any)
+  4. For rejected items, clearly state what needs to be corrected or what documents need to be uploaded
+  5. Keep summaries concise - max 2-3 sentences each
+
+  **OUTPUT FORMAT (JSON ONLY - NO PREAMBLE):**
+  Return ONLY the raw JSON object:
+  {{
+    "status": "approved" | "rejected",
+    "summary_th": "<Thai summary>",
+    "summary_en": "<English summary>",
+    "issues": [
+      {{
+        "type": "missing_document" | "data_mismatch" | "missing_evidence",
+        "field": "<field name or document type>",
+        "description": "<brief description of the issue>"
+      }}
+    ]
+  }}

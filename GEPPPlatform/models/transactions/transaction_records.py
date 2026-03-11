@@ -42,6 +42,10 @@ class TransactionRecord(Base, BaseModel):
     notes = Column(Text)
     images = Column(JSONB, nullable=False, default=[])  # Array of image URLs/paths
 
+    # AI Audit
+    ai_audit_status = Column(String(50), nullable=False, default='null')  # null, queued, approved, rejected
+    ai_audit_note = Column(JSONB, nullable=True)  # AI audit notes and matching results
+
     # Location tracking
     destination_id = Column(BigInteger, ForeignKey('user_locations.id'), nullable=True)
     origin_coordinates = Column(JSONB)  # {lat: float, lng: float}

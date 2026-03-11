@@ -3,9 +3,10 @@ Transaction Audits Model
 Stores audit history for transactions (both AI and manual audits)
 """
 
-from sqlalchemy import Column, String, BigInteger, Boolean, ForeignKey, Integer, Index
+from sqlalchemy import Column, String, BigInteger, Boolean, ForeignKey, Integer, Index, DateTime, TIMESTAMP
 from sqlalchemy.orm import relationship
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.sql import func
 from ..base import Base, BaseModel
 
 
@@ -32,11 +33,10 @@ class TransactionAudit(Base, BaseModel):
     token_usage = Column(JSONB, nullable=True)
     model_version = Column(String(100), nullable=True)
 
-    # Override BaseModel's DateTime columns with BIGINT (milliseconds since epoch)
-    # This matches the database schema in migration 054
-    created_date = Column(BigInteger, nullable=True)
-    updated_date = Column(BigInteger, nullable=True)
-    deleted_date = Column(BigInteger, nullable=True)
+    # Date columns (TIMESTAMPTZ after migration 005)
+    created_date = Column(DateTime(timezone=True), nullable=True, server_default=func.now())
+    updated_date = Column(TIMESTAMP, nullable=True, server_default=func.now(), onupdate=func.now())
+    deleted_date = Column(DateTime(timezone=True), nullable=True)
 
     # Relationships
     transaction = relationship("Transaction", foreign_keys=[transaction_id], back_populates="audits")

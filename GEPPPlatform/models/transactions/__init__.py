@@ -7,6 +7,7 @@ from .transaction_records import TransactionRecord
 from .transaction_audits import TransactionAudit
 from .traceability_transaction_group import TraceabilityTransactionGroup
 from .transport_transaction import TransportTransaction
+from .ai_audit_document_types import AiAuditDocumentType
 
 __all__ = [
     # Main transaction models
@@ -17,6 +18,9 @@ __all__ = [
 
     # Transaction audits
     'TransactionAudit',
+
+    # AI Audit document types
+    'AiAuditDocumentType',
 
     # Traceability grouping
     'TraceabilityTransactionGroup',
