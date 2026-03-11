@@ -4,12 +4,17 @@ Loads prompt from YAML and fills in transaction/evidence data
 """
 
 import json
+import yaml
 from pathlib import Path
 from typing import Dict, Any, List
 
-from langchain_core.prompts import load_prompt
-
 PROMPT_PATH = Path(__file__).parent.parent / 'templates' / 'transaction_evidence_matching.yaml'
+
+
+def _load_template() -> str:
+    with open(PROMPT_PATH, 'r') as f:
+        data = yaml.safe_load(f)
+    return data['template']
 
 
 def build_transaction_matching_prompt(
@@ -40,10 +45,10 @@ def build_transaction_matching_prompt(
     Returns:
         Prompt string for LLM
     """
-    prompt = load_prompt(str(PROMPT_PATH))
+    template = _load_template()
     columns_to_check = [k for k, v in check_columns.items() if v]
 
-    return prompt.format(
+    return template.format(
         transaction_data=json.dumps(transaction_data, ensure_ascii=False, indent=2),
         extracted_evidence=json.dumps(extracted_evidence, ensure_ascii=False, indent=2),
         columns_to_check=json.dumps(columns_to_check),

@@ -1,6 +1,3 @@
-_type: prompt
-input_variables:
-  - document_types_spec
 template: |
   Role: Document Evidence Classifier & Data Extractor
   Task: Classify this evidence image into one of the provided document types and extract all relevant data fields.

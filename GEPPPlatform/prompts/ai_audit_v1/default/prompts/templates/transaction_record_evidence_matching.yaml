@@ -1,8 +1,3 @@
-_type: prompt
-input_variables:
-  - record_data
-  - extracted_evidence
-  - columns_to_check
 template: |
   Role: Transaction Record Data Auditor
   Task: Compare extracted evidence data against a single transaction record (one material line) and determine if each field is satisfied by the evidence.

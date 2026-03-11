@@ -357,7 +357,7 @@ def _process_single_transaction(
     from GEPPPlatform.models.cores.files import File
     from GEPPPlatform.models.users.user_location import UserLocation
     from GEPPPlatform.models.cores.references import Material
-    from ..clients.llm_client import get_default_audit_llm, call_llm_with_images, call_llm_text_only, parse_json_response
+    from ..clients.llm_client import get_default_audit_llm, call_llm_with_images, call_llm_text_only, parse_json_response  # noqa: F401
 
     processing_start = time.time()
     total_token_usage = {'input_tokens': 0, 'output_tokens': 0}
@@ -516,7 +516,7 @@ def _step6_classify_evidence(
     Store results in File.observation.
     """
     from GEPPPlatform.models.cores.files import File
-    from langchain_core.prompts import load_prompt
+    import yaml
 
     all_files = image_data.get('all_files', {})
     if not all_files:
@@ -536,8 +536,9 @@ def _step6_classify_evidence(
 
     # Load prompt template
     prompt_path = Path(__file__).parent.parent / 'prompts' / 'templates' / 'evidence_classify.yaml'
-    prompt_template = load_prompt(str(prompt_path))
-    prompt_text = prompt_template.format(document_types_spec=doc_types_spec_str)
+    with open(prompt_path, 'r') as f:
+        prompt_data = yaml.safe_load(f)
+    prompt_text = prompt_data['template'].format(document_types_spec=doc_types_spec_str)
 
     classified = []
 

@@ -4,12 +4,17 @@ Loads prompt from YAML and fills in matching results data
 """
 
 import json
+import yaml
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
-from langchain_core.prompts import load_prompt
-
 PROMPT_PATH = Path(__file__).parent.parent / 'templates' / 'audit_note_composing.yaml'
+
+
+def _load_template() -> str:
+    with open(PROMPT_PATH, 'r') as f:
+        data = yaml.safe_load(f)
+    return data['template']
 
 
 def build_audit_note_prompt(
@@ -36,9 +41,9 @@ def build_audit_note_prompt(
     Returns:
         Prompt string for LLM
     """
-    prompt = load_prompt(str(PROMPT_PATH))
+    template = _load_template()
 
-    return prompt.format(
+    return template.format(
         transaction_id=transaction_id,
         evidence_summary=json.dumps(evidence_summary, ensure_ascii=False, indent=2),
         missing_docs=json.dumps(missing_doc_types, ensure_ascii=False, indent=2),

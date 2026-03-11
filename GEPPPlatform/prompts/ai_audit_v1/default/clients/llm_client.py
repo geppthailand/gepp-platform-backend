@@ -1,6 +1,6 @@
 """
 LLM Client for Default AI Audit
-Uses OpenRouter API via langchain-openai ChatOpenAI
+Uses OpenRouter API via the openai Python package (OpenAI-compatible API)
 """
 
 import os
@@ -9,12 +9,11 @@ import logging
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
-from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage
+from openai import OpenAI
 
 logger = logging.getLogger(__name__)
 
-SETTINGS_PATH = Path(__file__).parent / 'settings.json'
+SETTINGS_PATH = Path(__file__).parent.parent / 'settings.json'
 
 
 def _load_settings() -> Dict[str, Any]:
@@ -23,46 +22,44 @@ def _load_settings() -> Dict[str, Any]:
         return json.load(f)
 
 
-def get_default_audit_llm(model: str = None) -> ChatOpenAI:
+def get_default_audit_llm() -> OpenAI:
     """
-    Create ChatOpenAI instance pointing to OpenRouter.
-
-    Args:
-        model: Model identifier override. Defaults to settings.json value.
+    Create OpenAI client pointing to OpenRouter.
 
     Returns:
-        ChatOpenAI configured for OpenRouter
+        OpenAI client configured for OpenRouter
     """
-    settings = _load_settings()
     api_key = os.environ.get('OPENROUTER_API_KEY')
     if not api_key:
         raise ValueError('OPENROUTER_API_KEY environment variable not set')
 
-    return ChatOpenAI(
-        model=model or settings.get('model', 'x-ai/grok-4.1-fast'),
-        openai_api_key=api_key,
-        openai_api_base='https://openrouter.ai/api/v1',
-        temperature=settings.get('temperature', 0.1),
-        max_tokens=settings.get('max_tokens', 4096),
+    return OpenAI(
+        api_key=api_key,
+        base_url='https://openrouter.ai/api/v1',
     )
 
 
 def call_llm_with_images(
-    llm: ChatOpenAI,
+    client: OpenAI,
     text_prompt: str,
-    image_urls: Optional[List[str]] = None
+    image_urls: Optional[List[str]] = None,
+    model: str = None,
 ) -> Dict[str, Any]:
     """
     Send a multimodal prompt (text + images) to the LLM.
 
     Args:
-        llm: ChatOpenAI instance
+        client: OpenAI client instance
         text_prompt: Text prompt content
         image_urls: Optional list of image URLs (presigned S3 URLs)
+        model: Model override. Defaults to settings.json value.
 
     Returns:
         dict with keys: content (str), usage (dict with input_tokens, output_tokens)
     """
+    settings = _load_settings()
+    model = model or settings.get('model', 'x-ai/grok-4.1-fast')
+
     content_parts = [{"type": "text", "text": text_prompt}]
 
     if image_urls:
@@ -72,25 +69,23 @@ def call_llm_with_images(
                 "image_url": {"url": url}
             })
 
-    message = HumanMessage(content=content_parts)
-
     try:
-        response = llm.invoke([message])
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": content_parts}],
+            temperature=settings.get('temperature', 0.1),
+            max_tokens=settings.get('max_tokens', 4096),
+        )
+
         usage = {}
-        if hasattr(response, 'usage_metadata') and response.usage_metadata:
+        if response.usage:
             usage = {
-                'input_tokens': getattr(response.usage_metadata, 'input_tokens', 0),
-                'output_tokens': getattr(response.usage_metadata, 'output_tokens', 0),
-            }
-        elif hasattr(response, 'response_metadata'):
-            token_usage = response.response_metadata.get('token_usage', {})
-            usage = {
-                'input_tokens': token_usage.get('prompt_tokens', 0),
-                'output_tokens': token_usage.get('completion_tokens', 0),
+                'input_tokens': response.usage.prompt_tokens or 0,
+                'output_tokens': response.usage.completion_tokens or 0,
             }
 
         return {
-            'content': response.content.strip(),
+            'content': response.choices[0].message.content.strip(),
             'usage': usage,
         }
     except Exception as e:
@@ -99,20 +94,22 @@ def call_llm_with_images(
 
 
 def call_llm_text_only(
-    llm: ChatOpenAI,
-    text_prompt: str
+    client: OpenAI,
+    text_prompt: str,
+    model: str = None,
 ) -> Dict[str, Any]:
     """
     Send a text-only prompt to the LLM.
 
     Args:
-        llm: ChatOpenAI instance
+        client: OpenAI client instance
         text_prompt: Text prompt content
+        model: Model override.
 
     Returns:
         dict with keys: content (str), usage (dict with input_tokens, output_tokens)
     """
-    return call_llm_with_images(llm, text_prompt, image_urls=None)
+    return call_llm_with_images(client, text_prompt, image_urls=None, model=model)
 
 
 def parse_json_response(response_text: str) -> Dict[str, Any]:

@@ -1,10 +1,3 @@
-_type: prompt
-input_variables:
-  - transaction_id
-  - evidence_summary
-  - missing_docs
-  - transaction_matching_result
-  - record_matching_results
 template: |
   Role: AI Audit Report Composer
   Task: Compose a concise audit summary for transaction #{transaction_id} based on all verification results.
