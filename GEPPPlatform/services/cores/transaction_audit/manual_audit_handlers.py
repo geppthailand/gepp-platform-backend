@@ -5,6 +5,7 @@ Manual Audit API handlers for human-driven audit operations
 from typing import Dict, Any
 import logging
 import traceback
+from datetime import datetime, timezone
 
 from .manual_audit_service import ManualAuditService
 from ..transactions.transaction_service import TransactionService
@@ -17,6 +18,65 @@ from ....exceptions import (
     BadRequestException,
     ValidationException
 )
+
+
+def _upsert_traceability_group_on_approve(db_session: Any, transaction_id: int) -> None:
+    """After a transaction or its records are approved, upsert records into traceability groups."""
+    try:
+        txn_service = TransactionService(db_session)
+        from ....models.transactions.transactions import Transaction
+        from ....models.transactions.transaction_records import TransactionRecord
+        transaction = db_session.query(Transaction).filter(Transaction.id == transaction_id).first()
+        if not transaction:
+            return
+        record_ids = [
+            r.id for r in db_session.query(TransactionRecord.id).filter(
+                TransactionRecord.created_transaction_id == transaction_id,
+                TransactionRecord.is_active == True,
+                TransactionRecord.deleted_date.is_(None),
+                TransactionRecord.status == "approved",
+            ).all()
+        ]
+        if record_ids:
+            txn_service._upsert_traceability_groups_for_transaction(transaction, record_ids)
+            db_session.commit()
+    except Exception as e:
+        logger.warning("Traceability group upsert failed for transaction %s: %s", transaction_id, str(e))
+
+
+def _remove_records_from_traceability_group_on_reject(db_session: Any, transaction_id: int) -> None:
+    """After a transaction or its records are rejected, remove records from traceability groups. Soft-delete empty groups."""
+    try:
+        from ....models.transactions.transaction_records import TransactionRecord
+        from ....models.transactions.traceability_transaction_group import TraceabilityTransactionGroup
+        record_ids = [
+            r.id for r in db_session.query(TransactionRecord.id).filter(
+                TransactionRecord.created_transaction_id == transaction_id,
+                TransactionRecord.is_active == True,
+                TransactionRecord.deleted_date.is_(None),
+                TransactionRecord.status == "rejected",
+            ).all()
+        ]
+        if not record_ids:
+            return
+        record_id_set = set(record_ids)
+        groups = db_session.query(TraceabilityTransactionGroup).filter(
+            TraceabilityTransactionGroup.is_active == True,
+            TraceabilityTransactionGroup.deleted_date.is_(None),
+            TraceabilityTransactionGroup.transaction_record_id.overlap(record_ids),
+        ).all()
+        now = datetime.now(timezone.utc)
+        for group in groups:
+            remaining = [rid for rid in (group.transaction_record_id or []) if rid not in record_id_set]
+            if remaining:
+                group.transaction_record_id = remaining
+                group.updated_date = now
+            else:
+                group.is_active = False
+                group.deleted_date = now
+        db_session.commit()
+    except Exception as e:
+        logger.warning("Traceability group removal failed for transaction %s: %s", transaction_id, str(e))
 
 
 def handle_manual_audit_routes(event: Dict[str, Any], data: Dict[str, Any], **params) -> Dict[str, Any]:
@@ -363,6 +423,8 @@ def handle_approve_transaction(
                 'data': None
             }
 
+        _upsert_traceability_group_on_approve(db_session, transaction_id)
+
         return {
             'success': True,
             'message': result['message'],
@@ -429,6 +491,8 @@ def handle_reject_transaction(
                 'error': result.get('error'),
                 'data': None
             }
+
+        _remove_records_from_traceability_group_on_reject(db_session, transaction_id)
 
         return {
             'success': True,
@@ -512,6 +576,8 @@ def handle_approve_transaction_record(
                     transaction_id,
                     str(e),
                 )
+        if transaction_id is not None:
+            _upsert_traceability_group_on_approve(db_session, int(transaction_id))
         return {
             'success': True,
             'message': result['message'],
@@ -595,6 +661,8 @@ def handle_reject_transaction_record(
                     record_id,
                     str(e),
                 )
+        if transaction_id is not None:
+            _remove_records_from_traceability_group_on_reject(db_session, int(transaction_id))
         return {
             'success': True,
             'message': result['message'],
@@ -746,10 +814,12 @@ def handle_bulk_approve_transactions(
                         'error': str(e)
                     })
 
+            approved_tids = [r['transaction_id'] for r in results]
             _create_txn_approved_notifications_for_bulk(
-                db_session, organization_id, current_user_id,
-                [r['transaction_id'] for r in results]
+                db_session, organization_id, current_user_id, approved_tids
             )
+            for tid in approved_tids:
+                _upsert_traceability_group_on_approve(db_session, tid)
             return {
                 'success': len(errors) == 0,
                 'message': f'Bulk approve completed: {len(results)} successful, {len(errors)} failed',
@@ -771,10 +841,12 @@ def handle_bulk_approve_transactions(
                 auditor_user_id=current_user_id,
                 notes=global_notes
             )
+            approved_tids = [r['transaction_id'] for r in result.get('results', [])]
             _create_txn_approved_notifications_for_bulk(
-                db_session, organization_id, current_user_id,
-                [r['transaction_id'] for r in result.get('results', [])]
+                db_session, organization_id, current_user_id, approved_tids
             )
+            for tid in approved_tids:
+                _upsert_traceability_group_on_approve(db_session, tid)
             return {
                 'success': result['success'],
                 'message': f'Bulk approve completed: {result["summary"]["successful"]} successful, {result["summary"]["failed"]} failed',
@@ -880,10 +952,12 @@ def handle_bulk_reject_transactions(
                         'error': str(e)
                     })
 
+            rejected_tids = [r['transaction_id'] for r in results]
             _create_txn_rejected_notifications_for_bulk(
-                db_session, organization_id, current_user_id,
-                [r['transaction_id'] for r in results]
+                db_session, organization_id, current_user_id, rejected_tids
             )
+            for tid in rejected_tids:
+                _remove_records_from_traceability_group_on_reject(db_session, tid)
             return {
                 'success': len(errors) == 0,
                 'message': f'Bulk reject completed: {len(results)} successful, {len(errors)} failed',
@@ -905,10 +979,12 @@ def handle_bulk_reject_transactions(
                 auditor_user_id=current_user_id,
                 rejection_reason=global_rejection_reason
             )
+            rejected_tids = [r['transaction_id'] for r in result.get('results', [])]
             _create_txn_rejected_notifications_for_bulk(
-                db_session, organization_id, current_user_id,
-                [r['transaction_id'] for r in result.get('results', [])]
+                db_session, organization_id, current_user_id, rejected_tids
             )
+            for tid in rejected_tids:
+                _remove_records_from_traceability_group_on_reject(db_session, tid)
             return {
                 'success': result['success'],
                 'message': f'Bulk reject completed: {result["summary"]["successful"]} successful, {result["summary"]["failed"]} failed',
