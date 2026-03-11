@@ -733,7 +733,7 @@ class TraceabilityService:
             Transaction.organization_id == organization_id,
             TransactionRecord.is_active == True,
             TransactionRecord.deleted_date.is_(None),
-            Transaction.status != TransactionStatus.rejected,
+            Transaction.status == TransactionStatus.approved,
             func.extract("year", txn_date_at_tz) == year,
             func.extract("month", txn_date_at_tz) == month,
         ]
