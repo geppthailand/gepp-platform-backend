@@ -174,19 +174,41 @@ def _draw_card_row(pdf, page_width_points: float, page_height_points: float, dat
 
 # Layout constants for flow chart (used for pagination and drawing)
 _FLOW_ROW_H = 0.85 * inch
-_FLOW_ROW_GAP = 0.38 * inch
-_FLOW_INNER_PAD = 0.4 * inch
+_FLOW_ROW_GAP = 0.20 * inch
+_FLOW_INNER_PAD = 0.20 * inch
+_FLOW_MIN_INNER_PAD = 0.12 * inch
+
+
+def _flow_content_height_for_rows(row_heights: list) -> float:
+    """Total vertical content height given a list of per-row heights."""
+    if not row_heights:
+        return 0.0
+    return sum(row_heights) + (len(row_heights) - 1) * _FLOW_ROW_GAP
 
 
 def _flow_content_height(n_rows: int) -> float:
-    """Total vertical content height for n flow chart rows."""
+    """Total vertical content height for n uniform flow chart rows (fallback)."""
     if n_rows <= 0:
         return 0.0
     return n_rows * _FLOW_ROW_H + (n_rows - 1) * _FLOW_ROW_GAP
 
 
+def _rows_that_fit_in_box_var(box_height: float, row_heights: list) -> int:
+    """Max number of rows that fit given variable per-row heights."""
+    available = box_height - 2 * _FLOW_INNER_PAD
+    if available <= 0 or not row_heights:
+        return 1
+    total = 0.0
+    for i, rh in enumerate(row_heights):
+        needed = rh if i == 0 else rh + _FLOW_ROW_GAP
+        if total + needed > available:
+            return max(1, i)
+        total += needed
+    return len(row_heights)
+
+
 def _rows_that_fit_in_box(box_height: float) -> int:
-    """Max number of rows that fit in the diagram box (with inner padding)."""
+    """Max number of rows that fit in the diagram box (uniform height fallback)."""
     available = box_height - 2 * _FLOW_INNER_PAD
     if available <= 0:
         return 1
@@ -194,24 +216,29 @@ def _rows_that_fit_in_box(box_height: float) -> int:
     return max(1, n)
 
 
-def _build_flow_chart_pages(groups: list, n_rows: int, rows_per_page: int) -> list:
+def _build_flow_chart_pages(groups: list, n_rows: int, rows_per_page: int, row_heights: list = None, page_available: float = None) -> list:
     """
-    Split flow chart rows across pages. Can split within an origin (same origin redrawn on next page).
-    Returns list of pages; each page is dict: global_indices (list of row indices), page_groups (list of list of indices into that page).
+    Split flow chart rows across pages using variable row heights when available.
+    Returns list of pages; each page is dict: global_indices, page_groups.
     """
-    if n_rows <= 0 or rows_per_page <= 0:
+    if n_rows <= 0:
         return []
-    # Which group each global row belongs to
     group_of_row = [None] * n_rows
     for gi, g in enumerate(groups):
         for global_idx in g:
             group_of_row[global_idx] = gi
+
+    use_var = row_heights is not None and page_available is not None
     pages = []
     row_start = 0
     while row_start < n_rows:
-        row_end = min(row_start + rows_per_page, n_rows)
+        if use_var:
+            remaining_heights = row_heights[row_start:]
+            count = _rows_that_fit_in_box_var(page_available + 2 * _FLOW_INNER_PAD, remaining_heights)
+            row_end = min(row_start + count, n_rows)
+        else:
+            row_end = min(row_start + max(1, rows_per_page), n_rows)
         page_global_indices = list(range(row_start, row_end))
-        # Split this page's rows by group (contiguous segments)
         page_groups = []
         current_group = None
         segment = []
@@ -305,13 +332,25 @@ def _collect_transit_info(transports: list) -> list:
 
 
 def _collect_disposal_methods(transports: list, group_weight: float = 0) -> list:
-    """Collect unique disposal methods from leaf nodes with their summed percentage_of_group and weight.
+    """Collect unique (material, destination, disposal_method) combos from leaf nodes with summed percentage and weight.
     Leaves without a disposal_method are summed into a 'pending' entry.
-    Returns list of dicts: [{"method": str, "percentage_of_group": float, "weight": float, "pending": bool}, ...]
+    Returns list of dicts with method (label), percentage_of_group, weight, pending.
     """
-    method_data: dict = {}
+    combo_data: dict = {}
     pending_pct = 0.0
     pending_weight = 0.0
+
+    def _loc_label(t: dict, field: str) -> str:
+        obj = t.get(field)
+        if isinstance(obj, dict):
+            return obj.get("display_name") or obj.get("name_en") or obj.get("name_th") or ""
+        return ""
+
+    def _mat_label(t: dict) -> str:
+        mat = t.get("material")
+        if isinstance(mat, dict):
+            return mat.get("name_th") or mat.get("name_en") or ""
+        return ""
 
     def _walk(nodes):
         nonlocal pending_pct, pending_weight
@@ -326,30 +365,70 @@ def _collect_disposal_methods(transports: list, group_weight: float = 0) -> list
                 pct = float(t.get("percentage_of_group") or 0)
                 w = float(t.get("weight") or 0)
                 if method:
-                    if method not in method_data:
-                        method_data[method] = {"pct": 0.0, "weight": 0.0}
-                    method_data[method]["pct"] += pct
-                    method_data[method]["weight"] += w
+                    mat_id = t.get("material_id")
+                    dest_id = t.get("destination_id")
+                    key = (mat_id, dest_id, method)
+                    if key not in combo_data:
+                        combo_data[key] = {
+                            "pct": 0.0, "weight": 0.0,
+                            "material": _mat_label(t),
+                            "destination": _loc_label(t, "destination"),
+                            "method": method,
+                        }
+                    combo_data[key]["pct"] += pct
+                    combo_data[key]["weight"] += w
                 else:
                     pending_pct += pct
                     pending_weight += w
 
     _walk(transports)
-    assigned_pct = sum(d["pct"] for d in method_data.values()) + pending_pct
+    assigned_pct = sum(d["pct"] for d in combo_data.values()) + pending_pct
     unaccounted = round(100.0 - assigned_pct, 2) if assigned_pct < 99.99 else 0.0
     total_pending_pct = round(pending_pct + max(unaccounted, 0), 2)
 
-    assigned_weight = sum(d["weight"] for d in method_data.values()) + pending_weight
+    assigned_weight = sum(d["weight"] for d in combo_data.values()) + pending_weight
     unaccounted_weight = round(group_weight - assigned_weight, 2) if group_weight > assigned_weight else 0.0
     total_pending_weight = round(pending_weight + max(unaccounted_weight, 0), 2)
 
-    results = [
-        {"method": m, "percentage_of_group": round(d["pct"], 2), "weight": round(d["weight"], 2), "pending": False}
-        for m, d in method_data.items()
-    ]
+    results = []
+    for d in combo_data.values():
+        results.append({
+            "method_name": d["method"],
+            "material_name": d["material"],
+            "destination_name": d["destination"],
+            "percentage_of_group": round(d["pct"], 2),
+            "weight": round(d["weight"], 2),
+            "pending": False,
+        })
     if total_pending_pct > 0:
-        results.append({"method": "กำลังรอการจัดการ", "percentage_of_group": total_pending_pct, "weight": total_pending_weight, "pending": True})
+        results.append({
+            "method_name": "กำลังรอการจัดการ",
+            "material_name": "",
+            "destination_name": "",
+            "percentage_of_group": total_pending_pct,
+            "weight": total_pending_weight,
+            "pending": True,
+        })
     return results
+
+
+def _method_stack_height(disposal_methods: list) -> float:
+    """Compute the total vertical height needed for the disposal method nodes."""
+    if not disposal_methods:
+        return 0.0
+    line_h = 0.10 * inch
+    top_pad = 0.10 * inch
+    bot_pad = 0.08 * inch
+    gap = 0.06 * inch
+    heights = []
+    for dm in disposal_methods:
+        n_lines = 2
+        if dm.get("material_name"):
+            n_lines += 1
+        if dm.get("destination_name"):
+            n_lines += 1
+        heights.append(top_pad + n_lines * line_h + bot_pad)
+    return sum(heights) + (len(heights) - 1) * gap
 
 
 def _build_chart_rows(hierarchy_data: list):
@@ -369,6 +448,9 @@ def _build_chart_rows(hierarchy_data: list):
             group_indices.append(idx)
             group_transports = group_node.get("children") or []
             group_w = float(group_node.get("weight") or group_node.get("total_weight_kg") or 0)
+            dmethods = _collect_disposal_methods(group_transports, group_w)
+            methods_h = _method_stack_height(dmethods)
+            rh = max(_FLOW_ROW_H, methods_h + 0.08 * inch)
             rows.append({
                 "origin": origin_node.get("origin") or {"display_name": origin_node.get("name", "-")},
                 "origin_id": origin_node.get("origin_id"),
@@ -377,7 +459,8 @@ def _build_chart_rows(hierarchy_data: list):
                 "weight": group_w,
                 "is_managed": _all_leaves_managed(group_transports),
                 "transit_info": _collect_transit_info(group_transports),
-                "disposal_methods": _collect_disposal_methods(group_transports, group_w),
+                "disposal_methods": dmethods,
+                "row_height": rh,
             })
         if group_indices:
             groups.append(group_indices)
@@ -425,13 +508,31 @@ def _draw_flow_chart(
     col_w0 = col_w
     col_w_rest = col_w - shrink_rest
     col_gap_plus = col_gap + shrink_rest
-    row_h = _FLOW_ROW_H
-    node_h = row_h - 0.08 * inch
+    per_row_h = [rec.get("row_height", _FLOW_ROW_H) for rec in records]
+    node_h = _FLOW_ROW_H - 0.08 * inch
     origin_extra_h = 0.40 * inch
     origin_h = node_h + origin_extra_h
-    total_content_h = n * row_h + (n - 1) * row_gap if n > 1 else row_h
+    raw_content_h = sum(per_row_h) + (n - 1) * row_gap if n > 1 else per_row_h[0]
+
+    top_overflow = 0.0
+    bottom_overflow = 0.0
+    if groups:
+        first_grp = groups[0]
+        first_span = sum(per_row_h[i] for i in first_grp) + max(0, len(first_grp) - 1) * row_gap
+        top_overflow = max(0, (origin_h - first_span) / 2)
+        last_grp = groups[-1]
+        last_span = sum(per_row_h[i] for i in last_grp) + max(0, len(last_grp) - 1) * row_gap
+        bottom_overflow = max(0, (origin_h - last_span) / 2)
+
+    total_content_h = raw_content_h + top_overflow + bottom_overflow
     content_bottom = box_bottom + (box_height - total_content_h) / 2
-    y_start = content_bottom + (n - 1) * (row_h + row_gap)
+
+    row_mid_y_map = {}
+    _y_cursor = content_bottom + total_content_h - top_overflow
+    for _idx in range(n):
+        _y_cursor -= per_row_h[_idx]
+        row_mid_y_map[_idx] = _y_cursor + per_row_h[_idx] / 2
+        _y_cursor -= row_gap
     stroke_green = colors.HexColor("#85bbae")
     stroke_grey = colors.HexColor("#d9d9d9")
     fill_white = colors.HexColor("#ffffff")
@@ -453,8 +554,8 @@ def _draw_flow_chart(
     x_start3 = cx3
 
     for group in groups:
-        row_ys = [y_start - i * (row_h + row_gap) for i in group]
-        mid_ys = [row_y + node_h / 2 for row_y in row_ys]
+        mid_ys = [row_mid_y_map[i] for i in group]
+        row_ys = [m - node_h / 2 for m in mid_ys]
         top_mid_y = mid_ys[0]
         bottom_mid_y = mid_ys[-1]
         origin_center_y = (top_mid_y + bottom_mid_y) / 2
@@ -631,19 +732,27 @@ def _draw_flow_chart(
             disposal_methods = rec.get("disposal_methods") or []
             status_border = colors.HexColor("#a4e1af")
             status_text_color = colors.HexColor("#7bbfa5")
-            method_node_h = 0.34 * inch
+            accent_method = colors.HexColor("#85bbae")
             method_gap_v = 0.06 * inch
+            method_line_h = 0.10 * inch
+            method_top_pad = 0.10 * inch
+            method_bot_pad = 0.08 * inch
+            accent_bar_w = 0.04 * inch
+
+            pending_border = colors.HexColor("#c0c0c0")
+            pending_text = colors.HexColor("#999999")
+            pending_pill_bg = colors.HexColor("#d9d9d9")
 
             if not disposal_methods:
                 status_h = node_h * 0.5
                 status_y = row_y + (node_h - status_h) / 2
                 pdf.setDash(3, 3)
                 pdf.setFillColor(fill_white)
-                pdf.setStrokeColor(status_border)
+                pdf.setStrokeColor(pending_border)
                 pdf.setLineWidth(0.5)
                 pdf.roundRect(cx3, status_y, col_w_rest, status_h, node_radius)
                 pdf.setDash()
-                pdf.setFillColor(status_text_color)
+                pdf.setFillColor(pending_text)
                 try:
                     pdf.setFont("IBMPlexSansThai-Regular", 7)
                 except Exception:
@@ -655,62 +764,107 @@ def _draw_flow_chart(
                     sw = pdf.stringWidth(status_label, "Helvetica", 7)
                 pdf.drawString(cx3 + (col_w_rest - sw) / 2, status_y + status_h / 2 - 0.04 * inch, status_label)
             else:
+                node_heights = []
+                for dm in disposal_methods:
+                    n_lines = 1
+                    if dm.get("material_name"):
+                        n_lines += 1
+                    if dm.get("destination_name"):
+                        n_lines += 1
+                    n_lines += 1
+                    node_heights.append(method_top_pad + n_lines * method_line_h + method_bot_pad)
                 n_methods = len(disposal_methods)
-                total_methods_h = n_methods * method_node_h + (n_methods - 1) * method_gap_v
+                total_methods_h = sum(node_heights) + (n_methods - 1) * method_gap_v
                 methods_top_y = mid_y + total_methods_h / 2
                 method_mid_ys = []
+                cursor_y = methods_top_y
 
                 for mi, dm in enumerate(disposal_methods):
-                    m_y = methods_top_y - mi * (method_node_h + method_gap_v) - method_node_h
-                    m_mid = m_y + method_node_h / 2
+                    m_h = node_heights[mi]
+                    m_y = cursor_y - m_h
+                    m_mid = m_y + m_h / 2
                     method_mid_ys.append(m_mid)
-                    method_name = _safe(dm.get("method", "-"))
+                    cursor_y = m_y - method_gap_v
+
+                    meth_name = _safe(dm.get("method_name", "-"))
+                    mat_name = _safe(dm.get("material_name", ""))
+                    dest_name = _safe(dm.get("destination_name", ""))
                     pct = dm.get("percentage_of_group", 0)
                     dm_weight = dm.get("weight", 0)
                     is_pending = dm.get("pending", False)
 
+                    if is_pending:
+                        node_border = pending_border
+                        node_accent = pending_border
+                        node_title_color = pending_text
+                        node_pill_bg = pending_pill_bg
+                    elif meth_name in _DIRECTED_METHODS:
+                        node_border = colors.HexColor("#eb7170")
+                        node_accent = colors.HexColor("#eb7170")
+                        node_title_color = colors.HexColor("#eb7170")
+                        node_pill_bg = colors.HexColor("#eb7170")
+                    elif meth_name in _DIVERTED_METHODS:
+                        node_border = colors.HexColor("#c6dcf9")
+                        node_accent = colors.HexColor("#c6dcf9")
+                        node_title_color = colors.HexColor("#7ba3d4")
+                        node_pill_bg = colors.HexColor("#c6dcf9")
+                    else:
+                        node_border = status_border
+                        node_accent = accent_method
+                        node_title_color = status_text_color
+                        node_pill_bg = status_border
+
                     pdf.setFillColor(fill_white)
-                    pdf.setStrokeColor(status_border)
+                    pdf.setStrokeColor(node_border)
                     pdf.setLineWidth(0.5)
                     if is_pending:
                         pdf.setDash(3, 3)
-                    pdf.roundRect(cx3, m_y, col_w_rest, method_node_h, node_radius)
+                    pdf.roundRect(cx3, m_y, col_w_rest, m_h, node_radius)
                     if is_pending:
                         pdf.setDash()
+
+                    if not is_pending:
+                        pdf.setFillColor(node_accent)
+                        pdf.roundRect(cx3, m_y, accent_bar_w + node_radius, m_h, node_radius, fill=1, stroke=0)
+                        pdf.rect(cx3 + node_radius, m_y, accent_bar_w, m_h, fill=1, stroke=0)
 
                     pct_text = f"{pct}%"
                     pill_w_s = 0.38 * inch
                     pill_h_s = 0.14 * inch
                     pill_x_s = cx3 + col_w_rest - pill_w_s - 0.05 * inch
-                    pill_y_s = m_y + method_node_h - pill_h_s - 0.04 * inch
-
-                    text_x = cx3 + 0.06 * inch
+                    pill_y_s = m_y + m_h - pill_h_s - 0.05 * inch
+                    text_x = cx3 + accent_bar_w + 0.10 * inch
                     max_text_w = pill_x_s - text_x - 0.04 * inch
-                    name_y = m_y + method_node_h - 0.12 * inch
-                    pdf.setFillColor(status_text_color)
-                    try:
-                        pdf.setFont("IBMPlexSansThai-Regular", 6)
-                    except Exception:
-                        pdf.setFont("Helvetica", 6)
-                    display_name = method_name
-                    try:
-                        font_name = "IBMPlexSansThai-Regular"
-                        while pdf.stringWidth(display_name, font_name, 6) > max_text_w and len(display_name) > 1:
-                            display_name = display_name[:-1]
-                    except Exception:
-                        display_name = method_name[:30]
-                    pdf.drawString(text_x, name_y, display_name)
+                    line_y = m_y + m_h - method_top_pad - method_line_h + 0.04 * inch
 
-                    weight_text = f"{_fmt_num(dm_weight)} กก."
-                    weight_y = name_y - 0.12 * inch
-                    pdf.setFillColor(colors.HexColor("#999999"))
-                    try:
-                        pdf.setFont("IBMPlexSansThai-Regular", 5.5)
-                    except Exception:
-                        pdf.setFont("Helvetica", 5.5)
-                    pdf.drawString(text_x, weight_y, weight_text)
+                    def _draw_clipped(txt, font, size, color, y_pos):
+                        pdf.setFillColor(color)
+                        try:
+                            pdf.setFont(font, size)
+                        except Exception:
+                            pdf.setFont("Helvetica", size)
+                        disp = txt
+                        try:
+                            while pdf.stringWidth(disp, font, size) > max_text_w and len(disp) > 1:
+                                disp = disp[:-1]
+                        except Exception:
+                            disp = txt[:35]
+                        pdf.drawString(text_x, y_pos, disp)
 
-                    pdf.setFillColor(status_border)
+                    _draw_clipped(f"\u25B8 {meth_name}", "IBMPlexSansThai-Bold", 6, node_title_color, line_y)
+                    line_y -= method_line_h
+
+                    if mat_name:
+                        _draw_clipped(f"\u25B8 {mat_name}", "IBMPlexSansThai-Regular", 5.5, colors.HexColor("#595959"), line_y)
+                        line_y -= method_line_h
+
+                    if dest_name:
+                        _draw_clipped(f"\u25B8 {dest_name}", "IBMPlexSansThai-Regular", 5.5, colors.HexColor("#595959"), line_y)
+                        line_y -= method_line_h
+
+                    _draw_clipped(f"\u25B8 {_fmt_num(dm_weight)} กก.", "IBMPlexSansThai-Regular", 5.5, colors.HexColor("#999999"), line_y)
+
+                    pdf.setFillColor(node_pill_bg)
                     pdf.roundRect(pill_x_s, pill_y_s, pill_w_s, pill_h_s, pill_h_s / 2, fill=1, stroke=0)
                     pdf.setFillColor(fill_white)
                     try:
@@ -1104,15 +1258,28 @@ def _draw_diagram_section(pdf, page_width_points: float, page_height_points: flo
 
     original_indices = list(range(len(records)))
     n_rows = len(records)
+    all_row_heights = [rec.get("row_height", _FLOW_ROW_H) for rec in records]
     header_y_first = y_below_cards - 0.15 * inch
     box_top_first = header_y_first - section_gap
     box_bottom_first = padding
     box_height_first = box_top_first - box_bottom_first
-    rows_per_page = _rows_that_fit_in_box(box_height_first)
-    pages = _build_flow_chart_pages(origin_groups, n_rows, rows_per_page)
+
+    all_content_h = _flow_content_height_for_rows(all_row_heights)
+    if all_content_h + 2 * _FLOW_MIN_INNER_PAD <= box_height_first:
+        pages = _build_flow_chart_pages(origin_groups, n_rows, n_rows)
+    else:
+        rows_per_page = _rows_that_fit_in_box_var(box_height_first, all_row_heights)
+        pages = _build_flow_chart_pages(
+            origin_groups, n_rows, rows_per_page,
+            row_heights=all_row_heights,
+            page_available=box_height_first - 2 * _FLOW_INNER_PAD,
+        )
     last_box_bottom = box_bottom_first
 
     for page_idx, page_info in enumerate(pages):
+        page_rh = [all_row_heights[i] for i in page_info["global_indices"]]
+        page_content_h = _flow_content_height_for_rows(page_rh)
+
         if page_idx > 0:
             pdf.showPage()
             pdf.setPageSize((page_width_points, page_height_points))
@@ -1124,9 +1291,7 @@ def _draw_diagram_section(pdf, page_width_points: float, page_height_points: flo
             except Exception:
                 pdf.setFont("Helvetica-Bold", 16)
             pdf.drawString(padding, y_below_header, section_title)
-            n_page_rows = len(page_info["global_indices"])
-            content_h = _flow_content_height(n_page_rows)
-            box_height_page = content_h + 2 * _FLOW_INNER_PAD
+            box_height_page = page_content_h + 2 * _FLOW_INNER_PAD
             box_top_page = y_below_header - section_gap
             box_bottom_page = box_top_page - box_height_page
             last_box_bottom = box_bottom_page
@@ -1152,9 +1317,7 @@ def _draw_diagram_section(pdf, page_width_points: float, page_height_points: flo
             box_height = box_height_first
             box_bottom = box_bottom_first
         else:
-            n_page_rows = len(page_info["global_indices"])
-            content_h = _flow_content_height(n_page_rows)
-            box_height = content_h + 2 * _FLOW_INNER_PAD
+            box_height = page_content_h + 2 * _FLOW_INNER_PAD
             box_bottom = box_top_first - box_height
         last_box_bottom = box_bottom
         pdf.setFillColor(colors.HexColor("#fafafa"))
