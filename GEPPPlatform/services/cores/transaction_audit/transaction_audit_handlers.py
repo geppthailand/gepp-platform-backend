@@ -518,6 +518,7 @@ def handle_get_unaudited_transactions(
                 if t.transaction_records:
                     all_record_ids.append(t.transaction_records[0])  # first record
             material_map_by_tx = {}
+            record_date_map_by_tx = {}
             if all_record_ids:
                 records = db_session.query(TransactionRecord).filter(TransactionRecord.id.in_(all_record_ids)).all()
                 mat_ids = {r.material_id for r in records if r.material_id}
@@ -527,11 +528,16 @@ def handle_get_unaudited_transactions(
                     mat_name_map = {m.id: (m.name_en or m.name_th or f'Material {m.id}') for m in materials}
                 for r in records:
                     material_map_by_tx[r.created_transaction_id] = mat_name_map.get(r.material_id, '-')
+                    if r.transaction_date:
+                        record_date_map_by_tx[r.created_transaction_id] = r.transaction_date
 
-            # Attach to transaction_list
+            # Attach to transaction_list — use record's transaction_date over transaction-level date
             for i, t in enumerate(transactions):
                 transaction_list[i]['origin_name'] = origin_name_map.get(t.origin_id, '-')
                 transaction_list[i]['material_name'] = material_map_by_tx.get(t.id, '-')
+                rec_date = record_date_map_by_tx.get(t.id)
+                if rec_date:
+                    transaction_list[i]['transaction_date'] = rec_date.isoformat()
 
         # Build location options for filter dropdown
         location_combos = db_session.query(
@@ -671,6 +677,7 @@ def handle_get_queued_transactions(
                 if t.transaction_records:
                     all_record_ids.append(t.transaction_records[0])
             material_map_by_tx = {}
+            record_date_map_by_tx = {}
             if all_record_ids:
                 records = db_session.query(TransactionRecord).filter(TransactionRecord.id.in_(all_record_ids)).all()
                 mat_ids = {r.material_id for r in records if r.material_id}
@@ -680,10 +687,15 @@ def handle_get_queued_transactions(
                     mat_name_map = {m.id: (m.name_en or m.name_th or f'Material {m.id}') for m in materials}
                 for r in records:
                     material_map_by_tx[r.created_transaction_id] = mat_name_map.get(r.material_id, '-')
+                    if r.transaction_date:
+                        record_date_map_by_tx[r.created_transaction_id] = r.transaction_date
 
             for i, t in enumerate(transactions):
                 transaction_list[i]['origin_name'] = origin_name_map.get(t.origin_id, '-')
                 transaction_list[i]['material_name'] = material_map_by_tx.get(t.id, '-')
+                rec_date = record_date_map_by_tx.get(t.id)
+                if rec_date:
+                    transaction_list[i]['transaction_date'] = rec_date.isoformat()
 
         return {
             'success': True,
@@ -765,6 +777,7 @@ def handle_get_audit_queue_batches(
                     first_record_ids.append(t.transaction_records[0])
 
             material_map_by_tx = {}
+            record_date_map_by_tx = {}
             if first_record_ids:
                 records = db_session.query(TransactionRecord).filter(TransactionRecord.id.in_(first_record_ids)).all()
                 mat_ids = {r.material_id for r in records if r.material_id}
@@ -774,11 +787,16 @@ def handle_get_audit_queue_batches(
                     mat_name_map = {m.id: (m.name_en or m.name_th or f'Material {m.id}') for m in materials}
                 for r in records:
                     material_map_by_tx[r.created_transaction_id] = mat_name_map.get(r.material_id, '-')
+                    if r.transaction_date:
+                        record_date_map_by_tx[r.created_transaction_id] = r.transaction_date
 
             for t in txns:
+                # Use record's transaction_date over transaction-level date
+                rec_date = record_date_map_by_tx.get(t.id)
+                tx_date = rec_date.isoformat() if rec_date else (t.transaction_date.isoformat() if t.transaction_date else None)
                 tx_map[t.id] = {
                     'id': t.id,
-                    'transaction_date': t.transaction_date.isoformat() if t.transaction_date else None,
+                    'transaction_date': tx_date,
                     'status': t.status.value if hasattr(t.status, 'value') else str(t.status),
                     'ai_audit_status': t.ai_audit_status.value if hasattr(t.ai_audit_status, 'value') else None,
                     'weight_kg': float(t.weight_kg) if t.weight_kg else 0,

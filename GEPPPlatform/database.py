@@ -18,6 +18,7 @@ from GEPPPlatform.models.subscriptions.subscription_models import SubscriptionPl
 from GEPPPlatform.models.cores.locations import LocationCountry, LocationProvince, LocationDistrict, LocationSubdistrict
 from GEPPPlatform.models.cores.references import Currency, Material, Nationality, PhoneNumberCountryCode
 from GEPPPlatform.models.transactions.ai_audit_document_types import AiAuditDocumentType
+from GEPPPlatform.models.transactions.ai_audit_column_details import AiAuditColumnDetail
 from GEPPPlatform.models.subscriptions.organization_audit_settings import OrganizationAuditDocRequireTypes, OrganizationAuditCheckColumns
 
 class DatabaseManager:
