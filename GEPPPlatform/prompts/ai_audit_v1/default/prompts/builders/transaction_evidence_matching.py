@@ -1,6 +1,6 @@
 """
-Transaction-level Evidence Matching Prompt Builder
-Loads prompt from YAML and fills in transaction/evidence data
+Transaction-level Evidence Checklist Prompt Builder (Phase A)
+Sends 1 evidence's extracted_data + ALL records → column-level match/found/errors
 """
 
 import json
@@ -17,39 +17,29 @@ def _load_template() -> str:
     return data['template']
 
 
-def build_transaction_matching_prompt(
-    transaction_data: Dict[str, Any],
-    extracted_evidence: List[Dict[str, Any]],
-    check_columns: Dict[str, bool]
+def build_transaction_checklist_prompt(
+    single_evidence_data: Dict[str, Any],
+    all_records_data: List[Dict[str, Any]],
+    checklist_columns: List[str],
 ) -> str:
     """
-    Build a prompt for LLM to match extracted evidence against transaction-level fields.
+    Build a prompt for LLM to check 1 evidence against ALL records at column level.
 
     Args:
-        transaction_data: {
-            'transaction_id': int,
-            'origin_name': str,
-            'destination_names': list[str],
-            'weight_kg': float,
-            'total_amount': float,
-            'transaction_date': str (YYYY-MM-DD),
-        }
-        extracted_evidence: list of {
-            'file_id': int,
-            'document_type_id': int,
-            'document_type_name': str,
-            'extracted_data': dict,
-        }
-        check_columns: dict of column_name -> bool (which columns to check)
+        single_evidence_data: Extracted data from 1 evidence file, e.g.:
+            {'file_id': 123, 'document_type_name': '...', 'extracted_data': {...}}
+        all_records_data: List of all records with resolved names, e.g.:
+            [{'record_id': 1, 'material_name': '...', 'origin_weight_kg': 12.5, ...}, ...]
+        checklist_columns: List of column names to verify, e.g.:
+            ['material_id', 'origin_weight_kg', 'transaction_date']
 
     Returns:
         Prompt string for LLM
     """
     template = _load_template()
-    columns_to_check = [k for k, v in check_columns.items() if v]
 
     return template.format(
-        transaction_data=json.dumps(transaction_data, ensure_ascii=False, indent=2),
-        extracted_evidence=json.dumps(extracted_evidence, ensure_ascii=False, indent=2),
-        columns_to_check=json.dumps(columns_to_check),
+        evidence_data=json.dumps(single_evidence_data, ensure_ascii=False, indent=2),
+        all_records_data=json.dumps(all_records_data, ensure_ascii=False, indent=2),
+        checklist_columns=json.dumps(checklist_columns, ensure_ascii=False),
     )

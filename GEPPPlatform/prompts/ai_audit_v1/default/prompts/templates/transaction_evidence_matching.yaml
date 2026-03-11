@@ -1,37 +1,47 @@
 template: |
-  Role: Transaction Data Auditor
-  Task: Compare extracted evidence data against the transaction record and determine if each field is satisfied by the evidence.
+  Role: Transaction Evidence Auditor (Column-Level Checklist)
+  Task: You are given ONE evidence document's extracted data and ALL transaction records (materials). Check whether this evidence satisfies each column in the checklist across ALL records collectively.
 
-  **Transaction Data:**
-  {transaction_data}
+  **All Transaction Records (materials):**
+  {all_records_data}
 
-  **Extracted Evidence (from all documents attached to this transaction):**
-  {extracted_evidence}
+  **Evidence Extracted Data (from 1 document):**
+  {evidence_data}
 
-  **Columns to Verify:** {columns_to_check}
+  **Checklist Columns to Verify:** {checklist_columns}
 
   **Matching Rules:**
-  1. **origin_id**: Match the origin_name against any seller/origin name found in evidence. Names may differ slightly (e.g. "GEPP Recycling Co." vs "บริษัท GEPP รีไซเคิล"). Allow reasonable fuzzy matching for Thai/English name variations.
-  2. **destination_ids**: Match destination names against buyer/destination names in evidence (e.g. receipts, weight tickets). Note: origin and destination may appear swapped in some documents - allow this ambiguity if names match.
-  3. **weight_kg**: Sum of all material weights from evidence should approximately match (within 5% tolerance).
-  4. **total_amount**: Grand total from evidence should approximately match (within 5% tolerance).
-  5. **transaction_date**: Date from evidence should match or be within 3 days of the transaction date.
+  - **String fields** (material_id, origin_id, destination_id): Fuzzy match allowed. Thai/English name variations are OK (e.g. "GEPP Recycling Co." ≈ "บริษัท GEPP รีไซเคิล", "Plastic PET Bottles" ≈ "ขวด PET"). A column is `match=true` only if ALL records' values for that column are found and matched in this evidence.
+  - **Numeric fields** (origin_weight_kg, origin_quantity, origin_price_per_unit, total_amount): Must match **line-by-line per material** with 5% tolerance. For each record's material, find the corresponding line in the evidence and compare the numeric value. A column is `match=true` only if ALL records' values match their corresponding evidence lines.
+  - **Date field** (transaction_date): **Exact match** required (no tolerance). If the document has a single date (e.g. a daily receipt), that date applies to all materials if it matches. A column is `match=true` only if ALL records' dates match.
+  - **Row-level integrity**: Data must match **within the same row** in the evidence. If a material name matches a row, the weight/price/total must come from that same row.
 
-  **For list-type evidence data (e.g. materials list from receipts):**
-  - Search through ALL items in the list to find relevant matches.
-  - Aggregate values where appropriate (e.g. sum weights across all materials).
+  **How to determine column-level results:**
+  For each column in the checklist:
+  - `found`: Did the evidence contain ANY data relevant to this column? (true/false)
+  - `match`: Did the evidence data match ALL records for this column? (true/false). Can only be true if found is also true.
+  - `error`: If found=true but match=false, provide a descriptive error message in Thai explaining the mismatch. Include specific values from both evidence and records.
+    Example errors:
+    - "น้ำหนัก ของวัสดุ 'ขวด PET' ในเอกสาร 34.52 กก. ไม่ตรงกับข้อมูล 12.77 กก."
+    - "ไม่พบวัสดุ 'กระดาษลัง' ในเอกสาร"
+    - "วันที่ในเอกสาร 2026-03-10 ไม่ตรงกับวันที่ทำรายการ 2026-03-12"
+    If match=true or found=false, set error to null.
 
   **OUTPUT FORMAT (JSON ONLY - NO PREAMBLE):**
   Return ONLY the raw JSON object:
   {{
-    "<column_name>": {{
-      "satisfy": <bool - evidence contains relevant data for this field>,
-      "match": <bool - the evidence data matches the transaction data>,
-      "evidence_value": "<what was found in evidence>",
-      "transaction_value": "<what the transaction record says>",
-      "note": "<brief explanation of matching result>"
+    "match": {{
+      "<column_name>": <bool>,
+      ...
     }},
-    ...
+    "found": {{
+      "<column_name>": <bool>,
+      ...
+    }},
+    "errors": {{
+      "<column_name>": "<error message in Thai>" | null,
+      ...
+    }}
   }}
 
-  Only include columns from the Columns to Verify list.
+  Only include columns from the Checklist Columns to Verify list.

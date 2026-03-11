@@ -1,6 +1,6 @@
 """
-Transaction Record-level Evidence Matching Prompt Builder
-Loads prompt from YAML and fills in record/evidence data
+Record-level Evidence Checklist Prompt Builder (Phase B)
+Sends 1 record + ALL its record-level evidence → match/found/errors for unmatched columns only
 """
 
 import json
@@ -17,42 +17,30 @@ def _load_template() -> str:
     return data['template']
 
 
-def build_record_matching_prompt(
+def build_record_checklist_prompt(
     record_data: Dict[str, Any],
-    extracted_evidence: List[Dict[str, Any]],
-    check_columns: Dict[str, bool]
+    record_evidence_list: List[Dict[str, Any]],
+    unmatched_columns: List[str],
 ) -> str:
     """
-    Build a prompt for LLM to match extracted evidence against a single transaction record.
+    Build a prompt for LLM to check ALL record-level evidence against 1 record,
+    only for columns that were NOT matched at the transaction level.
 
     Args:
-        record_data: {
-            'record_id': int,
-            'material_name': str,
-            'origin_weight_kg': float,
-            'origin_quantity': float,
-            'origin_price_per_unit': float,
-            'total_amount': float,
-            'transaction_date': str or None,
-            'destination_name': str or None,
-        }
-        extracted_evidence: list of {
-            'file_id': int,
-            'document_type_id': int,
-            'document_type_name': str,
-            'extracted_data': dict,
-            'source': 'transaction' | 'record',
-        }
-        check_columns: dict of column_name -> bool (which columns to check)
+        record_data: Single record with resolved names, e.g.:
+            {'record_id': 1, 'material_name': 'ขวด PET', 'origin_weight_kg': 12.5, ...}
+        record_evidence_list: List of all evidence for this record, e.g.:
+            [{'file_id': 456, 'document_type_name': '...', 'extracted_data': {...}}, ...]
+        unmatched_columns: Columns still unmatched from Phase A, e.g.:
+            ['origin_weight_kg', 'total_amount']
 
     Returns:
         Prompt string for LLM
     """
     template = _load_template()
-    columns_to_check = [k for k, v in check_columns.items() if v]
 
     return template.format(
         record_data=json.dumps(record_data, ensure_ascii=False, indent=2),
-        extracted_evidence=json.dumps(extracted_evidence, ensure_ascii=False, indent=2),
-        columns_to_check=json.dumps(columns_to_check),
+        record_evidence_list=json.dumps(record_evidence_list, ensure_ascii=False, indent=2),
+        unmatched_columns=json.dumps(unmatched_columns, ensure_ascii=False),
     )

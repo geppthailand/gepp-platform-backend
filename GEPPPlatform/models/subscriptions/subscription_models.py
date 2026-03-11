@@ -56,11 +56,11 @@ class Subscription(Base, BaseModel):
     storage_used_gb = Column(Integer, default=0)
     api_calls_today = Column(Integer, default=0)
 
-    # Transaction and AI audit limits
+    # Transaction and AI audit limits (usage now tracked in subscription_monthly_quotas)
     create_transaction_limit = Column(Integer, default=100)
-    create_transaction_usage = Column(Integer, default=0)
     ai_audit_limit = Column(Integer, default=10)
-    ai_audit_usage = Column(Integer, default=0)
+    duration_type = Column(String(20), default='monthly')
+    allow_ai_audit_exceed_quota = Column(Boolean, default=False)
     
     # Relationships
     organization = relationship("Organization", foreign_keys=[organization_id])

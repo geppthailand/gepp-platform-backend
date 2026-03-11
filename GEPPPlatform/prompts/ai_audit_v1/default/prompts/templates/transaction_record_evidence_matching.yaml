@@ -1,40 +1,49 @@
 template: |
-  Role: Transaction Record Data Auditor
-  Task: Compare extracted evidence data against a single transaction record (one material line) and determine if each field is satisfied by the evidence.
+  Role: Record Evidence Auditor (Per-Record Checklist)
+  Task: You are given ONE transaction record (one material line) and ALL its record-level evidence documents. Check whether the evidence satisfies each column in the checklist for THIS record only.
+
+  Note: These columns were NOT matched at the transaction level, so they need verification from record-level evidence.
 
   **Transaction Record Data (one material):**
   {record_data}
 
-  **Extracted Evidence (from transaction-level AND record-level documents):**
-  {extracted_evidence}
+  **Record-Level Evidence (all documents for this record):**
+  {record_evidence_list}
 
-  **Columns to Verify:** {columns_to_check}
+  **Unmatched Columns to Verify:** {unmatched_columns}
 
   **Matching Rules:**
-  1. **material_id**: Match the material_name against material names found in evidence. Names may differ between Thai and English or use different terminology (e.g. "Plastic PET Bottles" ≈ "ขวด PET", "Cardboard" ≈ "กระดาษลัง"). Allow reasonable fuzzy matching.
-  2. **origin_weight_kg**: Find the weight for this specific material in the evidence. Evidence may contain a list of materials - find the one matching this material_name. Weight must be in kg (evidence should already be converted). Allow 5% tolerance.
-  3. **origin_quantity**: Match quantity/count for this material if present in evidence. Allow 5% tolerance.
-  4. **origin_price_per_unit**: Match the unit price (per kg or per piece) for this material. This is NOT the line total. Allow 5% tolerance.
-  5. **total_amount**: Match the line total for this specific material (not the grand total). Allow 5% tolerance.
-  6. **transaction_date**: Date from evidence should match or be within 3 days. Check both transaction-level and record-level evidence dates.
-  7. **destination_id**: Match destination_name against buyer/company names in evidence.
+  - **String fields** (material_id, origin_id, destination_id): Fuzzy match allowed. Thai/English name variations are OK (e.g. "Plastic PET Bottles" ≈ "ขวด PET", "Cardboard" ≈ "กระดาษลัง"). Match this record's value against any of the provided evidence documents.
+  - **Numeric fields** (origin_weight_kg, origin_quantity, origin_price_per_unit, total_amount): Must match the record's value with 5% tolerance. Search through all evidence documents to find a matching value for this specific material.
+  - **Date field** (transaction_date): **Exact match** required (no tolerance). Search all evidence documents for a date matching this record's transaction_date.
+  - **Row-level integrity**: If evidence contains multiple materials, find the row matching this record's material and compare values from that same row.
+  - **Cross-document search**: Search across ALL provided evidence documents. If any single document satisfies a column, that column is matched.
 
-  **For list-type evidence data (e.g. materials list from a receipt):**
-  - Search through ALL items in the materials list to find the one matching this record's material.
-  - Material name matching should be fuzzy - the same material may have different names in different languages or formats.
-  - If no matching material is found in the list, mark satisfy as false.
+  **How to determine results:**
+  For each column in the unmatched list:
+  - `found`: Did ANY evidence document contain data relevant to this column for this record? (true/false)
+  - `match`: Did the evidence data match this record's value? (true/false). Can only be true if found is also true.
+  - `error`: If found=true but match=false, provide a descriptive error message in Thai explaining the mismatch. Include specific values.
+    Example errors:
+    - "น้ำหนัก ของวัสดุ 'ขวด PET' ในเอกสาร 34.52 กก. ไม่ตรงกับข้อมูล 12.77 กก."
+    - "ราคาต่อหน่วย ของวัสดุ 'กระดาษลัง' ในเอกสาร 5.00 บาท ไม่ตรงกับข้อมูล 4.50 บาท"
+    If match=true or found=false, set error to null.
 
   **OUTPUT FORMAT (JSON ONLY - NO PREAMBLE):**
   Return ONLY the raw JSON object:
   {{
-    "<column_name>": {{
-      "satisfy": <bool - evidence contains relevant data for this field>,
-      "match": <bool - the evidence data matches the record data>,
-      "evidence_value": "<what was found in evidence for this material>",
-      "record_value": "<what the transaction record says>",
-      "note": "<brief explanation of matching result>"
+    "match": {{
+      "<column_name>": <bool>,
+      ...
     }},
-    ...
+    "found": {{
+      "<column_name>": <bool>,
+      ...
+    }},
+    "errors": {{
+      "<column_name>": "<error message in Thai>" | null,
+      ...
+    }}
   }}
 
-  Only include columns from the Columns to Verify list.
+  Only include columns from the Unmatched Columns to Verify list.
