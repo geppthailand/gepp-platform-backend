@@ -266,9 +266,12 @@ class TransactionService:
             <div style="padding: 28px 24px;">
                 <p style="margin: 0 0 16px 0; font-size: 15px;">Hello,</p>
                 <p style="margin: 0 0 20px 0; font-size: 15px;">A new transaction has been created in your organization.</p>
-                <div style="background: #f8f9fa; border-radius: 8px; padding: 16px 20px; margin: 24px 0; border-left: 4px solid #27ae60;">
-                    <p style="margin: 0 0 4px 0; font-size: 12px; color: #6c757d; text-transform: uppercase; letter-spacing: 0.05em;">Transaction ID</p>
-                    <p style="margin: 0; font-size: 18px; font-weight: 600; color: #2c3e50;">#{transaction_id}</p>
+                <div style="background: #f8f9fa; border-radius: 8px; padding: 16px 20px; margin: 24px 0; border-left: 4px solid #27ae60; display: flex; align-items: center; justify-content: space-between;">
+                    <div>
+                        <p style="margin: 0 0 4px 0; font-size: 12px; color: #6c757d; text-transform: uppercase; letter-spacing: 0.05em;">Transaction ID</p>
+                        <p style="margin: 0; font-size: 18px; font-weight: 600; color: #2c3e50;">#{transaction_id}</p>
+                    </div>
+                    <a href="https://geppdata.com/waste-transactions#{transaction_id}" style="display: inline-block; padding: 10px 24px; background: linear-gradient(135deg, #8fc9a3 0%, #27ae60 100%); color: #ffffff; font-size: 14px; font-weight: 600; text-decoration: none; border-radius: 8px; white-space: nowrap;">See details</a>
                 </div>
                 <p style="margin: 0; font-size: 14px; color: #6c757d;">Log in to the platform to view details and take action if needed.</p>
             </div>
@@ -287,6 +290,8 @@ Hello,
 A new transaction has been created in your organization.
 
 Transaction ID: #{transaction_id}
+
+See details: https://geppdata.com/waste-transactions#{transaction_id}
 
 Log in to the platform to view details and take action if needed.
 
@@ -343,9 +348,12 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
             <div style="padding: 28px 24px;">
                 <p style="margin: 0 0 16px 0; font-size: 15px;">Hello,</p>
                 <p style="margin: 0 0 20px 0; font-size: 15px;">A transaction in your organization has been updated.</p>
-                <div style="background: #f8f9fa; border-radius: 8px; padding: 16px 20px; margin: 24px 0; border-left: 4px solid #3498db;">
-                    <p style="margin: 0 0 4px 0; font-size: 12px; color: #6c757d; text-transform: uppercase; letter-spacing: 0.05em;">Transaction ID</p>
-                    <p style="margin: 0; font-size: 18px; font-weight: 600; color: #2c3e50;">#{transaction_id}</p>
+                <div style="background: #f8f9fa; border-radius: 8px; padding: 16px 20px; margin: 24px 0; border-left: 4px solid #3498db; display: flex; align-items: center; justify-content: space-between;">
+                    <div>
+                        <p style="margin: 0 0 4px 0; font-size: 12px; color: #6c757d; text-transform: uppercase; letter-spacing: 0.05em;">Transaction ID</p>
+                        <p style="margin: 0; font-size: 18px; font-weight: 600; color: #2c3e50;">#{transaction_id}</p>
+                    </div>
+                    <a href="https://geppdata.com/waste-transactions#{transaction_id}" style="display: inline-block; padding: 10px 24px; background: linear-gradient(135deg, #7ec4e8 0%, #3498db 100%); color: #ffffff; font-size: 14px; font-weight: 600; text-decoration: none; border-radius: 8px; white-space: nowrap;">See details</a>
                 </div>
                 <p style="margin: 0; font-size: 14px; color: #6c757d;">Log in to the platform to view the latest details.</p>
             </div>
@@ -364,6 +372,8 @@ Hello,
 A transaction in your organization has been updated.
 
 Transaction ID: #{transaction_id}
+
+See details: https://geppdata.com/waste-transactions#{transaction_id}
 
 Log in to the platform to view the latest details.
 
@@ -386,6 +396,88 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
             except Exception as e:
                 logger.exception(
                     "Failed to send TXN_UPDATED email to %s for transaction_id=%s: %s",
+                    to_email,
+                    transaction_id,
+                    e,
+                )
+
+    def _send_txn_deleted_emails(
+        self,
+        transaction_id: int,
+        organization_id: int,
+        email_list: List[str],
+        resource: Dict[str, Any],
+    ) -> None:
+        """
+        Send TXN_DELETED notification emails to the given addresses via Lambda.
+        """
+        if not email_list:
+            return
+        subject = f"Transaction #{transaction_id} deleted – GEPP Platform"
+        html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f4f6f8; line-height: 1.6; color: #333;">
+    <div style="max-width: 560px; margin: 0 auto; padding: 32px 24px;">
+        <div style="background: #ffffff; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); overflow: hidden;">
+            <div style="background: linear-gradient(135deg, #2c3e50 0%, #e74c3c 100%); padding: 28px 24px; text-align: center;">
+                <h1 style="margin: 0; color: #ffffff; font-size: 22px; font-weight: 600; letter-spacing: -0.02em;">Transaction Deleted</h1>
+                <p style="margin: 8px 0 0 0; color: rgba(255,255,255,0.9); font-size: 14px;">GEPP Platform</p>
+            </div>
+            <div style="padding: 28px 24px;">
+                <p style="margin: 0 0 16px 0; font-size: 15px;">Hello,</p>
+                <p style="margin: 0 0 20px 0; font-size: 15px;">A transaction in your organization has been deleted.</p>
+                <div style="background: #f8f9fa; border-radius: 8px; padding: 16px 20px; margin: 24px 0; border-left: 4px solid #e74c3c; display: flex; align-items: center; justify-content: space-between;">
+                    <div>
+                        <p style="margin: 0 0 4px 0; font-size: 12px; color: #6c757d; text-transform: uppercase; letter-spacing: 0.05em;">Transaction ID</p>
+                        <p style="margin: 0; font-size: 18px; font-weight: 600; color: #2c3e50;">#{transaction_id}</p>
+                    </div>
+                    <a href="https://geppdata.com/waste-transactions#{transaction_id}" style="display: inline-block; padding: 10px 24px; background: linear-gradient(135deg, #f1a9a0 0%, #e74c3c 100%); color: #ffffff; font-size: 14px; font-weight: 600; text-decoration: none; border-radius: 8px; white-space: nowrap;">See details</a>
+                </div>
+                <p style="margin: 0; font-size: 14px; color: #6c757d;">Log in to the platform for more information.</p>
+            </div>
+            <hr style="border: none; border-top: 1px solid #eee; margin: 0;">
+            <div style="padding: 16px 24px;">
+                <p style="margin: 0; font-size: 12px; color: #95a5a6;">This is an automated message from GEPP Platform. Please do not reply to this email.</p>
+            </div>
+        </div>
+    </div>
+</body>
+</html>"""
+        text_content = f"""Transaction Deleted – GEPP Platform
+
+Hello,
+
+A transaction in your organization has been deleted.
+
+Transaction ID: #{transaction_id}
+
+See details: https://geppdata.com/waste-transactions#{transaction_id}
+
+Log in to the platform for more information.
+
+—
+This is an automated message from GEPP Platform. Please do not reply to this email."""
+        for to_email in email_list:
+            try:
+                sent = self._send_email_via_lambda(
+                    to_email=to_email,
+                    subject=subject,
+                    html_content=html_content,
+                    text_content=text_content,
+                )
+                logger.info(
+                    "TXN_DELETED email to %s for transaction_id=%s: sent=%s",
+                    to_email,
+                    transaction_id,
+                    sent,
+                )
+            except Exception as e:
+                logger.exception(
+                    "Failed to send TXN_DELETED email to %s for transaction_id=%s: %s",
                     to_email,
                     transaction_id,
                     e,
@@ -604,6 +696,111 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                 exc_info=True,
             )
 
+    def create_txn_deleted_notifications(
+        self,
+        transaction_id: int,
+        organization_id: int,
+        created_by_id: int,
+    ) -> None:
+        """
+        Create one notification (notification_type='TXN_DELETED'), user_notifications for users
+        whose roles have BELL (channels_mask 2 or 3), and collect emails for users whose roles
+        have EMAIL (channels_mask 1 or 3) then call _send_txn_deleted_emails.
+        """
+        try:
+            resource_dict = {'transaction_id': transaction_id}
+            resource_json = json.dumps(resource_dict)
+
+            r_bell = self.db.execute(
+                text("""
+                    SELECT role_id FROM organization_notification_settings
+                    WHERE organization_id = :org_id AND event = 'TXN_DELETED'
+                      AND is_active = TRUE AND deleted_date IS NULL
+                      AND (channels_mask & 2) != 0
+                """),
+                {'org_id': organization_id},
+            )
+            bell_role_ids = [row[0] for row in r_bell.fetchall()]
+
+            if bell_role_ids:
+                ins = self.db.execute(
+                    text("""
+                        INSERT INTO notifications
+                            (created_by_id, resource, notification_type, is_active, created_date, updated_date)
+                        VALUES (:created_by_id, CAST(:resource AS jsonb), :notification_type, TRUE, NOW(), NOW())
+                        RETURNING id
+                    """),
+                    {
+                        'created_by_id': created_by_id,
+                        'resource': resource_json,
+                        'notification_type': 'TXN_DELETED',
+                    },
+                )
+                row = ins.fetchone()
+                if row:
+                    notif_id = row[0]
+                    users_bell = self.db.execute(
+                        text("""
+                            SELECT DISTINCT id FROM user_locations
+                            WHERE organization_id = :org_id AND organization_role_id = ANY(:role_ids)
+                              AND is_user = TRUE AND is_active = TRUE AND deleted_date IS NULL
+                        """),
+                        {'org_id': organization_id, 'role_ids': bell_role_ids},
+                    )
+                    for u in users_bell.fetchall():
+                        self.db.execute(
+                            text("""
+                                INSERT INTO user_notifications
+                                    (user_id, notification_id, is_read, is_active, created_date, updated_date)
+                                VALUES (:user_id, :notification_id, FALSE, TRUE, NOW(), NOW())
+                                ON CONFLICT (user_id, notification_id) DO NOTHING
+                            """),
+                            {'user_id': u[0], 'notification_id': notif_id},
+                        )
+
+            r_email = self.db.execute(
+                text("""
+                    SELECT role_id FROM organization_notification_settings
+                    WHERE organization_id = :org_id AND event = 'TXN_DELETED'
+                      AND is_active = TRUE AND deleted_date IS NULL
+                      AND (channels_mask & 1) != 0
+                """),
+                {'org_id': organization_id},
+            )
+            email_role_ids = [row[0] for row in r_email.fetchall()]
+            email_list: List[str] = []
+            if email_role_ids:
+                users_email = self.db.execute(
+                    text("""
+                        SELECT DISTINCT id, email FROM user_locations
+                        WHERE organization_id = :org_id AND organization_role_id = ANY(:role_ids)
+                          AND is_user = TRUE AND is_active = TRUE AND deleted_date IS NULL
+                          AND email IS NOT NULL AND TRIM(email) != ''
+                    """),
+                    {'org_id': organization_id, 'role_ids': email_role_ids},
+                )
+                seen: set = set()
+                for u in users_email.fetchall():
+                    em = (u[1] or '').strip()
+                    if em and em not in seen:
+                        seen.add(em)
+                        email_list.append(em)
+
+            self._send_txn_deleted_emails(
+                transaction_id=transaction_id,
+                organization_id=organization_id,
+                email_list=email_list,
+                resource=resource_dict,
+            )
+            self.db.flush()
+        except Exception as e:
+            logger.error(
+                "Error creating TXN_DELETED notifications for transaction_id=%s: %s",
+                transaction_id,
+                str(e),
+                exc_info=True,
+            )
+
     def _send_txn_approved_emails(
         self,
         transaction_id: int,
@@ -632,9 +829,12 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
             <div style="padding: 28px 24px;">
                 <p style="margin: 0 0 16px 0; font-size: 15px;">Hello,</p>
                 <p style="margin: 0 0 20px 0; font-size: 15px;">Transaction {txn_ref} has been approved.</p>
-                <div style="background: #f8f9fa; border-radius: 8px; padding: 16px 20px; margin: 24px 0; border-left: 4px solid #27ae60;">
-                    <p style="margin: 0 0 4px 0; font-size: 12px; color: #6c757d; text-transform: uppercase; letter-spacing: 0.05em;">Transaction</p>
-                    <p style="margin: 0; font-size: 18px; font-weight: 600; color: #2c3e50;">{txn_ref}</p>
+                <div style="background: #f8f9fa; border-radius: 8px; padding: 16px 20px; margin: 24px 0; border-left: 4px solid #27ae60; display: flex; align-items: center; justify-content: space-between;">
+                    <div>
+                        <p style="margin: 0 0 4px 0; font-size: 12px; color: #6c757d; text-transform: uppercase; letter-spacing: 0.05em;">Transaction</p>
+                        <p style="margin: 0; font-size: 18px; font-weight: 600; color: #2c3e50;">{txn_ref}</p>
+                    </div>
+                    <a href="https://geppdata.com/waste-transactions#{transaction_id}" style="display: inline-block; padding: 10px 24px; background: linear-gradient(135deg, #8fc9a3 0%, #27ae60 100%); color: #ffffff; font-size: 14px; font-weight: 600; text-decoration: none; border-radius: 8px; white-space: nowrap;">See details</a>
                 </div>
                 <p style="margin: 0; font-size: 14px; color: #6c757d;">Log in to the platform to view details.</p>
             </div>
@@ -651,6 +851,8 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
 Hello,
 
 Transaction {txn_ref} has been approved.
+
+See details: https://geppdata.com/waste-transactions#{transaction_id}
 
 Log in to the platform to view details.
 
@@ -706,9 +908,12 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
             <div style="padding: 28px 24px;">
                 <p style="margin: 0 0 16px 0; font-size: 15px;">Hello,</p>
                 <p style="margin: 0 0 20px 0; font-size: 15px;">Transaction {txn_ref} has been rejected because one or all of its records have been rejected. Please check the platform.</p>
-                <div style="background: #f8f9fa; border-radius: 8px; padding: 16px 20px; margin: 24px 0; border-left: 4px solid #e74c3c;">
-                    <p style="margin: 0 0 4px 0; font-size: 12px; color: #6c757d; text-transform: uppercase; letter-spacing: 0.05em;">Transaction</p>
-                    <p style="margin: 0; font-size: 18px; font-weight: 600; color: #2c3e50;">{txn_ref}</p>
+                <div style="background: #f8f9fa; border-radius: 8px; padding: 16px 20px; margin: 24px 0; border-left: 4px solid #e74c3c; display: flex; align-items: center; justify-content: space-between;">
+                    <div>
+                        <p style="margin: 0 0 4px 0; font-size: 12px; color: #6c757d; text-transform: uppercase; letter-spacing: 0.05em;">Transaction</p>
+                        <p style="margin: 0; font-size: 18px; font-weight: 600; color: #2c3e50;">{txn_ref}</p>
+                    </div>
+                    <a href="https://geppdata.com/waste-transactions#{transaction_id}" style="display: inline-block; padding: 10px 24px; background: linear-gradient(135deg, #f1a9a0 0%, #e74c3c 100%); color: #ffffff; font-size: 14px; font-weight: 600; text-decoration: none; border-radius: 8px; white-space: nowrap;">See details</a>
                 </div>
                 <p style="margin: 0; font-size: 14px; color: #6c757d;">Log in to the platform to view details and take action if needed.</p>
             </div>
@@ -725,6 +930,8 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
 Hello,
 
 Transaction {txn_ref} has been rejected because one or all of its records have been rejected. Please check the platform.
+
+See details: https://geppdata.com/waste-transactions#{transaction_id}
 
 Log in to the platform to view details and take action if needed.
 
@@ -1992,8 +2199,11 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                         TransportTransaction.deleted_date.is_(None),
                     ).limit(1).first() is not None
                     if not has_transport:
-                        existing.transaction_record_id = list((existing.transaction_record_id or [])) + record_ids
-                        existing.updated_date = datetime.utcnow()
+                        current_ids = set(existing.transaction_record_id or [])
+                        new_ids = [rid for rid in record_ids if rid not in current_ids]
+                        if new_ids:
+                            existing.transaction_record_id = list(current_ids) + new_ids
+                            existing.updated_date = datetime.utcnow()
                         continue
                 # No existing group, or existing group already processed: create new group
                 if not existing:

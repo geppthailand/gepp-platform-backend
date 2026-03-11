@@ -32,12 +32,6 @@ class TransactionAudit(Base, BaseModel):
     token_usage = Column(JSONB, nullable=True)
     model_version = Column(String(100), nullable=True)
 
-    # Override BaseModel's DateTime columns with BIGINT (milliseconds since epoch)
-    # This matches the database schema in migration 054
-    created_date = Column(BigInteger, nullable=True)
-    updated_date = Column(BigInteger, nullable=True)
-    deleted_date = Column(BigInteger, nullable=True)
-
     # Relationships
     transaction = relationship("Transaction", foreign_keys=[transaction_id], back_populates="audits")
     organization = relationship("Organization", foreign_keys=[organization_id])
