@@ -64,18 +64,17 @@ class AuditSettingsService:
             OrganizationAuditDocRequireTypes.deleted_date.is_(None),
         ).first()
 
-        tx_requires = data.get('transaction_document_requires', [])
         rec_requires = data.get('record_document_requires', [])
 
         if record:
-            record.transaction_document_requires = tx_requires
+            record.transaction_document_requires = []
             record.record_document_requires = rec_requires
             flag_modified(record, 'transaction_document_requires')
             flag_modified(record, 'record_document_requires')
         else:
             record = OrganizationAuditDocRequireTypes(
                 organization_id=organization_id,
-                transaction_document_requires=tx_requires,
+                transaction_document_requires=[],
                 record_document_requires=rec_requires,
             )
             self.db.add(record)

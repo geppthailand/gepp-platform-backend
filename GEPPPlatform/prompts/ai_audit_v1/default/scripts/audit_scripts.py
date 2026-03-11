@@ -818,14 +818,13 @@ def _step7_check_required_docs(
     doc_type_specs: List[Dict] = None,
 ) -> Dict[str, Any]:
     """
-    Step 7: Check if required document types are present.
-    Transaction images are reusable for records.
+    Step 7: Check if required document types are present at record level.
+    Transaction images are reusable for records (counted toward record requirements).
     Returns missing doc info with resolved names.
     """
-    tx_doc_requires = doc_requires.get('transaction_document_requires', [])
     rec_doc_requires = doc_requires.get('record_document_requires', [])
 
-    if not tx_doc_requires and not rec_doc_requires:
+    if not rec_doc_requires:
         return {'all_present': True, 'missing_transaction_docs': [], 'missing_record_docs': {}}
 
     # Build doc type ID → name map
@@ -851,13 +850,11 @@ def _step7_check_required_docs(
         if ev.get('document_type_id') and ev['document_type_id'] != 0:
             file_to_type[ev['file_id']] = ev['document_type_id']
 
-    # Check transaction-level requirements
+    # Collect transaction-level present types (reusable for all records)
     tx_present_types = set()
     for fid in transaction_file_ids:
         if fid in file_to_type:
             tx_present_types.add(file_to_type[fid])
-
-    missing_tx = [_resolve_doc_name(dt_id) for dt_id in tx_doc_requires if dt_id not in tx_present_types]
 
     # Check record-level requirements (tx images are reusable)
     missing_records = {}
@@ -871,11 +868,11 @@ def _step7_check_required_docs(
         if missing_rec:
             missing_records[rec_id] = missing_rec
 
-    all_present = len(missing_tx) == 0 and len(missing_records) == 0
+    all_present = len(missing_records) == 0
 
     return {
         'all_present': all_present,
-        'missing_transaction_docs': missing_tx,
+        'missing_transaction_docs': [],
         'missing_record_docs': missing_records,
     }
 
@@ -894,11 +891,9 @@ def _step8_match_evidence_to_data(
     """
     from GEPPPlatform.models.users.user_location import UserLocation
     from GEPPPlatform.models.cores.references import Material
-    from ..prompts.builders.transaction_evidence_matching import build_transaction_matching_prompt
     from ..prompts.builders.transaction_record_evidence_matching import build_record_matching_prompt
     from ..clients.llm_client import call_llm_text_only, parse_json_response
 
-    tx_checks = check_columns_config.get('transaction_checks', {})
     rec_checks = check_columns_config.get('transaction_record_checks', {})
 
     # Prepare evidence data (all classified evidence)
@@ -913,41 +908,6 @@ def _step8_match_evidence_to_data(
     ]
 
     result = {'transaction_match': None, 'record_matches': {}}
-
-    # --- Transaction-level matching ---
-    active_tx_checks = {k: v for k, v in tx_checks.items() if v}
-    if active_tx_checks and evidence_for_prompt:
-        # Resolve names for matching
-        origin_name = ''
-        if tx.origin_id:
-            origin = db.query(UserLocation).filter(UserLocation.id == tx.origin_id).first()
-            origin_name = (origin.name_en or '') if origin else ''
-
-        destination_names = []
-        dest_ids = tx.destination_ids or []
-        if dest_ids:
-            dests = db.query(UserLocation).filter(UserLocation.id.in_(dest_ids)).all()
-            dest_map = {d.id: (d.name_en or '') for d in dests}
-            destination_names = [dest_map.get(did, '') for did in dest_ids]
-
-        tx_data = {
-            'transaction_id': tx.id,
-            'origin_name': origin_name,
-            'destination_names': destination_names,
-            'weight_kg': float(tx.weight_kg) if tx.weight_kg else 0,
-            'total_amount': float(tx.total_amount) if tx.total_amount else 0,
-            'transaction_date': tx.transaction_date.strftime('%Y-%m-%d') if tx.transaction_date else None,
-        }
-
-        prompt = build_transaction_matching_prompt(tx_data, evidence_for_prompt, active_tx_checks)
-        try:
-            response = call_llm_text_only(llm, prompt)
-            token_usage['input_tokens'] += response.get('usage', {}).get('input_tokens', 0)
-            token_usage['output_tokens'] += response.get('usage', {}).get('output_tokens', 0)
-            result['transaction_match'] = parse_json_response(response['content'])
-        except Exception as e:
-            logger.error(f"Transaction matching failed for #{tx.id}: {str(e)}")
-            result['transaction_match'] = {'error': str(e)}
 
     # --- Record-level matching (sequential — db session not thread-safe) ---
     active_rec_checks = {k: v for k, v in rec_checks.items() if v}
