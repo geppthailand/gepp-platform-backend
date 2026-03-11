@@ -98,21 +98,6 @@ def handle_traceability_routes(event: Dict[str, Any], data: Dict[str, Any], **pa
             default_filename_prefix="traceability_report",
         )
 
-    # new endpoint: return hierarchy data per transport transaction row filtered by date range
-    if path == "/api/traceability/hierarchy/rows" and method == "GET":
-        result = traceability_service.get_traceability_hierarchy_per_row(
-            organization_id=current_user_organization_id,
-            **query_params,
-        )
-        return {
-            "message": "Traceability hierarchy (per row)",
-            "data": result.get("data", []),
-            "page": result.get("page", 1),
-            "page_size": result.get("page_size", 10),
-            "total_items": result.get("total_items", 0),
-            "total_pages": result.get("total_pages", 0),
-        }
-
     if path == "/api/traceability" and method == "PUT":
         body = data or {}
         data_list = body.get("data")

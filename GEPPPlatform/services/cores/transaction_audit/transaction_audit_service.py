@@ -2123,7 +2123,7 @@ class TransactionAuditService:
                         processing_time_ms=result.get('processing_time_ms'),
                         token_usage=result.get('token_usage', {}),
                         model_version=result.get('model_version', 'gemini-2.5-flash-lite'),
-                        created_date=int(datetime.now(timezone.utc).timestamp() * 1000),
+                        created_date=datetime.now(timezone.utc),
                         created_by_id=None  # System-generated
                     )
                     db.add(transaction_audit)

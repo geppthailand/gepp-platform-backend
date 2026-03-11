@@ -249,7 +249,7 @@ class ManualAuditService:
                 processing_time_ms=None,
                 token_usage=None,
                 model_version=None,
-                created_date=int(datetime.now(timezone.utc).timestamp() * 1000),
+                created_date=datetime.now(timezone.utc),
                 created_by_id=auditor_user_id
             )
             db.add(transaction_audit)
@@ -363,7 +363,7 @@ class ManualAuditService:
                 processing_time_ms=None,
                 token_usage=None,
                 model_version=None,
-                created_date=int(datetime.now(timezone.utc).timestamp() * 1000),
+                created_date=datetime.now(timezone.utc),
                 created_by_id=auditor_user_id
             )
             db.add(transaction_audit)

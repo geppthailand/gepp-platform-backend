@@ -19,7 +19,6 @@ from ....exceptions import (
     ValidationException
 )
 
-
 def _upsert_traceability_group_on_approve(db_session: Any, transaction_id: int) -> None:
     """After a transaction or its records are approved, upsert records into traceability groups."""
     try:
