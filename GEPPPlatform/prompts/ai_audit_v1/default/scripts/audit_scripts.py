@@ -20,8 +20,6 @@ from sqlalchemy import and_
 logger = logging.getLogger(__name__)
 
 # Constants
-MAX_TRANSACTIONS_PER_BATCH = 25
-MAX_THREAD_WORKERS = 10
 ALLOWED_TRANSACTION_METHODS = ('origin', 'qr_input')
 SETTINGS_PATH = Path(__file__).parent.parent / 'settings.json'
 
@@ -123,8 +121,10 @@ def run_default_audit(get_session_factory: Callable) -> Dict[str, Any]:
             db.close()
 
         # Level-1 threading: one thread per org's audit history
+        settings = _load_settings()
+        max_workers = settings.get('max_thread_workers', 10)
         results = []
-        with ThreadPoolExecutor(max_workers=min(len(unique_histories), MAX_THREAD_WORKERS)) as executor:
+        with ThreadPoolExecutor(max_workers=min(len(unique_histories), max_workers)) as executor:
             futures = {}
             for history_id, org_id in unique_histories:
                 future = executor.submit(
@@ -207,6 +207,10 @@ def _process_single_audit_history(
             db.commit()
             return {'history_id': history_id, 'status': 'completed', 'processed_count': 0, 'message': 'No transactions in batch'}
 
+        settings = _load_settings()
+        max_tx_per_batch = settings.get('max_transactions_per_batch', 25)
+        max_workers = settings.get('max_thread_workers', 10)
+
         transactions = db.query(Transaction).filter(
             and_(
                 Transaction.id.in_(tx_ids),
@@ -214,7 +218,7 @@ def _process_single_audit_history(
                 Transaction.transaction_method.in_(ALLOWED_TRANSACTION_METHODS),
                 Transaction.deleted_date.is_(None)
             )
-        ).order_by(Transaction.id.asc()).limit(MAX_TRANSACTIONS_PER_BATCH).all()
+        ).order_by(Transaction.id.asc()).limit(max_tx_per_batch).all()
 
         if not transactions:
             # Check if there are any remaining queued transactions
@@ -316,7 +320,7 @@ def _process_single_audit_history(
 
         # Level-2 threading: one thread per transaction
         tx_results = []
-        with ThreadPoolExecutor(max_workers=min(len(transaction_ids), MAX_THREAD_WORKERS)) as executor:
+        with ThreadPoolExecutor(max_workers=min(len(transaction_ids), max_workers)) as executor:
             futures = {}
             for tx_id in transaction_ids:
                 future = executor.submit(
@@ -941,7 +945,7 @@ def _step6_classify_evidence(
     # Classify remaining files in parallel (LLM calls are thread-safe, DB writes are not)
     if file_ids_to_classify:
         new_results = []
-        with ThreadPoolExecutor(max_workers=min(len(file_ids_to_classify), 5)) as classify_executor:
+        with ThreadPoolExecutor(max_workers=len(file_ids_to_classify)) as classify_executor:
             futures = {
                 classify_executor.submit(classify_single_file, fid, all_files[fid]): fid
                 for fid in file_ids_to_classify
@@ -1159,7 +1163,7 @@ def _step8a_transaction_level_check(
 
     # Run evidence checks in parallel
     all_parsed = []
-    with ThreadPoolExecutor(max_workers=min(len(tx_evidence), 5)) as ev_executor:
+    with ThreadPoolExecutor(max_workers=len(tx_evidence)) as ev_executor:
         futures = {ev_executor.submit(_check_single_evidence, ev): ev for ev in tx_evidence}
         for future in as_completed(futures):
             parsed, usage = future.result()
@@ -1265,7 +1269,7 @@ def _step8b_record_level_check(
             return record.id, rec_checklist, {}
 
     # Run record checks in parallel
-    with ThreadPoolExecutor(max_workers=min(len(records), 5)) as rec_executor:
+    with ThreadPoolExecutor(max_workers=len(records)) as rec_executor:
         futures = {rec_executor.submit(_check_single_record, r): r.id for r in records}
         for future in as_completed(futures):
             try:

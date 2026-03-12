@@ -3,5 +3,5 @@
     "temperature": 0.1,
     "max_tokens": 4096,
     "max_transactions_per_batch": 25,
-    "max_thread_workers": 10
+    "max_thread_workers": 1000
 }
