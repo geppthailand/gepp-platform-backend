@@ -696,14 +696,13 @@ def _draw_flow_chart(
             max_display = min(n_info, 8)
             has_overflow = n_info > max_display
             line_spacing_t = 0.12 * inch
-            top_pad_t = 0.15 * inch
-            bottom_pad_t = 0.10 * inch
+            top_pad_t = 0.20 * inch
+            bottom_pad_t = 0.20 * inch
             title_gap_t = 0.16 * inch
             if max_display > 0:
-                items_h = title_gap_t + max_display * line_spacing_t
-                if has_overflow:
-                    items_h += line_spacing_t
-                transit_card_h = top_pad_t + items_h + bottom_pad_t
+                n_lines = max_display + (1 if has_overflow else 0)
+                content_h = title_gap_t + (n_lines - 1) * line_spacing_t
+                transit_card_h = top_pad_t + content_h + bottom_pad_t
             else:
                 transit_card_h = 0.35 * inch
             transit_card_y = mid_y - transit_card_h / 2
@@ -717,12 +716,8 @@ def _draw_flow_chart(
             except Exception:
                 pdf.setFont("Helvetica-Bold", 7)
             transit_title = "ชื่อผู้จัดส่ง"
-            try:
-                ttw = pdf.stringWidth(transit_title, "IBMPlexSansThai-Bold", 7)
-            except Exception:
-                ttw = pdf.stringWidth(transit_title, "Helvetica-Bold", 7)
             title_y_t = transit_card_y + transit_card_h - top_pad_t
-            pdf.drawString(cx2 + (col_w_rest - ttw) / 2, title_y_t, transit_title)
+            pdf.drawString(cx2 + 0.08 * inch, title_y_t, transit_title)
             if max_display > 0:
                 try:
                     pdf.setFont("IBMPlexSansThai-Regular", 6)
