@@ -672,160 +672,204 @@ def _handle_diversion_report(
     filters: Dict[str, Any],
     current_user: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
-    """Handle /api/reports/diversion endpoint — optimized single-query path"""
+    """Handle /api/reports/diversion endpoint — uses traceability hierarchy data."""
 
-    current_user_id = (current_user or {}).get('user_id') or (current_user or {}).get('id')
+    from ..traceability.traceability_service import TraceabilityService
+    traceability_service = TraceabilityService(reports_service.db)
 
-    # Use optimized single-query path (returns lightweight tuples)
-    result = reports_service.get_overview_data(
-        organization_id=organization_id,
-        filters=filters if filters else None,
-        current_user_id=current_user_id
-    )
-    rows = result.get('rows', [])
+    # --- Resolve date range into individual (year, month) pairs ---
+    date_from_str = filters.get("date_from")
+    date_to_str = filters.get("date_to")
+    months_to_query: list = []
+    if date_from_str and date_to_str:
+        try:
+            tz = ZoneInfo("Asia/Bangkok")
+            dt_from = datetime.fromisoformat(str(date_from_str).replace("Z", "+00:00"))
+            dt_to = datetime.fromisoformat(str(date_to_str).replace("Z", "+00:00"))
+            if dt_from.tzinfo is None:
+                dt_from = dt_from.replace(tzinfo=timezone.utc)
+            if dt_to.tzinfo is None:
+                dt_to = dt_to.replace(tzinfo=timezone.utc)
+            local_from = dt_from.astimezone(tz)
+            local_to = dt_to.astimezone(tz)
+            y, m = local_from.year, local_from.month
+            while (y, m) <= (local_to.year, local_to.month):
+                months_to_query.append((y, m))
+                m += 1
+                if m > 12:
+                    m = 1
+                    y += 1
+        except Exception:
+            pass
 
-    # Tuple indices from get_overview_data:
-    # 0: origin_quantity, 1: transaction_date, 2: created_transaction_id,
-    # 3: origin_id, 4: txn_status, 5: unit_weight, 6: calc_ghg,
-    # 7: mat_category_id, 8: mat_main_material_id, 9: material_tags,
-    # 10: origin_weight_kg, 11: record_category_id, 12: record_main_material_id,
-    # 13: material_id, 14: material_name_en, 15: material_name_th,
-    # 16: disposal_method, 17: record_status
+    if not months_to_query:
+        return {
+            "card_data": {"total_origin": 0, "complete_transfer": 0.0, "processing_transfer": 0.0, "completed_rate": 0.0},
+            "sankey_data": [["From", "To", "Weight"]],
+            "material_table": [],
+            "materials_data": [],
+        }
 
-    unique_origins = set()
-    transaction_map: Dict[int, Dict] = {}
+    # --- Build kwargs for traceability hierarchy (material / origin filters) ---
+    # material filter -> passed as material_id (comma-separated)
+    hierarchy_kwargs: Dict[str, Any] = {}
+    mat_ids = filters.get("material_ids")
+    if mat_ids:
+        hierarchy_kwargs["material_id"] = ",".join(str(m) for m in mat_ids)
+    # origin filter -> passed as origin_id (pipe-separated composite)
+    origin_combos = filters.get("origin_combos")
+    origin_ids = filters.get("origin_ids")
+    if origin_combos:
+        # Use first combo for per-month query; multi-origin handled below via post-filter
+        combo = origin_combos[0]
+        hierarchy_kwargs["origin_id"] = "|".join(str(v) if v is not None else "" for v in combo)
+    elif origin_ids:
+        hierarchy_kwargs["origin_id"] = str(origin_ids[0])
+
+    # --- Collect hierarchy data across all months ---
+    all_hierarchy: list = []
+    for year, month in months_to_query:
+        first_day = datetime(year, month, 1, 0, 0, 0, tzinfo=ZoneInfo("Asia/Bangkok"))
+        kw = dict(hierarchy_kwargs)
+        kw["date_from"] = first_day.astimezone(timezone.utc).isoformat()
+        kw["date_to"] = first_day.astimezone(timezone.utc).isoformat()  # same month
+        result = traceability_service.get_traceability_hierarchy(organization_id, _exclude_idle=True, **kw)
+        hierarchy_data = result.get("data") or []
+        all_hierarchy.extend(hierarchy_data)
+
+    # --- Walk hierarchy to compute card_data, sankey, material_table, materials_data ---
+    _DIVERTED = {
+        "Preparation for reuse", "Recycling (Own)",
+        "Other recover operation", "Recycle",
+    }
+    _DIRECTED = {
+        "Composted by municipality", "Municipality receive",
+        "Incineration without energy", "Incineration with energy",
+    }
+
+    unique_origins: set = set()
+    complete_transfer = 0.0
+    total_group_weight = 0.0  # sum of all group weights (for weighted avg)
+    completed_weight = 0.0    # sum of group_weight * group_completed_pct / 100
     sankey_map: Dict[tuple, float] = {}
     material_table_map: Dict[int, Dict] = {}
-    main_material_ids: set = set()
-    category_ids: set = set()
+    material_ids_set: set = set()
     category_to_main_map: Dict[int, set] = {}
 
-    for row in rows:
-        origin_qty = float(row[0] or 0)
-        txn_date = row[1]
-        txn_id = row[2]
-        origin_id = row[3]
-        unit_weight = float(row[5] or 0)
-        origin_weight_kg = float(row[10] or 0)
-        cat_id = row[7] or row[11]
-        mm_id = row[8] or row[12]
-        disposal_method = (row[16] or '').strip() or None
-        record_status = (row[17] or '').lower()
+    def _get_leaves(nodes: list) -> list:
+        """Collect all leaf transport nodes."""
+        leaves = []
+        for n in nodes:
+            if not isinstance(n, dict):
+                continue
+            children = n.get("children") or []
+            if children:
+                leaves.extend(_get_leaves(children))
+            else:
+                leaves.append(n)
+        return leaves
 
-        # Weight: prefer qty * unit_weight, fall back to origin_weight_kg
-        weight = origin_qty * unit_weight if unit_weight > 0 else origin_weight_kg
-        if weight <= 0 and origin_weight_kg > 0:
-            weight = origin_weight_kg
-
-        # Track category → main_material mapping
-        if cat_id is not None:
-            try:
-                cid_int = int(cat_id)
-                category_ids.add(cid_int)
-                if mm_id is not None:
-                    mm_id_int = int(mm_id)
-                    if cid_int not in category_to_main_map:
-                        category_to_main_map[cid_int] = set()
-                    category_to_main_map[cid_int].add(mm_id_int)
-            except Exception:
-                pass
-
-        # Track unique origins
-        if origin_id is not None:
+    for origin_node in all_hierarchy:
+        if not isinstance(origin_node, dict):
+            continue
+        origin_id = origin_node.get("origin_id")
+        group_children = origin_node.get("children") or []
+        if group_children and origin_id is not None:
             unique_origins.add(origin_id)
 
-        # Group by transaction for completion tracking
-        if txn_id is not None:
-            if txn_id not in transaction_map:
-                transaction_map[txn_id] = {'records': [], 'total_weight': 0.0}
-            transaction_map[txn_id]['records'].append({'status': record_status, 'weight': weight})
-            transaction_map[txn_id]['total_weight'] += weight
+        for group_node in group_children:
+            if not isinstance(group_node, dict):
+                continue
+            group_weight = float(group_node.get("weight") or group_node.get("total_weight_kg") or 0)
+            group_month = group_node.get("transaction_month")
+            # Use the group's (original) material for sankey / material_table
+            group_mat_info = group_node.get("material") or {}
+            main_material_id = group_mat_info.get("main_material_id")
+            category_id = group_mat_info.get("category_id")
+            leaves = _get_leaves(group_node.get("children") or [])
 
-        # Resolve main_material_id as int
-        main_material_id = None
-        if mm_id is not None:
-            try:
-                main_material_id = int(mm_id)
-            except Exception:
-                pass
+            # Track category -> main_material mapping once per group
+            if main_material_id is not None and category_id is not None:
+                try:
+                    cid = int(category_id)
+                    mid = int(main_material_id)
+                    category_to_main_map.setdefault(cid, set()).add(mid)
+                except (ValueError, TypeError):
+                    pass
 
-        # Build sankey data (MainMaterial → DisposalMethod flows)
-        if main_material_id is not None and disposal_method:
-            main_material_ids.add(main_material_id)
-            key = (main_material_id, disposal_method)
-            sankey_map[key] = sankey_map.get(key, 0.0) + weight
+            group_completed_pct = 0.0  # sum of percentage_of_group for arrived+method leaves in this group
+            total_group_weight += group_weight
 
-        # Build material_table data
-        if main_material_id is not None:
-            main_material_ids.add(main_material_id)
+            for leaf in leaves:
+                status = leaf.get("status") or ""
+                method = (leaf.get("disposal_method") or "").strip() or None
+                leaf_weight = float(leaf.get("weight") or 0)
+                leaf_pct = float(leaf.get("percentage_of_group") or 0)
 
-            if main_material_id not in material_table_map:
-                material_table_map[main_material_id] = {
-                    'monthly_data': {},
-                    'transactions': {},
-                    'destinations': set()
-                }
+                # complete_transfer: sum weight of leafest nodes that have a disposal method and arrived
+                if status == "arrived" and method:
+                    complete_transfer += leaf_weight
+                    group_completed_pct += leaf_pct
 
-            entry = material_table_map[main_material_id]
+                # sankey: group material -> disposal method
+                if main_material_id is not None and method:
+                    material_ids_set.add(main_material_id)
+                    key = (main_material_id, method)
+                    sankey_map[key] = sankey_map.get(key, 0.0) + leaf_weight
 
-            # Aggregate by month
-            if txn_date is not None:
-                dt = txn_date if isinstance(txn_date, datetime) else _parse_datetime(str(txn_date))
-                if dt:
-                    month = dt.month
-                    entry['monthly_data'][month] = entry['monthly_data'].get(month, 0.0) + weight
+                # material_table: aggregate by group's main_material_id and month
+                if main_material_id is not None:
+                    material_ids_set.add(main_material_id)
+                    if main_material_id not in material_table_map:
+                        material_table_map[main_material_id] = {
+                            "monthly_data": {},
+                            "destinations": set(),
+                            "has_incomplete": False,
+                        }
+                    entry = material_table_map[main_material_id]
+                    if group_month:
+                        entry["monthly_data"][group_month] = entry["monthly_data"].get(group_month, 0.0) + leaf_weight
+                    if method:
+                        entry["destinations"].add(method)
+                    if status != "arrived" or not method:
+                        entry["has_incomplete"] = True
 
-            # Track transaction statuses
-            if txn_id is not None:
-                if txn_id not in entry['transactions']:
-                    entry['transactions'][txn_id] = []
-                entry['transactions'][txn_id].append(record_status)
+            # Weighted contribution of this group's completion rate
+            completed_weight += group_weight * group_completed_pct / 100
 
-            # Track disposal methods
-            if disposal_method:
-                entry['destinations'].add(disposal_method)
+    # --- Card data ---
+    completed_rate = round((completed_weight / total_group_weight * 100) if total_group_weight > 0 else 0.0, 2)
+    processing_transfer = round(100.0 - completed_rate, 2)
 
-    # Calculate completion metrics
-    total_transactions, completed_transactions, complete_transfer = _check_transaction_completion(transaction_map)
-    completed_rate = (completed_transactions / total_transactions * 100) if total_transactions > 0 else 0.0
-    processing_transfer = 100.0 - completed_rate
+    # --- Fetch main material names ---
+    main_material_names = _fetch_main_material_names(reports_service.db, material_ids_set)
 
-    # Fetch main material names
-    main_material_names = _fetch_main_material_names(reports_service.db, main_material_ids)
-
-    # Build sankey_data array
+    # --- Sankey ---
     sankey_data = [["From", "To", "Weight"]]
     for (mm_id_key, method), w in sankey_map.items():
         from_name = main_material_names.get(mm_id_key, f"Material {mm_id_key}")
         to_name = method or "Unknown Disposal"
         sankey_data.append([from_name, to_name, w])
 
-    # Build material_table
+    # --- Material table ---
     month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
     material_table = []
-
     for mid, entry in material_table_map.items():
         monthly_data = [
-            {'month': month_names[m - 1], 'value': entry['monthly_data'][m]}
+            {"month": month_names[m - 1], "value": entry["monthly_data"][m]}
             for m in range(1, 13)
-            if m in entry['monthly_data']
+            if m in entry["monthly_data"]
         ]
-
-        all_completed = all(
-            all(s == 'completed' for s in statuses)
-            for statuses in entry['transactions'].values()
-        )
-        status = 'Completed' if all_completed else 'Processing'
-
+        status = "Processing" if entry["has_incomplete"] else "Completed"
         material_table.append({
-            'key': mid,
-            'materials': main_material_names.get(mid, f"Material {mid}"),
-            'data': monthly_data,
-            'status': status,
-            'destination': list(entry['destinations'])
+            "key": mid,
+            "materials": main_material_names.get(mid, f"Material {mid}"),
+            "data": monthly_data,
+            "status": status,
+            "destination": list(entry["destinations"]),
         })
 
-    # Build materials_data: Dangerous (categories 5,6) vs Non-Dangerous
+    # --- Materials data (Dangerous vs Non-Dangerous) ---
     danger_cids = {5, 6}
     dangerous_main_ids: set = set()
     non_dangerous_main_ids: set = set()
@@ -849,7 +893,7 @@ def _handle_diversion_report(
     return {
         "card_data": {
             "total_origin": len(unique_origins),
-            "complete_transfer": complete_transfer,
+            "complete_transfer": round(complete_transfer, 2),
             "processing_transfer": processing_transfer,
             "completed_rate": completed_rate,
         },
