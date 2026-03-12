@@ -301,18 +301,20 @@ def _process_single_audit_history(
                     'message': f'AI audit quota exhausted (remaining={remaining}, needed={total_record_count})',
                 }
 
+        # Extract transaction IDs before closing session (ORM objects become detached after close)
+        transaction_ids = [tx.id for tx in transactions]
         db.close()  # Close parent session before threading
 
         # Level-2 threading: one thread per transaction
         tx_results = []
-        with ThreadPoolExecutor(max_workers=min(len(transactions), MAX_THREAD_WORKERS)) as executor:
+        with ThreadPoolExecutor(max_workers=min(len(transaction_ids), MAX_THREAD_WORKERS)) as executor:
             futures = {}
-            for tx in transactions:
+            for tx_id in transaction_ids:
                 future = executor.submit(
                     _process_single_transaction,
-                    tx.id, organization_id, config, model_version, session_factory
+                    tx_id, organization_id, config, model_version, session_factory
                 )
-                futures[future] = tx.id
+                futures[future] = tx_id
 
             for future in as_completed(futures):
                 tx_id = futures[future]
@@ -376,7 +378,7 @@ def _process_single_audit_history(
                 processed_tx_ids = [r['transaction_id'] for r in tx_results if r.get('status') in ('approved', 'rejected')]
                 if processed_tx_ids:
                     processed_record_count = db.query(TransactionRecord).filter(
-                        TransactionRecord.transaction_id.in_(processed_tx_ids),
+                        TransactionRecord.created_transaction_id.in_(processed_tx_ids),
                         TransactionRecord.deleted_date.is_(None),
                     ).count()
 
@@ -494,10 +496,12 @@ def _process_single_transaction(
         logger.info(f"Tx #{transaction_id} Step 6 (classify): {time.time()-t0:.1f}s — {len(classified_evidence)} files classified")
 
         # === Step 7: Check required docs ===
+        all_record_ids = [r.id for r in records]
         doc_check = _step7_check_required_docs(
             classified_evidence, config['doc_requires'],
             image_data.get('transaction_file_ids', []),
             image_data.get('record_file_ids', {}),
+            all_record_ids=all_record_ids,
             doc_type_specs=config['doc_type_specs'],
         )
 
@@ -935,11 +939,13 @@ def _step7_check_required_docs(
     doc_requires: Dict[str, Any],
     transaction_file_ids: List[int],
     record_file_ids: Dict[int, List[int]],
+    all_record_ids: List[int] = None,
     doc_type_specs: List[Dict] = None,
 ) -> Dict[str, Any]:
     """
     Step 7: Check if required document types are present at record level.
     Transaction images are reusable for records (counted toward record requirements).
+    Checks ALL records (including those with no images) against requirements.
     Returns missing doc info with resolved names.
     """
     rec_doc_requires = doc_requires.get('record_document_requires', [])
@@ -976,9 +982,13 @@ def _step7_check_required_docs(
         if fid in file_to_type:
             tx_present_types.add(file_to_type[fid])
 
-    # Check record-level requirements (tx images are reusable)
+    # Check ALL records against requirements (not just those with files)
+    # Use all_record_ids to ensure records with no images are also checked
+    check_record_ids = set(all_record_ids or []) | set(record_file_ids.keys())
+
     missing_records = {}
-    for rec_id, rec_fids in record_file_ids.items():
+    for rec_id in check_record_ids:
+        rec_fids = record_file_ids.get(rec_id, [])
         rec_present_types = set(tx_present_types)  # Include tx-level images
         for fid in rec_fids:
             if fid in file_to_type:

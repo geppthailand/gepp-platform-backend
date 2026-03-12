@@ -134,4 +134,33 @@ def parse_json_response(response_text: str) -> Dict[str, Any]:
             lines = lines[:-1]
         text = '\n'.join(lines).strip()
 
-    return json.loads(text)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        # LLM may return extra text after JSON — extract first complete JSON object
+        start = text.find('{')
+        if start == -1:
+            raise
+        depth = 0
+        in_string = False
+        escape_next = False
+        for i in range(start, len(text)):
+            ch = text[i]
+            if escape_next:
+                escape_next = False
+                continue
+            if ch == '\\' and in_string:
+                escape_next = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:
+                    return json.loads(text[start:i + 1])
+        raise

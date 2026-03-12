@@ -131,6 +131,13 @@ def handle_transaction_audit_routes(event: Dict[str, Any], data: Dict[str, Any],
                 current_user_organization_id
             )
 
+        elif path == '/api/transaction_audit/check_ai_audit_quota' and method == 'POST':
+            return handle_check_ai_audit_quota(
+                db_session,
+                data,
+                current_user_organization_id
+            )
+
         else:
             # Route not found
             raise NotFoundException(f'Transaction audit route not found: {method} {path}')
@@ -414,6 +421,117 @@ def handle_add_ai_audit_queue(
         logger.error(f"Error queueing transactions for AI audit: {str(e)}")
         logger.error(f"Traceback: {traceback.format_exc()}")
         raise APIException(f'Failed to queue transactions for AI audit: {str(e)}')
+
+
+def handle_check_ai_audit_quota(
+    db_session: Any,
+    data: Dict[str, Any],
+    organization_id: int,
+) -> Dict[str, Any]:
+    """
+    Handle POST /api/transaction_audit/check_ai_audit_quota
+    Check if organization has enough AI audit quota for the given transactions.
+
+    Expected payload:
+    {
+        "transaction_ids": [1, 2, 3]
+    }
+
+    Returns quota info including remaining, needed, and excess units.
+    """
+    try:
+        from datetime import datetime, timezone
+        from ....models.subscriptions.subscription_models import Subscription
+        from ....models.subscriptions.subscription_monthly_quotas import SubscriptionMonthlyQuota
+
+        transaction_ids = data.get('transaction_ids', [])
+        if not transaction_ids:
+            raise ValidationException('transaction_ids is required')
+
+        # Count total transaction_records across all selected transactions
+        transactions = db_session.query(Transaction).filter(
+            Transaction.id.in_(transaction_ids),
+            Transaction.organization_id == organization_id,
+            Transaction.deleted_date.is_(None),
+        ).all()
+
+        total_record_count = 0
+        for tx in transactions:
+            rec_ids = tx.transaction_records or []
+            total_record_count += len(rec_ids)
+
+        # Get active subscription
+        subscription = db_session.query(Subscription).filter(
+            Subscription.organization_id == organization_id,
+            Subscription.status == 'active',
+            Subscription.deleted_date.is_(None),
+        ).order_by(Subscription.id.desc()).first()
+
+        if not subscription:
+            # No subscription — no quota enforcement, allow freely
+            return {
+                'success': True,
+                'data': {
+                    'has_subscription': False,
+                    'quota_sufficient': True,
+                    'total_record_count': total_record_count,
+                    'transaction_count': len(transactions),
+                }
+            }
+
+        # Get or create quota for current period
+        duration_type = subscription.duration_type or 'monthly'
+        now = datetime.now(timezone.utc)
+        scope = now.strftime('%Y-%m') if duration_type == 'monthly' else now.strftime('%Y')
+
+        quota = db_session.query(SubscriptionMonthlyQuota).filter(
+            SubscriptionMonthlyQuota.organization_id == organization_id,
+            SubscriptionMonthlyQuota.duration_type == duration_type,
+            SubscriptionMonthlyQuota.duration_scope == scope,
+            SubscriptionMonthlyQuota.deleted_date.is_(None),
+        ).first()
+
+        if not quota:
+            quota = SubscriptionMonthlyQuota(
+                organization_id=organization_id,
+                duration_type=duration_type,
+                duration_scope=scope,
+                ai_audit_limit=subscription.ai_audit_limit or 10,
+                ai_audit_usage=0,
+                create_transaction_limit=subscription.create_transaction_limit or 100,
+                create_transaction_usage=0,
+            )
+            db_session.add(quota)
+            db_session.commit()
+
+        remaining = quota.ai_audit_limit - quota.ai_audit_usage
+        quota_sufficient = remaining >= total_record_count
+        excess_units = max(0, total_record_count - remaining) if not quota_sufficient else 0
+        allow_exceed = bool(subscription.allow_ai_audit_exceed_quota)
+
+        return {
+            'success': True,
+            'data': {
+                'has_subscription': True,
+                'quota_sufficient': quota_sufficient,
+                'allow_exceed_quota': allow_exceed,
+                'ai_audit_limit': quota.ai_audit_limit,
+                'ai_audit_usage': quota.ai_audit_usage,
+                'remaining': max(remaining, 0),
+                'total_record_count': total_record_count,
+                'transaction_count': len(transactions),
+                'excess_units': excess_units,
+                'duration_type': duration_type,
+                'duration_scope': scope,
+            }
+        }
+
+    except (APIException, ValidationException):
+        raise
+    except Exception as e:
+        logger.error(f"Error checking AI audit quota: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise APIException(f'Failed to check AI audit quota: {str(e)}')
 
 
 def handle_get_unaudited_transactions(
