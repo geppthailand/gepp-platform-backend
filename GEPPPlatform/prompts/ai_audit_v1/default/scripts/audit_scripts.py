@@ -1529,8 +1529,18 @@ def _step9_compose_and_save(
     from GEPPPlatform.models.transactions.transaction_audits import TransactionAudit
 
     final_checklist = final_determination['final_checklist']
-    rejection_errors = final_determination['rejection_errors']
+    rejection_errors = list(final_determination['rejection_errors'])
     determined_status = final_determination['status']
+
+    # Derive checklist_columns from tx_checklist keys
+    checklist_columns = list(tx_checklist.keys())
+
+    # Check if any record has no evidence files — reject transaction if so
+    for record in records:
+        record_images = record.images if hasattr(record, 'images') and record.images else []
+        if len(record_images) == 0 and checklist_columns:
+            determined_status = 'rejected'
+            rejection_errors.append(f'รายการ #{record.id} ไม่มีเอกสารแนบ')
 
     # Compose audit note programmatically (no LLM call needed)
     audit_note = _compose_audit_note(
@@ -1568,6 +1578,10 @@ def _step9_compose_and_save(
         rec_checklist = per_record_results.get(record.id, {})
         rec_missing = doc_check.get('missing_record_docs', {}).get(record.id, [])
 
+        # Check if record has NO evidence files at all
+        record_images = record.images if hasattr(record, 'images') and record.images else []
+        rec_has_no_files = len(record_images) == 0
+
         # Per-record errors: only columns NOT already matched at tx-level
         rec_errors = []
         rec_has_issue = False
@@ -1582,6 +1596,11 @@ def _step9_compose_and_save(
                 if not (tx_col.get('match') and tx_col.get('found')):
                     # Not matched at tx-level either — check if required
                     rec_has_issue = True
+
+        # Record with no evidence files must be rejected
+        if rec_has_no_files and checklist_columns:
+            rec_has_issue = True
+            rec_errors.append('ไม่มีเอกสารแนบสำหรับรายการนี้')
 
         if rec_has_issue or rec_missing:
             record.ai_audit_status = 'rejected'

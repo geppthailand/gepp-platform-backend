@@ -891,12 +891,19 @@ def handle_get_audit_queue_batches(
 
         page = max(int(query_params.get('page', 1)), 1)
         page_size = min(int(query_params.get('page_size', 20)), 50)
+        statuses_param = query_params.get('statuses', '')
 
-        # Query audit history batches with pending/in_progress status
+        # Parse statuses filter — default to all if not specified
+        if statuses_param:
+            statuses = [s.strip() for s in statuses_param.split(',') if s.strip()]
+        else:
+            statuses = ['pending', 'in_progress', 'completed', 'failed', 'undone', 'cancelled']
+
+        # Query audit history batches filtered by status
         query = db_session.query(TransactionAuditHistory).filter(
             and_(
                 TransactionAuditHistory.organization_id == organization_id,
-                TransactionAuditHistory.status.in_(['pending', 'in_progress']),
+                TransactionAuditHistory.status.in_(statuses),
                 TransactionAuditHistory.deleted_date.is_(None)
             )
         ).order_by(desc(TransactionAuditHistory.created_date))

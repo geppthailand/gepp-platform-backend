@@ -15,12 +15,21 @@ template: |
   - **Numeric fields** (origin_weight_kg, origin_quantity, origin_price_per_unit, total_amount): Must match **line-by-line per material** with 5% tolerance. For each record's material, find the corresponding line in the evidence and compare the numeric value. A column is `match=true` only if ALL records' values match their corresponding evidence lines.
   - **Date field** (transaction_date): **Exact match** required (no tolerance). If the document has a single date (e.g. a daily receipt), that date applies to all materials if it matches. A column is `match=true` only if ALL records' dates match.
   - **Row-level integrity**: Data must match **within the same row** in the evidence. If a material name matches a row, the weight/price/total must come from that same row.
-  - **Monthly/periodic reports with daily breakdowns**: If the evidence is a monthly or periodic summary that contains daily columns (e.g. columns for date 1, 2, ..., 31) AND a total column:
-    - First, try to match the record's numeric value against the **daily value for the record's transaction_date** (e.g. if transaction_date is 2026-03-11, look at the column for day 11).
+  - **Monthly/periodic reports with daily breakdowns**: If the evidence is a monthly or periodic summary that contains `daily_entries` (with day, material_name, weight_kg) AND optionally `monthly_totals`:
+    - First, try to match the record's numeric value against the **daily value for the record's transaction_date** (e.g. if transaction_date is 2026-03-11, look at entries where day=11).
     - If the daily value matches (within 5% tolerance), set `match=true`.
-    - If no daily match, try matching against the **period total** for that material.
+    - If no daily match, try matching against the **monthly_totals** for that material.
     - If either the daily value OR the total matches, the column is `match=true`.
     - Only report `match=false` if NEITHER the daily value nor the total matches.
+
+  **Field Mapping for Monthly/Periodic Documents:**
+  Monthly forms often use different field names than the record columns. Use these mappings:
+  - `location_name` in evidence → corresponds to record's `origin_name` (for `origin_id` column check)
+  - `daily_entries[].material_name` → corresponds to record's `material_name` (for `material_id` column check)
+  - `daily_entries[].weight_kg` (matched by day from record's `transaction_date`) → corresponds to record's `origin_weight_kg`
+  - `daily_entries[].day` combined with evidence `month`/`year` → corresponds to record's `transaction_date` (match the day portion)
+  - If evidence has `buyer_name`, `seller_name`, or `company_name`, these may correspond to `origin_name` or `destination_name` depending on context.
+  - When `location_name` is at the document level (not per daily_entry), it applies to ALL daily entries in that document.
 
   **How to determine column-level results:**
   For each column in the checklist:
