@@ -1535,6 +1535,11 @@ def _step9_compose_and_save(
     # Derive checklist_columns from tx_checklist keys
     checklist_columns = list(tx_checklist.keys())
 
+    print(f"[AUDIT-DEBUG] Tx #{tx.id} Step9: tx_checklist={tx_checklist}")
+    print(f"[AUDIT-DEBUG] Tx #{tx.id} Step9: final_checklist={final_checklist}")
+    print(f"[AUDIT-DEBUG] Tx #{tx.id} Step9: per_record_results={per_record_results}")
+    print(f"[AUDIT-DEBUG] Tx #{tx.id} Step9: determined_status={determined_status}, rejection_errors={rejection_errors}")
+
     # Check if any record has no evidence files — reject transaction if so
     for record in records:
         record_images = record.images if hasattr(record, 'images') and record.images else []
@@ -1582,30 +1587,50 @@ def _step9_compose_and_save(
         record_images = record.images if hasattr(record, 'images') and record.images else []
         rec_has_no_files = len(record_images) == 0
 
-        # Per-record errors: only columns NOT already matched at tx-level
+        print(f"[AUDIT-DEBUG] Tx #{tx.id} Record #{record.id}: rec_checklist={rec_checklist}, rec_missing={rec_missing}, rec_has_no_files={rec_has_no_files}, images={record_images}")
+
+        # Per-record errors: only flag issues specific to THIS record
         rec_errors = []
         rec_has_issue = False
         for col, result in rec_checklist.items():
+            tx_col = tx_checklist.get(col, {})
             if result.get('found') and not result.get('match'):
+                # Record-level evidence found but doesn't match → this record has an issue
                 rec_has_issue = True
+                print(f"[AUDIT-DEBUG]   Record #{record.id} col={col}: REJECT (rec found=T, match=F, error={result.get('error')})")
                 if result.get('error'):
                     rec_errors.append(result['error'])
             elif not result.get('found'):
-                # Check if tx-level matched this column
-                tx_col = tx_checklist.get(col, {})
-                if not (tx_col.get('match') and tx_col.get('found')):
-                    # Not matched at tx-level either — check if required
+                # No record-level evidence for this column
+                if tx_col.get('match') and tx_col.get('found'):
+                    # Tx-level already matched — no issue for this record
+                    print(f"[AUDIT-DEBUG]   Record #{record.id} col={col}: PASS (tx matched)")
+                elif tx_col.get('found') and not tx_col.get('match'):
+                    # Tx-level found evidence but didn't match collectively.
+                    # The mismatch may be caused by OTHER records, not this one.
+                    # Don't flag this record — the tx-level rejection handles it.
+                    print(f"[AUDIT-DEBUG]   Record #{record.id} col={col}: PASS (tx found but mismatch may be from other records)")
+                elif not tx_col.get('found'):
+                    # No evidence at tx-level or record-level → missing evidence
                     rec_has_issue = True
+                    print(f"[AUDIT-DEBUG]   Record #{record.id} col={col}: REJECT (no evidence anywhere)")
+            else:
+                print(f"[AUDIT-DEBUG]   Record #{record.id} col={col}: PASS (rec found=T, match=T)")
 
         # Record with no evidence files must be rejected
         if rec_has_no_files and checklist_columns:
             rec_has_issue = True
             rec_errors.append('ไม่มีเอกสารแนบสำหรับรายการนี้')
+            print(f"[AUDIT-DEBUG]   Record #{record.id}: REJECT (no files at all)")
+
+        print(f"[AUDIT-DEBUG]   Record #{record.id}: final rec_has_issue={rec_has_issue}, rec_missing={rec_missing}")
 
         if rec_has_issue or rec_missing:
             record.ai_audit_status = 'rejected'
         else:
-            record.ai_audit_status = 'approved' if final_status == 'approved' else 'rejected'
+            # Record has no individual issues — approve it even if tx-level is rejected
+            # (other records may have caused the tx-level rejection)
+            record.ai_audit_status = 'approved'
 
         record.ai_audit_note = {
             'status': record.ai_audit_status,
@@ -1614,6 +1639,7 @@ def _step9_compose_and_save(
             'missing_docs': rec_missing,
         }
         flag_modified(record, 'ai_audit_note')
+        print(f"[AUDIT-DEBUG]   Record #{record.id}: STATUS={record.ai_audit_status}")
 
     # Insert TransactionAudit record
     audit_record = TransactionAudit(
