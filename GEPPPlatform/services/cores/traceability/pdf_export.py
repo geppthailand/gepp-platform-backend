@@ -422,9 +422,7 @@ def _method_stack_height(disposal_methods: list) -> float:
     gap = 0.06 * inch
     heights = []
     for dm in disposal_methods:
-        n_lines = 2
-        if dm.get("material_name"):
-            n_lines += 1
+        n_lines = 2  # material+weight title line + method line
         if dm.get("destination_name"):
             n_lines += 1
         heights.append(top_pad + n_lines * line_h + bot_pad)
@@ -661,7 +659,18 @@ def _draw_flow_chart(
                 pdf.setFont("IBMPlexSansThai-Regular", 8)
             except Exception:
                 pdf.setFont("Helvetica", 8)
-            pdf.drawString(cx1 + accent_w + 0.12 * inch, row_y + node_h / 2 - 0.04 * inch, mat_name[:20])
+            mat_display = mat_name
+            mat_font = "IBMPlexSansThai-Regular"
+            mat_font_size = 8
+            mat_max_w = col_w_rest - accent_w - 0.12 * inch - 0.52 * inch - 0.20 * inch
+            try:
+                while pdf.stringWidth(mat_display, mat_font, mat_font_size) > mat_max_w and len(mat_display) > 1:
+                    mat_display = mat_display[:-1]
+            except Exception:
+                mat_display = mat_name[:15]
+            if len(mat_display) < len(mat_name):
+                mat_display = mat_display.rstrip() + "..."
+            pdf.drawString(cx1 + accent_w + 0.12 * inch, row_y + node_h / 2 - 0.04 * inch, mat_display)
             # Weight pill upper-right
             pill_text = f"{_fmt_num(w)} กก."
             pill_w = 0.52 * inch
@@ -707,7 +716,7 @@ def _draw_flow_chart(
                 pdf.setFont("IBMPlexSansThai-Bold", 7)
             except Exception:
                 pdf.setFont("Helvetica-Bold", 7)
-            transit_title = "จัดส่งโดย"
+            transit_title = "ชื่อผู้จัดส่ง"
             try:
                 ttw = pdf.stringWidth(transit_title, "IBMPlexSansThai-Bold", 7)
             except Exception:
@@ -766,12 +775,9 @@ def _draw_flow_chart(
             else:
                 node_heights = []
                 for dm in disposal_methods:
-                    n_lines = 1
-                    if dm.get("material_name"):
-                        n_lines += 1
+                    n_lines = 2  # material+weight title line + method line
                     if dm.get("destination_name"):
                         n_lines += 1
-                    n_lines += 1
                     node_heights.append(method_top_pad + n_lines * method_line_h + method_bot_pad)
                 n_methods = len(disposal_methods)
                 total_methods_h = sum(node_heights) + (n_methods - 1) * method_gap_v
@@ -851,18 +857,15 @@ def _draw_flow_chart(
                             disp = txt[:35]
                         pdf.drawString(text_x, y_pos, disp)
 
-                    _draw_clipped(f"\u25B8 {meth_name}", "IBMPlexSansThai-Bold", 6, node_title_color, line_y)
+                    mat_weight_label = f"{mat_name} ({_fmt_num(dm_weight)} กก.)" if mat_name else f"{_fmt_num(dm_weight)} กก."
+                    _draw_clipped(f"\u25B8 {mat_weight_label}", "IBMPlexSansThai-Bold", 6, node_title_color, line_y)
                     line_y -= method_line_h
 
-                    if mat_name:
-                        _draw_clipped(f"\u25B8 {mat_name}", "IBMPlexSansThai-Regular", 5.5, colors.HexColor("#595959"), line_y)
-                        line_y -= method_line_h
-
                     if dest_name:
-                        _draw_clipped(f"\u25B8 {dest_name}", "IBMPlexSansThai-Regular", 5.5, colors.HexColor("#595959"), line_y)
+                        _draw_clipped(f"\u25B8 ปลายทาง : {dest_name}", "IBMPlexSansThai-Regular", 5.5, colors.HexColor("#595959"), line_y)
                         line_y -= method_line_h
 
-                    _draw_clipped(f"\u25B8 {_fmt_num(dm_weight)} กก.", "IBMPlexSansThai-Regular", 5.5, colors.HexColor("#999999"), line_y)
+                    _draw_clipped(f"\u25B8 วิธีการจัดการ : {meth_name}", "IBMPlexSansThai-Regular", 5.5, colors.HexColor("#595959"), line_y)
 
                     pdf.setFillColor(node_pill_bg)
                     pdf.roundRect(pill_x_s, pill_y_s, pill_w_s, pill_h_s, pill_h_s / 2, fill=1, stroke=0)
@@ -1343,27 +1346,34 @@ _DIRECTED_METHODS = {
 }
 
 
-def _compute_card_values_from_hierarchy(hierarchy_data: list, summary: dict) -> list:
-    """Compute [total_waste, total_managed, diverted, directed] from leaf transports in the hierarchy."""
-    total_waste = summary.get("total_waste_weight", 0) if isinstance(summary, dict) else 0
-    diverted = 0.0
-    directed = 0.0
+def _compute_card_values_from_hierarchy(hierarchy_data: list) -> list:
+    """Compute [total_waste, total_managed, treatment, disposal] from leaf transports in the hierarchy.
 
-    def _walk_leaves(transports):
-        nonlocal diverted, directed
-        for t in transports:
+    Mirrors the logic in GET /api/traceability: only counts arrived leaves
+    using raw weight.
+    """
+    treatment_w = 0.0
+    disposal_w = 0.0
+    total_group_weight = 0.0
+
+    def _sum_leaves(nodes):
+        nonlocal treatment_w, disposal_w
+        for t in nodes:
             if not isinstance(t, dict):
                 continue
             children = t.get("children") or []
             if children:
-                _walk_leaves(children)
+                _sum_leaves(children)
             else:
+                status = t.get("status") or ""
                 method = t.get("disposal_method") or ""
+                if status != "arrived" or not method:
+                    continue
                 w = float(t.get("weight") or 0)
                 if method in _DIVERTED_METHODS:
-                    diverted += w
+                    treatment_w += w
                 elif method in _DIRECTED_METHODS:
-                    directed += w
+                    disposal_w += w
 
     for origin_node in hierarchy_data:
         if not isinstance(origin_node, dict):
@@ -1371,10 +1381,15 @@ def _compute_card_values_from_hierarchy(hierarchy_data: list, summary: dict) -> 
         for group_node in origin_node.get("children") or []:
             if not isinstance(group_node, dict):
                 continue
-            _walk_leaves(group_node.get("children") or [])
+            gw = float(group_node.get("weight") or group_node.get("total_weight_kg") or 0)
+            total_group_weight += gw
+            _sum_leaves(group_node.get("children") or [])
 
-    total_managed = diverted + directed
-    return [total_waste, total_managed, diverted, directed]
+    total_waste = round(total_group_weight, 2)
+    total_treatment = round(treatment_w, 2)
+    total_disposal = round(disposal_w, 2)
+    total_managed = round(total_treatment + total_disposal, 2)
+    return [total_waste, total_managed, total_treatment, total_disposal]
 
 
 def generate_pdf_bytes(data: dict) -> bytes:
@@ -1391,8 +1406,7 @@ def generate_pdf_bytes(data: dict) -> bytes:
     """
     data = dict(data)
     hierarchy = data.get("hierarchy") or []
-    summary = data.get("summary") or {}
-    data["card_values"] = _compute_card_values_from_hierarchy(hierarchy, summary)
+    data["card_values"] = _compute_card_values_from_hierarchy(hierarchy)
     _register_fonts()
     width_pt = PAGE_WIDTH_IN * inch
     height_pt = PAGE_HEIGHT_IN * inch
