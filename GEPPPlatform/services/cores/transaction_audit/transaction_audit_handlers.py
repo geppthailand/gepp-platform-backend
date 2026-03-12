@@ -6,7 +6,7 @@ from typing import Dict, Any
 import logging
 import traceback
 import os
-from sqlalchemy import and_, desc
+from sqlalchemy import and_, desc, func
 
 from .transaction_audit_service import TransactionAuditService
 from ....models.logs.transaction_audit_history import TransactionAuditHistory
@@ -99,6 +99,43 @@ def handle_transaction_audit_routes(event: Dict[str, Any], data: Dict[str, Any],
                 query_params,
                 current_user_organization_id,
                 current_user_id
+            )
+
+        elif path == '/api/transaction_audit/unaudited_transactions' and method == 'GET':
+            return handle_get_unaudited_transactions(
+                db_session,
+                query_params,
+                current_user_organization_id,
+                current_user_id
+            )
+
+        elif path == '/api/transaction_audit/queued_transactions' and method == 'GET':
+            return handle_get_queued_transactions(
+                db_session,
+                query_params,
+                current_user_organization_id,
+                current_user_id
+            )
+
+        elif path == '/api/transaction_audit/audit_queue_batches' and method == 'GET':
+            return handle_get_audit_queue_batches(
+                db_session,
+                query_params,
+                current_user_organization_id
+            )
+
+        elif path == '/api/transaction_audit/cancel_audit_batch' and method == 'POST':
+            return handle_cancel_audit_batch(
+                db_session,
+                data,
+                current_user_organization_id
+            )
+
+        elif path == '/api/transaction_audit/check_ai_audit_quota' and method == 'POST':
+            return handle_check_ai_audit_quota(
+                db_session,
+                data,
+                current_user_organization_id
             )
 
         else:
@@ -384,6 +421,613 @@ def handle_add_ai_audit_queue(
         logger.error(f"Error queueing transactions for AI audit: {str(e)}")
         logger.error(f"Traceback: {traceback.format_exc()}")
         raise APIException(f'Failed to queue transactions for AI audit: {str(e)}')
+
+
+def handle_check_ai_audit_quota(
+    db_session: Any,
+    data: Dict[str, Any],
+    organization_id: int,
+) -> Dict[str, Any]:
+    """
+    Handle POST /api/transaction_audit/check_ai_audit_quota
+    Check if organization has enough AI audit quota for the given transactions.
+
+    Expected payload:
+    {
+        "transaction_ids": [1, 2, 3]
+    }
+
+    Returns quota info including remaining, needed, and excess units.
+    """
+    try:
+        from datetime import datetime, timezone
+        from ....models.subscriptions.subscription_models import Subscription
+        from ....models.subscriptions.subscription_monthly_quotas import SubscriptionMonthlyQuota
+
+        transaction_ids = data.get('transaction_ids', [])
+        if not transaction_ids:
+            raise ValidationException('transaction_ids is required')
+
+        # Count total transaction_records across all selected transactions
+        transactions = db_session.query(Transaction).filter(
+            Transaction.id.in_(transaction_ids),
+            Transaction.organization_id == organization_id,
+            Transaction.deleted_date.is_(None),
+        ).all()
+
+        total_record_count = 0
+        for tx in transactions:
+            rec_ids = tx.transaction_records or []
+            total_record_count += len(rec_ids)
+
+        # Get active subscription
+        subscription = db_session.query(Subscription).filter(
+            Subscription.organization_id == organization_id,
+            Subscription.status == 'active',
+            Subscription.deleted_date.is_(None),
+        ).order_by(Subscription.id.desc()).first()
+
+        if not subscription:
+            # No subscription — no quota enforcement, allow freely
+            return {
+                'success': True,
+                'data': {
+                    'has_subscription': False,
+                    'quota_sufficient': True,
+                    'total_record_count': total_record_count,
+                    'transaction_count': len(transactions),
+                }
+            }
+
+        # Get or create quota for current period
+        duration_type = subscription.duration_type or 'monthly'
+        now = datetime.now(timezone.utc)
+        scope = now.strftime('%Y-%m') if duration_type == 'monthly' else now.strftime('%Y')
+
+        quota = db_session.query(SubscriptionMonthlyQuota).filter(
+            SubscriptionMonthlyQuota.organization_id == organization_id,
+            SubscriptionMonthlyQuota.duration_type == duration_type,
+            SubscriptionMonthlyQuota.duration_scope == scope,
+            SubscriptionMonthlyQuota.deleted_date.is_(None),
+        ).first()
+
+        if not quota:
+            quota = SubscriptionMonthlyQuota(
+                organization_id=organization_id,
+                duration_type=duration_type,
+                duration_scope=scope,
+                ai_audit_limit=subscription.ai_audit_limit or 10,
+                ai_audit_usage=0,
+                create_transaction_limit=subscription.create_transaction_limit or 100,
+                create_transaction_usage=0,
+            )
+            db_session.add(quota)
+            db_session.commit()
+
+        remaining = quota.ai_audit_limit - quota.ai_audit_usage
+        quota_sufficient = remaining >= total_record_count
+        excess_units = max(0, total_record_count - remaining) if not quota_sufficient else 0
+        allow_exceed = bool(subscription.allow_ai_audit_exceed_quota)
+
+        return {
+            'success': True,
+            'data': {
+                'has_subscription': True,
+                'quota_sufficient': quota_sufficient,
+                'allow_exceed_quota': allow_exceed,
+                'ai_audit_limit': quota.ai_audit_limit,
+                'ai_audit_usage': quota.ai_audit_usage,
+                'remaining': max(remaining, 0),
+                'total_record_count': total_record_count,
+                'transaction_count': len(transactions),
+                'excess_units': excess_units,
+                'duration_type': duration_type,
+                'duration_scope': scope,
+            }
+        }
+
+    except (APIException, ValidationException):
+        raise
+    except Exception as e:
+        logger.error(f"Error checking AI audit quota: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise APIException(f'Failed to check AI audit quota: {str(e)}')
+
+
+def handle_get_unaudited_transactions(
+    db_session: Any,
+    query_params: Dict[str, Any],
+    organization_id: int,
+    current_user_id: Any = None
+) -> Dict[str, Any]:
+    """
+    Handle GET /api/transaction_audit/unaudited_transactions - Get transactions with ai_audit_status = null
+
+    Query parameters:
+    - date_from: str (ISO date) - Filter transactions from this date
+    - date_to: str (ISO date) - Filter transactions to this date
+    - location_ids: str - Comma-separated list of origin location IDs (multi-select)
+    - page: int - Page number for pagination (default: 1)
+    - page_size: int - Items per page (default: 50, max: 100)
+
+    Returns paginated list of unaudited transactions for the queue modal.
+    """
+    try:
+        from sqlalchemy import String, exists
+        from ....models.subscriptions.organizations import OrganizationSetup
+        from ....models.users.user_location import UserLocation
+
+        page = max(int(query_params.get('page', 1)), 1)
+        page_size = min(int(query_params.get('page_size', 50)), 100)
+
+        # Base query: only transactions with ai_audit_status = null (not yet audited)
+        query = db_session.query(Transaction).filter(
+            and_(
+                Transaction.organization_id == organization_id,
+                Transaction.ai_audit_status == AIAuditStatus.null,
+                Transaction.deleted_date.is_(None)
+            )
+        )
+
+        query = _apply_member_filter_to_transaction_query(query, db_session, current_user_id)
+
+        # Date filters
+        date_from_dt, date_to_dt = _parse_audit_report_date_range(query_params)
+        if date_from_dt is not None or date_to_dt is not None:
+            record_date_filter = and_(
+                TransactionRecord.created_transaction_id == Transaction.id,
+                TransactionRecord.is_active == True
+            )
+            if date_from_dt is not None:
+                record_date_filter = and_(record_date_filter, TransactionRecord.transaction_date >= date_from_dt)
+            if date_to_dt is not None:
+                record_date_filter = and_(record_date_filter, TransactionRecord.transaction_date <= date_to_dt)
+            query = query.filter(exists().where(record_date_filter))
+
+        # Status filter (comma-separated, e.g. "pending,rejected,approved")
+        statuses_str = query_params.get('statuses', '')
+        if statuses_str:
+            try:
+                status_values = [s.strip() for s in statuses_str.split(',') if s.strip()]
+                if status_values:
+                    status_enums = [TransactionStatus(s) for s in status_values if s in TransactionStatus.__members__]
+                    if status_enums:
+                        query = query.filter(Transaction.status.in_(status_enums))
+            except (ValueError, TypeError):
+                pass
+
+        # Location IDs filter (multi-select, comma-separated)
+        location_ids_str = query_params.get('location_ids', '')
+        if location_ids_str:
+            try:
+                location_ids = [int(lid.strip()) for lid in location_ids_str.split(',') if lid.strip()]
+                if location_ids:
+                    query = query.filter(Transaction.origin_id.in_(location_ids))
+            except (ValueError, TypeError):
+                pass
+
+        # Get total count
+        total_count = query.count()
+        total_pages = (total_count + page_size - 1) // page_size if page_size > 0 else 0
+
+        # Get all matching transaction IDs (for select-all across pages)
+        all_matching_ids = [tid for (tid,) in query.with_entities(Transaction.id).order_by(desc(Transaction.id)).all()]
+
+        # Get paginated results
+        offset = (page - 1) * page_size
+        transactions = query.order_by(desc(Transaction.id)).offset(offset).limit(page_size).all()
+
+        # Build transaction list items with origin_name and material_name
+        transaction_list = _build_audit_transaction_list_items(transactions)
+
+        # Enrich with origin_name and material_name
+        if transactions:
+            # Batch fetch origin names
+            origin_ids_set = {t.origin_id for t in transactions if t.origin_id}
+            origin_name_map = {}
+            if origin_ids_set:
+                origins = db_session.query(UserLocation).filter(UserLocation.id.in_(origin_ids_set)).all()
+                origin_name_map = {o.id: (o.name_en or o.name_th or f'ID:{o.id}') for o in origins}
+
+            # Batch fetch material names from first record of each transaction
+            from ....models.cores.references import Material
+            all_record_ids = []
+            for t in transactions:
+                if t.transaction_records:
+                    all_record_ids.append(t.transaction_records[0])  # first record
+            material_map_by_tx = {}
+            record_date_map_by_tx = {}
+            if all_record_ids:
+                records = db_session.query(TransactionRecord).filter(TransactionRecord.id.in_(all_record_ids)).all()
+                mat_ids = {r.material_id for r in records if r.material_id}
+                mat_name_map = {}
+                if mat_ids:
+                    materials = db_session.query(Material).filter(Material.id.in_(mat_ids)).all()
+                    mat_name_map = {m.id: (m.name_en or m.name_th or f'Material {m.id}') for m in materials}
+                for r in records:
+                    material_map_by_tx[r.created_transaction_id] = mat_name_map.get(r.material_id, '-')
+                    if r.transaction_date:
+                        record_date_map_by_tx[r.created_transaction_id] = r.transaction_date
+
+            # Attach to transaction_list — use record's transaction_date over transaction-level date
+            for i, t in enumerate(transactions):
+                transaction_list[i]['origin_name'] = origin_name_map.get(t.origin_id, '-')
+                transaction_list[i]['material_name'] = material_map_by_tx.get(t.id, '-')
+                rec_date = record_date_map_by_tx.get(t.id)
+                if rec_date:
+                    transaction_list[i]['transaction_date'] = rec_date.isoformat()
+
+        # Build location options for filter dropdown
+        location_combos = db_session.query(
+            Transaction.origin_id
+        ).filter(
+            and_(
+                Transaction.organization_id == organization_id,
+                Transaction.ai_audit_status == AIAuditStatus.null,
+                Transaction.deleted_date.is_(None),
+                Transaction.origin_id.isnot(None)
+            )
+        ).distinct().all()
+
+        origin_ids = list({row[0] for row in location_combos if row[0] is not None})
+        location_options = []
+
+        if origin_ids:
+            origin_locations = db_session.query(UserLocation).filter(
+                UserLocation.id.in_(origin_ids)
+            ).all()
+
+            # Build location paths
+            org_setup = db_session.query(OrganizationSetup).filter(
+                and_(
+                    OrganizationSetup.organization_id == organization_id,
+                    OrganizationSetup.is_active == True
+                )
+            ).first()
+            if not org_setup:
+                org_setup = db_session.query(OrganizationSetup).filter(
+                    OrganizationSetup.organization_id == organization_id
+                ).order_by(OrganizationSetup.created_date.desc()).first()
+
+            location_paths = {}
+            if org_setup and org_setup.root_nodes:
+                all_locations = db_session.query(UserLocation).filter(
+                    and_(
+                        UserLocation.organization_id == organization_id,
+                        UserLocation.deleted_date.is_(None)
+                    )
+                ).all()
+                loc_names = {loc.id: (loc.name_en or loc.name_th or f'ID:{loc.id}') for loc in all_locations}
+
+                def build_paths(nodes, parent_path=""):
+                    for node in (nodes or []):
+                        node_id = node.get('id')
+                        if node_id is not None:
+                            name = loc_names.get(node_id, f'ID:{node_id}')
+                            path = f"{parent_path} > {name}" if parent_path else name
+                            location_paths[node_id] = path
+                            build_paths(node.get('children', []), path)
+
+                build_paths(org_setup.root_nodes)
+
+            for loc in origin_locations:
+                loc_name = location_paths.get(loc.id) or loc.name_en or loc.name_th or f'ID:{loc.id}'
+                location_options.append({
+                    'id': loc.id,
+                    'name': loc_name
+                })
+
+            location_options.sort(key=lambda x: x['name'])
+
+        return {
+            'success': True,
+            'data': {
+                'transactions': transaction_list,
+                'pagination': {
+                    'page': page,
+                    'page_size': page_size,
+                    'total_count': total_count,
+                    'total_pages': total_pages,
+                    'has_next': page < total_pages,
+                    'has_prev': page > 1
+                },
+                'location_options': location_options,
+                'all_transaction_ids': all_matching_ids
+            }
+        }
+
+    except Exception as e:
+        logger.error(f"Error fetching unaudited transactions: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise APIException(f'Failed to fetch unaudited transactions: {str(e)}')
+
+
+def handle_get_queued_transactions(
+    db_session: Any,
+    query_params: Dict[str, Any],
+    organization_id: int,
+    current_user_id: Any = None
+) -> Dict[str, Any]:
+    """
+    Handle GET /api/transaction_audit/queued_transactions - Get transactions with ai_audit_status = 'queued'
+
+    Returns paginated list of queued transactions with material and origin info.
+    """
+    try:
+        from ....models.users.user_location import UserLocation
+        from ....models.cores.references import Material
+
+        page = max(int(query_params.get('page', 1)), 1)
+        page_size = min(int(query_params.get('page_size', 50)), 100)
+
+        # Base query: only queued transactions
+        query = db_session.query(Transaction).filter(
+            and_(
+                Transaction.organization_id == organization_id,
+                Transaction.ai_audit_status == AIAuditStatus.queued,
+                Transaction.deleted_date.is_(None)
+            )
+        )
+
+        query = _apply_member_filter_to_transaction_query(query, db_session, current_user_id)
+
+        # Get total count
+        total_count = query.count()
+        total_pages = (total_count + page_size - 1) // page_size if page_size > 0 else 0
+
+        # Get paginated results
+        offset = (page - 1) * page_size
+        transactions = query.order_by(desc(Transaction.id)).offset(offset).limit(page_size).all()
+
+        # Build transaction list
+        transaction_list = _build_audit_transaction_list_items(transactions)
+
+        # Enrich with origin_name and material_name
+        if transactions:
+            origin_ids_set = {t.origin_id for t in transactions if t.origin_id}
+            origin_name_map = {}
+            if origin_ids_set:
+                origins = db_session.query(UserLocation).filter(UserLocation.id.in_(origin_ids_set)).all()
+                origin_name_map = {o.id: (o.name_en or o.name_th or f'ID:{o.id}') for o in origins}
+
+            all_record_ids = []
+            for t in transactions:
+                if t.transaction_records:
+                    all_record_ids.append(t.transaction_records[0])
+            material_map_by_tx = {}
+            record_date_map_by_tx = {}
+            if all_record_ids:
+                records = db_session.query(TransactionRecord).filter(TransactionRecord.id.in_(all_record_ids)).all()
+                mat_ids = {r.material_id for r in records if r.material_id}
+                mat_name_map = {}
+                if mat_ids:
+                    materials = db_session.query(Material).filter(Material.id.in_(mat_ids)).all()
+                    mat_name_map = {m.id: (m.name_en or m.name_th or f'Material {m.id}') for m in materials}
+                for r in records:
+                    material_map_by_tx[r.created_transaction_id] = mat_name_map.get(r.material_id, '-')
+                    if r.transaction_date:
+                        record_date_map_by_tx[r.created_transaction_id] = r.transaction_date
+
+            for i, t in enumerate(transactions):
+                transaction_list[i]['origin_name'] = origin_name_map.get(t.origin_id, '-')
+                transaction_list[i]['material_name'] = material_map_by_tx.get(t.id, '-')
+                rec_date = record_date_map_by_tx.get(t.id)
+                if rec_date:
+                    transaction_list[i]['transaction_date'] = rec_date.isoformat()
+
+        return {
+            'success': True,
+            'data': {
+                'transactions': transaction_list,
+                'pagination': {
+                    'page': page,
+                    'page_size': page_size,
+                    'total_count': total_count,
+                    'total_pages': total_pages,
+                    'has_next': page < total_pages,
+                    'has_prev': page > 1
+                }
+            }
+        }
+
+    except Exception as e:
+        logger.error(f"Error fetching queued transactions: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise APIException(f'Failed to fetch queued transactions: {str(e)}')
+
+
+def handle_get_audit_queue_batches(
+    db_session: Any,
+    query_params: Dict[str, Any],
+    organization_id: int
+) -> Dict[str, Any]:
+    """
+    Handle GET /api/transaction_audit/audit_queue_batches
+    Returns transaction_audit_history batches with status pending/in_progress,
+    including basic transaction info for each batch's transaction IDs.
+    """
+    try:
+        from ....models.users.user_location import UserLocation
+        from ....models.cores.references import Material
+
+        page = max(int(query_params.get('page', 1)), 1)
+        page_size = min(int(query_params.get('page_size', 20)), 50)
+
+        # Query audit history batches with pending/in_progress status
+        query = db_session.query(TransactionAuditHistory).filter(
+            and_(
+                TransactionAuditHistory.organization_id == organization_id,
+                TransactionAuditHistory.status.in_(['pending', 'in_progress']),
+                TransactionAuditHistory.deleted_date.is_(None)
+            )
+        ).order_by(desc(TransactionAuditHistory.created_date))
+
+        total_count = query.count()
+        total_pages = (total_count + page_size - 1) // page_size if page_size > 0 else 0
+
+        offset = (page - 1) * page_size
+        batches = query.offset(offset).limit(page_size).all()
+
+        # Collect all transaction IDs across all batches
+        all_tx_ids = set()
+        for batch in batches:
+            if batch.transactions:
+                all_tx_ids.update(batch.transactions)
+
+        # Batch fetch all transactions
+        tx_map = {}
+        if all_tx_ids:
+            txns = db_session.query(Transaction).filter(
+                Transaction.id.in_(all_tx_ids)
+            ).all()
+
+            # Fetch origin names
+            origin_ids = {t.origin_id for t in txns if t.origin_id}
+            origin_name_map = {}
+            if origin_ids:
+                origins = db_session.query(UserLocation).filter(UserLocation.id.in_(origin_ids)).all()
+                origin_name_map = {o.id: (o.name_en or o.name_th or f'ID:{o.id}') for o in origins}
+
+            # Fetch material names from first record
+            first_record_ids = []
+            for t in txns:
+                if t.transaction_records:
+                    first_record_ids.append(t.transaction_records[0])
+
+            material_map_by_tx = {}
+            record_date_map_by_tx = {}
+            if first_record_ids:
+                records = db_session.query(TransactionRecord).filter(TransactionRecord.id.in_(first_record_ids)).all()
+                mat_ids = {r.material_id for r in records if r.material_id}
+                mat_name_map = {}
+                if mat_ids:
+                    materials = db_session.query(Material).filter(Material.id.in_(mat_ids)).all()
+                    mat_name_map = {m.id: (m.name_en or m.name_th or f'Material {m.id}') for m in materials}
+                for r in records:
+                    material_map_by_tx[r.created_transaction_id] = mat_name_map.get(r.material_id, '-')
+                    if r.transaction_date:
+                        record_date_map_by_tx[r.created_transaction_id] = r.transaction_date
+
+            for t in txns:
+                # Use record's transaction_date over transaction-level date
+                rec_date = record_date_map_by_tx.get(t.id)
+                tx_date = rec_date.isoformat() if rec_date else (t.transaction_date.isoformat() if t.transaction_date else None)
+                tx_map[t.id] = {
+                    'id': t.id,
+                    'transaction_date': tx_date,
+                    'status': t.status.value if hasattr(t.status, 'value') else str(t.status),
+                    'ai_audit_status': t.ai_audit_status.value if hasattr(t.ai_audit_status, 'value') else None,
+                    'weight_kg': float(t.weight_kg) if t.weight_kg else 0,
+                    'total_amount': float(t.total_amount) if t.total_amount else 0,
+                    'origin_name': origin_name_map.get(t.origin_id, '-'),
+                    'material_name': material_map_by_tx.get(t.id, '-'),
+                }
+
+        # Build response
+        batch_list = []
+        for batch in batches:
+            batch_tx_ids = batch.transactions or []
+            batch_transactions = sorted(
+                [tx_map[tid] for tid in batch_tx_ids if tid in tx_map],
+                key=lambda x: x['id']
+            )
+
+            batch_list.append({
+                'id': batch.id,
+                'status': batch.status,
+                'total_transactions': batch.total_transactions or len(batch_tx_ids),
+                'processed_transactions': batch.processed_transactions or 0,
+                'approved_count': batch.approved_count or 0,
+                'rejected_count': batch.rejected_count or 0,
+                'triggered_by_user_id': batch.triggered_by_user_id,
+                'started_at': batch.started_at.isoformat() if batch.started_at else None,
+                'created_date': batch.created_date.isoformat() if batch.created_date else None,
+                'transactions': batch_transactions,
+            })
+
+        return {
+            'success': True,
+            'data': {
+                'batches': batch_list,
+                'pagination': {
+                    'page': page,
+                    'page_size': page_size,
+                    'total_count': total_count,
+                    'total_pages': total_pages,
+                    'has_next': page < total_pages,
+                    'has_prev': page > 1
+                }
+            }
+        }
+
+    except Exception as e:
+        logger.error(f"Error fetching audit queue batches: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise APIException(f'Failed to fetch audit queue batches: {str(e)}')
+
+
+def handle_cancel_audit_batch(
+    db_session: Any,
+    data: Dict[str, Any],
+    organization_id: int
+) -> Dict[str, Any]:
+    """
+    Handle POST /api/transaction_audit/cancel_audit_batch
+    Cancel an audit batch: set status to 'cancelled' and revert transactions' ai_audit_status to null.
+    """
+    try:
+        batch_id = data.get('batch_id')
+        if not batch_id:
+            raise ValidationException('batch_id is required')
+
+        batch = db_session.query(TransactionAuditHistory).filter(
+            and_(
+                TransactionAuditHistory.id == batch_id,
+                TransactionAuditHistory.organization_id == organization_id,
+                TransactionAuditHistory.deleted_date.is_(None)
+            )
+        ).first()
+
+        if not batch:
+            raise NotFoundException(f'Audit batch #{batch_id} not found')
+
+        if batch.status not in ('pending', 'in_progress'):
+            raise ValidationException(f'Cannot cancel batch with status: {batch.status}')
+
+        # Revert transactions' ai_audit_status to null
+        tx_ids = batch.transactions or []
+        if tx_ids:
+            db_session.query(Transaction).filter(
+                Transaction.id.in_(tx_ids)
+            ).update(
+                {Transaction.ai_audit_status: AIAuditStatus.null},
+                synchronize_session='fetch'
+            )
+
+        # Set batch status to cancelled
+        batch.status = 'cancelled'
+        batch.deleted_date = func.now()
+
+        db_session.commit()
+
+        logger.info(f"Cancelled audit batch #{batch_id}, reverted {len(tx_ids)} transactions")
+
+        return {
+            'success': True,
+            'message': f'Cancelled audit batch #{batch_id}',
+            'data': {
+                'batch_id': batch_id,
+                'reverted_count': len(tx_ids)
+            }
+        }
+
+    except (APIException, ValidationException, NotFoundException):
+        raise
+    except Exception as e:
+        db_session.rollback()
+        logger.error(f"Error cancelling audit batch: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise APIException(f'Failed to cancel audit batch: {str(e)}')
 
 
 def handle_process_audit_queue(db_session: Any) -> Dict[str, Any]:

@@ -1,0 +1,53 @@
+template: |
+  Role: Transaction Evidence Auditor (Column-Level Checklist)
+  Task: You are given ONE evidence document's extracted data and ALL transaction records (materials). Check whether this evidence satisfies each column in the checklist across ALL records collectively.
+
+  **All Transaction Records (materials):**
+  {all_records_data}
+
+  **Evidence Extracted Data (from 1 document):**
+  {evidence_data}
+
+  **Checklist Columns to Verify:** {checklist_columns}
+
+  **Matching Rules:**
+  - **String fields** (material_id, origin_id, destination_id): Fuzzy match allowed. Thai/English name variations are OK (e.g. "GEPP Recycling Co." ≈ "บริษัท GEPP รีไซเคิล", "Plastic PET Bottles" ≈ "ขวด PET"). When multiple similar materials exist in the evidence (e.g. "Plastic Bag" and "Clear Plastic (PET)"), match to the **most specific/closest** name. A column is `match=true` only if ALL records' values for that column are found and matched in this evidence.
+  - **Numeric fields** (origin_weight_kg, origin_quantity, origin_price_per_unit, total_amount): Must match **line-by-line per material** with 5% tolerance. For each record's material, find the corresponding line in the evidence and compare the numeric value. A column is `match=true` only if ALL records' values match their corresponding evidence lines.
+  - **Date field** (transaction_date): **Exact match** required (no tolerance). If the document has a single date (e.g. a daily receipt), that date applies to all materials if it matches. A column is `match=true` only if ALL records' dates match.
+  - **Row-level integrity**: Data must match **within the same row** in the evidence. If a material name matches a row, the weight/price/total must come from that same row.
+  - **Monthly/periodic reports with daily breakdowns**: If the evidence is a monthly or periodic summary that contains daily columns (e.g. columns for date 1, 2, ..., 31) AND a total column:
+    - First, try to match the record's numeric value against the **daily value for the record's transaction_date** (e.g. if transaction_date is 2026-03-11, look at the column for day 11).
+    - If the daily value matches (within 5% tolerance), set `match=true`.
+    - If no daily match, try matching against the **period total** for that material.
+    - If either the daily value OR the total matches, the column is `match=true`.
+    - Only report `match=false` if NEITHER the daily value nor the total matches.
+
+  **How to determine column-level results:**
+  For each column in the checklist:
+  - `found`: Did the evidence contain ANY data relevant to this column? (true/false)
+  - `match`: Did the evidence data match ALL records for this column? (true/false). Can only be true if found is also true.
+  - `error`: If found=true but match=false, provide a descriptive error message in Thai explaining the mismatch. Include specific values from both evidence and records.
+    Example errors:
+    - "น้ำหนัก ของวัสดุ 'ขวด PET' ในเอกสาร 34.52 กก. ไม่ตรงกับข้อมูล 12.77 กก."
+    - "ไม่พบวัสดุ 'กระดาษลัง' ในเอกสาร"
+    - "วันที่ในเอกสาร 2026-03-10 ไม่ตรงกับวันที่ทำรายการ 2026-03-12"
+    If match=true or found=false, set error to null.
+
+  **OUTPUT FORMAT (JSON ONLY - NO PREAMBLE):**
+  Return ONLY the raw JSON object:
+  {{
+    "match": {{
+      "<column_name>": <bool>,
+      ...
+    }},
+    "found": {{
+      "<column_name>": <bool>,
+      ...
+    }},
+    "errors": {{
+      "<column_name>": "<error message in Thai>" | null,
+      ...
+    }}
+  }}
+
+  Only include columns from the Checklist Columns to Verify list.

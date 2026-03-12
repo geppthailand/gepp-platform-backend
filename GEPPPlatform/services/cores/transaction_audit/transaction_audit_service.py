@@ -2265,7 +2265,7 @@ class TransactionAuditService:
                 processed_transactions=0,
                 approved_count=0,
                 rejected_count=0,
-                status='in_progress',
+                status='pending',
                 started_at=datetime.now(timezone.utc),
                 completed_at=None
             )

@@ -598,6 +598,16 @@ def main(event, context):
                             "data": traceability_result
                         }
 
+                    elif "/api/audit-settings" in path:
+                        # Handle AI audit settings routes (doc types, doc requires, check columns)
+                        from .services.cores.audit_settings.audit_settings_handlers import handle_audit_settings_routes
+
+                        settings_result = handle_audit_settings_routes(event, data=body, **commonParams)
+                        results = {
+                            "success": True,
+                            "data": settings_result
+                        }
+
                     elif "/api/audit" in path:
                         if "/api/audit/manual" in path:
                             # Handle all manual audit routes
