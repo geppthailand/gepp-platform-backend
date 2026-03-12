@@ -138,6 +138,13 @@ def handle_transaction_audit_routes(event: Dict[str, Any], data: Dict[str, Any],
                 current_user_organization_id
             )
 
+        elif path == '/api/transaction_audit/undo_audit_batch' and method == 'POST':
+            return handle_undo_audit_batch(
+                db_session,
+                data,
+                current_user_organization_id
+            )
+
         else:
             # Route not found
             raise NotFoundException(f'Transaction audit route not found: {method} {path}')
@@ -285,8 +292,40 @@ def handle_get_audit_history(
         offset = (page - 1) * page_size
         audit_histories = query.offset(offset).limit(page_size).all()
 
-        # Serialize results
-        history_data = [history.to_dict() for history in audit_histories]
+        # Serialize results and enrich with transaction details
+        history_data = []
+        # Collect all transaction IDs across all history records
+        all_tx_ids = []
+        for h in audit_histories:
+            if h.transactions:
+                all_tx_ids.extend(h.transactions)
+
+        # Batch fetch transaction basic info
+        tx_map = {}
+        if all_tx_ids:
+            txns = db_session.query(
+                Transaction.id,
+                Transaction.transaction_date,
+                Transaction.ai_audit_status,
+                Transaction.status,
+            ).filter(
+                Transaction.id.in_(all_tx_ids)
+            ).all()
+            for tx in txns:
+                tx_map[tx.id] = {
+                    'id': tx.id,
+                    'transaction_date': tx.transaction_date.isoformat() if tx.transaction_date else None,
+                    'ai_audit_status': tx.ai_audit_status.value if tx.ai_audit_status else None,
+                    'status': tx.status.value if tx.status else None,
+                }
+
+        for history in audit_histories:
+            h_dict = history.to_dict()
+            # Attach transaction details
+            h_dict['transaction_details'] = [
+                tx_map[tid] for tid in (history.transactions or []) if tid in tx_map
+            ]
+            history_data.append(h_dict)
 
         return {
             'success': True,
@@ -1740,3 +1779,82 @@ def handle_get_audit_report(
         logger.error(f"Error generating audit report: {str(e)}")
         logger.error(f"Traceback: {traceback.format_exc()}")
         raise APIException(f'Failed to generate audit report: {str(e)}')
+
+
+def handle_undo_audit_batch(
+    db_session: Any,
+    data: Dict[str, Any],
+    organization_id: int
+) -> Dict[str, Any]:
+    """
+    Handle POST /api/transaction_audit/undo_audit_batch
+    Undo a completed audit batch: set history status='undone',
+    reset ai_audit_status/ai_audit_note on transactions and transaction_records.
+    """
+    try:
+        batch_id = data.get('batch_id')
+        if not batch_id:
+            raise ValidationException('batch_id is required')
+
+        history = db_session.query(TransactionAuditHistory).filter(
+            and_(
+                TransactionAuditHistory.id == batch_id,
+                TransactionAuditHistory.organization_id == organization_id,
+                TransactionAuditHistory.deleted_date.is_(None)
+            )
+        ).first()
+
+        if not history:
+            raise NotFoundException(f'Audit history batch {batch_id} not found')
+
+        if history.status == 'undone':
+            return {'success': False, 'message': 'Batch already undone'}
+
+        tx_ids = history.transactions or []
+        logger.info(f"Undoing audit batch {batch_id} with {len(tx_ids)} transactions")
+
+        # 1. Mark history as undone
+        history.status = 'undone'
+
+        if tx_ids:
+            # 2. Reset transactions
+            db_session.query(Transaction).filter(
+                Transaction.id.in_(tx_ids)
+            ).update(
+                {
+                    Transaction.ai_audit_status: AIAuditStatus.null,
+                    Transaction.ai_audit_note: None,
+                },
+                synchronize_session=False
+            )
+
+            # 3. Reset transaction_records
+            db_session.query(TransactionRecord).filter(
+                TransactionRecord.created_transaction_id.in_(tx_ids)
+            ).update(
+                {
+                    TransactionRecord.ai_audit_status: 'null',
+                    TransactionRecord.ai_audit_note: None,
+                },
+                synchronize_session=False
+            )
+
+        db_session.commit()
+        logger.info(f"Successfully undone audit batch {batch_id}")
+
+        return {
+            'success': True,
+            'message': f'Successfully undone audit batch {batch_id}',
+            'data': {
+                'batch_id': batch_id,
+                'transactions_reset': len(tx_ids),
+            }
+        }
+
+    except (APIException, ValidationException, NotFoundException):
+        raise
+    except Exception as e:
+        db_session.rollback()
+        logger.error(f"Error undoing audit batch: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise APIException(f'Failed to undo audit batch: {str(e)}')

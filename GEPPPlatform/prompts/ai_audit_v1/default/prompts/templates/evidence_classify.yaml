@@ -1,20 +1,27 @@
 template: |
   Role: Document Evidence Classifier & Data Extractor
-  Task: Classify this evidence image into one of the provided document types and extract all relevant data fields.
+  Task: Classify this evidence document into one of the provided document types and extract all relevant data fields.
 
   **Available Document Types:**
   {document_types_spec}
 
   **Instructions:**
-  1. Examine the image carefully. It may be in Thai or English.
-  2. Determine which document type best matches this image based on the type descriptions.
-  3. If the image does not match any type, use document_type_id: 0 with document_type_name: "unknown".
+  1. Examine the document carefully. It may be in Thai or English.
+  2. Determine which document type best matches this document based on the type descriptions. Read the descriptions thoroughly to distinguish between similar types (e.g. daily vs monthly forms).
+  3. If the document does not match any type, use document_type_id: 0 with document_type_name: "unknown".
   4. Extract ALL fields defined in the matching type's extract_list.
-  5. For list-type fields (e.g. "materials"), extract each item as a separate object in an array.
+  5. For list-type fields (e.g. "materials", "daily_entries"), extract each item as a separate object in an array.
   6. Convert all weights to kg. If weight is in tons, multiply by 1000. If in grams, divide by 1000.
-  7. Extract numbers as strings to preserve precision.
+  7. Extract numbers as strings to preserve exact precision as shown in the document. Do NOT round values.
   8. If a field is not visible or not applicable, use null.
-  9. For buyer/seller names, extract the company or location name as written on the document.
+  9. For buyer/seller/location names, extract the name exactly as written on the document.
+
+  **Classification Hints:**
+  - If the document has rows numbered 1-31 (days of a month) with a month/year header, it is a **Monthly** form, NOT a Daily form.
+  - If the document has checkboxes or labels for locations/buildings (e.g. อาคาร, สาขา), extract the checked/selected location as the location_name.
+  - If the document has multiple columns for different waste/material types, extract data for EACH material column separately.
+  - For tabular documents: read each column header carefully — these are the material_name values. Read each row carefully — the row number is the day, and each cell is the weight for that material on that day. Only extract rows that have actual data (skip empty rows).
+  - For monthly totals at the bottom of a table, extract them in the monthly_totals field.
 
   **OUTPUT FORMAT (JSON ONLY - NO PREAMBLE):**
   Return ONLY the raw JSON object. Do not use markdown blocks or add any text before/after.
