@@ -1350,27 +1350,26 @@ def _compute_card_values_from_hierarchy(hierarchy_data: list) -> list:
     """Compute [total_waste, total_managed, treatment, disposal] from leaf transports in the hierarchy.
 
     Mirrors the logic in GET /api/traceability: only counts arrived leaves
-    using percentage_of_group * group_weight.
+    using raw weight.
     """
     treatment_w = 0.0
     disposal_w = 0.0
     total_group_weight = 0.0
 
-    def _sum_leaves(nodes, group_weight):
+    def _sum_leaves(nodes):
         nonlocal treatment_w, disposal_w
         for t in nodes:
             if not isinstance(t, dict):
                 continue
             children = t.get("children") or []
             if children:
-                _sum_leaves(children, group_weight)
+                _sum_leaves(children)
             else:
                 status = t.get("status") or ""
                 method = t.get("disposal_method") or ""
                 if status != "arrived" or not method:
                     continue
-                pct = float(t.get("percentage_of_group") or 0)
-                w = pct / 100 * group_weight
+                w = float(t.get("weight") or 0)
                 if method in _DIVERTED_METHODS:
                     treatment_w += w
                 elif method in _DIRECTED_METHODS:
@@ -1384,7 +1383,7 @@ def _compute_card_values_from_hierarchy(hierarchy_data: list) -> list:
                 continue
             gw = float(group_node.get("weight") or group_node.get("total_weight_kg") or 0)
             total_group_weight += gw
-            _sum_leaves(group_node.get("children") or [], gw)
+            _sum_leaves(group_node.get("children") or [])
 
     total_waste = round(total_group_weight, 2)
     total_treatment = round(treatment_w, 2)
