@@ -132,40 +132,6 @@ class TraceabilityService:
                 if item.get("transport_transaction_id") not in parent_ids_in_arr2
             ]
 
-        # 6) Records in this month for summary
-        records = self._records_for_org_month_year(organization_id, year, month, kwargs)
-        path_map: Dict[int, str] = {}
-        location_ids = set()
-        for r in records:
-            if r.created_transaction and getattr(r.created_transaction, "origin_id", None):
-                location_ids.add(r.created_transaction.origin_id)
-            if getattr(r, "destination_id", None):
-                location_ids.add(r.destination_id)
-        if location_ids:
-            from ..users.user_service import UserService
-            user_service = UserService(self.db)
-            path_map = user_service._build_location_paths(organization_id, [{"id": lid} for lid in location_ids]) or {}
-
-        all_txn_ids = set()
-        for r in records:
-            if r.created_transaction_id:
-                all_txn_ids.add(r.created_transaction_id)
-            for tid in (r.traceability or []):
-                all_txn_ids.add(tid)
-        txn_map = {}
-        if all_txn_ids:
-            txns = self.db.query(Transaction).filter(Transaction.id.in_(all_txn_ids)).all()
-            txn_map = {t.id: t for t in txns}
-        transport_txn_ids = {tid for tid, t in txn_map.items() if getattr(t, "transaction_method", None) == "transport"}
-
-        def get_display_transport_txn(record: TransactionRecord):
-            if record.created_transaction_id and record.created_transaction_id in transport_txn_ids:
-                return record.created_transaction
-            candidate_ids = [tid for tid in (record.traceability or []) if tid in transport_txn_ids]
-            if not candidate_ids:
-                return None
-            return txn_map.get(max(candidate_ids))
-
         _DIVERTED = {
             "Preparation for reuse", "Recycling (Own)",
             "Other recover operation", "Recycle",
@@ -175,10 +141,9 @@ class TraceabilityService:
             "Incineration without energy", "Incineration with energy",
         }
 
-        hierarchy_result = self.get_traceability_hierarchy(organization_id, **kwargs)
+        hierarchy_result = self.get_traceability_hierarchy(organization_id, _exclude_idle=True, **kwargs)
         hierarchy_data = hierarchy_result.get("data") or []
 
-        total_waste_weight = sum(float(getattr(r, "origin_weight_kg", None) or 0) for r in records)
         treatment_w = 0.0
         disposal_w = 0.0
         total_group_weight = 0.0
@@ -192,7 +157,10 @@ class TraceabilityService:
                 if children:
                     _sum_leaves(children, group_weight)
                 else:
+                    status = t.get("status") or ""
                     method = t.get("disposal_method") or ""
+                    if status != "arrived" or not method:
+                        continue
                     pct = float(t.get("percentage_of_group") or 0)
                     w = pct / 100 * group_weight
                     if method in _DIVERTED:
@@ -210,12 +178,10 @@ class TraceabilityService:
                 total_group_weight += gw
                 _sum_leaves(group_node.get("children") or [], gw)
 
-        scale = total_waste_weight / total_group_weight if total_group_weight > 0 else 0
-        total_treatment = round(treatment_w * scale, 2)
-        total_disposal = round(disposal_w * scale, 2)
-
-        total_treatment = round(total_treatment, 2)
-        total_disposal = round(total_disposal, 2)
+        # total_waste_weight is the sum of all group weights in this month
+        total_waste_weight = round(total_group_weight, 2)
+        total_treatment = round(treatment_w, 2)
+        total_disposal = round(disposal_w, 2)
         total_managed_waste = round(total_treatment + total_disposal, 2)
 
         return {
@@ -228,11 +194,12 @@ class TraceabilityService:
             },
         }
 
-    def get_traceability_hierarchy(self, organization_id: Optional[int] = None, **kwargs: Any) -> Dict[str, Any]:
+    def get_traceability_hierarchy(self, organization_id: Optional[int] = None, _exclude_idle: bool = False, **kwargs: Any) -> Dict[str, Any]:
         """
         Get full hierarchy for the tree chart: transaction groups for the month, each with a tree of
         TransportTransactions (root = parent_id null, then children recursively to leaf).
         Same query params as get_traceability: date_from, date_to (1-month), material_id, origin_id.
+        _exclude_idle: when True, filter out idle transport transactions (used for summary calculation).
         """
         if organization_id is None:
             return {"data": []}
@@ -278,15 +245,17 @@ class TraceabilityService:
             return {"data": []}
 
         group_ids = [g.id for g in groups]
+        transport_filters = [
+            TransportTransaction.transaction_group_id.in_(group_ids),
+            TransportTransaction.organization_id == organization_id,
+            TransportTransaction.is_active == True,
+            TransportTransaction.deleted_date.is_(None),
+        ]
+        if _exclude_idle:
+            transport_filters.append(TransportTransaction.status != "idle")
         all_transports = (
             self.db.query(TransportTransaction)
-            .filter(
-                TransportTransaction.transaction_group_id.in_(group_ids),
-                TransportTransaction.organization_id == organization_id,
-                TransportTransaction.is_active == True,
-                TransportTransaction.deleted_date.is_(None),
-                TransportTransaction.status != "idle",
-            )
+            .filter(*transport_filters)
             .all()
         )
         by_group: Dict[int, List[Any]] = {}
@@ -565,20 +534,11 @@ class TraceabilityService:
                 "children": [],
             }
 
-        def _build_shallow(root: Any) -> Dict[str, Any]:
+        def _build_subtree(root: Any) -> Dict[str, Any]:
             node = transport_to_node(root)
             children = by_parent.get(root.id, [])
-            children = sorted(
-                children,
-                key=lambda x: x.updated_date or datetime.min,
-                reverse=True,
-            )
-            child_nodes = []
-            for child in children:
-                child_node = transport_to_node(child)
-                del child_node["children"]
-                child_nodes.append(child_node)
-            node["children"] = child_nodes
+            children = sorted(children, key=lambda x: x.id)
+            node["children"] = [_build_subtree(child) for child in children]
             return node
 
         # pick roots using the date filters
@@ -608,7 +568,7 @@ class TraceabilityService:
         end = start + page_size
         paginated_roots = roots[start:end]
 
-        data = [_build_shallow(r) for r in paginated_roots]
+        data = [_build_subtree(r) for r in paginated_roots]
         return {
             "data": data,
             "page": page,
@@ -824,14 +784,16 @@ class TraceabilityService:
             key = (origin_id, r.material_id, location_tag_id, tenant_id, year, month)
             key_to_records[key].append(r)
         for (origin_id, material_id, location_tag_id, tenant_id, _, _), group_records in key_to_records.items():
-            record_ids = [r.id for r in group_records]
+            record_ids = list(dict.fromkeys(r.id for r in group_records))
             key = (origin_id, material_id, location_tag_id, tenant_id, year, month)
             existing = key_to_existing_group.get(key)
             if existing and existing.id not in group_ids_already_processed:
-                existing_record_ids = list(existing.transaction_record_id or [])
+                existing_record_ids = list(dict.fromkeys(existing.transaction_record_id or []))
+                existing_set = set(existing_record_ids)
                 for rid in record_ids:
-                    if rid not in existing_record_ids:
+                    if rid not in existing_set:
                         existing_record_ids.append(rid)
+                        existing_set.add(rid)
                 existing.transaction_record_id = existing_record_ids
                 existing.updated_date = datetime.now(timezone.utc)
             else:
