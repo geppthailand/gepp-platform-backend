@@ -914,36 +914,75 @@ def _step6_classify_evidence(
                 'error': str(e),
             }
 
-    # Classify files sequentially (db session is not thread-safe)
+    # Check for cached observations first
+    file_ids_to_classify = []
+    cached_count = 0
+    file_objects = {f.id: f for f in db.query(File).filter(File.id.in_(list(all_files.keys()))).all()}
+
     for fid, finfo in all_files.items():
-        result = classify_single_file(fid, finfo)
-        classified.append(result)
+        file_obj = file_objects.get(fid)
+        if file_obj and file_obj.observation and isinstance(file_obj.observation, dict):
+            obs = file_obj.observation
+            if obs.get('document_type_id') is not None and obs.get('extracted_data'):
+                classified.append({
+                    'file_id': fid,
+                    'document_type_id': obs.get('document_type_id', 0),
+                    'document_type_name': obs.get('document_type_name', 'unknown'),
+                    'extracted_data': obs.get('extracted_data', {}),
+                    'confidence': obs.get('confidence', 0.0),
+                })
+                cached_count += 1
+                continue
+        file_ids_to_classify.append(fid)
 
-        # Store in File.observation for ALL results (classified, skipped, error)
+    if cached_count > 0:
+        logger.info(f"Step 6: {cached_count} files from cache, {len(file_ids_to_classify)} to classify")
+
+    # Classify remaining files in parallel (LLM calls are thread-safe, DB writes are not)
+    if file_ids_to_classify:
+        new_results = []
+        with ThreadPoolExecutor(max_workers=min(len(file_ids_to_classify), 5)) as classify_executor:
+            futures = {
+                classify_executor.submit(classify_single_file, fid, all_files[fid]): fid
+                for fid in file_ids_to_classify
+            }
+            for future in as_completed(futures):
+                try:
+                    result = future.result()
+                    new_results.append(result)
+                    classified.append(result)
+                except Exception as e:
+                    fid = futures[future]
+                    logger.error(f"Classify file #{fid} thread failed: {str(e)}")
+
+        # Write observations to DB sequentially
+        for result in new_results:
+            try:
+                file_obj = file_objects.get(result['file_id'])
+                if not file_obj:
+                    file_obj = db.query(File).filter(File.id == result['file_id']).first()
+                if file_obj:
+                    observation = {
+                        'document_type_id': result.get('document_type_id', 0),
+                        'document_type_name': result.get('document_type_name', 'unknown'),
+                        'extracted_data': result.get('extracted_data', {}),
+                        'confidence': result.get('confidence', 0.0),
+                        'classified_at': datetime.now(timezone.utc).isoformat(),
+                    }
+                    if result.get('skipped_reason'):
+                        observation['skipped_reason'] = result['skipped_reason']
+                    if result.get('error'):
+                        observation['error'] = result['error']
+                    file_obj.observation = observation
+                    flag_modified(file_obj, 'observation')
+            except Exception as e:
+                logger.error(f"Failed to update File.observation for #{result['file_id']}: {str(e)}")
+
+        # Commit all observation updates
         try:
-            file_obj = db.query(File).filter(File.id == result['file_id']).first()
-            if file_obj:
-                observation = {
-                    'document_type_id': result.get('document_type_id', 0),
-                    'document_type_name': result.get('document_type_name', 'unknown'),
-                    'extracted_data': result.get('extracted_data', {}),
-                    'confidence': result.get('confidence', 0.0),
-                    'classified_at': datetime.now(timezone.utc).isoformat(),
-                }
-                if result.get('skipped_reason'):
-                    observation['skipped_reason'] = result['skipped_reason']
-                if result.get('error'):
-                    observation['error'] = result['error']
-                file_obj.observation = observation
-                flag_modified(file_obj, 'observation')
+            db.commit()
         except Exception as e:
-            logger.error(f"Failed to update File.observation for #{result['file_id']}: {str(e)}")
-
-    # Commit all observation updates
-    try:
-        db.commit()
-    except Exception as e:
-        logger.error(f"Failed to commit File.observation updates: {str(e)}")
+            logger.error(f"Failed to commit File.observation updates: {str(e)}")
 
     logger.info(f"Classified {len(classified)} evidence files")
     return classified
@@ -1102,8 +1141,8 @@ def _step8a_transaction_level_check(
     if not tx_evidence or not all_records_data:
         return tx_checklist
 
-    # For each tx-level evidence file, call LLM once with ALL records
-    for ev in tx_evidence:
+    def _check_single_evidence(ev):
+        """Check one evidence file against all records (thread-safe)."""
         try:
             prompt = build_transaction_checklist_prompt(
                 single_evidence_data=ev,
@@ -1111,35 +1150,45 @@ def _step8a_transaction_level_check(
                 checklist_columns=checklist_columns,
             )
             response = call_llm_text_only(llm, prompt)
-            token_usage['input_tokens'] += response.get('usage', {}).get('input_tokens', 0)
-            token_usage['output_tokens'] += response.get('usage', {}).get('output_tokens', 0)
+            usage = response.get('usage', {})
             parsed = parse_json_response(response['content'])
-
-            # OR-merge into running checklist per column
-            match_result = parsed.get('match', {})
-            found_result = parsed.get('found', {})
-            errors_result = parsed.get('errors', {})
-
-            for col in checklist_columns:
-                if col not in tx_checklist:
-                    continue
-                col_match = bool(match_result.get(col, False))
-                col_found = bool(found_result.get(col, False))
-                col_error = errors_result.get(col)
-
-                # OR-merge: if any evidence matches, the column is matched
-                if col_match:
-                    tx_checklist[col]['match'] = True
-                    tx_checklist[col]['found'] = True
-                    tx_checklist[col]['error'] = None  # Clear any previous error
-                elif col_found:
-                    tx_checklist[col]['found'] = True
-                    # Keep error only if not already matched
-                    if not tx_checklist[col]['match'] and col_error:
-                        tx_checklist[col]['error'] = col_error
-
+            return parsed, usage
         except Exception as e:
             logger.error(f"Tx #{transaction_id} Phase A evidence file #{ev.get('file_id')} failed: {str(e)}")
+            return None, {}
+
+    # Run evidence checks in parallel
+    all_parsed = []
+    with ThreadPoolExecutor(max_workers=min(len(tx_evidence), 5)) as ev_executor:
+        futures = {ev_executor.submit(_check_single_evidence, ev): ev for ev in tx_evidence}
+        for future in as_completed(futures):
+            parsed, usage = future.result()
+            token_usage['input_tokens'] += usage.get('input_tokens', 0)
+            token_usage['output_tokens'] += usage.get('output_tokens', 0)
+            if parsed:
+                all_parsed.append(parsed)
+
+    # OR-merge all results
+    for parsed in all_parsed:
+        match_result = parsed.get('match', {})
+        found_result = parsed.get('found', {})
+        errors_result = parsed.get('errors', {})
+
+        for col in checklist_columns:
+            if col not in tx_checklist:
+                continue
+            col_match = bool(match_result.get(col, False))
+            col_found = bool(found_result.get(col, False))
+            col_error = errors_result.get(col)
+
+            if col_match:
+                tx_checklist[col]['match'] = True
+                tx_checklist[col]['found'] = True
+                tx_checklist[col]['error'] = None
+            elif col_found:
+                tx_checklist[col]['found'] = True
+                if not tx_checklist[col]['match'] and col_error:
+                    tx_checklist[col]['error'] = col_error
 
     return tx_checklist
 
@@ -1174,20 +1223,18 @@ def _step8b_record_level_check(
                 'extracted_data': ev.get('extracted_data', {}),
             }
 
-    for record in records:
-        # Initialize per-record checklist for unmatched columns
+    def _check_single_record(record):
+        """Check a single record's evidence (thread-safe, no DB access)."""
         rec_checklist = {
             col: {'match': False, 'found': False, 'error': None}
             for col in unmatched_columns
         }
 
-        # Get record-level evidence only
         rec_fids = record_file_ids.get(record.id, [])
         rec_evidence = [ev_by_id[fid] for fid in rec_fids if fid in ev_by_id]
 
         if not rec_evidence:
-            per_record_results[record.id] = rec_checklist
-            continue
+            return record.id, rec_checklist, {}
 
         try:
             record_data = _build_record_data(record, names)
@@ -1197,8 +1244,7 @@ def _step8b_record_level_check(
                 unmatched_columns=unmatched_columns,
             )
             response = call_llm_text_only(llm, prompt)
-            token_usage['input_tokens'] += response.get('usage', {}).get('input_tokens', 0)
-            token_usage['output_tokens'] += response.get('usage', {}).get('output_tokens', 0)
+            usage = response.get('usage', {})
             parsed = parse_json_response(response['content'])
 
             match_result = parsed.get('match', {})
@@ -1212,10 +1258,28 @@ def _step8b_record_level_check(
                     'error': errors_result.get(col),
                 }
 
+            return record.id, rec_checklist, usage
+
         except Exception as e:
             logger.error(f"Tx #{transaction_id} Phase B record #{record.id} failed: {str(e)}")
+            return record.id, rec_checklist, {}
 
-        per_record_results[record.id] = rec_checklist
+    # Run record checks in parallel
+    with ThreadPoolExecutor(max_workers=min(len(records), 5)) as rec_executor:
+        futures = {rec_executor.submit(_check_single_record, r): r.id for r in records}
+        for future in as_completed(futures):
+            try:
+                rec_id, rec_checklist, usage = future.result()
+                per_record_results[rec_id] = rec_checklist
+                token_usage['input_tokens'] += usage.get('input_tokens', 0)
+                token_usage['output_tokens'] += usage.get('output_tokens', 0)
+            except Exception as e:
+                rid = futures[future]
+                logger.error(f"Tx #{transaction_id} Phase B record #{rid} thread failed: {str(e)}")
+                per_record_results[rid] = {
+                    col: {'match': False, 'found': False, 'error': None}
+                    for col in unmatched_columns
+                }
 
     return per_record_results
 
@@ -1335,6 +1399,60 @@ def _get_column_description(col: str) -> str:
     return descriptions.get(col, col)
 
 
+def _compose_audit_note(
+    transaction_id: int,
+    status: str,
+    final_checklist: Dict[str, Dict],
+    rejection_errors: List[str],
+    doc_check: Dict[str, Any],
+    classified_evidence: List[Dict],
+) -> Dict[str, Any]:
+    """Compose audit note programmatically without LLM call."""
+    issues = []
+    missing_record_docs = doc_check.get('missing_record_docs', {})
+
+    # Build issues from rejection errors
+    for col, result in final_checklist.items():
+        if result.get('found') and not result.get('match'):
+            issues.append({
+                'type': 'data_mismatch',
+                'field': col,
+                'description': result.get('error') or f'{_get_column_description(col)} ไม่ตรงกับเอกสาร',
+            })
+        elif not result.get('found'):
+            issues.append({
+                'type': 'missing_evidence',
+                'field': col,
+                'description': f'ไม่พบข้อมูล {_get_column_description(col)} ในเอกสารแนบ',
+            })
+
+    for rec_id, missing_list in missing_record_docs.items():
+        for doc_info in missing_list:
+            doc_name = doc_info.get('name_th', doc_info.get('name_en', '')) if isinstance(doc_info, dict) else str(doc_info)
+            issues.append({
+                'type': 'missing_document',
+                'field': doc_name,
+                'description': f'ไม่พบเอกสาร \'{doc_name}\' สำหรับรายการ #{rec_id}',
+            })
+
+    n_evidence = len(classified_evidence)
+
+    if status == 'approved':
+        summary_th = f'ตรวจสอบเอกสาร {n_evidence} ไฟล์เรียบร้อย ข้อมูลตรงกับเอกสารทั้งหมด'
+        summary_en = f'Verified {n_evidence} evidence files. All data matches.'
+    else:
+        n_issues = len(issues)
+        summary_th = f'ตรวจสอบเอกสาร {n_evidence} ไฟล์ พบปัญหา {n_issues} รายการ'
+        summary_en = f'Verified {n_evidence} evidence files. Found {n_issues} issue(s).'
+
+    return {
+        'status': status,
+        'summary_th': summary_th,
+        'summary_en': summary_en,
+        'issues': issues,
+    }
+
+
 def _step9_compose_and_save(
     tx: Any,
     records: List[Any],
@@ -1356,51 +1474,15 @@ def _step9_compose_and_save(
     """
     from GEPPPlatform.models.transactions.transactions import AIAuditStatus
     from GEPPPlatform.models.transactions.transaction_audits import TransactionAudit
-    from ..prompts.builders.audit_note_composing import build_audit_note_prompt
-    from ..clients.llm_client import call_llm_text_only, parse_json_response
 
     final_checklist = final_determination['final_checklist']
     rejection_errors = final_determination['rejection_errors']
     determined_status = final_determination['status']
 
-    # Build evidence summary for the compose prompt
-    evidence_summary = [
-        {'file_id': ev['file_id'], 'document_type_name': ev.get('document_type_name', 'unknown'), 'confidence': ev.get('confidence', 0)}
-        for ev in classified_evidence
-    ]
-
-    # Build per-record results for prompt
-    per_record_for_prompt = []
-    for rec in records:
-        rec_result = per_record_results.get(rec.id, {})
-        per_record_for_prompt.append({
-            'record_id': rec.id,
-            'checklist': rec_result,
-        })
-
-    # Compose audit note via LLM
-    compose_prompt = build_audit_note_prompt(
-        transaction_id=tx.id,
-        final_checklist=final_checklist,
-        per_record_results=per_record_for_prompt,
-        missing_doc_types=doc_check,
-        evidence_summary=evidence_summary,
-        rejection_errors=rejection_errors,
+    # Compose audit note programmatically (no LLM call needed)
+    audit_note = _compose_audit_note(
+        tx.id, determined_status, final_checklist, rejection_errors, doc_check, classified_evidence,
     )
-
-    try:
-        response = call_llm_text_only(llm, compose_prompt)
-        token_usage['input_tokens'] += response.get('usage', {}).get('input_tokens', 0)
-        token_usage['output_tokens'] += response.get('usage', {}).get('output_tokens', 0)
-        audit_note = parse_json_response(response['content'])
-    except Exception as e:
-        logger.error(f"Audit note composing failed for tx #{tx.id}: {str(e)}")
-        audit_note = {
-            'status': determined_status,
-            'summary_th': 'ไม่สามารถสร้างสรุปอัตโนมัติได้',
-            'summary_en': 'Could not generate automatic summary',
-            'issues': [],
-        }
 
     # Use the determined status from Phase C (not LLM's opinion)
     final_status = determined_status

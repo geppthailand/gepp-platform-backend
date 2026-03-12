@@ -16,10 +16,22 @@ logger = logging.getLogger(__name__)
 SETTINGS_PATH = Path(__file__).parent.parent / 'settings.json'
 
 
+_cached_settings = None
+_cached_settings_mtime = 0
+
+
 def _load_settings() -> Dict[str, Any]:
-    """Load settings from settings.json"""
-    with open(SETTINGS_PATH, 'r') as f:
-        return json.load(f)
+    """Load settings from settings.json (cached by mtime)."""
+    global _cached_settings, _cached_settings_mtime
+    try:
+        mtime = SETTINGS_PATH.stat().st_mtime
+    except OSError:
+        mtime = 0
+    if _cached_settings is None or mtime != _cached_settings_mtime:
+        with open(SETTINGS_PATH, 'r') as f:
+            _cached_settings = json.load(f)
+        _cached_settings_mtime = mtime
+    return _cached_settings
 
 
 def get_default_audit_llm() -> OpenAI:
