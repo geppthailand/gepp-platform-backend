@@ -13,11 +13,17 @@ template: |
   **Unmatched Columns to Verify:** {unmatched_columns}
 
   **Matching Rules:**
-  - **String fields** (material_id, origin_id, destination_id): Fuzzy match allowed. Thai/English name variations are OK (e.g. "Plastic PET Bottles" ≈ "ขวด PET", "Cardboard" ≈ "กระดาษลัง"). Match this record's value against any of the provided evidence documents.
+  - **String fields** (material_id, origin_id, destination_id): Fuzzy match allowed. Thai/English name variations are OK (e.g. "Plastic PET Bottles" ≈ "ขวด PET", "Cardboard" ≈ "กระดาษลัง"). When multiple similar materials exist in the evidence (e.g. "Plastic Bag" and "Clear Plastic (PET)"), match to the **most specific/closest** name. Match this record's value against any of the provided evidence documents.
   - **Numeric fields** (origin_weight_kg, origin_quantity, origin_price_per_unit, total_amount): Must match the record's value with 5% tolerance. Search through all evidence documents to find a matching value for this specific material.
   - **Date field** (transaction_date): **Exact match** required (no tolerance). Search all evidence documents for a date matching this record's transaction_date.
   - **Row-level integrity**: If evidence contains multiple materials, find the row matching this record's material and compare values from that same row.
   - **Cross-document search**: Search across ALL provided evidence documents. If any single document satisfies a column, that column is matched.
+  - **Monthly/periodic reports with daily breakdowns**: If evidence is a monthly or periodic summary with daily columns (e.g. columns for date 1, 2, ..., 31) AND a total column:
+    - First, try to match the record's numeric value against the **daily value for the record's transaction_date** (e.g. if transaction_date is 2026-03-11, look at the column for day 11).
+    - If the daily value matches (within 5% tolerance), set `match=true`.
+    - If no daily match, try matching against the **period total** for that material.
+    - If either the daily value OR the total matches, the column is `match=true`.
+    - Only report `match=false` if NEITHER the daily value nor the total matches.
 
   **How to determine results:**
   For each column in the unmatched list:

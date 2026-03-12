@@ -834,9 +834,9 @@ class ManualAuditService:
             # Material information from join
             'ai_audit_status': record.ai_audit_status if hasattr(record, 'ai_audit_status') else None,
             'ai_audit_note': record.ai_audit_note if hasattr(record, 'ai_audit_note') else None,
-            # Material information from join
-            'material_name_en': main_material.name_en,
-            'material_name_th': main_material.name_th,
-            'material_code': main_material.code,
+            # Material information from join (prefer specific material, fallback to main_material)
+            'material_name_en': (material.name_en if material and material.name_en else main_material.name_en),
+            'material_name_th': (material.name_th if material and material.name_th else main_material.name_th),
+            'material_code': (material.code if material and hasattr(material, 'code') and material.code else main_material.code),
             'material_unit_weight': float(material.unit_weight) if material and material.unit_weight else None
         }
