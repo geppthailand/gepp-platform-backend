@@ -1198,6 +1198,16 @@ def _draw_item_details_table(
     page_row_index = 0
     min_y_for_row = bottom_margin + row_height
 
+    # Only start the table on this page if there is space for at least the
+    # title + header + one data row; otherwise jump to a new page first.
+    min_space_needed = TABLE_TITLE_GAP + row_height + row_height  # title gap + header + 1 row
+    if y - min_space_needed < min_y_for_row:
+        pdf.showPage()
+        pdf.setPageSize((page_width_points, page_height_points))
+        _draw_header(pdf, page_width_points, page_height_points, data)
+        y = page_height_points - (1.8 * inch)
+        is_continuation_page = True
+
     while row_index_global < len(flat_rows):
         if need_title:
             if is_continuation_page:
