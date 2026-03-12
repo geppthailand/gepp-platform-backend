@@ -2401,5 +2401,7 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
             'is_active': record.is_active,
             'created_date': record.created_date.isoformat() if record.created_date else None,
             'updated_date': record.updated_date.isoformat() if record.updated_date else None,
-            'deleted_date': record.deleted_date.isoformat() if record.deleted_date else None
+            'deleted_date': record.deleted_date.isoformat() if record.deleted_date else None,
+            'ai_audit_status': record.ai_audit_status if hasattr(record, 'ai_audit_status') else None,
+            'ai_audit_note': record.ai_audit_note if hasattr(record, 'ai_audit_note') else None,
         }

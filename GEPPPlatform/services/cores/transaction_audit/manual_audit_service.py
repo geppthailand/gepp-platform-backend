@@ -832,6 +832,9 @@ class ManualAuditService:
             'updated_date': record.updated_date.isoformat() if record.updated_date else None,
             'deleted_date': record.deleted_date.isoformat() if record.deleted_date else None,
             # Material information from join
+            'ai_audit_status': record.ai_audit_status if hasattr(record, 'ai_audit_status') else None,
+            'ai_audit_note': record.ai_audit_note if hasattr(record, 'ai_audit_note') else None,
+            # Material information from join
             'material_name_en': main_material.name_en,
             'material_name_th': main_material.name_th,
             'material_code': main_material.code,
