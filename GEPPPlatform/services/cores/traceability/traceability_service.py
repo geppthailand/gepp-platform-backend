@@ -148,21 +148,20 @@ class TraceabilityService:
         disposal_w = 0.0
         total_group_weight = 0.0
 
-        def _sum_leaves(nodes, group_weight):
+        def _sum_leaves(nodes):
             nonlocal treatment_w, disposal_w
             for t in nodes:
                 if not isinstance(t, dict):
                     continue
                 children = t.get("children") or []
                 if children:
-                    _sum_leaves(children, group_weight)
+                    _sum_leaves(children)
                 else:
                     status = t.get("status") or ""
                     method = t.get("disposal_method") or ""
                     if status != "arrived" or not method:
                         continue
-                    pct = float(t.get("percentage_of_group") or 0)
-                    w = pct / 100 * group_weight
+                    w = float(t.get("weight") or 0)
                     if method in _DIVERTED:
                         treatment_w += w
                     elif method in _DIRECTED:
@@ -176,7 +175,7 @@ class TraceabilityService:
                     continue
                 gw = float(group_node.get("weight") or group_node.get("total_weight_kg") or 0)
                 total_group_weight += gw
-                _sum_leaves(group_node.get("children") or [], gw)
+                _sum_leaves(group_node.get("children") or [])
 
         # total_waste_weight is the sum of all group weights in this month
         total_waste_weight = round(total_group_weight, 2)
