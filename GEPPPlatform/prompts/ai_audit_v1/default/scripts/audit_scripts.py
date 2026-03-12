@@ -176,6 +176,7 @@ def _process_single_audit_history(
     from GEPPPlatform.models.transactions.transactions import Transaction, AIAuditStatus
     from GEPPPlatform.models.transactions.transaction_records import TransactionRecord
     from GEPPPlatform.models.transactions.ai_audit_document_types import AiAuditDocumentType
+    from GEPPPlatform.models.transactions.ai_audit_column_details import AiAuditColumnDetail
     from GEPPPlatform.models.subscriptions.organization_audit_settings import (
         OrganizationAuditDocRequireTypes, OrganizationAuditCheckColumns
     )
@@ -251,10 +252,18 @@ def _process_single_audit_history(
             OrganizationAuditCheckColumns.deleted_date.is_(None)
         ).first()
 
+        # Load column details for resolving IDs → column names
+        column_details = db.query(AiAuditColumnDetail).filter(
+            AiAuditColumnDetail.deleted_date.is_(None),
+            AiAuditColumnDetail.is_active.is_(True),
+        ).all()
+        column_detail_map = {cd.id: cd.column_name for cd in column_details}
+
         config = {
             'doc_type_specs': doc_type_specs_list,
             'doc_requires': doc_requires.to_dict() if doc_requires else {'transaction_document_requires': [], 'record_document_requires': []},
-            'check_columns': check_columns.to_dict() if check_columns else {'transaction_checks': {}, 'transaction_record_checks': {}},
+            'check_columns': check_columns.to_dict() if check_columns else {'transaction_checks': {}, 'transaction_record_checks': []},
+            'column_detail_map': column_detail_map,
         }
 
         # Initialize LLM
@@ -506,8 +515,14 @@ def _process_single_transaction(
         )
 
         # === Step 8: Checklist-based matching (Phase A → B → C) ===
-        rec_checks = config['check_columns'].get('transaction_record_checks', {})
-        checklist_columns = [k for k, v in rec_checks.items() if v]
+        rec_checks = config['check_columns'].get('transaction_record_checks', [])
+        column_detail_map = config.get('column_detail_map', {})
+        # transaction_record_checks is a list of ai_audit_column_details IDs, e.g. [6, 7, 8]
+        if isinstance(rec_checks, list):
+            checklist_columns = [column_detail_map[cid] for cid in rec_checks if cid in column_detail_map]
+        else:
+            # Legacy fallback: old format {"column_name": true/false}
+            checklist_columns = [k for k, v in rec_checks.items() if v]
 
         # Resolve names in batch
         names = _resolve_names_batch(tx, records, db)
@@ -539,7 +554,7 @@ def _process_single_transaction(
             logger.info(f"Tx #{transaction_id} Step 8B skipped — all columns matched at tx-level")
 
         # Phase C: Determine final status
-        required_columns = [k for k, v in rec_checks.items() if v]  # all checked columns are required
+        required_columns = checklist_columns  # all checked columns are required
         final_determination = _determine_final_status(
             tx_checklist, per_record_results, checklist_columns, required_columns, doc_check,
         )

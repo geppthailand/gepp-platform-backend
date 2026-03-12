@@ -96,7 +96,7 @@ class AuditSettingsService:
             'id': None,
             'organization_id': organization_id,
             'transaction_checks': {},
-            'transaction_record_checks': {},
+            'transaction_record_checks': [],
             'is_active': True,
         }
 
@@ -106,18 +106,15 @@ class AuditSettingsService:
             OrganizationAuditCheckColumns.deleted_date.is_(None),
         ).first()
 
-        tx_checks = data.get('transaction_checks', {})
-        rec_checks = data.get('transaction_record_checks', {})
+        # transaction_record_checks is now a list of ai_audit_column_details IDs, e.g. [6, 7, 8]
+        rec_checks = data.get('transaction_record_checks', [])
 
         if record:
-            record.transaction_checks = tx_checks
             record.transaction_record_checks = rec_checks
-            flag_modified(record, 'transaction_checks')
             flag_modified(record, 'transaction_record_checks')
         else:
             record = OrganizationAuditCheckColumns(
                 organization_id=organization_id,
-                transaction_checks=tx_checks,
                 transaction_record_checks=rec_checks,
             )
             self.db.add(record)
