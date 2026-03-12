@@ -23,6 +23,15 @@ template: |
   - For tabular documents: read each column header carefully — these are the material_name values. Read each row carefully — the row number is the day, and each cell is the weight for that material on that day. Only extract rows that have actual data (skip empty rows).
   - For monthly totals at the bottom of a table, extract them in the monthly_totals field.
 
+  **Extracting location_name (IMPORTANT):**
+  The location_name field identifies WHERE the data was recorded. Look for it in these places:
+  - A row labeled "อาคาร" (building), "สถานที่" (location), "สาขา" (branch), or similar — the value in that row (or the checked/marked checkbox) is the location_name.
+  - In spreadsheets, it may appear as a row like: `อาคาร | นานาเหนือ | | |` or `อาคาร | ☐นานาเหนือ ☑สุขุมวิท ☐ปทุมวัน` — extract the non-empty value or checked value.
+  - The sheet/tab name itself may be the location (e.g. sheet named "SM Tower" or "นานาเหนือ").
+  - A header row or title area with a location/building name.
+  - If the location appears as a cell value adjacent to a label like "อาคาร:", "Building:", "Location:", extract that cell value.
+  - Do NOT return null if any location/building information is present in the document. Search thoroughly.
+
   **OUTPUT FORMAT (JSON ONLY - NO PREAMBLE):**
   Return ONLY the raw JSON object. Do not use markdown blocks or add any text before/after.
   {{

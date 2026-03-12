@@ -24,12 +24,11 @@ template: |
 
   **Field Mapping for Monthly/Periodic Documents:**
   Monthly forms often use different field names than the record columns. Use these mappings:
-  - `location_name` in evidence → corresponds to record's `origin_name` (for `origin_id` column check)
+  - `daily_entries[].location_name` in evidence → corresponds to record's `origin_name` (for `origin_id` column check). If `location_name` is at document level instead, it applies to ALL entries.
   - `daily_entries[].material_name` → corresponds to record's `material_name` (for `material_id` column check)
   - `daily_entries[].weight_kg` (matched by day from record's `transaction_date`) → corresponds to record's `origin_weight_kg`
   - `daily_entries[].day` combined with evidence `month`/`year` → corresponds to record's `transaction_date` (match the day portion)
   - If evidence has `buyer_name`, `seller_name`, or `company_name`, these may correspond to `origin_name` or `destination_name` depending on context.
-  - When `location_name` is at the document level (not per daily_entry), it applies to ALL daily entries in that document.
 
   **How to determine column-level results:**
   For each column in the checklist:
