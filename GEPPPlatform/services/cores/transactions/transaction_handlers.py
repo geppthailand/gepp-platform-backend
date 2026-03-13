@@ -434,6 +434,9 @@ def handle_update_transaction(
                     organization_id=organization_id,
                     created_by_id=int(current_user_id),
                 )
+                owner_id = transaction.get('created_by_id')
+                if owner_id and int(current_user_id) != int(owner_id):
+                    transaction_service.notify_transaction_owner(transaction_id, 'TXN_UPDATED', int(owner_id))
             return {
                 'success': True,
                 'message': result['message'],
@@ -491,6 +494,9 @@ def handle_update_transaction_with_records(
                     organization_id=organization_id,
                     created_by_id=int(current_user_id),
                 )
+                owner_id = transaction.get('created_by_id')
+                if owner_id and int(current_user_id) != int(owner_id):
+                    transaction_service.notify_transaction_owner(transaction_id, 'TXN_UPDATED', int(owner_id))
             return {
                 'success': True,
                 'message': result['message'],
@@ -542,6 +548,9 @@ def handle_delete_transaction(
                     organization_id=organization_id,
                     created_by_id=int(current_user_id),
                 )
+                owner_id = transaction.get('created_by_id')
+                if owner_id and int(current_user_id) != int(owner_id):
+                    transaction_service.notify_transaction_owner(transaction_id, 'TXN_DELETED', int(owner_id))
             return {
                 'success': True,
                 'message': result['message']

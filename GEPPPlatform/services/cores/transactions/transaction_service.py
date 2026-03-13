@@ -908,6 +908,78 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                 exc_info=True,
             )
 
+    def notify_owner_if_different(self, transaction_id: int, notification_type: str, actor_id: int) -> None:
+        """
+        Look up the transaction owner (created_by_id) and, if they differ from the actor,
+        ensure they have a user_notification entry for the given notification type.
+        """
+        try:
+            row = self.db.execute(
+                text("SELECT created_by_id FROM transactions WHERE id = :txn_id LIMIT 1"),
+                {'txn_id': transaction_id}
+            ).fetchone()
+            if row and row[0] and int(row[0]) != int(actor_id):
+                self.notify_transaction_owner(transaction_id, notification_type, int(row[0]))
+        except Exception as e:
+            logger.error(f"Error in notify_owner_if_different (txn={transaction_id}): {e}")
+
+    def notify_transaction_owner(self, transaction_id: int, notification_type: str, owner_id: int) -> None:
+        """
+        Ensure the transaction owner has a user_notification entry for the latest
+        notification of the given type on this transaction, and also send them an email.
+        Called when someone other than the owner updates or deletes a transaction.
+        """
+        try:
+            row = self.db.execute(
+                text("""
+                    SELECT id FROM notifications
+                    WHERE notification_type = :ntype
+                      AND (resource->>'transaction_id')::int = :txn_id
+                      AND is_active = TRUE
+                    ORDER BY created_date DESC
+                    LIMIT 1
+                """),
+                {'ntype': notification_type, 'txn_id': transaction_id}
+            ).fetchone()
+            if row:
+                self.db.execute(
+                    text("""
+                        INSERT INTO user_notifications
+                            (user_id, notification_id, is_read, is_active, created_date, updated_date)
+                        VALUES (:user_id, :notification_id, FALSE, TRUE, NOW(), NOW())
+                        ON CONFLICT (user_id, notification_id) DO NOTHING
+                    """),
+                    {'user_id': owner_id, 'notification_id': row[0]}
+                )
+                self.db.flush()
+            # Send email to the owner
+            owner_row = self.db.execute(
+                text("""
+                    SELECT ul.email, t.organization_id
+                    FROM user_locations ul
+                    JOIN transactions t ON t.id = :txn_id
+                    WHERE ul.id = :owner_id
+                      AND ul.email IS NOT NULL AND TRIM(ul.email) != ''
+                    LIMIT 1
+                """),
+                {'txn_id': transaction_id, 'owner_id': owner_id}
+            ).fetchone()
+            if owner_row:
+                owner_email = (owner_row[0] or '').strip()
+                org_id = owner_row[1]
+                if owner_email and org_id:
+                    resource = {'transaction_id': transaction_id}
+                    send_fn = {
+                        'TXN_UPDATED': self._send_txn_updated_emails,
+                        'TXN_DELETED': self._send_txn_deleted_emails,
+                        'TXN_APPROVED': self._send_txn_approved_emails,
+                        'TXN_REJECTED': self._send_txn_rejected_emails,
+                    }.get(notification_type)
+                    if send_fn:
+                        send_fn(transaction_id, org_id, [owner_email], resource)
+        except Exception as e:
+            logger.error(f"Error notifying transaction owner (txn={transaction_id}, owner={owner_id}): {e}")
+
     def _send_txn_approved_emails(
         self,
         transaction_id: int,
