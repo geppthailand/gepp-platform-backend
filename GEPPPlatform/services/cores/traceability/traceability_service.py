@@ -1600,7 +1600,13 @@ class TraceabilityService:
     def _recalculate_absolute_percentage(self, transaction_group_id: int) -> None:
         """
         Recalculate absolute_percentage for ALL active transport transactions in the group.
-        absolute_percentage = (node_weight / sum_of_siblings_weights) * 100
+
+        The calculation is cascading (compound):
+          absolute_percentage = parent_absolute_percentage * (node_weight / siblings_total)
+        Root-level nodes (parent_id is None) use 100 as the base.
+
+        Example: if a node's parent has absolute_percentage=50 and the node weighs
+        14 out of siblings total 16, then: 50 * (14/16) = 43.75%
 
         IMPORTANT: Any code that creates, updates, or reverts transport transactions
         MUST call this method afterward to keep absolute_percentage in sync.
@@ -1619,19 +1625,33 @@ class TraceabilityService:
         if not rows:
             return
 
-        # Group by parent_id to find sibling sets at each tree level
+        # Index by id for parent lookup; group by parent_id to find sibling sets
+        by_id: Dict[int, TransportTransaction] = {r.id: r for r in rows}
         by_parent: Dict[Optional[int], List[TransportTransaction]] = {}
         for r in rows:
             by_parent.setdefault(r.parent_id, []).append(r)
 
-        for siblings in by_parent.values():
+        # Walk the tree top-down (BFS) so parents are calculated before children
+        queue: List[Optional[int]] = [None]  # start with root-level nodes (parent_id=None)
+        while queue:
+            parent_id = queue.pop(0)
+            siblings = by_parent.get(parent_id)
+            if not siblings:
+                continue
+
+            # Parent's absolute_percentage (100 for root level)
+            parent_pct = float(by_id[parent_id].absolute_percentage or 100) if parent_id is not None else 100.0
+
             siblings_total = sum(float(s.weight or 0) for s in siblings)
             for node in siblings:
                 w = float(node.weight or 0)
                 if siblings_total > 0:
-                    node.absolute_percentage = Decimal(str(round((w / siblings_total) * 100, 2)))
+                    node.absolute_percentage = Decimal(str(round(parent_pct * (w / siblings_total), 2)))
                 else:
                     node.absolute_percentage = Decimal("0")
+                # Enqueue this node's id so its children get processed next
+                if node.id in by_parent:
+                    queue.append(node.id)
 
         self.db.flush()
 
