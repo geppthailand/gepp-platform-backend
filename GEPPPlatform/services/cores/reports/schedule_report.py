@@ -42,12 +42,11 @@ SCHEDULED_REPORT_EVENTS = (
 )
 
 
-def _thai_date_to_utc_iso(
+def _thai_date_to_naive_iso(
     year: int, month: int, day: int, hour: int = 0, minute: int = 0, second: int = 0, microsecond: int = 0
 ) -> str:
-    """Build a datetime in Thai time and return UTC ISO string for filters."""
-    local_dt = datetime(year, month, day, hour, minute, second, microsecond, tzinfo=THAI_TZ)
-    return local_dt.astimezone(timezone.utc).isoformat()
+    """Build a naive Thai-time ISO string for DB filters (transaction_date is stored as Thai local naive)."""
+    return datetime(year, month, day, hour, minute, second, microsecond).isoformat()
 
 
 def should_run_scheduled_event(event: str, now_thai: datetime) -> bool:
@@ -76,7 +75,8 @@ def get_date_range_for_scheduled_event(
     event: str, now_thai: datetime
 ) -> Optional[Tuple[str, str]]:
     """
-    Return (date_from_iso, date_to_iso) in UTC for the report period.
+    Return (date_from_iso, date_to_iso) as Thai-time naive ISO strings matching how
+    transaction_date is stored in the DB (Thai local, no timezone offset).
     - Daily: yesterday (full day Thai)
     - Weekly: last week Mon 00:00 - Sun 23:59:59 Thai
     - Bi-weekly: previous 14 days ending yesterday (Mon-Sun of prior 2 weeks)
@@ -85,16 +85,16 @@ def get_date_range_for_scheduled_event(
     """
     if event == "RPT_TXN_DAILY":
         yesterday = now_thai.date() - timedelta(days=1)
-        date_from = _thai_date_to_utc_iso(yesterday.year, yesterday.month, yesterday.day, 0, 0, 0, 0)
-        date_to = _thai_date_to_utc_iso(yesterday.year, yesterday.month, yesterday.day, 23, 59, 59, 999999)
+        date_from = _thai_date_to_naive_iso(yesterday.year, yesterday.month, yesterday.day, 0, 0, 0, 0)
+        date_to = _thai_date_to_naive_iso(yesterday.year, yesterday.month, yesterday.day, 23, 59, 59, 999999)
         return (date_from, date_to)
 
     if event == "RPT_TXN_WEEKLY":
         # Last week: Monday to Sunday
         last_monday = now_thai.date() - timedelta(days=7)
         last_sunday = last_monday + timedelta(days=6)
-        date_from = _thai_date_to_utc_iso(last_monday.year, last_monday.month, last_monday.day, 0, 0, 0, 0)
-        date_to = _thai_date_to_utc_iso(last_sunday.year, last_sunday.month, last_sunday.day, 23, 59, 59, 999999)
+        date_from = _thai_date_to_naive_iso(last_monday.year, last_monday.month, last_monday.day, 0, 0, 0, 0)
+        date_to = _thai_date_to_naive_iso(last_sunday.year, last_sunday.month, last_sunday.day, 23, 59, 59, 999999)
         return (date_from, date_to)
 
     if event == "RPT_TXN_BIWEEKLY":
@@ -102,8 +102,8 @@ def get_date_range_for_scheduled_event(
         this_monday = now_thai.date()
         period_end = this_monday - timedelta(days=1)
         period_start = period_end - timedelta(days=13)
-        date_from = _thai_date_to_utc_iso(period_start.year, period_start.month, period_start.day, 0, 0, 0, 0)
-        date_to = _thai_date_to_utc_iso(period_end.year, period_end.month, period_end.day, 23, 59, 59, 999999)
+        date_from = _thai_date_to_naive_iso(period_start.year, period_start.month, period_start.day, 0, 0, 0, 0)
+        date_to = _thai_date_to_naive_iso(period_end.year, period_end.month, period_end.day, 23, 59, 59, 999999)
         return (date_from, date_to)
 
     if event == "RPT_TXN_MONTHLY":
@@ -111,13 +111,18 @@ def get_date_range_for_scheduled_event(
         first_this_month = now_thai.replace(day=1)
         last_prev_month_dt = first_this_month - timedelta(days=1)
         first_prev_month = last_prev_month_dt.replace(day=1)
-        date_from = _thai_date_to_utc_iso(first_prev_month.year, first_prev_month.month, first_prev_month.day, 0, 0, 0, 0)
-        date_to = _thai_date_to_utc_iso(
+        date_from = _thai_date_to_naive_iso(first_prev_month.year, first_prev_month.month, first_prev_month.day, 0, 0, 0, 0)
+        date_to = _thai_date_to_naive_iso(
             last_prev_month_dt.year, last_prev_month_dt.month, last_prev_month_dt.day, 23, 59, 59, 999999
         )
         return (date_from, date_to)
 
     return None
+
+
+def _fmt_date_long(d) -> str:
+    """Format a date as '12 February 2025'."""
+    return d.strftime("%-d %B %Y")
 
 
 def get_report_period_display(event: str, now_thai: datetime) -> Tuple[str, str]:
@@ -127,25 +132,26 @@ def get_report_period_display(event: str, now_thai: datetime) -> Tuple[str, str]
     UTC conversion, so the displayed dates match what users expect (e.g. weekly = Mon–Sun in Thai).
     """
     if event == "RPT_TXN_DAILY":
-        d = (now_thai.date() - timedelta(days=1)).isoformat()
-        return d, "Report date"
+        d = now_thai.date() - timedelta(days=1)
+        return d.isoformat(), "Daily"
     if event == "RPT_TXN_WEEKLY":
         last_monday = now_thai.date() - timedelta(days=7)
         last_sunday = last_monday + timedelta(days=6)
-        return f"{last_monday.isoformat()} — {last_sunday.isoformat()}", "Report period"
+        display = f"Weekly - ({_fmt_date_long(last_monday)} - {_fmt_date_long(last_sunday)})"
+        return display, "Weekly"
     if event == "RPT_TXN_BIWEEKLY":
         this_monday = now_thai.date()
         period_end = this_monday - timedelta(days=1)
         period_start = period_end - timedelta(days=13)
-        return f"{period_start.isoformat()} — {period_end.isoformat()}", "Report period"
+        display = f"Bi-weekly - ({_fmt_date_long(period_start)} - {_fmt_date_long(period_end)})"
+        return display, "Bi-weekly"
     if event == "RPT_TXN_MONTHLY":
         first_this_month = now_thai.replace(day=1)
         last_prev_month_dt = first_this_month - timedelta(days=1)
         first_prev_month = last_prev_month_dt.replace(day=1)
-        return (
-            f"{first_prev_month.date().isoformat()} — {last_prev_month_dt.date().isoformat()}",
-            "Report period",
-        )
+        month_str = first_prev_month.date().strftime("%B %Y")
+        display = f"Monthly - ({month_str})"
+        return display, "Monthly"
     return "", "Report period"
 
 
@@ -197,12 +203,20 @@ def get_user_emails_by_org_and_role(
             SELECT DISTINCT ul.email
             FROM user_locations ul
             WHERE ul.organization_id = :organization_id
-              AND ul.organization_role_id = :role_id
               AND ul.is_user = TRUE
               AND (ul.deleted_date IS NULL OR ul.deleted_date > CURRENT_TIMESTAMP)
               AND ul.is_active = TRUE
               AND ul.email IS NOT NULL
               AND TRIM(ul.email) != ''
+              AND (
+                ul.organization_role_id = :role_id
+                OR (ul.organization_role_id IS NULL
+                  AND EXISTS (
+                    SELECT 1 FROM organization_roles ar
+                    WHERE ar.organization_id = :organization_id AND ar.key = 'admin'
+                      AND ar.id = :role_id
+                  ))
+              )
         """),
         {"organization_id": organization_id, "role_id": role_id},
     )
@@ -349,11 +363,16 @@ def run_scheduled_report_job(db: Session) -> Dict[str, Any]:
             org_id = s["organization_id"]
             role_id = s["role_id"]
             event = s["event"]
+            channels_mask = s.get("channels_mask") or 0
             key = (org_id, role_id, event)
             if key in seen:
                 continue
 
             print(f"[ScheduleReport] Checking org_id={org_id} role_id={role_id} event={event}...")
+            if not (channels_mask & 1):
+                print(f"[ScheduleReport]   Skip: EMAIL bit not set in channels_mask={channels_mask}")
+                skipped += 1
+                continue
             if not should_run_scheduled_event(event, now_thai):
                 print(f"[ScheduleReport]   Skip: wrong day/date for {event} (today={now_thai.date()})")
                 logger.debug("Skip event %s: wrong day/date (today %s)", event, now_thai.date())
@@ -412,8 +431,8 @@ def run_scheduled_report_job(db: Session) -> Dict[str, Any]:
                                 filename = m.group(1).strip()
                     if not filename:
                         filename = f"report_{date_from_iso[:10]}_{date_to_iso[:10]}.pdf"
-                    period_display, period_label = get_report_period_display(event, now_thai)
-                    subject = f"Your scheduled report – {period_display}"
+                    period_display, _ = get_report_period_display(event, now_thai)
+                    subject = f"Scheduled Report – {period_display}"
                     html_content = f"""<!DOCTYPE html>
 <html>
 <head>
@@ -431,7 +450,6 @@ def run_scheduled_report_job(db: Session) -> Dict[str, Any]:
                 <p style="margin: 0 0 16px 0; font-size: 15px;">Hello,</p>
                 <p style="margin: 0 0 20px 0; font-size: 15px;">Your scheduled report is ready. Please find the PDF attached to this email.</p>
                 <div style="background: #f8f9fa; border-radius: 8px; padding: 16px 20px; margin: 24px 0; border-left: 4px solid #27ae60;">
-                    <p style="margin: 0 0 4px 0; font-size: 12px; color: #6c757d; text-transform: uppercase; letter-spacing: 0.05em;">{period_label}</p>
                     <p style="margin: 0; font-size: 16px; font-weight: 600; color: #2c3e50;">{period_display}</p>
                 </div>
                 <p style="margin: 0 0 8px 0; font-size: 14px; color: #6c757d;">The attachment <strong style="color: #333;">{filename}</strong> contains your full report.</p>
@@ -451,7 +469,7 @@ Hello,
 
 Your scheduled report is ready. Please find the PDF attached to this email.
 
-{period_label}: {period_display}
+{period_display}
 Attachment: {filename}
 
 If you have any questions, please contact your administrator.

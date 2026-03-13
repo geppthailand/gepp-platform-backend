@@ -211,7 +211,9 @@ class UserCRUD:
         Get users with advanced filtering and pagination
         """
         query = self.db.query(UserLocation).filter(
-            UserLocation.is_user == True
+            UserLocation.is_user == True,
+            UserLocation.is_active == True,
+            UserLocation.deleted_date.is_(None),
         )
 
         # Exclude organization owners from user lists
