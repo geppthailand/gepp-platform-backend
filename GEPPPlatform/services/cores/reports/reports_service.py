@@ -76,7 +76,7 @@ class ReportsService:
                 f"[REPORTS] get_transaction_records_by_organization member_filter: current_user_id={current_user_id}, "
                 f"apply_member_filter={_apply_member}, report_type={report_type}"
             )
-            query = self._apply_member_filter_to_transaction_query(query, current_user_id)
+            query = self._apply_member_filter_to_transaction_query(query, current_user_id, organization_id)
 
             # Track applied filters for logging
             applied_filters = {}
@@ -145,33 +145,10 @@ class ReportsService:
                     if date_to:
                         query = query.filter(TransactionRecord.transaction_date <= date_to)
                 else:
-                    # Apply clamping (date_to <= today only, no duration limit)
-                    try:
-                        now = datetime.now(timezone.utc)
-                        end_of_today = now.replace(hour=23, minute=59, second=59, microsecond=999999)
-                        df = datetime.fromisoformat(date_from) if isinstance(date_from, str) else date_from
-                        dt = datetime.fromisoformat(date_to) if isinstance(date_to, str) else date_to
-                        if dt and dt > end_of_today:
-                            dt = end_of_today
-                        # No duration limit - allow any date range
-                        if df:
-                            query = query.filter(TransactionRecord.transaction_date >= df.isoformat() if isinstance(date_from, str) else df)
-                        if dt:
-                            query = query.filter(TransactionRecord.transaction_date <= dt.isoformat() if isinstance(date_to, str) else dt)
-                    except Exception:
-                        # If parsing fails, fall back to original filters
-                        if date_from:
-                            query = query.filter(TransactionRecord.transaction_date >= date_from)
-                        if date_to:
-                            try:
-                                parsed = datetime.fromisoformat(date_to) if isinstance(date_to, str) else date_to
-                                now = datetime.now(timezone.utc)
-                                end_of_today = now.replace(hour=23, minute=59, second=59, microsecond=999999)
-                                if parsed and parsed > end_of_today:
-                                    parsed = end_of_today
-                                query = query.filter(TransactionRecord.transaction_date <= parsed.isoformat() if isinstance(date_to, str) else parsed)
-                            except Exception:
-                                query = query.filter(TransactionRecord.transaction_date <= date_to)
+                    if date_from:
+                        query = query.filter(TransactionRecord.transaction_date >= date_from)
+                    if date_to:
+                        query = query.filter(TransactionRecord.transaction_date <= date_to)
             
             # Print applied filters before executing query
             if applied_filters:
@@ -461,26 +438,13 @@ class ReportsService:
                         if date_to:
                             query = query.filter(TransactionRecord.transaction_date <= date_to)
                     else:
-                        try:
-                            now = datetime.now(timezone.utc)
-                            end_of_today = now.replace(hour=23, minute=59, second=59, microsecond=999999)
-                            df = datetime.fromisoformat(date_from) if isinstance(date_from, str) else date_from
-                            dt = datetime.fromisoformat(date_to) if isinstance(date_to, str) else date_to
-                            if dt and dt > end_of_today:
-                                dt = end_of_today
-                            # No duration limit - allow any date range
-                            if df:
-                                query = query.filter(TransactionRecord.transaction_date >= (df.isoformat() if isinstance(date_from, str) else df))
-                            if dt:
-                                query = query.filter(TransactionRecord.transaction_date <= (dt.isoformat() if isinstance(date_to, str) else dt))
-                        except Exception:
-                            if date_from:
-                                query = query.filter(TransactionRecord.transaction_date >= date_from)
-                            if date_to:
-                                query = query.filter(TransactionRecord.transaction_date <= date_to)
+                        if date_from:
+                            query = query.filter(TransactionRecord.transaction_date >= date_from)
+                        if date_to:
+                            query = query.filter(TransactionRecord.transaction_date <= date_to)
 
-            # Apply member-based filtering (non-admin users only see their own origins)
-            query = self._apply_member_filter_to_transaction_query(query, current_user_id)
+            # Apply member-based filtering (non-admin users only see their own origins + descendants)
+            query = self._apply_member_filter_to_transaction_query(query, current_user_id, organization_id)
 
             rows = query.all()
 
@@ -611,43 +575,82 @@ class ReportsService:
         _find_and_expand(root_nodes)
         return list(expanded)
 
-    def _apply_member_filter_to_transaction_query(self, query, current_user_id: Any):
-        """Apply origin/tag/tenant member filter to a query that includes Transaction. No-op if admin or no role."""
+    def _apply_member_filter_to_transaction_query(self, query, current_user_id: Any, organization_id: Optional[int] = None):
+        """
+        Filter transactions to those from locations the user is a member of,
+        including all descendants of those locations. No-op if admin or no role.
+        """
         if current_user_id is None or not self._should_filter_reports_by_member(current_user_id):
             return query
-        logger.info(f"[REPORTS] Applying member filter to transaction query for current_user_id={current_user_id}")
+        logger.info(f"[REPORTS] Applying member filter for current_user_id={current_user_id}")
         uid_int = int(current_user_id)
         uid_str = str(current_user_id)
-        query = query.join(Transaction.origin)
-        query = query.outerjoin(UserLocationTag, Transaction.location_tag_id == UserLocationTag.id)
-        query = query.outerjoin(UserTenant, Transaction.tenant_id == UserTenant.id)
+
+        # Fetch location IDs where user is a direct member
         pattern_num = func.jsonb_build_array(func.jsonb_build_object('user_id', uid_int))
         pattern_str = func.jsonb_build_array(func.jsonb_build_object('user_id', uid_str))
-        origin_cond = and_(
+        member_loc_rows = self.db.query(UserLocation.id).filter(
             UserLocation.members.isnot(None),
-            or_(UserLocation.members.op('@>')(pattern_num), UserLocation.members.op('@>')(pattern_str))
-        )
-        tag_cond = and_(
-            Transaction.location_tag_id.isnot(None),
+            or_(
+                UserLocation.members.op('@>')(pattern_num),
+                UserLocation.members.op('@>')(pattern_str)
+            )
+        ).all()
+        member_location_ids = [row[0] for row in member_loc_rows]
+
+        if not member_location_ids:
+            return query.filter(Transaction.origin_id.is_(None))
+
+        # Expand direct-member locations to include all descendants
+        if organization_id is not None:
+            expanded_ids = self._resolve_descendant_ids(organization_id, member_location_ids)
+        else:
+            expanded_ids = member_location_ids
+
+        descendant_only_ids = list(set(expanded_ids) - set(member_location_ids))
+
+        # Fetch tag and tenant IDs where user is a direct member (for direct-location access control)
+        tag_rows = self.db.query(UserLocationTag.id).filter(
             UserLocationTag.members.isnot(None),
             or_(
                 cast(UserLocationTag.members, JSONB).op('@>')(func.jsonb_build_array(uid_int)),
                 cast(UserLocationTag.members, JSONB).op('@>')(func.jsonb_build_array(uid_str))
             )
-        )
-        tenant_cond = and_(
-            Transaction.tenant_id.isnot(None),
+        ).all()
+        member_tag_ids = [row[0] for row in tag_rows]
+
+        tenant_rows = self.db.query(UserTenant.id).filter(
             UserTenant.members.isnot(None),
             or_(
                 cast(UserTenant.members, JSONB).op('@>')(func.jsonb_build_array(uid_int)),
                 cast(UserTenant.members, JSONB).op('@>')(func.jsonb_build_array(uid_str))
             )
+        ).all()
+        member_tenant_ids = [row[0] for row in tenant_rows]
+
+        # For direct member locations: also require tag/tenant membership when present
+        if member_tag_ids:
+            tag_cond = or_(Transaction.location_tag_id.is_(None), Transaction.location_tag_id.in_(member_tag_ids))
+        else:
+            tag_cond = Transaction.location_tag_id.is_(None)
+
+        if member_tenant_ids:
+            tenant_cond = or_(Transaction.tenant_id.is_(None), Transaction.tenant_id.in_(member_tenant_ids))
+        else:
+            tenant_cond = Transaction.tenant_id.is_(None)
+
+        direct_cond = and_(
+            Transaction.origin_id.in_(member_location_ids),
+            tag_cond,
+            tenant_cond
         )
-        return query.filter(and_(
-            origin_cond,
-            or_(Transaction.location_tag_id.is_(None), tag_cond),
-            or_(Transaction.tenant_id.is_(None), tenant_cond)
-        ))
+
+        # Descendant locations: grant full access (no tag/tenant restriction)
+        conditions = [direct_cond]
+        if descendant_only_ids:
+            conditions.append(Transaction.origin_id.in_(descendant_only_ids))
+
+        return query.filter(or_(*conditions))
 
     def get_origin_by_organization(self, organization_id: int, filters: Optional[Dict[str, Any]] = None, current_user_id: Any = None) -> Dict[str, Any]:
         """
@@ -686,31 +689,11 @@ class ReportsService:
                 date_from = filters.get('date_from')
                 date_to = filters.get('date_to')
                 if date_from or date_to:
-                    try:
-                        now = datetime.now(timezone.utc)
-                        end_of_today = now.replace(hour=23, minute=59, second=59, microsecond=999999)
-                        df = datetime.fromisoformat(date_from) if isinstance(date_from, str) else date_from
-                        dt = datetime.fromisoformat(date_to) if isinstance(date_to, str) else date_to
-                        if dt and dt > end_of_today:
-                            dt = end_of_today
-                        # No duration limit - allow any date range
-                        if df:
-                            tr_query = tr_query.filter(TransactionRecord.transaction_date >= (df.isoformat() if isinstance(date_from, str) else df))
-                        if dt:
-                            tr_query = tr_query.filter(TransactionRecord.transaction_date <= (dt.isoformat() if isinstance(date_to, str) else dt))
-                    except Exception:
-                        if date_from:
-                            tr_query = tr_query.filter(TransactionRecord.transaction_date >= date_from)
-                        if date_to:
-                            try:
-                                parsed = datetime.fromisoformat(date_to) if isinstance(date_to, str) else date_to
-                                end_of_today = datetime.now(timezone.utc).replace(hour=23, minute=59, second=59, microsecond=999999)
-                                if parsed and parsed > end_of_today:
-                                    parsed = end_of_today
-                                tr_query = tr_query.filter(TransactionRecord.transaction_date <= (parsed.isoformat() if isinstance(date_to, str) else parsed))
-                            except Exception:
-                                tr_query = tr_query.filter(TransactionRecord.transaction_date <= date_to)
-                tr_query = self._apply_member_filter_to_transaction_query(tr_query, current_user_id)
+                    if date_from:
+                        tr_query = tr_query.filter(TransactionRecord.transaction_date >= date_from)
+                    if date_to:
+                        tr_query = tr_query.filter(TransactionRecord.transaction_date <= date_to)
+                tr_query = self._apply_member_filter_to_transaction_query(tr_query, current_user_id, organization_id)
                 combos_result = tr_query.distinct().all()
             else:
                 combos_query = self.db.query(
@@ -718,7 +701,24 @@ class ReportsService:
                     Transaction.location_tag_id,
                     Transaction.tenant_id
                 ).filter(*base_filter)
-                combos_result = self._apply_member_filter_to_transaction_query(combos_query, current_user_id).distinct().all()
+                combos_result = self._apply_member_filter_to_transaction_query(combos_query, current_user_id, organization_id).distinct().all()
+
+            # Expand member-filtered origins to also include their descendants
+            if self._should_filter_reports_by_member(current_user_id):
+                member_origin_ids = list({row[0] for row in combos_result if row[0] is not None})
+                if member_origin_ids:
+                    expanded_ids = self._resolve_descendant_ids(organization_id, member_origin_ids)
+                    new_ids = set(expanded_ids) - set(member_origin_ids)
+                    if new_ids:
+                        extra_combos = self.db.query(
+                            Transaction.origin_id,
+                            Transaction.location_tag_id,
+                            Transaction.tenant_id
+                        ).filter(
+                            *base_filter,
+                            Transaction.origin_id.in_(list(new_ids))
+                        ).distinct().all()
+                        combos_result = list(combos_result) + list(extra_combos)
 
             # Filter combos to only include origins in the active organization_setup
             active_setup_ids = self._get_active_setup_location_ids(organization_id)
@@ -873,26 +873,6 @@ class ReportsService:
                         seen_ids.add(oid)
                         origin_options.append({'id': oid, 'origin_id': origin_id, 'name': origin_name, 'display_name': origin_name, 'path': path})
 
-            # Add all structure locations (branch/building/floor/room) from root_nodes
-            # even if they have no transactions, so the filter shows the full tree
-            if org_setup and org_setup.root_nodes:
-                structure_types = {'branch', 'building', 'floor', 'room'}
-                location_by_id = {loc.id: loc for loc in all_locations}
-                for node_id in all_node_ids:
-                    oid = f"{node_id}||"
-                    if oid in seen_ids:
-                        continue
-                    loc = location_by_id.get(node_id)
-                    if not loc:
-                        continue
-                    loc_type = (loc.type or '').lower().strip()
-                    if loc_type not in structure_types:
-                        continue
-                    loc_name = loc.display_name or loc.name_en or loc.name_th or f"Location {node_id}"
-                    path = ', '.join(_get_ancestors(node_id))
-                    seen_ids.add(oid)
-                    origin_options.append({'id': oid, 'origin_id': node_id, 'name': loc_name, 'display_name': loc_name, 'path': path})
-
             sorted_options = sorted(origin_options, key=lambda x: x['name'])
             origins_data = sorted_options
             return {
@@ -933,7 +913,7 @@ class ReportsService:
                     TransactionRecord.status.is_(None)
                 ),
             )
-            transaction_records_query = self._apply_member_filter_to_transaction_query(transaction_records_query, current_user_id)
+            transaction_records_query = self._apply_member_filter_to_transaction_query(transaction_records_query, current_user_id, organization_id)
             # Filter by active organization_setup locations
             transaction_records_query = self._apply_active_setup_filter(transaction_records_query, organization_id)
             # Apply optional filters
@@ -995,34 +975,13 @@ class ReportsService:
                             transaction_records_query = transaction_records_query.filter(TransactionRecord.material_id.in_(mids))
                     except Exception:
                         pass
-                # Date range filter (clamped)
+                # Date range filter
                 date_from = filters.get('date_from')
                 date_to = filters.get('date_to')
-                try:
-                    now = datetime.utcnow()
-                    end_of_today = now.replace(hour=23, minute=59, second=59, microsecond=999999)
-                    df = datetime.fromisoformat(date_from) if isinstance(date_from, str) else date_from
-                    dt = datetime.fromisoformat(date_to) if isinstance(date_to, str) else date_to
-                    if dt and dt > end_of_today:
-                        dt = end_of_today
-                    # No duration limit - allow any date range
-                    if df:
-                        transaction_records_query = transaction_records_query.filter(TransactionRecord.transaction_date >= df.isoformat() if isinstance(date_from, str) else df)
-                    if dt:
-                        transaction_records_query = transaction_records_query.filter(TransactionRecord.transaction_date <= dt.isoformat() if isinstance(date_to, str) else dt)
-                except Exception:
-                    if date_from:
-                        transaction_records_query = transaction_records_query.filter(TransactionRecord.transaction_date >= date_from)
-                    if date_to:
-                        try:
-                            parsed = datetime.fromisoformat(date_to) if isinstance(date_to, str) else date_to
-                            now = datetime.utcnow()
-                            end_of_today = now.replace(hour=23, minute=59, second=59, microsecond=999999)
-                            if parsed and parsed > end_of_today:
-                                parsed = end_of_today
-                            transaction_records_query = transaction_records_query.filter(TransactionRecord.transaction_date <= parsed.isoformat() if isinstance(date_to, str) else parsed)
-                        except Exception:
-                            transaction_records_query = transaction_records_query.filter(TransactionRecord.transaction_date <= date_to)
+                if date_from:
+                    transaction_records_query = transaction_records_query.filter(TransactionRecord.transaction_date >= date_from)
+                if date_to:
+                    transaction_records_query = transaction_records_query.filter(TransactionRecord.transaction_date <= date_to)
             
             transaction_records = transaction_records_query.all()
             

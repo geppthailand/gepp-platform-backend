@@ -168,32 +168,14 @@ def _build_filters_from_query_params(query_params: Dict[str, Any], timezone_name
         filters['date_from'] = start_of_year_utc.isoformat()
         filters['date_to'] = end_of_today_utc.isoformat()
 
-    # Clamp date range constraints globally:
-    # - date_to must not be in the future
-    # - No limit on date range duration (allow all time)
+    # If only date_from is provided, set date_to to end of today as a default
     try:
-        now_utc = datetime.now(timezone.utc)
-        end_of_today = now_utc.replace(hour=23, minute=59, second=59, microsecond=999999)
-
         dt_from = _parse_datetime(filters.get('date_from')) if filters.get('date_from') else None
         dt_to = _parse_datetime(filters.get('date_to')) if filters.get('date_to') else None
-
-        # If only date_from is provided, set date_to to today (clamped later)
         if dt_from and not dt_to:
-            dt_to = end_of_today
-            filters['date_to'] = dt_to.isoformat()
-
-        # If only date_to is provided, leave date_from empty (no default)
-        # Allow user to specify any date range they want
-
-        # Clamp date_to to today if provided
-        if dt_to and dt_to > end_of_today:
-            dt_to = end_of_today
-            filters['date_to'] = dt_to.isoformat()
-
-        # No enforcement of max window - allow any date range duration
+            now_utc = datetime.now(timezone.utc)
+            filters['date_to'] = now_utc.replace(hour=23, minute=59, second=59, microsecond=999999).isoformat()
     except Exception:
-        # Best-effort clamp; ignore parsing issues
         pass
 
     return filters

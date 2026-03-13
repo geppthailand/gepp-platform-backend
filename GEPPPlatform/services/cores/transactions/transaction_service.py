@@ -1404,6 +1404,42 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                 'errors': [str(e)]
             }
 
+    def _resolve_descendant_ids(self, organization_id: int, origin_ids: List[int]) -> List[int]:
+        """Given a list of origin_ids, expand each to include itself + all descendants from org setup tree."""
+        setup = self.db.query(OrganizationSetup).filter(
+            OrganizationSetup.organization_id == organization_id,
+            OrganizationSetup.is_active == True
+        ).first()
+        if not setup or not setup.root_nodes:
+            return origin_ids
+        root_nodes = setup.root_nodes if isinstance(setup.root_nodes, list) else []
+        target_set = set(origin_ids)
+        expanded = set(origin_ids)
+
+        def _collect_descendants(nodes):
+            ids = set()
+            for node in nodes:
+                nid = node.get('nodeId')
+                if nid is not None:
+                    nid = int(nid) if isinstance(nid, str) else nid
+                    ids.add(nid)
+                if node.get('children'):
+                    ids |= _collect_descendants(node['children'])
+            return ids
+
+        def _find_and_expand(nodes):
+            for node in nodes:
+                nid = node.get('nodeId')
+                if nid is not None:
+                    nid = int(nid) if isinstance(nid, str) else nid
+                if nid in target_set and node.get('children'):
+                    expanded.update(_collect_descendants(node['children']))
+                if node.get('children'):
+                    _find_and_expand(node['children'])
+
+        _find_and_expand(root_nodes)
+        return list(expanded)
+
     def _should_filter_transactions_by_origin_member(self, current_user_id) -> bool:
         """
         Return True if we should filter transactions by origin members (only show where user is in origin.members).
@@ -1493,56 +1529,77 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
             if origin_id:
                 query = query.filter(Transaction.origin_id == origin_id)
 
-            # Only include transactions where the current user is a member of the origin location,
-            # or of the transaction's tag, or of the transaction's tenant (unless user is admin or has no role)
+            # For non-admin users with a role: restrict to transactions from their member locations
+            # + all descendants of those locations. If no origin_id filter was specified, this
+            # acts as the scope. If origin_id was specified, it further intersects for access control.
             if current_user_id is not None and self._should_filter_transactions_by_origin_member(current_user_id):
                 uid_int = int(current_user_id)
                 uid_str = str(current_user_id)
-                query = query.join(Transaction.origin)
-                query = query.outerjoin(
-                    UserLocationTag,
-                    Transaction.location_tag_id == UserLocationTag.id
-                )
-                query = query.outerjoin(
-                    UserTenant,
-                    Transaction.tenant_id == UserTenant.id
-                )
-                # Origin: user in origin.members — format [{"role": "admin", "user_id": 4354}, ...]
-                # Match by containment: array contains an object with this user_id (int or string)
-                pattern_num = func.jsonb_build_array(
-                    func.jsonb_build_object('user_id', uid_int)
-                )
-                pattern_str = func.jsonb_build_array(
-                    func.jsonb_build_object('user_id', uid_str)
-                )
-                origin_cond = and_(
+                pattern_num = func.jsonb_build_array(func.jsonb_build_object('user_id', uid_int))
+                pattern_str = func.jsonb_build_array(func.jsonb_build_object('user_id', uid_str))
+
+                # Fetch location IDs where user is a direct member
+                member_loc_rows = self.db.query(UserLocation.id).filter(
                     UserLocation.members.isnot(None),
-                    or_(UserLocation.members.op('@>')(pattern_num), UserLocation.members.op('@>')(pattern_str))
-                )
-                # Tag: user in tag.members — format [3483, 3484, 3485] (plain user_location IDs)
-                tag_cond = and_(
-                    Transaction.location_tag_id.isnot(None),
-                    UserLocationTag.members.isnot(None),
                     or_(
-                        cast(UserLocationTag.members, JSONB).op('@>')(func.jsonb_build_array(uid_int)),
-                        cast(UserLocationTag.members, JSONB).op('@>')(func.jsonb_build_array(uid_str))
+                        UserLocation.members.op('@>')(pattern_num),
+                        UserLocation.members.op('@>')(pattern_str)
                     )
-                )
-                # Tenant: user in tenant.members — format [3483, 3484, 3485] (plain user_location IDs)
-                tenant_cond = and_(
-                    Transaction.tenant_id.isnot(None),
-                    UserTenant.members.isnot(None),
-                    or_(
-                        cast(UserTenant.members, JSONB).op('@>')(func.jsonb_build_array(uid_int)),
-                        cast(UserTenant.members, JSONB).op('@>')(func.jsonb_build_array(uid_str))
+                ).all()
+                member_location_ids = [row[0] for row in member_loc_rows]
+
+                if not member_location_ids:
+                    query = query.filter(Transaction.origin_id.is_(None))
+                else:
+                    # Expand direct-member locations to include all descendants
+                    if organization_id:
+                        expanded_ids = self._resolve_descendant_ids(organization_id, member_location_ids)
+                    else:
+                        expanded_ids = member_location_ids
+                    descendant_only_ids = list(set(expanded_ids) - set(member_location_ids))
+
+                    # Fetch tag/tenant IDs where user is a direct member
+                    tag_rows = self.db.query(UserLocationTag.id).filter(
+                        UserLocationTag.members.isnot(None),
+                        or_(
+                            cast(UserLocationTag.members, JSONB).op('@>')(func.jsonb_build_array(uid_int)),
+                            cast(UserLocationTag.members, JSONB).op('@>')(func.jsonb_build_array(uid_str))
+                        )
+                    ).all()
+                    member_tag_ids = [row[0] for row in tag_rows]
+
+                    tenant_rows = self.db.query(UserTenant.id).filter(
+                        UserTenant.members.isnot(None),
+                        or_(
+                            cast(UserTenant.members, JSONB).op('@>')(func.jsonb_build_array(uid_int)),
+                            cast(UserTenant.members, JSONB).op('@>')(func.jsonb_build_array(uid_str))
+                        )
+                    ).all()
+                    member_tenant_ids = [row[0] for row in tenant_rows]
+
+                    # Direct member locations: also require tag/tenant membership when present
+                    if member_tag_ids:
+                        tag_cond = or_(Transaction.location_tag_id.is_(None), Transaction.location_tag_id.in_(member_tag_ids))
+                    else:
+                        tag_cond = Transaction.location_tag_id.is_(None)
+
+                    if member_tenant_ids:
+                        tenant_cond = or_(Transaction.tenant_id.is_(None), Transaction.tenant_id.in_(member_tenant_ids))
+                    else:
+                        tenant_cond = Transaction.tenant_id.is_(None)
+
+                    direct_cond = and_(
+                        Transaction.origin_id.in_(member_location_ids),
+                        tag_cond,
+                        tenant_cond
                     )
-                )
-                # User must be in origin AND (in tag when present) AND (in tenant when present)
-                query = query.filter(and_(
-                    origin_cond,
-                    or_(Transaction.location_tag_id.is_(None), tag_cond),
-                    or_(Transaction.tenant_id.is_(None), tenant_cond)
-                ))
+
+                    # Descendant locations: full access, no tag/tenant restriction
+                    conditions = [direct_cond]
+                    if descendant_only_ids:
+                        conditions.append(Transaction.origin_id.in_(descendant_only_ids))
+
+                    query = query.filter(or_(*conditions))
             if location_tag_id is not None:
                 query = query.filter(Transaction.location_tag_id == location_tag_id)
             if tenant_id is not None:
