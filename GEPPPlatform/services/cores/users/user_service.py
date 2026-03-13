@@ -780,14 +780,20 @@ class UserService:
             # Return all locations
             locations = self.crud.get_user_locations(organization_id=organization_id)
 
-        # Apply member-based filtering if current_user_id is provided
+        # Resolve 3-tier access if current_user_id is provided
+        tiers = None
         if current_user_id and not include_all:
-            locations = self._filter_locations_by_member_access(
+            tiers = self._resolve_location_tiers(
                 locations, organization_id, current_user_id
             )
+            if not tiers['is_owner']:
+                # Filter to only assigned + ancestor locations
+                visible_ids = tiers['assigned_ids'] | tiers['ancestor_ids']
+                locations = [loc for loc in locations if (loc.id if hasattr(loc, 'id') else loc.get('id')) in visible_ids]
 
         # Serialize location data - include all columns except sensitive fields
         location_data = []
+        ancestor_data = []
         for location in locations:
             # Debug: log members for each location
             if location.members:
@@ -874,9 +880,24 @@ class UserService:
                 'expired_date': location.expired_date.isoformat() if location.expired_date else None,
                 'footprint': float(location.footprint) if location.footprint else None,
             }
-            location_data.append(location_dict)
+            # Separate ancestor locations (minimal data) from assigned locations (full data)
+            loc_id = location.id
+            is_ancestor = (tiers and not tiers['is_owner'] and loc_id in tiers['ancestor_ids'])
 
-        # Fetch tags for all locations in one query
+            if is_ancestor:
+                ancestor_dict = {
+                    'id': loc_id,
+                    'name_th': location.name_th,
+                    'name_en': location.name_en,
+                    'display_name': location.display_name,
+                    'type': location.type,
+                    'is_ancestor': True,
+                }
+                ancestor_data.append(ancestor_dict)
+            else:
+                location_data.append(location_dict)
+
+        # Fetch tags for all assigned locations in one query
         if location_data:
             from GEPPPlatform.models.users.user_related import UserLocationTag
             location_ids = [loc['id'] for loc in location_data]
@@ -914,12 +935,17 @@ class UserService:
             for loc in location_data:
                 loc['tags'] = tags_by_location.get(loc['id'], [])
 
-        # Build and add path traces for all locations
+        # Build and add path traces for assigned locations
         location_paths = self._build_location_paths(organization_id, location_data)
         for loc in location_data:
             loc['path'] = location_paths.get(loc['id'], '')
 
-        return location_data
+        is_owner = tiers['is_owner'] if tiers else True
+        return {
+            'data': location_data,
+            'ancestors': ancestor_data,
+            'is_owner': is_owner,
+        }
 
     def get_orphan_locations(
         self,
@@ -1086,17 +1112,25 @@ class UserService:
             print(f"Error extracting setup location IDs for organization {organization_id}: {str(e)}")
             return None
 
-    def _filter_locations_by_member_access(
+    def _resolve_location_tiers(
         self,
         locations: list,
         organization_id: int,
         current_user_id: int
-    ) -> list:
+    ) -> dict:
         """
-        Filter locations based on member access rules (same logic as MobileInput):
-        - Owner: sees ALL locations
-        - Member of a location: sees that location + all descendants in the org tree
-        - Non-member: location is excluded
+        3-tier location access control:
+        - Tier 1 (Assigned): Locations where user is member + all descendants → full data
+        - Tier 2 (Ancestor): Parent nodes from root down to assigned locations → minimal data
+        - Tier 3 (Unseen): All other locations → not returned
+
+        Returns:
+            {
+                'is_owner': bool,
+                'assigned_ids': set of location IDs (tier 1),
+                'ancestor_ids': set of location IDs (tier 2),
+                'member_ids': set of location IDs (direct membership)
+            }
         """
         from ....models.subscriptions.organizations import OrganizationSetup, Organization
 
@@ -1106,8 +1140,7 @@ class UserService:
         ).first()
 
         if org and org.owner_id == current_user_id:
-            # Owner sees everything
-            return locations
+            return {'is_owner': True, 'assigned_ids': set(), 'ancestor_ids': set(), 'member_ids': set()}
 
         # Get org setup root_nodes for tree traversal
         org_setup = self.db.query(OrganizationSetup).filter(
@@ -1117,7 +1150,8 @@ class UserService:
         ).order_by(OrganizationSetup.created_date.desc()).first()
 
         if not org_setup or not org_setup.root_nodes:
-            return locations  # No setup, can't filter
+            # No setup, treat as owner (can't filter without tree)
+            return {'is_owner': True, 'assigned_ids': set(), 'ancestor_ids': set(), 'member_ids': set()}
 
         root_nodes = org_setup.root_nodes
         if not isinstance(root_nodes, list):
@@ -1148,31 +1182,51 @@ class UserService:
                 member_loc_ids.add(loc.id if hasattr(loc, 'id') else loc.get('id'))
 
         if not member_loc_ids:
-            return []  # User is not a member of any location
+            return {'is_owner': False, 'assigned_ids': set(), 'ancestor_ids': set(), 'member_ids': set()}
 
-        # Collect member locations + all descendants from the tree
-        def collect_descendants(nodes, collecting=False):
-            ids = set()
+        assigned_ids = set()
+        ancestor_ids = set()
+
+        def collect_all_descendants(nodes, ids_set):
+            """Recursively collect all node IDs from the given nodes and their children."""
             for node in nodes:
                 nid = int(node.get('nodeId', 0))
-                should_collect = collecting or nid in member_loc_ids
-                if should_collect:
-                    ids.add(nid)
+                ids_set.add(nid)
                 children = node.get('children', [])
                 if children:
-                    ids |= collect_descendants(children, should_collect)
-            return ids
+                    collect_all_descendants(children, ids_set)
 
-        accessible_ids = collect_descendants(root_nodes)
+        def walk_tree(nodes, path_from_root):
+            """Walk tree to find member nodes, collect their descendants and trace ancestors."""
+            for node in nodes:
+                nid = int(node.get('nodeId', 0))
+                children = node.get('children', [])
 
-        # Filter locations to only accessible ones
-        filtered = []
-        for loc in locations:
-            loc_id = loc.id if hasattr(loc, 'id') else loc.get('id')
-            if loc_id in accessible_ids:
-                filtered.append(loc)
+                if nid in member_loc_ids:
+                    # This node + all descendants → assigned (tier 1)
+                    assigned_ids.add(nid)
+                    if children:
+                        collect_all_descendants(children, assigned_ids)
+                    # All nodes in path from root → ancestor (tier 2)
+                    for aid in path_from_root:
+                        if aid not in assigned_ids:
+                            ancestor_ids.add(aid)
+                else:
+                    # Continue searching deeper
+                    if children:
+                        walk_tree(children, path_from_root + [nid])
 
-        return filtered
+        walk_tree(root_nodes, [])
+
+        # Remove any ancestor IDs that ended up in assigned (edge case: overlapping paths)
+        ancestor_ids -= assigned_ids
+
+        return {
+            'is_owner': False,
+            'assigned_ids': assigned_ids,
+            'ancestor_ids': ancestor_ids,
+            'member_ids': member_loc_ids
+        }
 
     def _extract_node_ids(self, nodes, location_ids: set):
         """

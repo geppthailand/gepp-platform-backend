@@ -196,6 +196,60 @@ class OrganizationService:
             'updated_date': setup.updated_date.isoformat() if setup.updated_date else None
         }
 
+    def get_organization_setup_filtered(self, organization_id: int, current_user_id: int) -> Optional[Dict[str, Any]]:
+        """
+        Get organization setup with 3-tier tree pruning.
+        - Assigned nodes: kept as-is
+        - Ancestor nodes: kept with is_ancestor=True annotation
+        - Unseen nodes: pruned entirely
+        """
+        setup = self.get_organization_setup(organization_id)
+        if not setup:
+            return setup
+
+        # Get tiers from user_service
+        from ..users.user_service import UserService
+        user_service = UserService(self.db)
+
+        # We need locations to resolve tiers (membership check)
+        locations = user_service.crud.get_user_locations(organization_id=organization_id)
+        tiers = user_service._resolve_location_tiers(locations, organization_id, current_user_id)
+
+        if tiers['is_owner']:
+            return setup
+
+        visible_ids = tiers['assigned_ids'] | tiers['ancestor_ids']
+        ancestor_ids = tiers['ancestor_ids']
+
+        def prune_tree(nodes):
+            if not nodes:
+                return []
+            result = []
+            for node in nodes:
+                nid = int(node.get('nodeId', 0))
+                if nid not in visible_ids:
+                    continue
+                pruned = dict(node)
+                if 'children' in pruned:
+                    pruned['children'] = prune_tree(pruned['children'])
+                if nid in ancestor_ids:
+                    pruned['is_ancestor'] = True
+                result.append(pruned)
+            return result
+
+        setup['root_nodes'] = prune_tree(setup.get('root_nodes') or [])
+
+        # Also prune hub_node children
+        hub_node = setup.get('hub_node')
+        if hub_node and isinstance(hub_node, dict):
+            hub_children = hub_node.get('children', [])
+            if hub_children:
+                pruned_hub = dict(hub_node)
+                pruned_hub['children'] = prune_tree(hub_children)
+                setup['hub_node'] = pruned_hub
+
+        return setup
+
     def create_organization_setup(self, organization_id: int, setup_data: Dict[str, Any]) -> Dict[str, Any]:
         """
         Create a new organization setup structure.

@@ -27,6 +27,19 @@ class TraceabilityService:
     def __init__(self, db: Session):
         self.db = db
 
+    def _get_assigned_location_ids(self, organization_id: int, current_user_id: int) -> Optional[set]:
+        """
+        Get the set of location IDs that the user has assigned access to (member + descendants).
+        Returns None if user is owner/admin (no filtering needed).
+        """
+        from ..users.user_service import UserService
+        user_service = UserService(self.db)
+        locations = user_service.crud.get_user_locations(organization_id=organization_id)
+        tiers = user_service._resolve_location_tiers(locations, organization_id, current_user_id)
+        if tiers['is_owner']:
+            return None  # No filtering needed
+        return tiers['assigned_ids']
+
     def get_traceability(self, organization_id: Optional[int] = None, **kwargs: Any) -> Dict[str, Any]:
         """
         Get traceability for the organization. date_from and date_to define a 1-month range.
@@ -87,6 +100,13 @@ class TraceabilityService:
                     group_filters.append(TraceabilityTransactionGroup.tenant_id == int(parts[2]))
             except (ValueError, TypeError):
                 pass
+
+        # Apply member-based filtering: restrict to user's assigned locations
+        current_user_id = kwargs.get("current_user_id")
+        if current_user_id and organization_id:
+            assigned_ids = self._get_assigned_location_ids(organization_id, int(current_user_id))
+            if assigned_ids is not None:
+                group_filters.append(TraceabilityTransactionGroup.origin_id.in_(list(assigned_ids)))
 
         groups = self.db.query(TraceabilityTransactionGroup).filter(and_(*group_filters)).all()
         group_ids = [g.id for g in groups]
@@ -238,6 +258,13 @@ class TraceabilityService:
                     group_filters.append(TraceabilityTransactionGroup.tenant_id == int(parts[2]))
             except (ValueError, TypeError):
                 pass
+
+        # Apply member-based filtering: restrict to user's assigned locations
+        current_user_id = kwargs.get("current_user_id")
+        if current_user_id and organization_id:
+            assigned_ids = self._get_assigned_location_ids(organization_id, int(current_user_id))
+            if assigned_ids is not None:
+                group_filters.append(TraceabilityTransactionGroup.origin_id.in_(list(assigned_ids)))
 
         groups = self.db.query(TraceabilityTransactionGroup).filter(and_(*group_filters)).all()
         if not groups:
