@@ -2479,6 +2479,13 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                         if new_ids:
                             existing.transaction_record_id = list(current_ids) + new_ids
                             existing.updated_date = datetime.utcnow()
+                            # Set reverse pointer on newly added records
+                            self.db.query(TransactionRecord).filter(
+                                TransactionRecord.id.in_(new_ids)
+                            ).update(
+                                {TransactionRecord.traceability_group_id: existing.id},
+                                synchronize_session=False
+                            )
                         continue
                 # No existing group, or existing group already processed: create new group
                 if not existing:
@@ -2517,6 +2524,15 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                         is_active=True
                     )
                     self.db.add(group)
+                    self.db.flush()  # get group.id for reverse pointer
+                    # Set reverse pointer on all backfilled records
+                    if all_record_ids:
+                        self.db.query(TransactionRecord).filter(
+                            TransactionRecord.id.in_(all_record_ids)
+                        ).update(
+                            {TransactionRecord.traceability_group_id: group.id},
+                            synchronize_session=False
+                        )
                 else:
                     # Existing group already has TransportTransactions; create a new group for these records only
                     group = TraceabilityTransactionGroup(
@@ -2532,6 +2548,15 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                         is_active=True
                     )
                     self.db.add(group)
+                    self.db.flush()  # get group.id for reverse pointer
+                    # Set reverse pointer on records in new group
+                    if record_ids:
+                        self.db.query(TransactionRecord).filter(
+                            TransactionRecord.id.in_(record_ids)
+                        ).update(
+                            {TransactionRecord.traceability_group_id: group.id},
+                            synchronize_session=False
+                        )
         except Exception as e:
             logger.warning(
                 "Failed to upsert traceability_transaction_group for transaction %s: %s",

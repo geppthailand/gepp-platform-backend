@@ -377,16 +377,21 @@ def _handle_overview_report(
     # 10: origin_weight_kg, 11: record_category_id, 12: record_main_material_id
 
     # Aggregate in single pass
+    from .recycling_rate_helper import compute_recycling_rate, fetch_group_leaf_data, is_record_recyclable
+
     ghg_reduction = 0.0
     total_waste = 0.0
-    recyclable_waste = 0.0
     plastic_saved = 0.0
-    recyclable_ghg_reduction = 0.0
-    origin_waste_map = {}
     category_waste_map = {}
     month_totals_by_year = {}
     tx_ids = set()
     tx_approved = set()
+
+    # Collect per-record data for 3-tier recycling rate calculation
+    record_weights = []  # (weight, calc_ghg, cat_id, group_id)
+    record_origins = []  # (origin_id, weight, calc_ghg, cat_id, group_id) for origin_waste_map
+
+    group_ids = set()
 
     for row in rows:
         origin_qty = float(row[0] or 0)
@@ -401,6 +406,7 @@ def _handle_overview_report(
         # Fallback to TransactionRecord fields when Material is missing.
         cat_id = row[7] or row[11]           # material_category_id || record_category_id
         main_mat_id = row[8] or row[12]      # material_main_material_id || record_main_material_id
+        group_id = row[18]                   # traceability_group_id
 
         # Track transactions
         tx_ids.add(tx_id)
@@ -429,18 +435,30 @@ def _handle_overview_report(
         if main_mat_id == 1 and cat_id == 1:
             plastic_saved += weight
 
-        # Recyclable waste (category_id in {1, 3})
-        if cat_id in (1, 3):
-            recyclable_waste += weight
-            recyclable_ghg_reduction += record_ghg
-            if origin_id is not None:
-                origin_waste_map[origin_id] = origin_waste_map.get(origin_id, 0.0) + weight
+        # Collect for 3-tier recycling rate
+        record_weights.append((weight, calc_ghg, cat_id, group_id))
+        if origin_id is not None:
+            record_origins.append((origin_id, weight, calc_ghg, cat_id, group_id))
+        if group_id is not None:
+            group_ids.add(group_id)
 
         # Category proportions
         if cat_id is not None:
             category_waste_map[cat_id] = category_waste_map.get(cat_id, 0.0) + weight
 
+    # 3-tier recycling rate calculation using traceability data
+    group_leaf_data, group_completion = fetch_group_leaf_data(reports_service.db, group_ids)
+    recyclable_waste, recyclable_ghg_reduction, _, traceability_fully_managed = compute_recycling_rate(
+        record_weights, group_leaf_data, group_completion
+    )
     recycle_rate = ((recyclable_waste / total_waste) * 100) if total_waste > 0 else 0.0
+
+    # Build origin_waste_map using 3-tier recyclable logic
+    origin_waste_map = {}
+    for origin_id, weight, calc_ghg, cat_id, group_id in record_origins:
+        recyclable_w = is_record_recyclable(weight, cat_id, group_id, group_leaf_data, group_completion)
+        if recyclable_w > 0:
+            origin_waste_map[origin_id] = origin_waste_map.get(origin_id, 0.0) + recyclable_w
 
     # Top 5 recyclable origins — fetch origin names with member filtering
     top_origin_ids = sorted(origin_waste_map.items(), key=lambda kv: kv[1], reverse=True)[:5]
@@ -510,7 +528,8 @@ def _handle_overview_report(
             'chart_data': chart_data
         },
         'waste_type_proportions': waste_type_proportions,
-        'material_summary': []
+        'material_summary': [],
+        'traceability_fully_managed': traceability_fully_managed,
     }
 
 
@@ -916,17 +935,20 @@ def _handle_performance_report(
     )
     rows = result.get('rows', [])
 
+    from .recycling_rate_helper import compute_recycling_rate, fetch_group_leaf_data
+
     # Collect all category IDs from rows and fetch names
     all_category_ids = set()
-    # Build location ID → list of (origin_quantity, unit_weight, category_id, main_material_id) tuples
+    all_group_ids = set()
+    # Build location ID → list of (origin_quantity, unit_weight, category_id, main_material_id, calc_ghg, group_id) tuples
     location_records_map: Dict[int, list] = {}
     for row in rows:
-        # Unpack all 18 columns from get_overview_data query
+        # Unpack all 19 columns from get_overview_data query
         (origin_qty, txn_date, txn_id, origin_id, status,
          unit_weight, calc_ghg, mat_category_id, mat_main_material_id, material_tags,
          origin_weight_kg, record_category_id, record_main_material_id,
          _mat_id, _mat_name_en, _mat_name_th,
-         _disposal_method, _record_status) = row
+         _disposal_method, _record_status, traceability_group_id) = row
 
         # Use Material category as primary source (matches old reportUtils logic)
         category_id = mat_category_id or record_category_id
@@ -941,13 +963,20 @@ def _handle_performance_report(
                 float(origin_qty or 0),
                 float(unit_weight or 0),
                 int(category_id) if category_id is not None else None,
-                int(main_material_id) if main_material_id is not None else None
+                int(main_material_id) if main_material_id is not None else None,
+                float(calc_ghg or 0),
+                traceability_group_id,
             ))
+        if traceability_group_id is not None:
+            all_group_ids.add(traceability_group_id)
         if category_id is not None:
             try:
                 all_category_ids.add(int(category_id))
             except Exception:
                 pass
+
+    # Pre-fetch traceability leaf data for all groups across all locations (single query)
+    perf_group_leaf_data, perf_group_completion = fetch_group_leaf_data(reports_service.db, all_group_ids)
 
     # Collect all location IDs from hierarchy and fetch names
     location_ids = set()
@@ -971,16 +1000,22 @@ def _handle_performance_report(
     # Look up GENERAL_WASTE main_material_id once for waste-to-energy splitting
     _perf_gw_mm_id = _get_general_waste_mm_id(reports_service.db)
 
+    # Track if all nodes are fully traced for disclaimer flag
+    perf_all_fully_traced = True
+
     # Helper to calculate metrics from lightweight tuples
     def calculate_metrics(records):
-        """records: list of (origin_qty, unit_weight, category_id, main_material_id) tuples"""
+        """records: list of (origin_qty, unit_weight, category_id, main_material_id, calc_ghg, group_id) tuples"""
+        nonlocal perf_all_fully_traced
         material_metrics: Dict[str, float] = {}
         cat_mm_map: Dict[Tuple[int, int], float] = {}
         total_weight = 0.0
-        recyclable_weight = 0.0
         general_weight = 0.0
 
-        for origin_qty, unit_weight, cat_id, mm_id in records:
+        # Build record_weights for 3-tier recycling rate
+        node_record_weights = []
+
+        for origin_qty, unit_weight, cat_id, mm_id, calc_ghg, group_id in records:
             weight = origin_qty * unit_weight
             total_weight += weight
 
@@ -992,13 +1027,20 @@ def _handle_performance_report(
                     key = (cat_id, mm_id)
                     cat_mm_map[key] = cat_mm_map.get(key, 0.0) + weight
 
-            if cat_id in (1, 3):
-                recyclable_weight += weight
             if cat_id == _GENERAL_WASTE_CAT_ID:
                 general_weight += weight
 
+            node_record_weights.append((weight, calc_ghg, cat_id, group_id))
+
         # Split Waste to Energy out of General Waste
         _split_waste_to_energy(material_metrics, cat_mm_map, _perf_gw_mm_id, category_names)
+
+        # 3-tier recycling rate using pre-fetched traceability data
+        recyclable_weight, _, _, node_fully_traced = compute_recycling_rate(
+            node_record_weights, perf_group_leaf_data, perf_group_completion
+        )
+        if not node_fully_traced:
+            perf_all_fully_traced = False
 
         recycling_rate = (recyclable_weight / total_weight * 100) if total_weight > 0 else 0.0
         return {
@@ -1134,7 +1176,8 @@ def _handle_performance_report(
     return {
         'success': True,
         'data': performance_data,
-        'message': 'Performance report generated successfully'
+        'message': 'Performance report generated successfully',
+        'traceability_fully_managed': perf_all_fully_traced,
     }
 
 def _handle_comparison_report(

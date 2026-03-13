@@ -47,6 +47,9 @@ def handle_debug_routes(event: Dict[str, Any], data: Optional[Dict[str, Any]] = 
         elif path == "/api/debug/traceability/backfill_percentages" and method == "POST":
             return backfill_traceability_percentages(organization_id, **kwargs)
 
+        elif path == "/api/debug/traceability/backfill_group_ids" and method == "POST":
+            return backfill_traceability_group_ids(organization_id, **kwargs)
+
         else:
             raise APIException(
                 message=f"Debug endpoint not found: {method} {path}",
@@ -261,4 +264,56 @@ def backfill_traceability_percentages(organization_id: int, **kwargs) -> Dict[st
             message="Failed to backfill traceability percentages",
             status_code=500,
             error_code="BACKFILL_PERCENTAGES_ERROR",
+        )
+
+
+def backfill_traceability_group_ids(organization_id: int, **kwargs) -> Dict[str, Any]:
+    """
+    DEBUG: Set traceability_group_id on transaction_records for all existing
+    traceability_transaction_group entries in the organization.
+    """
+    try:
+        session = kwargs.get('session')
+        if not session:
+            raise APIException(message="No database session", status_code=500, error_code="NO_SESSION")
+
+        from ...models.transactions.traceability_transaction_group import TraceabilityTransactionGroup
+        from ...models.transactions.transaction_records import TransactionRecord
+
+        groups = session.query(TraceabilityTransactionGroup).filter(
+            TraceabilityTransactionGroup.organization_id == organization_id,
+            TraceabilityTransactionGroup.is_active == True,
+            TraceabilityTransactionGroup.deleted_date.is_(None),
+        ).all()
+
+        records_updated = 0
+        for g in groups:
+            if g.transaction_record_id:
+                updated = session.query(TransactionRecord).filter(
+                    TransactionRecord.id.in_(g.transaction_record_id)
+                ).update(
+                    {TransactionRecord.traceability_group_id: g.id},
+                    synchronize_session=False
+                )
+                records_updated += updated or 0
+
+        session.commit()
+
+        return {
+            "success": True,
+            "message": f"Backfilled traceability_group_id for {records_updated} records across {len(groups)} groups",
+            "data": {
+                "records_updated": records_updated,
+                "groups_processed": len(groups),
+                "organization_id": organization_id,
+            },
+        }
+    except APIException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in backfill_traceability_group_ids: {str(e)}")
+        raise APIException(
+            message="Failed to backfill traceability group IDs",
+            status_code=500,
+            error_code="BACKFILL_GROUP_IDS_ERROR",
         )

@@ -56,6 +56,9 @@ class TransactionRecord(Base, BaseModel):
     treatment_method = Column(String(255))
     disposal_method = Column(String(255))
 
+    # Traceability reverse pointer
+    traceability_group_id = Column(BigInteger, ForeignKey('traceability_transaction_group.id'), nullable=True)
+
     # People involved
     created_by_id = Column(BigInteger, ForeignKey('user_locations.id'), nullable=False)
     approved_by_id = Column(BigInteger, ForeignKey('user_locations.id'), nullable=True)
@@ -83,6 +86,7 @@ class TransactionRecord(Base, BaseModel):
     created_by = relationship("UserLocation", foreign_keys=[created_by_id])
     approved_by = relationship("UserLocation", foreign_keys=[approved_by_id])
     destination = relationship("UserLocation", foreign_keys=[destination_id])
+    traceability_group = relationship("TraceabilityTransactionGroup", foreign_keys=[traceability_group_id])
     # Note: Using JSONB 'images' field for storing S3 URLs instead of relationship
     def calculate_total_value(self):
         """Calculate total value based on quantity and unit price"""
