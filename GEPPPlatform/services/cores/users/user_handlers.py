@@ -1046,6 +1046,61 @@ def handle_update_location(
         else:
             print(f"[DEBUG] No 'tag_ids' key in data!")
 
+        # Handle tenant assignments - update location.tenants JSONB array and bidirectional relationship
+        if 'tenant_ids' in data:
+            from GEPPPlatform.models.users.user_related import UserTenant
+            new_tenant_ids = data['tenant_ids'] or []
+            print(f"[DEBUG] Tenant IDs received: {new_tenant_ids}")
+
+            current_tenant_ids_raw = location.tenants or []
+            current_tenant_ids = set(int(tid) if isinstance(tid, str) else tid for tid in current_tenant_ids_raw)
+            new_tenant_ids_set = set(int(tid) if isinstance(tid, str) else tid for tid in new_tenant_ids)
+
+            tenants_to_add = new_tenant_ids_set - current_tenant_ids
+            tenants_to_remove = current_tenant_ids - new_tenant_ids_set
+
+            print(f"[DEBUG] Current tenants (normalized): {current_tenant_ids}")
+            print(f"[DEBUG] Tenants to add: {tenants_to_add}")
+            print(f"[DEBUG] Tenants to remove: {tenants_to_remove}")
+
+            # Update the location's tenants array
+            location.tenants = [int(tid) for tid in new_tenant_ids_set]
+            flag_modified(location, 'tenants')
+
+            location_id_int = int(location_id)
+
+            # Remove location from tenants being removed
+            for tenant_id in tenants_to_remove:
+                tenant = db_session.query(UserTenant).filter(
+                    and_(
+                        UserTenant.id == int(tenant_id),
+                        UserTenant.organization_id == organization_id,
+                        UserTenant.deleted_date.is_(None)
+                    )
+                ).first()
+                if tenant and tenant.user_locations:
+                    tenant.user_locations = [loc_id for loc_id in tenant.user_locations if int(loc_id) != location_id_int]
+                    flag_modified(tenant, 'user_locations')
+                    print(f"[DEBUG] Removed location {location_id_int} from tenant {tenant_id}")
+
+            # Add location to tenants being added
+            for tenant_id in tenants_to_add:
+                tenant = db_session.query(UserTenant).filter(
+                    and_(
+                        UserTenant.id == int(tenant_id),
+                        UserTenant.organization_id == organization_id,
+                        UserTenant.deleted_date.is_(None)
+                    )
+                ).first()
+                if tenant:
+                    current_locations = tenant.user_locations or []
+                    if location_id_int not in current_locations:
+                        tenant.user_locations = current_locations + [location_id_int]
+                        flag_modified(tenant, 'user_locations')
+                        print(f"[DEBUG] Added location {location_id_int} to tenant {tenant_id}")
+
+            print(f"[DEBUG] Updated location.tenants to: {location.tenants}")
+
         location.updated_date = datetime.utcnow()
 
         print(f"[DEBUG] Before commit - location.members: {location.members}")
@@ -1075,6 +1130,20 @@ def handle_update_location(
                 )
             ).all()
 
+        # Get tenants for this location
+        from GEPPPlatform.models.users.user_related import UserTenant
+        location_tenant_ids = location.tenants or []
+        tenants = []
+        if location_tenant_ids:
+            tenant_ids_int = [int(tid) if isinstance(tid, str) else tid for tid in location_tenant_ids]
+            tenants = db_session.query(UserTenant).filter(
+                and_(
+                    UserTenant.id.in_(tenant_ids_int),
+                    UserTenant.organization_id == organization_id,
+                    UserTenant.deleted_date.is_(None)
+                )
+            ).all()
+
         # Serialize response
         return {
             'success': True,
@@ -1094,6 +1163,18 @@ def handle_update_location(
                         'members': tag.members or []
                     }
                     for tag in tags
+                ],
+                'tenants': [
+                    {
+                        'id': tenant.id,
+                        'name': tenant.name,
+                        'note': tenant.note,
+                        'user_locations': tenant.user_locations or [],
+                        'start_date': tenant.start_date.isoformat() if tenant.start_date else None,
+                        'end_date': tenant.end_date.isoformat() if tenant.end_date else None,
+                        'members': tenant.members or []
+                    }
+                    for tenant in tenants
                 ],
                 'updated_date': location.updated_date.isoformat() if location.updated_date else None
             },
