@@ -608,7 +608,7 @@ def handle_get_unaudited_transactions(
             )
         )
 
-        query = _apply_member_filter_to_transaction_query(query, db_session, current_user_id)
+        query = _apply_member_filter_to_transaction_query(query, db_session, current_user_id, organization_id)
 
         # Date filters
         date_from_dt, date_to_dt = _parse_audit_report_date_range(query_params)
@@ -1109,6 +1109,44 @@ def handle_process_audit_queue(db_session: Any) -> Dict[str, Any]:
         raise APIException(f'Failed to process audit queue: {str(e)}')
 
 
+def _resolve_descendant_ids(db_session: Any, organization_id: int, origin_ids: list) -> list:
+    """Given a list of origin_ids, expand each to include itself + all descendants from org setup tree."""
+    from ....models.subscriptions.organizations import OrganizationSetup
+    setup = db_session.query(OrganizationSetup).filter(
+        OrganizationSetup.organization_id == organization_id,
+        OrganizationSetup.is_active == True
+    ).first()
+    if not setup or not setup.root_nodes:
+        return origin_ids
+    root_nodes = setup.root_nodes if isinstance(setup.root_nodes, list) else []
+    target_set = set(origin_ids)
+    expanded = set(origin_ids)
+
+    def _collect_descendants(nodes):
+        ids = set()
+        for node in nodes:
+            nid = node.get('nodeId')
+            if nid is not None:
+                nid = int(nid) if isinstance(nid, str) else nid
+                ids.add(nid)
+            if node.get('children'):
+                ids |= _collect_descendants(node['children'])
+        return ids
+
+    def _find_and_expand(nodes):
+        for node in nodes:
+            nid = node.get('nodeId')
+            if nid is not None:
+                nid = int(nid) if isinstance(nid, str) else nid
+            if nid in target_set and node.get('children'):
+                expanded.update(_collect_descendants(node['children']))
+            if node.get('children'):
+                _find_and_expand(node['children'])
+
+    _find_and_expand(root_nodes)
+    return list(expanded)
+
+
 def _should_filter_audit_by_member(db_session: Any, current_user_id: Any) -> bool:
     """Return True if we should filter by origin/tag/tenant members (non-admin with a role)."""
     try:
@@ -1129,8 +1167,11 @@ def _should_filter_audit_by_member(db_session: Any, current_user_id: Any) -> boo
         return True
 
 
-def _apply_member_filter_to_transaction_query(query, db_session: Any, current_user_id: Any):
-    """Apply origin/tag/tenant member filter to a query that includes Transaction. No-op if admin or no role."""
+def _apply_member_filter_to_transaction_query(query, db_session: Any, current_user_id: Any, organization_id: Any = None):
+    """
+    Filter transactions to those from locations the user is a member of,
+    including all descendants of those locations. No-op if admin or no role.
+    """
     if current_user_id is None or not _should_filter_audit_by_member(db_session, current_user_id):
         return query
     from sqlalchemy import func, or_, cast
@@ -1139,36 +1180,71 @@ def _apply_member_filter_to_transaction_query(query, db_session: Any, current_us
     from ....models.users.user_related import UserLocationTag, UserTenant
     uid_int = int(current_user_id)
     uid_str = str(current_user_id)
-    query = query.join(Transaction.origin)
-    query = query.outerjoin(UserLocationTag, Transaction.location_tag_id == UserLocationTag.id)
-    query = query.outerjoin(UserTenant, Transaction.tenant_id == UserTenant.id)
     pattern_num = func.jsonb_build_array(func.jsonb_build_object('user_id', uid_int))
     pattern_str = func.jsonb_build_array(func.jsonb_build_object('user_id', uid_str))
-    origin_cond = and_(
+
+    # Fetch location IDs where user is a direct member
+    member_loc_rows = db_session.query(UserLocation.id).filter(
         UserLocation.members.isnot(None),
-        or_(UserLocation.members.op('@>')(pattern_num), UserLocation.members.op('@>')(pattern_str))
-    )
-    tag_cond = and_(
-        Transaction.location_tag_id.isnot(None),
+        or_(
+            UserLocation.members.op('@>')(pattern_num),
+            UserLocation.members.op('@>')(pattern_str)
+        )
+    ).all()
+    member_location_ids = [row[0] for row in member_loc_rows]
+
+    if not member_location_ids:
+        return query.filter(Transaction.origin_id.is_(None))
+
+    # Expand direct-member locations to include all descendants
+    if organization_id is not None:
+        expanded_ids = _resolve_descendant_ids(db_session, organization_id, member_location_ids)
+    else:
+        expanded_ids = member_location_ids
+    descendant_only_ids = list(set(expanded_ids) - set(member_location_ids))
+
+    # Fetch tag/tenant IDs where user is a direct member
+    tag_rows = db_session.query(UserLocationTag.id).filter(
         UserLocationTag.members.isnot(None),
         or_(
             cast(UserLocationTag.members, JSONB).op('@>')(func.jsonb_build_array(uid_int)),
             cast(UserLocationTag.members, JSONB).op('@>')(func.jsonb_build_array(uid_str))
         )
-    )
-    tenant_cond = and_(
-        Transaction.tenant_id.isnot(None),
+    ).all()
+    member_tag_ids = [row[0] for row in tag_rows]
+
+    tenant_rows = db_session.query(UserTenant.id).filter(
         UserTenant.members.isnot(None),
         or_(
             cast(UserTenant.members, JSONB).op('@>')(func.jsonb_build_array(uid_int)),
             cast(UserTenant.members, JSONB).op('@>')(func.jsonb_build_array(uid_str))
         )
+    ).all()
+    member_tenant_ids = [row[0] for row in tenant_rows]
+
+    # Direct member locations: also require tag/tenant membership when present
+    if member_tag_ids:
+        tag_cond = or_(Transaction.location_tag_id.is_(None), Transaction.location_tag_id.in_(member_tag_ids))
+    else:
+        tag_cond = Transaction.location_tag_id.is_(None)
+
+    if member_tenant_ids:
+        tenant_cond = or_(Transaction.tenant_id.is_(None), Transaction.tenant_id.in_(member_tenant_ids))
+    else:
+        tenant_cond = Transaction.tenant_id.is_(None)
+
+    direct_cond = and_(
+        Transaction.origin_id.in_(member_location_ids),
+        tag_cond,
+        tenant_cond
     )
-    return query.filter(and_(
-        origin_cond,
-        or_(Transaction.location_tag_id.is_(None), tag_cond),
-        or_(Transaction.tenant_id.is_(None), tenant_cond)
-    ))
+
+    # Descendant locations: full access, no tag/tenant restriction
+    conditions = [direct_cond]
+    if descendant_only_ids:
+        conditions.append(Transaction.origin_id.in_(descendant_only_ids))
+
+    return query.filter(or_(*conditions))
 
 
 def _parse_audit_report_date_range(query_params: Dict[str, Any]):
@@ -1352,7 +1428,7 @@ def handle_get_audit_report(
             )
         )
 
-        query = _apply_member_filter_to_transaction_query(query, db_session, current_user_id)
+        query = _apply_member_filter_to_transaction_query(query, db_session, current_user_id, organization_id)
 
         # Apply filters
         search = query_params.get('search')
@@ -1453,7 +1529,7 @@ def handle_get_audit_report(
             Transaction.deleted_date.is_(None),
             Transaction.origin_id.isnot(None)
         ))
-        combos_result = _apply_member_filter_to_transaction_query(combos_query, db_session, current_user_id).distinct().all()
+        combos_result = _apply_member_filter_to_transaction_query(combos_query, db_session, current_user_id, organization_id).distinct().all()
 
         origin_ids = list({row[0] for row in combos_result if row[0] is not None})
         tag_ids = list({row[1] for row in combos_result if row[1] is not None})
@@ -1716,7 +1792,7 @@ def handle_get_audit_report(
                 TransactionRecord.material_id.isnot(None)
             ))
         )
-        material_ids = [row[0] for row in _apply_member_filter_to_transaction_query(material_query, db_session, current_user_id).distinct().all()]
+        material_ids = [row[0] for row in _apply_member_filter_to_transaction_query(material_query, db_session, current_user_id, organization_id).distinct().all()]
         materials_options = []
         if material_ids:
             materials = db_session.query(Material).filter(
