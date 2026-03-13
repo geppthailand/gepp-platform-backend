@@ -585,7 +585,9 @@ class InputChannelService:
             # Get materials with details and locations if valid subuser
             if is_valid:
                 result['materials'] = self._get_materials_with_details(channel)
-                result['locations'] = self._get_user_locations(channel, validated_user)
+                location_data = self._get_user_locations_with_tree(channel, validated_user)
+                result['locations'] = location_data['locations']
+                result['root_nodes'] = location_data['root_nodes']
                 result['savedMaterialIds'] = saved_material_ids
 
         return result
@@ -969,6 +971,24 @@ class InputChannelService:
 
         result = []
         for loc in locations:
+            # Check if validated_user is a member of this location
+            if validated_user:
+                loc_members = loc.members or []
+                user_id_int = validated_user.id
+                user_id_str = str(validated_user.id)
+                is_member = False
+                for m in loc_members:
+                    if isinstance(m, dict):
+                        if m.get('user_id') == user_id_int or str(m.get('user_id', '')) == user_id_str:
+                            is_member = True
+                            break
+                    else:
+                        if m == user_id_int or str(m) == user_id_str:
+                            is_member = True
+                            break
+                if not is_member:
+                    continue
+
             functions = []
             if loc.functions:
                 if isinstance(loc.functions, list):
@@ -1070,6 +1090,78 @@ class InputChannelService:
             })
 
         return result
+
+    def _get_user_locations_with_tree(
+        self,
+        channel: UserInputChannel,
+        validated_user: Optional[UserLocation] = None
+    ) -> Dict[str, Any]:
+        """
+        Get locations with tree structure for nested display.
+        Returns both flat locations (member-filtered) and root_nodes tree.
+        """
+        from GEPPPlatform.models.subscriptions.organizations import OrganizationSetup
+
+        # Get flat locations (already member-filtered for tags/tenants)
+        locations = self._get_user_locations(channel, validated_user)
+
+        # Get the root_nodes tree structure
+        org_setup = self.db.query(OrganizationSetup).filter(
+            and_(
+                OrganizationSetup.organization_id == channel.organization_id,
+                OrganizationSetup.is_active == True,
+                OrganizationSetup.deleted_date.is_(None)
+            )
+        ).order_by(OrganizationSetup.created_date.desc()).first()
+
+        root_nodes = []
+        if org_setup and org_setup.root_nodes:
+            root_nodes = org_setup.root_nodes
+            if not isinstance(root_nodes, list):
+                root_nodes = [root_nodes] if root_nodes else []
+
+        # Build set of location IDs that the user has access to
+        accessible_loc_ids = {loc['id'] for loc in locations}
+
+        # Build a location name map from all nodes in the tree
+        all_ids = self._extract_node_ids_from_tree(root_nodes)
+        all_locs = self.db.query(UserLocation).filter(
+            UserLocation.id.in_(all_ids)
+        ).all() if all_ids else []
+        name_map = {str(loc.id): loc.display_name or loc.name_th or loc.name_en or '' for loc in all_locs}
+
+        # Filter + annotate the tree: keep only branches that lead to accessible leaf locations
+        def filter_tree(nodes):
+            """Recursively filter tree to only include paths leading to accessible locations"""
+            filtered = []
+            for node in nodes:
+                node_id = str(node.get('nodeId', ''))
+                children = node.get('children', [])
+                node_type = node.get('type', '')
+
+                # Recursively filter children
+                filtered_children = filter_tree(children) if children else []
+
+                # Include this node if it's accessible OR has accessible descendants
+                has_accessible_descendants = len(filtered_children) > 0
+                is_accessible = node_id in accessible_loc_ids
+
+                if is_accessible or has_accessible_descendants:
+                    filtered.append({
+                        'nodeId': node_id,
+                        'name': name_map.get(node_id, ''),
+                        'type': node_type,
+                        'children': filtered_children,
+                        'isSelectable': is_accessible,
+                    })
+            return filtered
+
+        filtered_tree = filter_tree(root_nodes)
+
+        return {
+            'locations': locations,
+            'root_nodes': filtered_tree,
+        }
 
     def submit_transaction_by_hash(
         self,
