@@ -749,13 +749,19 @@ class UserService:
                     f"must match creator's organization_id ({creator.organization_id})"
                 )
 
-    def get_locations(self, organization_id: int, include_all: bool = False) -> List[Dict[str, Any]]:
+    def get_locations(self, organization_id: int, include_all: bool = False, current_user_id: int = None) -> List[Dict[str, Any]]:
         """
-        Get user locations (is_location = True) for an organization
+        Get user locations (is_location = True) for an organization.
+
+        Member-based filtering (same logic as MobileInput):
+        - Owner: sees ALL locations
+        - Member of a location: sees that location + all descendants in the org tree
+        - Non-member: sees no locations (unless include_all=True)
 
         Args:
             organization_id: The organization ID to filter by
             include_all: If True, return all locations. If False, filter by organization setup
+            current_user_id: The current user's ID for member-based filtering
 
         Returns all user_location columns except password, username, and email
         """
@@ -773,6 +779,12 @@ class UserService:
         else:
             # Return all locations
             locations = self.crud.get_user_locations(organization_id=organization_id)
+
+        # Apply member-based filtering if current_user_id is provided
+        if current_user_id and not include_all:
+            locations = self._filter_locations_by_member_access(
+                locations, organization_id, current_user_id
+            )
 
         # Serialize location data - include all columns except sensitive fields
         location_data = []
@@ -1073,6 +1085,94 @@ class UserService:
             # If there's an error, log it and return None to fall back to all locations
             print(f"Error extracting setup location IDs for organization {organization_id}: {str(e)}")
             return None
+
+    def _filter_locations_by_member_access(
+        self,
+        locations: list,
+        organization_id: int,
+        current_user_id: int
+    ) -> list:
+        """
+        Filter locations based on member access rules (same logic as MobileInput):
+        - Owner: sees ALL locations
+        - Member of a location: sees that location + all descendants in the org tree
+        - Non-member: location is excluded
+        """
+        from ....models.subscriptions.organizations import OrganizationSetup, Organization
+
+        # Check if user is organization owner
+        org = self.db.query(Organization).filter(
+            Organization.id == organization_id
+        ).first()
+
+        if org and org.owner_id == current_user_id:
+            # Owner sees everything
+            return locations
+
+        # Get org setup root_nodes for tree traversal
+        org_setup = self.db.query(OrganizationSetup).filter(
+            OrganizationSetup.organization_id == organization_id,
+            OrganizationSetup.is_active == True,
+            OrganizationSetup.deleted_date.is_(None)
+        ).order_by(OrganizationSetup.created_date.desc()).first()
+
+        if not org_setup or not org_setup.root_nodes:
+            return locations  # No setup, can't filter
+
+        root_nodes = org_setup.root_nodes
+        if not isinstance(root_nodes, list):
+            root_nodes = [root_nodes] if root_nodes else []
+
+        # Helper to check membership (supports both plain IDs and objects)
+        def is_member_of(members_list, uid_int, uid_str):
+            if not members_list:
+                return False
+            for m in members_list:
+                if isinstance(m, dict):
+                    mid = m.get('user_id') or m.get('id')
+                    if mid is not None and (mid == uid_int or str(mid) == uid_str):
+                        return True
+                else:
+                    if m == uid_int or str(m) == uid_str:
+                        return True
+            return False
+
+        uid_int = current_user_id
+        uid_str = str(current_user_id)
+
+        # Find which locations the user is a direct member of
+        member_loc_ids = set()
+        for loc in locations:
+            loc_members = loc.members if hasattr(loc, 'members') else (loc.get('members') if isinstance(loc, dict) else [])
+            if loc_members and is_member_of(loc_members, uid_int, uid_str):
+                member_loc_ids.add(loc.id if hasattr(loc, 'id') else loc.get('id'))
+
+        if not member_loc_ids:
+            return []  # User is not a member of any location
+
+        # Collect member locations + all descendants from the tree
+        def collect_descendants(nodes, collecting=False):
+            ids = set()
+            for node in nodes:
+                nid = int(node.get('nodeId', 0))
+                should_collect = collecting or nid in member_loc_ids
+                if should_collect:
+                    ids.add(nid)
+                children = node.get('children', [])
+                if children:
+                    ids |= collect_descendants(children, should_collect)
+            return ids
+
+        accessible_ids = collect_descendants(root_nodes)
+
+        # Filter locations to only accessible ones
+        filtered = []
+        for loc in locations:
+            loc_id = loc.id if hasattr(loc, 'id') else loc.get('id')
+            if loc_id in accessible_ids:
+                filtered.append(loc)
+
+        return filtered
 
     def _extract_node_ids(self, nodes, location_ids: set):
         """
