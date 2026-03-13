@@ -44,6 +44,9 @@ def handle_debug_routes(event: Dict[str, Any], data: Optional[Dict[str, Any]] = 
         if path == "/api/debug/transaction/reset_pending_all" and method == "POST":
             return reset_all_transactions_to_pending(user_id, organization_id, **kwargs)
 
+        elif path == "/api/debug/traceability/backfill_percentages" and method == "POST":
+            return backfill_traceability_percentages(organization_id, **kwargs)
+
         else:
             raise APIException(
                 message=f"Debug endpoint not found: {method} {path}",
@@ -228,4 +231,34 @@ def reset_all_transactions_to_pending(user_id: int, organization_id: int, **kwar
             message="Failed to reset transactions",
             status_code=500,
             error_code="RESET_TRANSACTIONS_ERROR"
+        )
+
+
+def backfill_traceability_percentages(organization_id: int, **kwargs) -> Dict[str, Any]:
+    """
+    DEBUG: Backfill absolute_percentage for all traceability transport transactions in the organization.
+    """
+    try:
+        session = kwargs.get('session')
+        if not session:
+            raise APIException(message="No database session", status_code=500, error_code="NO_SESSION")
+
+        from ..cores.traceability.traceability_service import TraceabilityService
+        service = TraceabilityService(session)
+        count = service.backfill_absolute_percentages(organization_id)
+        session.commit()
+
+        return {
+            "success": True,
+            "message": f"Backfilled absolute_percentage for {count} groups",
+            "data": {"groups_processed": count, "organization_id": organization_id},
+        }
+    except APIException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in backfill_traceability_percentages: {str(e)}")
+        raise APIException(
+            message="Failed to backfill traceability percentages",
+            status_code=500,
+            error_code="BACKFILL_PERCENTAGES_ERROR",
         )

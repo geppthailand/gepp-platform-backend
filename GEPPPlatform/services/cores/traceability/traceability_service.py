@@ -338,6 +338,7 @@ class TraceabilityService:
                 "disposal_method": r.disposal_method,
                 "meta_data": r.meta_data or {},
                 "is_root": r.is_root,
+                "absolute_percentage": float(r.absolute_percentage) if r.absolute_percentage is not None else None,
                 "origin": origin,
                 "destination": destination,
                 "material": material,
@@ -554,6 +555,7 @@ class TraceabilityService:
                 "disposal_method": r.disposal_method,
                 "meta_data": r.meta_data or {},
                 "is_root": r.is_root,
+                "absolute_percentage": float(r.absolute_percentage) if r.absolute_percentage is not None else None,
                 "origin": origin,
                 "destination": destination,
                 "material": material,
@@ -1067,6 +1069,7 @@ class TraceabilityService:
                 "arrival_date": r.arrival_date.isoformat() if r.arrival_date else None,
                 "status": r.status,
                 "is_root": r.is_root,
+                "absolute_percentage": float(r.absolute_percentage) if r.absolute_percentage is not None else None,
                 "parent_id": r.parent_id,
                 "created_date": r.created_date.isoformat() if r.created_date else None,
                 "updated_date": r.updated_date.isoformat() if r.updated_date else None,
@@ -1140,6 +1143,7 @@ class TraceabilityService:
                 "arrival_date": r.arrival_date.isoformat() if r.arrival_date else None,
                 "status": r.status,
                 "is_root": r.is_root,
+                "absolute_percentage": float(r.absolute_percentage) if r.absolute_percentage is not None else None,
                 "parent_id": r.parent_id,
                 "created_date": r.created_date.isoformat() if r.created_date else None,
                 "updated_date": r.updated_date.isoformat() if r.updated_date else None,
@@ -1454,6 +1458,11 @@ class TraceabilityService:
             self.db.flush()
             created_ids.append(row.id)
 
+        # IMPORTANT: Recalculate absolute_percentage for the entire group after creating nodes.
+        # Any future code that creates transport transactions must also trigger this recalculation.
+        if transaction_group_id:
+            self._recalculate_absolute_percentage(transaction_group_id)
+
         return {
             "success": True,
             "message": "Transport transactions created",
@@ -1475,6 +1484,7 @@ class TraceabilityService:
 
         now = datetime.now(timezone.utc)
         updated_ids: List[int] = []
+        affected_group_ids: set = set()
 
         for item in data:
             tt_id = item.get("transport_transaction_id")
@@ -1497,6 +1507,9 @@ class TraceabilityService:
             )
             if not row:
                 return {"success": False, "message": f"Transport transaction {tt_id} not found or access denied", "ids": updated_ids}
+
+            if row.transaction_group_id:
+                affected_group_ids.add(row.transaction_group_id)
 
             # Recursively soft-delete all descendants
             self._soft_delete_descendants(tt_id, now)
@@ -1556,6 +1569,11 @@ class TraceabilityService:
             self.db.flush()
             updated_ids.append(tt_id)
 
+        # IMPORTANT: Recalculate absolute_percentage for all affected groups after updates.
+        # Any future code that updates transport transactions must also trigger this recalculation.
+        for gid in affected_group_ids:
+            self._recalculate_absolute_percentage(gid)
+
         return {
             "success": True,
             "message": "Transport transactions updated",
@@ -1577,6 +1595,44 @@ class TraceabilityService:
             self._soft_delete_descendants(child.id, now)
             child.is_active = False
             child.deleted_date = now
+        self.db.flush()
+
+    def _recalculate_absolute_percentage(self, transaction_group_id: int) -> None:
+        """
+        Recalculate absolute_percentage for ALL active transport transactions in the group.
+        absolute_percentage = (node_weight / sum_of_siblings_weights) * 100
+
+        IMPORTANT: Any code that creates, updates, or reverts transport transactions
+        MUST call this method afterward to keep absolute_percentage in sync.
+        This value is used by reports for fast percentage lookups against the
+        source group weight, without needing to traverse the tree at query time.
+        """
+        rows = (
+            self.db.query(TransportTransaction)
+            .filter(
+                TransportTransaction.transaction_group_id == transaction_group_id,
+                TransportTransaction.is_active == True,
+                TransportTransaction.deleted_date.is_(None),
+            )
+            .all()
+        )
+        if not rows:
+            return
+
+        # Group by parent_id to find sibling sets at each tree level
+        by_parent: Dict[Optional[int], List[TransportTransaction]] = {}
+        for r in rows:
+            by_parent.setdefault(r.parent_id, []).append(r)
+
+        for siblings in by_parent.values():
+            siblings_total = sum(float(s.weight or 0) for s in siblings)
+            for node in siblings:
+                w = float(node.weight or 0)
+                if siblings_total > 0:
+                    node.absolute_percentage = Decimal(str(round((w / siblings_total) * 100, 2)))
+                else:
+                    node.absolute_percentage = Decimal("0")
+
         self.db.flush()
 
     def confirm_arrival(
@@ -1685,6 +1741,12 @@ class TraceabilityService:
         deleted_ids.append(row.id)
 
         self.db.flush()
+
+        # IMPORTANT: Recalculate absolute_percentage after revert changes sibling structure.
+        # Any future code that reverts transport transactions must also trigger this recalculation.
+        if row.transaction_group_id:
+            self._recalculate_absolute_percentage(row.transaction_group_id)
+
         return {
             "success": True,
             "message": "Transaction reverted successfully",
@@ -1763,3 +1825,24 @@ class TraceabilityService:
             "unit_name_en": getattr(material, "unit_name_en", None),
             "unit_weight": float(material.unit_weight) if getattr(material, "unit_weight", None) else 0,
         }
+
+    def backfill_absolute_percentages(self, organization_id: int) -> int:
+        """
+        One-time backfill: recalculate absolute_percentage for all groups in an organization.
+        Returns the number of groups processed.
+        """
+        groups = (
+            self.db.query(TraceabilityTransactionGroup.id)
+            .filter(
+                TraceabilityTransactionGroup.organization_id == organization_id,
+                TraceabilityTransactionGroup.is_active == True,
+                TraceabilityTransactionGroup.deleted_date.is_(None),
+            )
+            .all()
+        )
+        count = 0
+        for (gid,) in groups:
+            self._recalculate_absolute_percentage(gid)
+            count += 1
+        self.db.flush()
+        return count

@@ -28,3 +28,4 @@ class TransportTransaction(Base, BaseModel):
     status = Column(String(100), nullable=True)
     is_root = Column(Boolean, nullable=False, default=True)
     parent_id = Column(BigInteger, ForeignKey("traceability_transport_transactions.id"), nullable=True)
+    absolute_percentage = Column(Numeric, nullable=True)
