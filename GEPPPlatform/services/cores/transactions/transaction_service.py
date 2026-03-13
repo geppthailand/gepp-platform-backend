@@ -237,6 +237,48 @@ class TransactionService:
             logger.exception("Error sending email via Lambda: %s", e)
             return False
 
+    def _get_transaction_materials(self, transaction_id: int) -> List[Dict[str, Any]]:
+        """Fetch material name (Thai) and weight for each record in a transaction."""
+        try:
+            result = self.db.execute(
+                text("""
+                    SELECT m.name_th, tr.origin_weight_kg
+                    FROM transaction_records tr
+                    JOIN materials m ON m.id = tr.material_id
+                    WHERE tr.created_transaction_id = :txn_id
+                    ORDER BY tr.id
+                """),
+                {'txn_id': transaction_id},
+            )
+            return [
+                {'name': row[0] or '', 'weight_kg': float(row[1] or 0)}
+                for row in result.fetchall()
+            ]
+        except Exception:
+            return []
+
+    def _build_materials_html(self, materials: List[Dict[str, Any]]) -> str:
+        if not materials:
+            return ''
+        rows = ''.join(
+            f'<tr>'
+            f'<td style="font-size: 14px; color: #495057; padding: 5px 0; border-bottom: 1px solid #e9ecef;">{m["name"]}</td>'
+            f'<td style="font-size: 14px; color: #495057; font-weight: 500; padding: 5px 0 5px 16px; border-bottom: 1px solid #e9ecef; text-align: right; white-space: nowrap;">{m["weight_kg"]:g} กก.</td>'
+            f'</tr>'
+            for m in materials
+        )
+        return (
+            f'<table width="100%" cellpadding="0" cellspacing="0" border="0"'
+            f' style="border-collapse: collapse; margin-top: 12px; border-top: 1px solid #dee2e6;">'
+            f'{rows}</table>'
+        )
+
+    def _build_materials_text(self, materials: List[Dict[str, Any]]) -> str:
+        if not materials:
+            return ''
+        lines = '\n'.join(f'  {m["name"]} {m["weight_kg"]:g} กก.' for m in materials)
+        return f'\nMaterials:\n{lines}'
+
     def _send_txn_created_emails(
         self,
         transaction_id: int,
@@ -249,6 +291,9 @@ class TransactionService:
         """
         if not email_list:
             return
+        materials = self._get_transaction_materials(transaction_id)
+        materials_html = self._build_materials_html(materials)
+        materials_text = self._build_materials_text(materials)
         subject = f"New transaction #{transaction_id} – GEPP Platform"
         html_content = f"""<!DOCTYPE html>
 <html>
@@ -266,12 +311,10 @@ class TransactionService:
             <div style="padding: 28px 24px;">
                 <p style="margin: 0 0 16px 0; font-size: 15px;">Hello,</p>
                 <p style="margin: 0 0 20px 0; font-size: 15px;">A new transaction has been created in your organization.</p>
-                <div style="background: #f8f9fa; border-radius: 8px; padding: 16px 20px; margin: 24px 0; border-left: 4px solid #27ae60; display: flex; align-items: center; justify-content: space-between;">
-                    <div>
-                        <p style="margin: 0 0 4px 0; font-size: 12px; color: #6c757d; text-transform: uppercase; letter-spacing: 0.05em;">Transaction ID</p>
-                        <p style="margin: 0; font-size: 18px; font-weight: 600; color: #2c3e50;">#{transaction_id}</p>
-                    </div>
-                    <a href="https://geppdata.com/waste-transactions#{transaction_id}" style="display: inline-block; padding: 10px 24px; background: linear-gradient(135deg, #8fc9a3 0%, #27ae60 100%); color: #ffffff; font-size: 14px; font-weight: 600; text-decoration: none; border-radius: 8px; white-space: nowrap;">See details</a>
+                <div style="background: #f8f9fa; border-radius: 8px; padding: 16px 20px; margin: 24px 0; border-left: 4px solid #27ae60;">
+                    <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse: collapse;"><tr>
+                        <td style="vertical-align: middle; padding-right: 16px;"><p style="margin: 0; font-size: 13px; color: #6c757d; text-transform: uppercase; letter-spacing: 0.05em;">Transaction ID &nbsp;<strong style="font-size: 18px; color: #2c3e50; text-transform: none; letter-spacing: normal;">#{transaction_id}</strong></p></td>
+                        <td style="vertical-align: middle; text-align: right; white-space: nowrap;"><a href="https://geppdata.com/waste-transactions#{transaction_id}" style="display: inline-block; padding: 10px 24px; background: linear-gradient(135deg, #8fc9a3 0%, #27ae60 100%); color: #ffffff; font-size: 14px; font-weight: 600; text-decoration: none; border-radius: 8px; white-space: nowrap;">See details</a></td></tr></table>{materials_html}
                 </div>
                 <p style="margin: 0; font-size: 14px; color: #6c757d;">Log in to the platform to view details and take action if needed.</p>
             </div>
@@ -289,7 +332,7 @@ Hello,
 
 A new transaction has been created in your organization.
 
-Transaction ID: #{transaction_id}
+Transaction ID: #{transaction_id}{materials_text}
 
 See details: https://geppdata.com/waste-transactions#{transaction_id}
 
@@ -331,6 +374,9 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
         """
         if not email_list:
             return
+        materials = self._get_transaction_materials(transaction_id)
+        materials_html = self._build_materials_html(materials)
+        materials_text = self._build_materials_text(materials)
         subject = f"Transaction #{transaction_id} updated – GEPP Platform"
         html_content = f"""<!DOCTYPE html>
 <html>
@@ -348,12 +394,10 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
             <div style="padding: 28px 24px;">
                 <p style="margin: 0 0 16px 0; font-size: 15px;">Hello,</p>
                 <p style="margin: 0 0 20px 0; font-size: 15px;">A transaction in your organization has been updated.</p>
-                <div style="background: #f8f9fa; border-radius: 8px; padding: 16px 20px; margin: 24px 0; border-left: 4px solid #3498db; display: flex; align-items: center; justify-content: space-between;">
-                    <div>
-                        <p style="margin: 0 0 4px 0; font-size: 12px; color: #6c757d; text-transform: uppercase; letter-spacing: 0.05em;">Transaction ID</p>
-                        <p style="margin: 0; font-size: 18px; font-weight: 600; color: #2c3e50;">#{transaction_id}</p>
-                    </div>
-                    <a href="https://geppdata.com/waste-transactions#{transaction_id}" style="display: inline-block; padding: 10px 24px; background: linear-gradient(135deg, #7ec4e8 0%, #3498db 100%); color: #ffffff; font-size: 14px; font-weight: 600; text-decoration: none; border-radius: 8px; white-space: nowrap;">See details</a>
+                <div style="background: #f8f9fa; border-radius: 8px; padding: 16px 20px; margin: 24px 0; border-left: 4px solid #3498db;">
+                    <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse: collapse;"><tr>
+                        <td style="vertical-align: middle; padding-right: 16px;"><p style="margin: 0; font-size: 13px; color: #6c757d; text-transform: uppercase; letter-spacing: 0.05em;">Transaction ID &nbsp;<strong style="font-size: 18px; color: #2c3e50; text-transform: none; letter-spacing: normal;">#{transaction_id}</strong></p></td>
+                        <td style="vertical-align: middle; text-align: right; white-space: nowrap;"><a href="https://geppdata.com/waste-transactions#{transaction_id}" style="display: inline-block; padding: 10px 24px; background: linear-gradient(135deg, #7ec4e8 0%, #3498db 100%); color: #ffffff; font-size: 14px; font-weight: 600; text-decoration: none; border-radius: 8px; white-space: nowrap;">See details</a></td></tr></table>{materials_html}
                 </div>
                 <p style="margin: 0; font-size: 14px; color: #6c757d;">Log in to the platform to view the latest details.</p>
             </div>
@@ -371,7 +415,7 @@ Hello,
 
 A transaction in your organization has been updated.
 
-Transaction ID: #{transaction_id}
+Transaction ID: #{transaction_id}{materials_text}
 
 See details: https://geppdata.com/waste-transactions#{transaction_id}
 
@@ -413,6 +457,9 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
         """
         if not email_list:
             return
+        materials = self._get_transaction_materials(transaction_id)
+        materials_html = self._build_materials_html(materials)
+        materials_text = self._build_materials_text(materials)
         subject = f"Transaction #{transaction_id} deleted – GEPP Platform"
         html_content = f"""<!DOCTYPE html>
 <html>
@@ -430,12 +477,8 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
             <div style="padding: 28px 24px;">
                 <p style="margin: 0 0 16px 0; font-size: 15px;">Hello,</p>
                 <p style="margin: 0 0 20px 0; font-size: 15px;">A transaction in your organization has been deleted.</p>
-                <div style="background: #f8f9fa; border-radius: 8px; padding: 16px 20px; margin: 24px 0; border-left: 4px solid #e74c3c; display: flex; align-items: center; justify-content: space-between;">
-                    <div>
-                        <p style="margin: 0 0 4px 0; font-size: 12px; color: #6c757d; text-transform: uppercase; letter-spacing: 0.05em;">Transaction ID</p>
-                        <p style="margin: 0; font-size: 18px; font-weight: 600; color: #2c3e50;">#{transaction_id}</p>
-                    </div>
-                    <a href="https://geppdata.com/waste-transactions#{transaction_id}" style="display: inline-block; padding: 10px 24px; background: linear-gradient(135deg, #f1a9a0 0%, #e74c3c 100%); color: #ffffff; font-size: 14px; font-weight: 600; text-decoration: none; border-radius: 8px; white-space: nowrap;">See details</a>
+                <div style="background: #f8f9fa; border-radius: 8px; padding: 16px 20px; margin: 24px 0; border-left: 4px solid #e74c3c;">
+                    <p style="margin: 0; font-size: 13px; color: #6c757d; text-transform: uppercase; letter-spacing: 0.05em;">Transaction ID &nbsp;<strong style="font-size: 18px; color: #2c3e50; text-transform: none; letter-spacing: normal;">#{transaction_id}</strong></p>{materials_html}
                 </div>
                 <p style="margin: 0; font-size: 14px; color: #6c757d;">Log in to the platform for more information.</p>
             </div>
@@ -453,9 +496,7 @@ Hello,
 
 A transaction in your organization has been deleted.
 
-Transaction ID: #{transaction_id}
-
-See details: https://geppdata.com/waste-transactions#{transaction_id}
+Transaction ID: #{transaction_id}{materials_text}
 
 Log in to the platform for more information.
 
@@ -529,11 +570,22 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                     notif_id = row[0]
                     users_bell = self.db.execute(
                         text("""
-                            SELECT DISTINCT id FROM user_locations
-                            WHERE organization_id = :org_id AND organization_role_id = ANY(:role_ids)
-                              AND is_user = TRUE AND is_active = TRUE AND deleted_date IS NULL
+                            SELECT DISTINCT ul.id FROM user_locations ul
+                            LEFT JOIN organization_roles orr ON orr.id = ul.organization_role_id
+                            WHERE ul.organization_id = :org_id
+                              AND ul.is_user = TRUE AND ul.is_active = TRUE AND ul.deleted_date IS NULL
+                              AND (
+                                (ul.organization_role_id = ANY(:role_ids)
+                                  AND (orr.key != 'data_input' OR ul.id = :created_by_id))
+                                OR (ul.organization_role_id IS NULL
+                                  AND EXISTS (
+                                    SELECT 1 FROM organization_roles ar
+                                    WHERE ar.organization_id = :org_id AND ar.key = 'admin'
+                                      AND ar.id = ANY(:role_ids)
+                                  ))
+                              )
                         """),
-                        {'org_id': organization_id, 'role_ids': bell_role_ids},
+                        {'org_id': organization_id, 'role_ids': bell_role_ids, 'created_by_id': created_by_id},
                     )
                     user_rows = users_bell.fetchall()
                     for u in user_rows:
@@ -562,12 +614,23 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
             if email_role_ids:
                 users_email = self.db.execute(
                     text("""
-                        SELECT DISTINCT id, email FROM user_locations
-                        WHERE organization_id = :org_id AND organization_role_id = ANY(:role_ids)
-                          AND is_user = TRUE AND is_active = TRUE AND deleted_date IS NULL
-                          AND email IS NOT NULL AND TRIM(email) != ''
+                        SELECT DISTINCT ul.id, ul.email FROM user_locations ul
+                        LEFT JOIN organization_roles orr ON orr.id = ul.organization_role_id
+                        WHERE ul.organization_id = :org_id
+                          AND ul.is_user = TRUE AND ul.is_active = TRUE AND ul.deleted_date IS NULL
+                          AND ul.email IS NOT NULL AND TRIM(ul.email) != ''
+                          AND (
+                            (ul.organization_role_id = ANY(:role_ids)
+                              AND (orr.key != 'data_input' OR ul.id = :created_by_id))
+                            OR (ul.organization_role_id IS NULL
+                              AND EXISTS (
+                                SELECT 1 FROM organization_roles ar
+                                WHERE ar.organization_id = :org_id AND ar.key = 'admin'
+                                  AND ar.id = ANY(:role_ids)
+                              ))
+                          )
                     """),
-                    {'org_id': organization_id, 'role_ids': email_role_ids},
+                    {'org_id': organization_id, 'role_ids': email_role_ids, 'created_by_id': created_by_id},
                 )
                 seen: set = set()
                 for u in users_email.fetchall():
@@ -636,11 +699,22 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                     notif_id = row[0]
                     users_bell = self.db.execute(
                         text("""
-                            SELECT DISTINCT id FROM user_locations
-                            WHERE organization_id = :org_id AND organization_role_id = ANY(:role_ids)
-                              AND is_user = TRUE AND is_active = TRUE AND deleted_date IS NULL
+                            SELECT DISTINCT ul.id FROM user_locations ul
+                            LEFT JOIN organization_roles orr ON orr.id = ul.organization_role_id
+                            WHERE ul.organization_id = :org_id
+                              AND ul.is_user = TRUE AND ul.is_active = TRUE AND ul.deleted_date IS NULL
+                              AND (
+                                (ul.organization_role_id = ANY(:role_ids)
+                                  AND (orr.key != 'data_input' OR ul.id = :created_by_id))
+                                OR (ul.organization_role_id IS NULL
+                                  AND EXISTS (
+                                    SELECT 1 FROM organization_roles ar
+                                    WHERE ar.organization_id = :org_id AND ar.key = 'admin'
+                                      AND ar.id = ANY(:role_ids)
+                                  ))
+                              )
                         """),
-                        {'org_id': organization_id, 'role_ids': bell_role_ids},
+                        {'org_id': organization_id, 'role_ids': bell_role_ids, 'created_by_id': created_by_id},
                     )
                     for u in users_bell.fetchall():
                         self.db.execute(
@@ -667,12 +741,23 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
             if email_role_ids:
                 users_email = self.db.execute(
                     text("""
-                        SELECT DISTINCT id, email FROM user_locations
-                        WHERE organization_id = :org_id AND organization_role_id = ANY(:role_ids)
-                          AND is_user = TRUE AND is_active = TRUE AND deleted_date IS NULL
-                          AND email IS NOT NULL AND TRIM(email) != ''
+                        SELECT DISTINCT ul.id, ul.email FROM user_locations ul
+                        LEFT JOIN organization_roles orr ON orr.id = ul.organization_role_id
+                        WHERE ul.organization_id = :org_id
+                          AND ul.is_user = TRUE AND ul.is_active = TRUE AND ul.deleted_date IS NULL
+                          AND ul.email IS NOT NULL AND TRIM(ul.email) != ''
+                          AND (
+                            (ul.organization_role_id = ANY(:role_ids)
+                              AND (orr.key != 'data_input' OR ul.id = :created_by_id))
+                            OR (ul.organization_role_id IS NULL
+                              AND EXISTS (
+                                SELECT 1 FROM organization_roles ar
+                                WHERE ar.organization_id = :org_id AND ar.key = 'admin'
+                                  AND ar.id = ANY(:role_ids)
+                              ))
+                          )
                     """),
-                    {'org_id': organization_id, 'role_ids': email_role_ids},
+                    {'org_id': organization_id, 'role_ids': email_role_ids, 'created_by_id': created_by_id},
                 )
                 seen: set = set()
                 for u in users_email.fetchall():
@@ -741,11 +826,22 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                     notif_id = row[0]
                     users_bell = self.db.execute(
                         text("""
-                            SELECT DISTINCT id FROM user_locations
-                            WHERE organization_id = :org_id AND organization_role_id = ANY(:role_ids)
-                              AND is_user = TRUE AND is_active = TRUE AND deleted_date IS NULL
+                            SELECT DISTINCT ul.id FROM user_locations ul
+                            LEFT JOIN organization_roles orr ON orr.id = ul.organization_role_id
+                            WHERE ul.organization_id = :org_id
+                              AND ul.is_user = TRUE AND ul.is_active = TRUE AND ul.deleted_date IS NULL
+                              AND (
+                                (ul.organization_role_id = ANY(:role_ids)
+                                  AND (orr.key != 'data_input' OR ul.id = :created_by_id))
+                                OR (ul.organization_role_id IS NULL
+                                  AND EXISTS (
+                                    SELECT 1 FROM organization_roles ar
+                                    WHERE ar.organization_id = :org_id AND ar.key = 'admin'
+                                      AND ar.id = ANY(:role_ids)
+                                  ))
+                              )
                         """),
-                        {'org_id': organization_id, 'role_ids': bell_role_ids},
+                        {'org_id': organization_id, 'role_ids': bell_role_ids, 'created_by_id': created_by_id},
                     )
                     for u in users_bell.fetchall():
                         self.db.execute(
@@ -772,12 +868,23 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
             if email_role_ids:
                 users_email = self.db.execute(
                     text("""
-                        SELECT DISTINCT id, email FROM user_locations
-                        WHERE organization_id = :org_id AND organization_role_id = ANY(:role_ids)
-                          AND is_user = TRUE AND is_active = TRUE AND deleted_date IS NULL
-                          AND email IS NOT NULL AND TRIM(email) != ''
+                        SELECT DISTINCT ul.id, ul.email FROM user_locations ul
+                        LEFT JOIN organization_roles orr ON orr.id = ul.organization_role_id
+                        WHERE ul.organization_id = :org_id
+                          AND ul.is_user = TRUE AND ul.is_active = TRUE AND ul.deleted_date IS NULL
+                          AND ul.email IS NOT NULL AND TRIM(ul.email) != ''
+                          AND (
+                            (ul.organization_role_id = ANY(:role_ids)
+                              AND (orr.key != 'data_input' OR ul.id = :created_by_id))
+                            OR (ul.organization_role_id IS NULL
+                              AND EXISTS (
+                                SELECT 1 FROM organization_roles ar
+                                WHERE ar.organization_id = :org_id AND ar.key = 'admin'
+                                  AND ar.id = ANY(:role_ids)
+                              ))
+                          )
                     """),
-                    {'org_id': organization_id, 'role_ids': email_role_ids},
+                    {'org_id': organization_id, 'role_ids': email_role_ids, 'created_by_id': created_by_id},
                 )
                 seen: set = set()
                 for u in users_email.fetchall():
@@ -812,6 +919,9 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
         if not email_list:
             return
         txn_ref = f"#{transaction_id}"
+        materials = self._get_transaction_materials(transaction_id)
+        materials_html = self._build_materials_html(materials)
+        materials_text = self._build_materials_text(materials)
         subject = f"Transaction {txn_ref} has been approved – GEPP Platform"
         html_content = f"""<!DOCTYPE html>
 <html>
@@ -829,12 +939,10 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
             <div style="padding: 28px 24px;">
                 <p style="margin: 0 0 16px 0; font-size: 15px;">Hello,</p>
                 <p style="margin: 0 0 20px 0; font-size: 15px;">Transaction {txn_ref} has been approved.</p>
-                <div style="background: #f8f9fa; border-radius: 8px; padding: 16px 20px; margin: 24px 0; border-left: 4px solid #27ae60; display: flex; align-items: center; justify-content: space-between;">
-                    <div>
-                        <p style="margin: 0 0 4px 0; font-size: 12px; color: #6c757d; text-transform: uppercase; letter-spacing: 0.05em;">Transaction</p>
-                        <p style="margin: 0; font-size: 18px; font-weight: 600; color: #2c3e50;">{txn_ref}</p>
-                    </div>
-                    <a href="https://geppdata.com/waste-transactions#{transaction_id}" style="display: inline-block; padding: 10px 24px; background: linear-gradient(135deg, #8fc9a3 0%, #27ae60 100%); color: #ffffff; font-size: 14px; font-weight: 600; text-decoration: none; border-radius: 8px; white-space: nowrap;">See details</a>
+                <div style="background: #f8f9fa; border-radius: 8px; padding: 16px 20px; margin: 24px 0; border-left: 4px solid #27ae60;">
+                    <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse: collapse;"><tr>
+                        <td style="vertical-align: middle; padding-right: 16px;"><p style="margin: 0; font-size: 13px; color: #6c757d; text-transform: uppercase; letter-spacing: 0.05em;">Transaction ID &nbsp;<strong style="font-size: 18px; color: #2c3e50; text-transform: none; letter-spacing: normal;">{txn_ref}</strong></p></td>
+                        <td style="vertical-align: middle; text-align: right; white-space: nowrap;"><a href="https://geppdata.com/waste-transactions#{transaction_id}" style="display: inline-block; padding: 10px 24px; background: linear-gradient(135deg, #8fc9a3 0%, #27ae60 100%); color: #ffffff; font-size: 14px; font-weight: 600; text-decoration: none; border-radius: 8px; white-space: nowrap;">See details</a></td></tr></table>{materials_html}
                 </div>
                 <p style="margin: 0; font-size: 14px; color: #6c757d;">Log in to the platform to view details.</p>
             </div>
@@ -851,6 +959,8 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
 Hello,
 
 Transaction {txn_ref} has been approved.
+
+Transaction ID: {txn_ref}{materials_text}
 
 See details: https://geppdata.com/waste-transactions#{transaction_id}
 
@@ -891,6 +1001,9 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
         if not email_list:
             return
         txn_ref = f"#{transaction_id}"
+        materials = self._get_transaction_materials(transaction_id)
+        materials_html = self._build_materials_html(materials)
+        materials_text = self._build_materials_text(materials)
         subject = f"Transaction {txn_ref} has been rejected – GEPP Platform"
         html_content = f"""<!DOCTYPE html>
 <html>
@@ -908,12 +1021,10 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
             <div style="padding: 28px 24px;">
                 <p style="margin: 0 0 16px 0; font-size: 15px;">Hello,</p>
                 <p style="margin: 0 0 20px 0; font-size: 15px;">Transaction {txn_ref} has been rejected because one or all of its records have been rejected. Please check the platform.</p>
-                <div style="background: #f8f9fa; border-radius: 8px; padding: 16px 20px; margin: 24px 0; border-left: 4px solid #e74c3c; display: flex; align-items: center; justify-content: space-between;">
-                    <div>
-                        <p style="margin: 0 0 4px 0; font-size: 12px; color: #6c757d; text-transform: uppercase; letter-spacing: 0.05em;">Transaction</p>
-                        <p style="margin: 0; font-size: 18px; font-weight: 600; color: #2c3e50;">{txn_ref}</p>
-                    </div>
-                    <a href="https://geppdata.com/waste-transactions#{transaction_id}" style="display: inline-block; padding: 10px 24px; background: linear-gradient(135deg, #f1a9a0 0%, #e74c3c 100%); color: #ffffff; font-size: 14px; font-weight: 600; text-decoration: none; border-radius: 8px; white-space: nowrap;">See details</a>
+                <div style="background: #f8f9fa; border-radius: 8px; padding: 16px 20px; margin: 24px 0; border-left: 4px solid #e74c3c;">
+                    <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse: collapse;"><tr>
+                        <td style="vertical-align: middle; padding-right: 16px;"><p style="margin: 0; font-size: 13px; color: #6c757d; text-transform: uppercase; letter-spacing: 0.05em;">Transaction ID &nbsp;<strong style="font-size: 18px; color: #2c3e50; text-transform: none; letter-spacing: normal;">{txn_ref}</strong></p></td>
+                        <td style="vertical-align: middle; text-align: right; white-space: nowrap;"><a href="https://geppdata.com/waste-transactions#{transaction_id}" style="display: inline-block; padding: 10px 24px; background: linear-gradient(135deg, #f1a9a0 0%, #e74c3c 100%); color: #ffffff; font-size: 14px; font-weight: 600; text-decoration: none; border-radius: 8px; white-space: nowrap;">See details</a></td></tr></table>{materials_html}
                 </div>
                 <p style="margin: 0; font-size: 14px; color: #6c757d;">Log in to the platform to view details and take action if needed.</p>
             </div>
@@ -930,6 +1041,8 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
 Hello,
 
 Transaction {txn_ref} has been rejected because one or all of its records have been rejected. Please check the platform.
+
+Transaction ID: {txn_ref}{materials_text}
 
 See details: https://geppdata.com/waste-transactions#{transaction_id}
 
@@ -1007,11 +1120,22 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                     notif_id = row[0]
                     users_bell = self.db.execute(
                         text("""
-                            SELECT DISTINCT id FROM user_locations
-                            WHERE organization_id = :org_id AND organization_role_id = ANY(:role_ids)
-                              AND is_user = TRUE AND is_active = TRUE AND deleted_date IS NULL
+                            SELECT DISTINCT ul.id FROM user_locations ul
+                            LEFT JOIN organization_roles orr ON orr.id = ul.organization_role_id
+                            WHERE ul.organization_id = :org_id
+                              AND ul.is_user = TRUE AND ul.is_active = TRUE AND ul.deleted_date IS NULL
+                              AND (
+                                (ul.organization_role_id = ANY(:role_ids)
+                                  AND (orr.key != 'data_input' OR ul.id = :created_by_id))
+                                OR (ul.organization_role_id IS NULL
+                                  AND EXISTS (
+                                    SELECT 1 FROM organization_roles ar
+                                    WHERE ar.organization_id = :org_id AND ar.key = 'admin'
+                                      AND ar.id = ANY(:role_ids)
+                                  ))
+                              )
                         """),
-                        {'org_id': organization_id, 'role_ids': bell_role_ids},
+                        {'org_id': organization_id, 'role_ids': bell_role_ids, 'created_by_id': created_by_id},
                     )
                     for u in users_bell.fetchall():
                         self.db.execute(
@@ -1038,12 +1162,23 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
             if email_role_ids:
                 users_email = self.db.execute(
                     text("""
-                        SELECT DISTINCT id, email FROM user_locations
-                        WHERE organization_id = :org_id AND organization_role_id = ANY(:role_ids)
-                          AND is_user = TRUE AND is_active = TRUE AND deleted_date IS NULL
-                          AND email IS NOT NULL AND TRIM(email) != ''
+                        SELECT DISTINCT ul.id, ul.email FROM user_locations ul
+                        LEFT JOIN organization_roles orr ON orr.id = ul.organization_role_id
+                        WHERE ul.organization_id = :org_id
+                          AND ul.is_user = TRUE AND ul.is_active = TRUE AND ul.deleted_date IS NULL
+                          AND ul.email IS NOT NULL AND TRIM(ul.email) != ''
+                          AND (
+                            (ul.organization_role_id = ANY(:role_ids)
+                              AND (orr.key != 'data_input' OR ul.id = :created_by_id))
+                            OR (ul.organization_role_id IS NULL
+                              AND EXISTS (
+                                SELECT 1 FROM organization_roles ar
+                                WHERE ar.organization_id = :org_id AND ar.key = 'admin'
+                                  AND ar.id = ANY(:role_ids)
+                              ))
+                          )
                     """),
-                    {'org_id': organization_id, 'role_ids': email_role_ids},
+                    {'org_id': organization_id, 'role_ids': email_role_ids, 'created_by_id': created_by_id},
                 )
                 seen: set = set()
                 for u in users_email.fetchall():
@@ -1133,14 +1268,13 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
         organization_id: int,
         created_by_id: int,
     ) -> None:
-        """Create TXN_APPROVED notifications for a record approve; resource = { transaction: { id, record_id } }."""
+        """Create TXN_APPROVED notifications for a record approve."""
         self._create_txn_event_notifications(
             transaction_id=transaction_id,
             organization_id=organization_id,
             created_by_id=created_by_id,
             event='TXN_APPROVED',
             send_email_fn=self._send_txn_approved_emails,
-            resource_override={'transaction': {'id': transaction_id, 'record_id': record_id}},
         )
 
     def create_txn_rejected_notifications_for_record(
@@ -1150,14 +1284,13 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
         organization_id: int,
         created_by_id: int,
     ) -> None:
-        """Create TXN_REJECTED notifications for a record reject; resource = { transaction: { id, record_id } }."""
+        """Create TXN_REJECTED notifications for a record reject."""
         self._create_txn_event_notifications(
             transaction_id=transaction_id,
             organization_id=organization_id,
             created_by_id=created_by_id,
             event='TXN_REJECTED',
             send_email_fn=self._send_txn_rejected_emails,
-            resource_override={'transaction': {'id': transaction_id, 'record_id': record_id}},
         )
 
     def get_transaction(self, transaction_id: int, include_records: bool = False) -> Dict[str, Any]:
@@ -1871,17 +2004,25 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                     'errors': ['Transaction does not exist or has been deleted']
                 }
 
+            # Collect record IDs belonging to this transaction before deleting
+            record_ids = [
+                r.id for r in self.db.query(TransactionRecord.id).filter(
+                    TransactionRecord.created_transaction_id == transaction_id
+                ).all()
+            ]
+
             if soft_delete:
                 # Soft delete - set is_active to False and set deleted_date
+                now = datetime.now()
                 transaction.is_active = False
-                transaction.deleted_date = datetime.now()
+                transaction.deleted_date = now
 
                 # Also soft delete associated transaction records
                 self.db.query(TransactionRecord).filter(
                     TransactionRecord.created_transaction_id == transaction_id
                 ).update({
                     TransactionRecord.is_active: False,
-                    TransactionRecord.deleted_date: datetime.now()
+                    TransactionRecord.deleted_date: now,
                 })
 
                 message = 'Transaction soft deleted successfully'
@@ -1894,6 +2035,10 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
 
                 self.db.delete(transaction)
                 message = 'Transaction deleted successfully'
+
+            # --- Clean up traceability groups and transport transactions ---
+            if record_ids:
+                self._cleanup_traceability_groups(record_ids, soft_delete)
 
             self.db.commit()
 
@@ -1918,6 +2063,62 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                 'message': 'Error deleting transaction',
                 'errors': [str(e)]
             }
+
+    def _cleanup_traceability_groups(self, record_ids: list, soft_delete: bool) -> None:
+        """Remove deleted record IDs from traceability groups.
+
+        For each affected group:
+        - Remove the record IDs from the group's transaction_record_id array.
+        - If the group becomes empty (no record IDs and no carried-over IDs),
+          soft-delete (or hard-delete) the group and all its transport transactions.
+        - If the group still has records but also has transport transactions,
+          soft-delete (or hard-delete) all transport transactions descended from
+          this group (the traceability tree is now stale).
+        """
+        if not record_ids:
+            return
+        now = datetime.now()
+
+        # Find groups whose transaction_record_id array overlaps with the deleted record IDs
+        groups = self.db.query(TraceabilityTransactionGroup).filter(
+            TraceabilityTransactionGroup.is_active == True,
+            TraceabilityTransactionGroup.deleted_date.is_(None),
+            TraceabilityTransactionGroup.transaction_record_id.overlap(record_ids),
+        ).all()
+
+        for group in groups:
+            old_ids = list(group.transaction_record_id or [])
+            new_ids = [rid for rid in old_ids if rid not in record_ids]
+            group.transaction_record_id = new_ids
+
+            carried = list(group.transaction_carried_over or [])
+            group_empty = (not new_ids) and (not carried)
+
+            # Soft-delete all transport transactions under this group
+            transport_filter = [
+                TransportTransaction.transaction_group_id == group.id,
+                TransportTransaction.is_active == True,
+                TransportTransaction.deleted_date.is_(None),
+            ]
+            if soft_delete:
+                self.db.query(TransportTransaction).filter(
+                    *transport_filter
+                ).update({
+                    TransportTransaction.is_active: False,
+                    TransportTransaction.deleted_date: now,
+                })
+            else:
+                self.db.query(TransportTransaction).filter(
+                    TransportTransaction.transaction_group_id == group.id,
+                ).delete()
+
+            # If group is now empty, delete the group itself
+            if group_empty:
+                if soft_delete:
+                    group.is_active = False
+                    group.deleted_date = now
+                else:
+                    self.db.delete(group)
 
     # ========== TRANSACTION RECORD OPERATIONS ==========
 
