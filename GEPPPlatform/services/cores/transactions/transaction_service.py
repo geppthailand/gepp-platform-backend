@@ -1931,7 +1931,7 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
             active_record_ids = [r.id for r in active_records]
             transaction.transaction_records = active_record_ids
 
-            # Recalculate total weight and amount from active records (2 decimal places)
+            # Recalculate totals and reset all record statuses to pending
             total_weight = Decimal('0')
             total_amount = Decimal('0')
             for record_id in active_record_ids:
@@ -1941,9 +1941,13 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                 if record:
                     total_weight += record.origin_weight_kg or Decimal('0')
                     total_amount += record.total_amount or Decimal('0')
+                    record.status = 'pending'
 
             transaction.weight_kg = _round_decimal(total_weight)
             transaction.total_amount = _round_decimal(total_amount)
+
+            # Reset transaction status to pending after edit
+            transaction.status = TransactionStatus.pending
 
             self.db.commit()
 

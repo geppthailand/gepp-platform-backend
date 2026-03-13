@@ -9,7 +9,7 @@ import time
 import json
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, List, Optional, Callable
 from pathlib import Path
 
@@ -272,8 +272,8 @@ def _process_single_audit_history(
 
         # Initialize LLM
         settings = _load_settings()
-        model_version = settings.get('model', 'x-ai/grok-4.1-fast')
-
+        # model_version = settings.get('model', 'x-ai/grok-4.1-fast')
+        model_version = settings.get('model', 'google/gemini-3-flash-preview')
         # Quota check: count total records and verify against subscription quota
         total_record_count = 0
         for txn in transactions:
@@ -841,6 +841,8 @@ def _step6_classify_evidence(
             mime = (file_info.get('mime_type') or '').lower()
             presigned_url = file_info['presigned_url']
 
+            combined_prompt = None  # Will be set for non-image types
+
             if mime in SUPPORTED_IMAGE_TYPES:
                 # Image: send as image_url to LLM
                 response = call_llm_with_images(llm, prompt_text, [presigned_url])
@@ -892,20 +894,45 @@ def _step6_classify_evidence(
                     'skipped_reason': f'Unsupported mime type: {mime}',
                 }
 
-            # Parse response
-            parsed = parse_json_response(response['content'])
-
-            # Track tokens
+            # Parse response with retry on JSON failure
             usage = response.get('usage', {})
             token_usage['input_tokens'] += usage.get('input_tokens', 0)
             token_usage['output_tokens'] += usage.get('output_tokens', 0)
 
+            parse_error = None
+            for attempt in range(3):
+                try:
+                    parsed = parse_json_response(response['content'])
+                    return {
+                        'file_id': file_id,
+                        'document_type_id': parsed.get('document_type_id', 0),
+                        'document_type_name': parsed.get('document_type_name', 'unknown'),
+                        'extracted_data': parsed.get('extracted_data', {}),
+                        'confidence': parsed.get('confidence', 0.0),
+                    }
+                except (json.JSONDecodeError, Exception) as je:
+                    parse_error = je
+                    if attempt < 2:
+                        logger.warning(f"File #{file_id}: JSON parse failed (attempt {attempt+1}/3), retrying LLM call...")
+                        try:
+                            if combined_prompt:
+                                response = call_llm_text_only(llm, combined_prompt)
+                            else:
+                                response = call_llm_with_images(llm, prompt_text, [presigned_url])
+                            u = response.get('usage', {})
+                            token_usage['input_tokens'] += u.get('input_tokens', 0)
+                            token_usage['output_tokens'] += u.get('output_tokens', 0)
+                        except Exception:
+                            pass
+
+            logger.error(f"File #{file_id}: JSON parse failed after 3 attempts: {str(parse_error)}")
             return {
                 'file_id': file_id,
-                'document_type_id': parsed.get('document_type_id', 0),
-                'document_type_name': parsed.get('document_type_name', 'unknown'),
-                'extracted_data': parsed.get('extracted_data', {}),
-                'confidence': parsed.get('confidence', 0.0),
+                'document_type_id': 0,
+                'document_type_name': 'error',
+                'extracted_data': {},
+                'confidence': 0.0,
+                'error': str(parse_error),
             }
         except Exception as e:
             logger.error(f"Failed to classify file #{file_id}: {str(e)}")
@@ -918,28 +945,11 @@ def _step6_classify_evidence(
                 'error': str(e),
             }
 
-    # Check for cached observations first
-    file_ids_to_classify = []
-    cached_count = 0
-    file_objects = {f.id: f for f in db.query(File).filter(File.id.in_(list(all_files.keys()))).all()}
+    # Always re-classify all evidence files (no cache)
+    file_ids_to_classify = list(all_files.keys())
+    file_objects = {f.id: f for f in db.query(File).filter(File.id.in_(file_ids_to_classify)).all()}
 
-    for fid, finfo in all_files.items():
-        file_obj = file_objects.get(fid)
-        if file_obj and file_obj.observation and isinstance(file_obj.observation, dict):
-            obs = file_obj.observation
-            if obs.get('document_type_id') is not None and obs.get('extracted_data'):
-                classified.append({
-                    'file_id': fid,
-                    'document_type_id': obs.get('document_type_id', 0),
-                    'document_type_name': obs.get('document_type_name', 'unknown'),
-                    'extracted_data': obs.get('extracted_data', {}),
-                    'confidence': obs.get('confidence', 0.0),
-                })
-                cached_count += 1
-                continue
-        file_ids_to_classify.append(fid)
-
-    if cached_count > 0:
+    if False:
         logger.info(f"Step 6: {cached_count} files from cache, {len(file_ids_to_classify)} to classify")
 
     # Classify remaining files in parallel (LLM calls are thread-safe, DB writes are not)
@@ -1091,10 +1101,25 @@ def _resolve_names_batch(tx: Any, records: List[Any], db: Session) -> Dict[str, 
     return {'mat_map': mat_map, 'dest_map': dest_map, 'origin_name': origin_name}
 
 
+_BANGKOK_TZ = timezone(timedelta(hours=7))
+
+
 def _build_record_data(record: Any, names: Dict[str, Any]) -> Dict[str, Any]:
     """Build a record data dict with resolved names for prompts."""
     mat_name = names['mat_map'].get(record.material_id, '') if record.material_id else ''
     dest_name = names['dest_map'].get(record.destination_id, '') if record.destination_id else ''
+
+    # Convert transaction_date to Bangkok time (UTC+7) before formatting
+    tx_date_str = None
+    if record.transaction_date:
+        dt = record.transaction_date
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(_BANGKOK_TZ)
+        else:
+            # Assume UTC if naive
+            dt = dt.replace(tzinfo=timezone.utc).astimezone(_BANGKOK_TZ)
+        tx_date_str = dt.strftime('%Y-%m-%d')
+
     return {
         'record_id': record.id,
         'material_name': mat_name,
@@ -1104,7 +1129,7 @@ def _build_record_data(record: Any, names: Dict[str, Any]) -> Dict[str, Any]:
         'origin_quantity': float(record.origin_quantity) if record.origin_quantity else 0,
         'origin_price_per_unit': float(record.origin_price_per_unit) if record.origin_price_per_unit else 0,
         'total_amount': float(record.total_amount) if record.total_amount else 0,
-        'transaction_date': record.transaction_date.strftime('%Y-%m-%d') if record.transaction_date else None,
+        'transaction_date': tx_date_str,
     }
 
 
@@ -1146,20 +1171,31 @@ def _step8a_transaction_level_check(
         return tx_checklist
 
     def _check_single_evidence(ev):
-        """Check one evidence file against all records (thread-safe)."""
-        try:
-            prompt = build_transaction_checklist_prompt(
-                single_evidence_data=ev,
-                all_records_data=all_records_data,
-                checklist_columns=checklist_columns,
-            )
-            response = call_llm_text_only(llm, prompt)
-            usage = response.get('usage', {})
-            parsed = parse_json_response(response['content'])
-            return parsed, usage
-        except Exception as e:
-            logger.error(f"Tx #{transaction_id} Phase A evidence file #{ev.get('file_id')} failed: {str(e)}")
-            return None, {}
+        """Check one evidence file against all records (thread-safe), with retry on JSON parse failure."""
+        total_usage = {}
+        prompt = build_transaction_checklist_prompt(
+            single_evidence_data=ev,
+            all_records_data=all_records_data,
+            checklist_columns=checklist_columns,
+        )
+        for attempt in range(3):
+            try:
+                response = call_llm_text_only(llm, prompt)
+                usage = response.get('usage', {})
+                total_usage['input_tokens'] = total_usage.get('input_tokens', 0) + usage.get('input_tokens', 0)
+                total_usage['output_tokens'] = total_usage.get('output_tokens', 0) + usage.get('output_tokens', 0)
+                parsed = parse_json_response(response['content'])
+                return parsed, total_usage
+            except json.JSONDecodeError as je:
+                if attempt < 2:
+                    logger.warning(f"Tx #{transaction_id} Phase A file #{ev.get('file_id')}: JSON parse failed (attempt {attempt+1}/3), retrying...")
+                    continue
+                logger.error(f"Tx #{transaction_id} Phase A file #{ev.get('file_id')}: JSON parse failed after 3 attempts: {str(je)}")
+                return None, total_usage
+            except Exception as e:
+                logger.error(f"Tx #{transaction_id} Phase A evidence file #{ev.get('file_id')} failed: {str(e)}")
+                return None, total_usage
+        return None, total_usage
 
     # Run evidence checks in parallel
     all_parsed = []
@@ -1228,7 +1264,7 @@ def _step8b_record_level_check(
             }
 
     def _check_single_record(record):
-        """Check a single record's evidence (thread-safe, no DB access)."""
+        """Check a single record's evidence (thread-safe, no DB access), with retry on JSON parse failure."""
         rec_checklist = {
             col: {'match': False, 'found': False, 'error': None}
             for col in unmatched_columns
@@ -1240,33 +1276,46 @@ def _step8b_record_level_check(
         if not rec_evidence:
             return record.id, rec_checklist, {}
 
-        try:
-            record_data = _build_record_data(record, names)
-            prompt = build_record_checklist_prompt(
-                record_data=record_data,
-                record_evidence_list=rec_evidence,
-                unmatched_columns=unmatched_columns,
-            )
-            response = call_llm_text_only(llm, prompt)
-            usage = response.get('usage', {})
-            parsed = parse_json_response(response['content'])
+        total_usage = {}
+        record_data = _build_record_data(record, names)
+        prompt = build_record_checklist_prompt(
+            record_data=record_data,
+            record_evidence_list=rec_evidence,
+            unmatched_columns=unmatched_columns,
+        )
 
-            match_result = parsed.get('match', {})
-            found_result = parsed.get('found', {})
-            errors_result = parsed.get('errors', {})
+        for attempt in range(3):
+            try:
+                response = call_llm_text_only(llm, prompt)
+                usage = response.get('usage', {})
+                total_usage['input_tokens'] = total_usage.get('input_tokens', 0) + usage.get('input_tokens', 0)
+                total_usage['output_tokens'] = total_usage.get('output_tokens', 0) + usage.get('output_tokens', 0)
+                parsed = parse_json_response(response['content'])
 
-            for col in unmatched_columns:
-                rec_checklist[col] = {
-                    'match': bool(match_result.get(col, False)),
-                    'found': bool(found_result.get(col, False)),
-                    'error': errors_result.get(col),
-                }
+                match_result = parsed.get('match', {})
+                found_result = parsed.get('found', {})
+                errors_result = parsed.get('errors', {})
 
-            return record.id, rec_checklist, usage
+                for col in unmatched_columns:
+                    rec_checklist[col] = {
+                        'match': bool(match_result.get(col, False)),
+                        'found': bool(found_result.get(col, False)),
+                        'error': errors_result.get(col),
+                    }
 
-        except Exception as e:
-            logger.error(f"Tx #{transaction_id} Phase B record #{record.id} failed: {str(e)}")
-            return record.id, rec_checklist, {}
+                return record.id, rec_checklist, total_usage
+
+            except json.JSONDecodeError as je:
+                if attempt < 2:
+                    logger.warning(f"Tx #{transaction_id} Phase B record #{record.id}: JSON parse failed (attempt {attempt+1}/3), retrying...")
+                    continue
+                logger.error(f"Tx #{transaction_id} Phase B record #{record.id}: JSON parse failed after 3 attempts: {str(je)}")
+                return record.id, rec_checklist, total_usage
+            except Exception as e:
+                logger.error(f"Tx #{transaction_id} Phase B record #{record.id} failed: {str(e)}")
+                return record.id, rec_checklist, total_usage
+
+        return record.id, rec_checklist, total_usage
 
     # Run record checks in parallel
     with ThreadPoolExecutor(max_workers=len(records)) as rec_executor:
@@ -1480,8 +1529,23 @@ def _step9_compose_and_save(
     from GEPPPlatform.models.transactions.transaction_audits import TransactionAudit
 
     final_checklist = final_determination['final_checklist']
-    rejection_errors = final_determination['rejection_errors']
+    rejection_errors = list(final_determination['rejection_errors'])
     determined_status = final_determination['status']
+
+    # Derive checklist_columns from tx_checklist keys
+    checklist_columns = list(tx_checklist.keys())
+
+    print(f"[AUDIT-DEBUG] Tx #{tx.id} Step9: tx_checklist={tx_checklist}")
+    print(f"[AUDIT-DEBUG] Tx #{tx.id} Step9: final_checklist={final_checklist}")
+    print(f"[AUDIT-DEBUG] Tx #{tx.id} Step9: per_record_results={per_record_results}")
+    print(f"[AUDIT-DEBUG] Tx #{tx.id} Step9: determined_status={determined_status}, rejection_errors={rejection_errors}")
+
+    # Check if any record has no evidence files — reject transaction if so
+    for record in records:
+        record_images = record.images if hasattr(record, 'images') and record.images else []
+        if len(record_images) == 0 and checklist_columns:
+            determined_status = 'rejected'
+            rejection_errors.append(f'รายการ #{record.id} ไม่มีเอกสารแนบ')
 
     # Compose audit note programmatically (no LLM call needed)
     audit_note = _compose_audit_note(
@@ -1519,25 +1583,54 @@ def _step9_compose_and_save(
         rec_checklist = per_record_results.get(record.id, {})
         rec_missing = doc_check.get('missing_record_docs', {}).get(record.id, [])
 
-        # Per-record errors: only columns NOT already matched at tx-level
+        # Check if record has NO evidence files at all
+        record_images = record.images if hasattr(record, 'images') and record.images else []
+        rec_has_no_files = len(record_images) == 0
+
+        print(f"[AUDIT-DEBUG] Tx #{tx.id} Record #{record.id}: rec_checklist={rec_checklist}, rec_missing={rec_missing}, rec_has_no_files={rec_has_no_files}, images={record_images}")
+
+        # Per-record errors: only flag issues specific to THIS record
         rec_errors = []
         rec_has_issue = False
         for col, result in rec_checklist.items():
+            tx_col = tx_checklist.get(col, {})
             if result.get('found') and not result.get('match'):
+                # Record-level evidence found but doesn't match → this record has an issue
                 rec_has_issue = True
+                print(f"[AUDIT-DEBUG]   Record #{record.id} col={col}: REJECT (rec found=T, match=F, error={result.get('error')})")
                 if result.get('error'):
                     rec_errors.append(result['error'])
             elif not result.get('found'):
-                # Check if tx-level matched this column
-                tx_col = tx_checklist.get(col, {})
-                if not (tx_col.get('match') and tx_col.get('found')):
-                    # Not matched at tx-level either — check if required
+                # No record-level evidence for this column
+                if tx_col.get('match') and tx_col.get('found'):
+                    # Tx-level already matched — no issue for this record
+                    print(f"[AUDIT-DEBUG]   Record #{record.id} col={col}: PASS (tx matched)")
+                elif tx_col.get('found') and not tx_col.get('match'):
+                    # Tx-level found evidence but didn't match collectively.
+                    # The mismatch may be caused by OTHER records, not this one.
+                    # Don't flag this record — the tx-level rejection handles it.
+                    print(f"[AUDIT-DEBUG]   Record #{record.id} col={col}: PASS (tx found but mismatch may be from other records)")
+                elif not tx_col.get('found'):
+                    # No evidence at tx-level or record-level → missing evidence
                     rec_has_issue = True
+                    print(f"[AUDIT-DEBUG]   Record #{record.id} col={col}: REJECT (no evidence anywhere)")
+            else:
+                print(f"[AUDIT-DEBUG]   Record #{record.id} col={col}: PASS (rec found=T, match=T)")
+
+        # Record with no evidence files must be rejected
+        if rec_has_no_files and checklist_columns:
+            rec_has_issue = True
+            rec_errors.append('ไม่มีเอกสารแนบสำหรับรายการนี้')
+            print(f"[AUDIT-DEBUG]   Record #{record.id}: REJECT (no files at all)")
+
+        print(f"[AUDIT-DEBUG]   Record #{record.id}: final rec_has_issue={rec_has_issue}, rec_missing={rec_missing}")
 
         if rec_has_issue or rec_missing:
             record.ai_audit_status = 'rejected'
         else:
-            record.ai_audit_status = 'approved' if final_status == 'approved' else 'rejected'
+            # Record has no individual issues — approve it even if tx-level is rejected
+            # (other records may have caused the tx-level rejection)
+            record.ai_audit_status = 'approved'
 
         record.ai_audit_note = {
             'status': record.ai_audit_status,
@@ -1546,6 +1639,7 @@ def _step9_compose_and_save(
             'missing_docs': rec_missing,
         }
         flag_modified(record, 'ai_audit_note')
+        print(f"[AUDIT-DEBUG]   Record #{record.id}: STATUS={record.ai_audit_status}")
 
     # Insert TransactionAudit record
     audit_record = TransactionAudit(

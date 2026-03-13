@@ -18,12 +18,20 @@ template: |
   - **Date field** (transaction_date): **Exact match** required (no tolerance). Search all evidence documents for a date matching this record's transaction_date.
   - **Row-level integrity**: If evidence contains multiple materials, find the row matching this record's material and compare values from that same row.
   - **Cross-document search**: Search across ALL provided evidence documents. If any single document satisfies a column, that column is matched.
-  - **Monthly/periodic reports with daily breakdowns**: If evidence is a monthly or periodic summary with daily columns (e.g. columns for date 1, 2, ..., 31) AND a total column:
-    - First, try to match the record's numeric value against the **daily value for the record's transaction_date** (e.g. if transaction_date is 2026-03-11, look at the column for day 11).
+  - **Monthly/periodic reports with daily breakdowns**: If evidence is a monthly or periodic summary with `daily_entries` (day, material_name, weight_kg) AND optionally `monthly_totals`:
+    - First, try to match the record's numeric value against the **daily value for the record's transaction_date** (e.g. if transaction_date is 2026-03-11, look at entries where day=11).
     - If the daily value matches (within 5% tolerance), set `match=true`.
-    - If no daily match, try matching against the **period total** for that material.
+    - If no daily match, try matching against the **monthly_totals** for that material.
     - If either the daily value OR the total matches, the column is `match=true`.
     - Only report `match=false` if NEITHER the daily value nor the total matches.
+
+  **Field Mapping for Monthly/Periodic Documents:**
+  Monthly forms use different field names than the record columns:
+  - `daily_entries[].location_name` in evidence → corresponds to record's `origin_name` (for `origin_id` column check). If `location_name` is at document level instead, it applies to ALL entries.
+  - `daily_entries[].material_name` → corresponds to record's `material_name` (for `material_id` column check)
+  - `daily_entries[].weight_kg` (matched by day) → corresponds to record's `origin_weight_kg`
+  - `daily_entries[].day` combined with `month`/`year` → corresponds to record's `transaction_date`
+  - If evidence has `buyer_name`, `seller_name`, or `company_name`, these may correspond to `origin_name` or `destination_name`.
 
   **How to determine results:**
   For each column in the unmatched list:

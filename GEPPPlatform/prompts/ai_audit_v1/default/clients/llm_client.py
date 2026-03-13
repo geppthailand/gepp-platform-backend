@@ -70,7 +70,8 @@ def call_llm_with_images(
         dict with keys: content (str), usage (dict with input_tokens, output_tokens)
     """
     settings = _load_settings()
-    model = model or settings.get('model', 'x-ai/grok-4.1-fast')
+    # model = model or settings.get('model', 'x-ai/grok-4.1-fast')
+    model = model or settings.get('model', 'google/gemini-3-flash-preview')
 
     content_parts = [{"type": "text", "text": text_prompt}]
 

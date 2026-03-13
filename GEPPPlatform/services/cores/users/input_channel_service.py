@@ -585,7 +585,9 @@ class InputChannelService:
             # Get materials with details and locations if valid subuser
             if is_valid:
                 result['materials'] = self._get_materials_with_details(channel)
-                result['locations'] = self._get_user_locations(channel, validated_user)
+                location_data = self._get_user_locations_with_tree(channel, validated_user)
+                result['locations'] = location_data['locations']
+                result['root_nodes'] = location_data['root_nodes']
                 result['savedMaterialIds'] = saved_material_ids
 
         return result
@@ -899,9 +901,13 @@ class InputChannelService:
         Get accessible locations for the channel's organization.
         Only returns locations from root_nodes in organization_setup (not hub_node).
         Also includes tags for each location where the user is a member.
+
+        Owner: sees ALL locations, ALL tags/tenants (no member filtering).
+        Member of parent: if user is member of e.g. Branch 1, sees Branch 1 + all descendants.
+        Normal user: sees only locations where they are a member of tags/tenants at that location.
         """
         from GEPPPlatform.models.users.user_related import UserLocationTag, UserTenant
-        from GEPPPlatform.models.subscriptions.organizations import OrganizationSetup
+        from GEPPPlatform.models.subscriptions.organizations import OrganizationSetup, Organization
 
         # Get the latest active organization setup
         org_setup = self.db.query(OrganizationSetup).filter(
@@ -913,23 +919,91 @@ class InputChannelService:
         ).order_by(OrganizationSetup.created_date.desc()).first()
 
         if not org_setup or not org_setup.root_nodes:
-            # Fallback: no organization setup, return empty list
             return []
 
-        # Extract all nodeIds from root_nodes (recursively including children)
         root_nodes = org_setup.root_nodes
         if not isinstance(root_nodes, list):
             root_nodes = [root_nodes] if root_nodes else []
 
-        location_ids = self._extract_node_ids_from_tree(root_nodes)
-
-        if not location_ids:
+        all_location_ids = self._extract_node_ids_from_tree(root_nodes)
+        if not all_location_ids:
             return []
 
-        # Query user_locations for those specific IDs
+        # Check if validated_user is the organization owner
+        is_owner = False
+        if validated_user:
+            org = self.db.query(Organization).filter(
+                Organization.id == channel.organization_id
+            ).first()
+            print(f"[DEBUG] _get_user_locations: validated_user.id={validated_user.id}, org.owner_id={org.owner_id if org else None}")
+            if org and org.owner_id == validated_user.id:
+                is_owner = True
+        print(f"[DEBUG] is_owner={is_owner}, all_location_ids={all_location_ids}")
+
+        # Determine which location IDs are accessible to the user
+        # Owner: all locations. Non-owner: locations where user is member, plus all descendants.
+        accessible_location_ids = set()
+        if is_owner:
+            accessible_location_ids = set(all_location_ids)
+        elif validated_user:
+            # Query all locations to check members field
+            all_locs_for_member_check = self.db.query(UserLocation).filter(
+                and_(
+                    UserLocation.id.in_(all_location_ids),
+                    UserLocation.organization_id == channel.organization_id,
+                    UserLocation.is_active == True,
+                    UserLocation.deleted_date.is_(None)
+                )
+            ).all()
+
+            user_id_int = validated_user.id
+            user_id_str = str(validated_user.id)
+
+            # Find locations where user is a direct member
+            # members can be plain IDs [5, 10] or objects [{"user_id": 4518, "role": "dataInput"}]
+            def is_member_of(members_list, uid_int, uid_str):
+                for m in members_list:
+                    if isinstance(m, dict):
+                        mid = m.get('user_id') or m.get('id')
+                        if mid is not None and (mid == uid_int or str(mid) == uid_str):
+                            return True
+                    else:
+                        if m == uid_int or str(m) == uid_str:
+                            return True
+                return False
+
+            member_loc_ids = set()
+            for loc in all_locs_for_member_check:
+                loc_members = loc.members or []
+                print(f"[DEBUG] Location {loc.id} ({loc.display_name}) members={loc_members}, checking user_id_int={user_id_int} user_id_str={user_id_str}")
+                if is_member_of(loc_members, user_id_int, user_id_str):
+                    member_loc_ids.add(loc.id)
+
+            print(f"[DEBUG] member_loc_ids={member_loc_ids}, all_location_ids={all_location_ids}")
+
+            # For each member location, collect it + all descendants from the tree
+            def collect_descendants(nodes, collecting=False):
+                """Collect node IDs. If collecting=True, add all nodes."""
+                ids = set()
+                for node in nodes:
+                    nid = int(node.get('nodeId', 0))
+                    should_collect = collecting or nid in member_loc_ids
+                    if should_collect:
+                        ids.add(nid)
+                    children = node.get('children', [])
+                    if children:
+                        ids |= collect_descendants(children, should_collect)
+                return ids
+
+            accessible_location_ids = collect_descendants(root_nodes)
+            print(f"[DEBUG] accessible_location_ids={accessible_location_ids}")
+        else:
+            accessible_location_ids = set(all_location_ids)
+
+        # Query user_locations for accessible IDs
         locations = self.db.query(UserLocation).filter(
             and_(
-                UserLocation.id.in_(location_ids),
+                UserLocation.id.in_(list(accessible_location_ids)),
                 UserLocation.organization_id == channel.organization_id,
                 UserLocation.is_location == True,
                 UserLocation.is_active == True,
@@ -938,34 +1012,31 @@ class InputChannelService:
         ).all()
 
         # Build a map of location ID -> display_name for path building
-        all_location_ids_for_path = self._extract_node_ids_from_tree(root_nodes)
         all_locations_for_path = self.db.query(UserLocation).filter(
-            UserLocation.id.in_(all_location_ids_for_path)
+            UserLocation.id.in_(all_location_ids)
         ).all()
         location_name_map = {loc.id: loc.display_name for loc in all_locations_for_path}
-        
+
         # Build a map of nodeId -> path (list of parent node IDs with names)
-        # This will help us show the hierarchical path for each location
         path_map = {}
-        
+
         def build_path_map(nodes: List[Dict], parent_path: List[Dict] = None):
-            """Recursively build path map for all nodes"""
             if parent_path is None:
                 parent_path = []
             for node in nodes:
                 node_id = node.get('nodeId')
                 if node_id:
                     node_id_int = int(node_id)
-                    # Store the path to this node (excluding itself)
                     path_map[node_id_int] = list(parent_path)
-                    # Build path for children, including current node info
-                    # Use display_name from database, fallback to node.get('name') or node.get('display_name')
                     node_name = location_name_map.get(node_id_int) or node.get('name') or node.get('display_name') or ''
                     child_path = parent_path + [{'nodeId': node_id_int, 'name': node_name, 'type': node.get('type', '')}]
                     if 'children' in node and isinstance(node['children'], list):
                         build_path_map(node['children'], child_path)
-        
+
         build_path_map(root_nodes)
+
+        # Skip tag/tenant member filtering if owner
+        skip_member_filter = is_owner or not validated_user
 
         result = []
         for loc in locations:
@@ -976,13 +1047,11 @@ class InputChannelService:
                 elif isinstance(loc.functions, str):
                     functions = [loc.functions]
 
-            # Get tags for this location using the new many-to-many structure
-            # Tags are stored in location.tags JSONB array AND tag.user_locations array
+            # Get tags for this location
             location_tag_ids = loc.tags or []
             location_tags = []
 
             if location_tag_ids:
-                # Handle both int and string IDs
                 tag_ids_int = [int(tid) if isinstance(tid, str) else tid for tid in location_tag_ids]
                 tags = self.db.query(UserLocationTag).filter(
                     and_(
@@ -993,12 +1062,16 @@ class InputChannelService:
                     )
                 ).all()
 
-                # Filter tags to only those where the validated_user is a member (if user exists)
                 for tag in tags:
-                    # If user validation is required, check if user is in tag members
-                    if validated_user:
+                    if skip_member_filter:
+                        location_tags.append({
+                            'id': str(tag.id),
+                            'name': tag.name,
+                            'start_date': tag.start_date.isoformat() if tag.start_date else None,
+                            'end_date': tag.end_date.isoformat() if tag.end_date else None,
+                        })
+                    else:
                         tag_members = tag.members or []
-                        # Check both integer and string representations since members may be stored as strings
                         user_id_int = validated_user.id
                         user_id_str = str(validated_user.id)
                         if user_id_int in tag_members or user_id_str in tag_members:
@@ -1008,16 +1081,8 @@ class InputChannelService:
                                 'start_date': tag.start_date.isoformat() if tag.start_date else None,
                                 'end_date': tag.end_date.isoformat() if tag.end_date else None,
                             })
-                    else:
-                        # If no user validation, include all tags
-                        location_tags.append({
-                            'id': str(tag.id),
-                            'name': tag.name,
-                            'start_date': tag.start_date.isoformat() if tag.start_date else None,
-                            'end_date': tag.end_date.isoformat() if tag.end_date else None,
-                        })
 
-            # Get tenants for this location (same pattern as tags)
+            # Get tenants for this location
             location_tenant_ids = loc.tenants or []
             location_tenants = []
             if location_tenant_ids:
@@ -1031,7 +1096,14 @@ class InputChannelService:
                     )
                 ).all()
                 for tenant in tenants:
-                    if validated_user:
+                    if skip_member_filter:
+                        location_tenants.append({
+                            'id': str(tenant.id),
+                            'name': tenant.name,
+                            'start_date': tenant.start_date.isoformat() if tenant.start_date else None,
+                            'end_date': tenant.end_date.isoformat() if tenant.end_date else None,
+                        })
+                    else:
                         tenant_members = tenant.members or []
                         user_id_int = validated_user.id
                         user_id_str = str(validated_user.id)
@@ -1042,19 +1114,12 @@ class InputChannelService:
                                 'start_date': tenant.start_date.isoformat() if tenant.start_date else None,
                                 'end_date': tenant.end_date.isoformat() if tenant.end_date else None,
                             })
-                    else:
-                        location_tenants.append({
-                            'id': str(tenant.id),
-                            'name': tenant.name,
-                            'start_date': tenant.start_date.isoformat() if tenant.start_date else None,
-                            'end_date': tenant.end_date.isoformat() if tenant.end_date else None,
-                        })
 
             # Build path string from parent nodes
             loc_path = path_map.get(loc.id, [])
             path_names = [p.get('name', '') for p in loc_path if p.get('name')]
             path_str = ', '.join(path_names) if path_names else ''
-            
+
             # Get location type from the tree node info
             location_type = loc.location_type if hasattr(loc, 'location_type') and loc.location_type else ''
 
@@ -1070,6 +1135,74 @@ class InputChannelService:
             })
 
         return result
+
+    def _get_user_locations_with_tree(
+        self,
+        channel: UserInputChannel,
+        validated_user: Optional[UserLocation] = None
+    ) -> Dict[str, Any]:
+        """
+        Get locations with tree structure for nested display.
+        Returns both flat locations (member-filtered) and root_nodes tree.
+        """
+        from GEPPPlatform.models.subscriptions.organizations import OrganizationSetup
+
+        # Get flat locations (already member-filtered for tags/tenants)
+        locations = self._get_user_locations(channel, validated_user)
+
+        # Get the root_nodes tree structure
+        org_setup = self.db.query(OrganizationSetup).filter(
+            and_(
+                OrganizationSetup.organization_id == channel.organization_id,
+                OrganizationSetup.is_active == True,
+                OrganizationSetup.deleted_date.is_(None)
+            )
+        ).order_by(OrganizationSetup.created_date.desc()).first()
+
+        root_nodes = []
+        if org_setup and org_setup.root_nodes:
+            root_nodes = org_setup.root_nodes
+            if not isinstance(root_nodes, list):
+                root_nodes = [root_nodes] if root_nodes else []
+
+        # Build set of location IDs from flat locations
+        accessible_loc_ids = {loc['id'] for loc in locations}
+
+        # Build a location name map from all nodes in the tree
+        all_ids = self._extract_node_ids_from_tree(root_nodes)
+        all_locs = self.db.query(UserLocation).filter(
+            UserLocation.id.in_(all_ids)
+        ).all() if all_ids else []
+        name_map = {str(loc.id): loc.display_name or loc.name_th or loc.name_en or '' for loc in all_locs}
+
+        # Filter tree: keep only branches that lead to accessible locations
+        def filter_tree(nodes):
+            filtered = []
+            for node in nodes:
+                node_id = str(node.get('nodeId', ''))
+                children = node.get('children', [])
+                node_type = node.get('type', '')
+
+                filtered_children = filter_tree(children) if children else []
+
+                is_accessible = node_id in accessible_loc_ids
+                has_accessible_descendants = len(filtered_children) > 0
+
+                if is_accessible or has_accessible_descendants:
+                    filtered.append({
+                        'nodeId': node_id,
+                        'name': name_map.get(node_id, ''),
+                        'type': node_type,
+                        'children': filtered_children,
+                    })
+            return filtered
+
+        filtered_tree = filter_tree(root_nodes)
+
+        return {
+            'locations': locations,
+            'root_nodes': filtered_tree,
+        }
 
     def submit_transaction_by_hash(
         self,

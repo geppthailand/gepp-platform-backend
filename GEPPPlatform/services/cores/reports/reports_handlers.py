@@ -1800,7 +1800,11 @@ def _handle_comparison_report(
                 'variables': var_values,
                 'materials_used': materials_used,
                 'risk_problems': (r.get('risk_problems') or '').strip(),
-                'recommendation': (r.get('recommendation') or '').strip()
+                'recommendation': (r.get('recommendation') or '').strip(),
+                'risk_bullets_th': (r.get('risk_bullets_th') or '').strip(),
+                'recommendation_bullets_th': (r.get('recommendation_bullets_th') or '').strip(),
+                'risk_bullets_en': (r.get('risk_bullets_en') or '').strip(),
+                'recommendation_bullets_en': (r.get('recommendation_bullets_en') or '').strip()
             })
         # Sort: matched first, then by urgency_score desc, stable otherwise
         results.sort(key=lambda x: (not x.get('matched', False), -float(x.get('urgency_score', 0.0))))
