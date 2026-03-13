@@ -1,0 +1,57 @@
+-- Migration: Soft-delete unused materials
+-- Date: 2026-03-13
+-- Description: Soft-delete materials that are no longer needed
+
+UPDATE materials
+SET deleted_date = NOW()
+WHERE deleted_date IS NULL
+  AND name_en IN (
+    'Used Beverage Carton (Baled)',
+    'Used Beverage Carton (Non-Baled)',
+    'Purchased from aggregators(Baled)',
+    'Landfilled(Non-baled)',
+    'Collected through drop point(Non-baled)',
+    'Printed screen on(Baled)',
+    'Pre-washed, printed screen on(Baled)',
+    'Blue color, label removed(Baled)',
+    'White clear color, label removed(Baled)',
+    'Blue and white clear color mixed, label removed(Baled)',
+    'Blue color, with label(Baled)',
+    'White clear color, with label(Baled)',
+    'Blue and white clear color mixed, with label(Baled)',
+    'Food grade(Baled)',
+    'Color mixed, no pre-treatment, no pre-wash(Baled)',
+    'Printed screen on(Non-baled)',
+    'Pre-washed, printed screen on(Non-baled)',
+    'Blue color, label removed(Non-baled)',
+    'White clear color, label removed(Non-baled)',
+    'Blue and white clear color mixed, label removed(Non-baled)',
+    'Blue color, with label(Non-baled)',
+    'White clear color, with label(Non-baled)',
+    'Blue and white clear color mixed, with label(Non-baled)',
+    'Food grade(Non-baled)',
+    'Color mixed, no pre-treatment, no pre-wash(Non-baled)',
+    'Green color, with label(Baled)',
+    'Green color, with label(Non-baled)',
+    'Green color, label removed(Baled)',
+    'Green color, label removed(Non-baled)',
+    'Brown color, with label(Baled)',
+    'Brown color, with label(Non-baled)',
+    'Brown color, label removed(Baled)',
+    'Brown color, label removed(Non-baled)',
+    'Rolled (Baled)',
+    'Rolled (Non-baled)',
+    'Mixed Paper (Baled)',
+    'Mixed Paper (Non-baled)',
+    'Filled UBC (Baled)',
+    'Filled UBC (Non-baled)',
+    'PolyAl (Recycle)',
+    'PolyAl (RDF)',
+    'Paper Pulp (Recycle)',
+    'Paper Pulp (RDF)',
+    'Purchased from aggregators(Non-baled)',
+    'Color mixed, with label(Baled)',
+    'Color mixed, with label(Non-baled)',
+    'Color mixed, label removed(Baled)',
+    'Color mixed, label removed(Non-baled)'
+  );
