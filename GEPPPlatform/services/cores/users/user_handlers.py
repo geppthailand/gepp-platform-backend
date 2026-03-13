@@ -975,22 +975,14 @@ def handle_update_location(
             location.address = data['address']
 
         # Handle user assignments - store in members JSONB column
-        print(f"[DEBUG] ===== UPDATE LOCATION {location_id} =====")
-        print(f"[DEBUG] Full data received: {data}")
-
         if 'users' in data:
-            print(f"[DEBUG] Users data: {data['users']}")
             location.members = data['users']
             flag_modified(location, 'members')
-            print(f"[DEBUG] Set location.members to: {location.members}")
-        else:
-            print(f"[DEBUG] No 'users' key in data!")
 
         # Handle tag assignments - update location.tags JSONB array and bidirectional relationship
         if 'tag_ids' in data:
             new_tag_ids = data['tag_ids'] or []
-            print(f"[DEBUG] Tag IDs received: {new_tag_ids}")
-            
+
             # Normalize all tag IDs to integers for consistent comparison
             # location.tags may contain strings or ints depending on how they were added
             current_tag_ids_raw = location.tags or []
@@ -1000,10 +992,6 @@ def handle_update_location(
             # Find tags to add and remove
             tags_to_add = new_tag_ids_set - current_tag_ids
             tags_to_remove = current_tag_ids - new_tag_ids_set
-            
-            print(f"[DEBUG] Current tags (normalized): {current_tag_ids}")
-            print(f"[DEBUG] Tags to add: {tags_to_add}")
-            print(f"[DEBUG] Tags to remove: {tags_to_remove}")
             
             # Update the location's tags array (store as integers for consistency)
             location.tags = list(new_tag_ids_set)
@@ -1024,8 +1012,7 @@ def handle_update_location(
                 if tag and tag.user_locations:
                     tag.user_locations = [loc_id for loc_id in tag.user_locations if int(loc_id) != location_id_int]
                     flag_modified(tag, 'user_locations')
-                    print(f"[DEBUG] Removed location {location_id_int} from tag {tag_id}")
-            
+
             # Add location to tags being added
             for tag_id in tags_to_add:
                 tag = db_session.query(UserLocationTag).filter(
@@ -1040,25 +1027,61 @@ def handle_update_location(
                     if location_id_int not in current_locations:
                         tag.user_locations = current_locations + [location_id_int]
                         flag_modified(tag, 'user_locations')
-                        print(f"[DEBUG] Added location {location_id_int} to tag {tag_id}")
-            
-            print(f"[DEBUG] Updated location.tags to: {location.tags}")
-        else:
-            print(f"[DEBUG] No 'tag_ids' key in data!")
+
+        # Handle tenant assignments - update location.tenants JSONB array and bidirectional relationship
+        if 'tenant_ids' in data:
+            from GEPPPlatform.models.users.user_related import UserTenant
+            new_tenant_ids = data['tenant_ids'] or []
+
+            current_tenant_ids_raw = location.tenants or []
+            current_tenant_ids = set(int(tid) if isinstance(tid, str) else tid for tid in current_tenant_ids_raw)
+            new_tenant_ids_set = set(int(tid) if isinstance(tid, str) else tid for tid in new_tenant_ids)
+
+            tenants_to_add = new_tenant_ids_set - current_tenant_ids
+            tenants_to_remove = current_tenant_ids - new_tenant_ids_set
+
+            # Update the location's tenants array
+            location.tenants = [int(tid) for tid in new_tenant_ids_set]
+            flag_modified(location, 'tenants')
+
+            location_id_int = int(location_id)
+
+            # Remove location from tenants being removed
+            for tenant_id in tenants_to_remove:
+                tenant = db_session.query(UserTenant).filter(
+                    and_(
+                        UserTenant.id == int(tenant_id),
+                        UserTenant.organization_id == organization_id,
+                        UserTenant.deleted_date.is_(None)
+                    )
+                ).first()
+                if tenant and tenant.user_locations:
+                    tenant.user_locations = [loc_id for loc_id in tenant.user_locations if int(loc_id) != location_id_int]
+                    flag_modified(tenant, 'user_locations')
+
+            # Add location to tenants being added
+            for tenant_id in tenants_to_add:
+                tenant = db_session.query(UserTenant).filter(
+                    and_(
+                        UserTenant.id == int(tenant_id),
+                        UserTenant.organization_id == organization_id,
+                        UserTenant.deleted_date.is_(None)
+                    )
+                ).first()
+                if tenant:
+                    current_locations = tenant.user_locations or []
+                    if location_id_int not in current_locations:
+                        tenant.user_locations = current_locations + [location_id_int]
+                        flag_modified(tenant, 'user_locations')
 
         location.updated_date = datetime.utcnow()
 
-        print(f"[DEBUG] Before commit - location.members: {location.members}")
         db_session.flush()
-        print(f"[DEBUG] After flush - location.members: {location.members}")
         db_session.commit()
-        print(f"[DEBUG] After commit - location.members: {location.members}")
 
-        # Verify by re-querying
+        # Re-query to get fresh data
         db_session.expire(location)
         verify_location = db_session.query(UserLocation).filter(UserLocation.id == int(location_id)).first()
-        print(f"[DEBUG] Re-queried location.members: {verify_location.members if verify_location else 'NOT FOUND'}")
-        print(f"[DEBUG] ===== END UPDATE =====")
 
         # Get tags for this location using the new many-to-many structure
         # Tags are now stored in location.tags JSONB array
@@ -1072,6 +1095,20 @@ def handle_update_location(
                     UserLocationTag.id.in_(tag_ids_int),
                     UserLocationTag.organization_id == organization_id,
                     UserLocationTag.deleted_date.is_(None)
+                )
+            ).all()
+
+        # Get tenants for this location
+        from GEPPPlatform.models.users.user_related import UserTenant
+        location_tenant_ids = location.tenants or []
+        tenants = []
+        if location_tenant_ids:
+            tenant_ids_int = [int(tid) if isinstance(tid, str) else tid for tid in location_tenant_ids]
+            tenants = db_session.query(UserTenant).filter(
+                and_(
+                    UserTenant.id.in_(tenant_ids_int),
+                    UserTenant.organization_id == organization_id,
+                    UserTenant.deleted_date.is_(None)
                 )
             ).all()
 
@@ -1094,6 +1131,18 @@ def handle_update_location(
                         'members': tag.members or []
                     }
                     for tag in tags
+                ],
+                'tenants': [
+                    {
+                        'id': tenant.id,
+                        'name': tenant.name,
+                        'note': tenant.note,
+                        'user_locations': tenant.user_locations or [],
+                        'start_date': tenant.start_date.isoformat() if tenant.start_date else None,
+                        'end_date': tenant.end_date.isoformat() if tenant.end_date else None,
+                        'members': tenant.members or []
+                    }
+                    for tenant in tenants
                 ],
                 'updated_date': location.updated_date.isoformat() if location.updated_date else None
             },
