@@ -808,7 +808,7 @@ def handle_get_queued_transactions(
             )
         )
 
-        query = _apply_member_filter_to_transaction_query(query, db_session, current_user_id)
+        query = _apply_member_filter_to_transaction_query(query, db_session, current_user_id, organization_id)
 
         # Get total count
         total_count = query.count()
@@ -1169,82 +1169,28 @@ def _should_filter_audit_by_member(db_session: Any, current_user_id: Any) -> boo
 
 def _apply_member_filter_to_transaction_query(query, db_session: Any, current_user_id: Any, organization_id: Any = None):
     """
-    Filter transactions to those from locations the user is a member of,
-    including all descendants of those locations. No-op if admin or no role.
+    Filter transactions to those from the user's assigned locations (3-tier model).
+    Owners see all transactions; members see only assigned locations + descendants.
     """
-    if current_user_id is None or not _should_filter_audit_by_member(db_session, current_user_id):
+    if current_user_id is None:
         return query
-    from sqlalchemy import func, or_, cast
-    from sqlalchemy.dialects.postgresql import JSONB
-    from ....models.users.user_location import UserLocation
-    from ....models.users.user_related import UserLocationTag, UserTenant
-    uid_int = int(current_user_id)
-    uid_str = str(current_user_id)
-    pattern_num = func.jsonb_build_array(func.jsonb_build_object('user_id', uid_int))
-    pattern_str = func.jsonb_build_array(func.jsonb_build_object('user_id', uid_str))
 
-    # Fetch location IDs where user is a direct member
-    member_loc_rows = db_session.query(UserLocation.id).filter(
-        UserLocation.members.isnot(None),
-        or_(
-            UserLocation.members.op('@>')(pattern_num),
-            UserLocation.members.op('@>')(pattern_str)
-        )
-    ).all()
-    member_location_ids = [row[0] for row in member_loc_rows]
+    if organization_id is None:
+        return query
 
-    if not member_location_ids:
+    from ..users.user_service import UserService
+    user_service = UserService(db_session)
+    locations = user_service.crud.get_user_locations(organization_id=organization_id)
+    tiers = user_service._resolve_location_tiers(locations, int(organization_id), int(current_user_id))
+
+    if tiers['is_owner']:
+        return query
+
+    assigned_ids = tiers['assigned_ids']
+    if not assigned_ids:
         return query.filter(Transaction.origin_id.is_(None))
 
-    # Expand direct-member locations to include all descendants
-    if organization_id is not None:
-        expanded_ids = _resolve_descendant_ids(db_session, organization_id, member_location_ids)
-    else:
-        expanded_ids = member_location_ids
-    descendant_only_ids = list(set(expanded_ids) - set(member_location_ids))
-
-    # Fetch tag/tenant IDs where user is a direct member
-    tag_rows = db_session.query(UserLocationTag.id).filter(
-        UserLocationTag.members.isnot(None),
-        or_(
-            cast(UserLocationTag.members, JSONB).op('@>')(func.jsonb_build_array(uid_int)),
-            cast(UserLocationTag.members, JSONB).op('@>')(func.jsonb_build_array(uid_str))
-        )
-    ).all()
-    member_tag_ids = [row[0] for row in tag_rows]
-
-    tenant_rows = db_session.query(UserTenant.id).filter(
-        UserTenant.members.isnot(None),
-        or_(
-            cast(UserTenant.members, JSONB).op('@>')(func.jsonb_build_array(uid_int)),
-            cast(UserTenant.members, JSONB).op('@>')(func.jsonb_build_array(uid_str))
-        )
-    ).all()
-    member_tenant_ids = [row[0] for row in tenant_rows]
-
-    # Direct member locations: also require tag/tenant membership when present
-    if member_tag_ids:
-        tag_cond = or_(Transaction.location_tag_id.is_(None), Transaction.location_tag_id.in_(member_tag_ids))
-    else:
-        tag_cond = Transaction.location_tag_id.is_(None)
-
-    if member_tenant_ids:
-        tenant_cond = or_(Transaction.tenant_id.is_(None), Transaction.tenant_id.in_(member_tenant_ids))
-    else:
-        tenant_cond = Transaction.tenant_id.is_(None)
-
-    direct_cond = and_(
-        Transaction.origin_id.in_(member_location_ids),
-        tag_cond,
-        tenant_cond
-    )
-
-    # Descendant locations: full access, no tag/tenant restriction
-    conditions = [direct_cond]
-    if descendant_only_ids:
-        conditions.append(Transaction.origin_id.in_(descendant_only_ids))
-
-    return query.filter(or_(*conditions))
+    return query.filter(Transaction.origin_id.in_(list(assigned_ids)))
 
 
 def _parse_audit_report_date_range(query_params: Dict[str, Any]):
