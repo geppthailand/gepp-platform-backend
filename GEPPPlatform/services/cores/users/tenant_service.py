@@ -25,7 +25,9 @@ class TenantService:
         organization_id: int,
         include_inactive: bool = False
     ) -> List[Dict[str, Any]]:
-        """Get all tenants associated with a specific location"""
+        """Get all tenants associated with a specific location (checks both directions)"""
+        from sqlalchemy.orm.attributes import flag_modified
+
         conditions = [
             UserTenant.organization_id == organization_id,
             UserTenant.deleted_date.is_(None)
@@ -38,14 +40,51 @@ class TenantService:
             and_(*conditions)
         ).order_by(UserTenant.created_date.desc()).all()
 
+        # Also check the location's tenants JSONB for tenant IDs (reverse direction)
+        location = self.db.query(UserLocation).filter(
+            and_(
+                UserLocation.id == user_location_id,
+                UserLocation.organization_id == organization_id,
+                UserLocation.deleted_date.is_(None)
+            )
+        ).first()
+        location_tenant_ids = set()
+        if location and location.tenants:
+            location_tenant_ids = {int(tid) if isinstance(tid, str) else tid for tid in location.tenants}
+
         location_tenants = []
+        seen_ids = set()
         location_id_int = user_location_id
         location_id_str = str(user_location_id)
 
         for tenant in all_tenants:
             tenant_locations = tenant.user_locations or []
-            if location_id_int in tenant_locations or location_id_str in tenant_locations:
-                location_tenants.append(self._serialize_tenant(tenant))
+            in_tenant_side = location_id_int in tenant_locations or location_id_str in tenant_locations
+            in_location_side = tenant.id in location_tenant_ids
+
+            if in_tenant_side or in_location_side:
+                if tenant.id not in seen_ids:
+                    location_tenants.append(self._serialize_tenant(tenant))
+                    seen_ids.add(tenant.id)
+
+                # Auto-repair bidirectional desync
+                if in_location_side and not in_tenant_side:
+                    current = list(tenant.user_locations or [])
+                    current.append(location_id_int)
+                    tenant.user_locations = current
+                    flag_modified(tenant, 'user_locations')
+                elif in_tenant_side and not in_location_side:
+                    if location:
+                        current = list(location.tenants or [])
+                        current.append(tenant.id)
+                        location.tenants = current
+                        flag_modified(location, 'tenants')
+
+        # Commit any repairs
+        try:
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
 
         return location_tenants
 
