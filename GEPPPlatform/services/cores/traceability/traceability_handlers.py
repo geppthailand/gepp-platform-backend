@@ -22,6 +22,7 @@ def handle_traceability_routes(event: Dict[str, Any], data: Dict[str, Any], **pa
 
     current_user = params.get("current_user", {})
     current_user_organization_id = current_user.get("organization_id")
+    current_user_id = current_user.get("user_id")
 
     traceability_service = TraceabilityService(db_session)
 
@@ -56,7 +57,7 @@ def handle_traceability_routes(event: Dict[str, Any], data: Dict[str, Any], **pa
         return {"message": "Destination locations (for input options)", "data": result}
 
     if path == "/api/traceability/hierarchy" and method == "GET":
-        result = traceability_service.get_traceability_hierarchy(organization_id=current_user_organization_id, **query_params)
+        result = traceability_service.get_traceability_hierarchy(organization_id=current_user_organization_id, current_user_id=current_user_id, **query_params)
         return {"message": "Traceability hierarchy (tree)", "data": result["data"]}
 
     if path == "/api/traceability" and method == "POST":
@@ -84,8 +85,8 @@ def handle_traceability_routes(event: Dict[str, Any], data: Dict[str, Any], **pa
 
     if path == "/api/traceability/export/pdf" and method == "GET":
         from ..pdf_export_hub import generate_pdf_via_lambda
-        summary_result = traceability_service.get_traceability(organization_id=current_user_organization_id, **query_params)
-        hierarchy_result = traceability_service.get_traceability_hierarchy(organization_id=current_user_organization_id, **query_params)
+        summary_result = traceability_service.get_traceability(organization_id=current_user_organization_id, current_user_id=current_user_id, **query_params)
+        hierarchy_result = traceability_service.get_traceability_hierarchy(organization_id=current_user_organization_id, current_user_id=current_user_id, **query_params)
         payload = {
             "hierarchy": hierarchy_result["data"],
             "summary": summary_result.get("summary"),
@@ -112,7 +113,7 @@ def handle_traceability_routes(event: Dict[str, Any], data: Dict[str, Any], **pa
         return {"message": result["message"], "data": result}
 
     if path == "/api/traceability" and method == "GET":
-        result = traceability_service.get_traceability(organization_id=current_user_organization_id, **query_params)
+        result = traceability_service.get_traceability(organization_id=current_user_organization_id, current_user_id=current_user_id, **query_params)
         return {
             "message": "Traceability API",
             "data": result["data"],

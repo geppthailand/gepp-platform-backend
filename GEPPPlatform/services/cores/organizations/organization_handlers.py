@@ -308,8 +308,8 @@ def handle_get_organization_setup(org_service: OrganizationService, user_id: int
         if not organization:
             raise NotFoundException('User is not part of any organization')
 
-        # Get organization setup
-        setup_data = org_service.get_organization_setup(organization.id)
+        # Get organization setup with 3-tier tree pruning
+        setup_data = org_service.get_organization_setup_filtered(organization.id, user_id)
 
         # Extract organization data
         organization_data = {

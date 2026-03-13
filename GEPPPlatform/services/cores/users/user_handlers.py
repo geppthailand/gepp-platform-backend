@@ -855,13 +855,21 @@ def handle_get_locations(db_session, user_service: UserService, query_params: Di
         # Check if we should return all locations or filter by organization setup
         include_all = query_params.get('all', '').lower() == 'true'
 
-        # Get user locations with filtering
-        locations = user_service.get_locations(
+        # Get current user ID for member-based filtering
+        current_user_id = current_user.get('user_id') if current_user else None
+
+        # Get user locations with 3-tier filtering
+        result = user_service.get_locations(
             organization_id=organization_id,
-            include_all=include_all
+            include_all=include_all,
+            current_user_id=current_user_id
         )
 
-        # Enrich each location with tag and tenant info (id, name, start_date, end_date, members)
+        locations = result['data']
+        ancestors = result['ancestors']
+        is_owner = result['is_owner']
+
+        # Enrich each assigned location with tag and tenant info (id, name, start_date, end_date, members)
         def _trim_tag_or_tenant(item: Dict[str, Any]) -> Dict[str, Any]:
             return {
                 'id': item.get('id'),
@@ -889,6 +897,8 @@ def handle_get_locations(db_session, user_service: UserService, query_params: Di
         return {
             'success': True,
             'data': locations,
+            'ancestors': ancestors,
+            'is_owner': is_owner,
             'total': len(locations),
             'organization_id': organization_id,
             'include_all': include_all,
