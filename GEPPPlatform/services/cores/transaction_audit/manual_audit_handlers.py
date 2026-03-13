@@ -569,6 +569,7 @@ def handle_approve_transaction_record(
                     organization_id=organization_id,
                     created_by_id=int(current_user_id),
                 )
+                txn_service.notify_owner_if_different(int(transaction_id), 'TXN_APPROVED', int(current_user_id))
             except Exception as e:
                 logger.warning(
                     "TXN_APPROVED notifications failed for transaction_id=%s: %s",
@@ -654,6 +655,7 @@ def handle_reject_transaction_record(
                     organization_id=organization_id,
                     created_by_id=int(current_user_id),
                 )
+                txn_service.notify_owner_if_different(int(transaction_id), 'TXN_REJECTED', int(current_user_id))
             except Exception as e:
                 logger.warning(
                     "TXN_REJECTED (record) notifications failed for record_id=%s: %s",
@@ -703,6 +705,7 @@ def _create_txn_approved_notifications_for_bulk(
                 organization_id=organization_id,
                 created_by_id=int(current_user_id),
             )
+            txn_service.notify_owner_if_different(int(tid), 'TXN_APPROVED', int(current_user_id))
         except Exception as e:
             logger.warning("TXN_APPROVED notifications failed for transaction_id=%s: %s", tid, str(e))
 
@@ -724,6 +727,7 @@ def _create_txn_rejected_notifications_for_bulk(
                 organization_id=organization_id,
                 created_by_id=int(current_user_id),
             )
+            txn_service.notify_owner_if_different(int(tid), 'TXN_REJECTED', int(current_user_id))
         except Exception as e:
             logger.warning("TXN_REJECTED notifications failed for transaction_id=%s: %s", tid, str(e))
 
