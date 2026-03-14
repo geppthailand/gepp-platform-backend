@@ -143,9 +143,12 @@ def fetch_group_leaf_data(db, group_ids: Set[int]) -> Tuple[Dict[int, List[dict]
     - group_completion: {group_id: completion_0_to_1}
     """
     if not group_ids:
+        print(f"[RECYCLE_DEBUG] fetch_group_leaf_data: no group_ids provided")
         return {}, {}
 
     from ....models.transactions.transport_transaction import TransportTransaction
+
+    print(f"[RECYCLE_DEBUG] fetch_group_leaf_data: querying TransportTransaction for group_ids={group_ids}")
 
     rows = db.query(
         TransportTransaction.transaction_group_id,
@@ -160,6 +163,18 @@ def fetch_group_leaf_data(db, group_ids: Set[int]) -> Tuple[Dict[int, List[dict]
         TransportTransaction.is_active == True,
         TransportTransaction.deleted_date.is_(None),
     ).all()
+
+    print(f"[RECYCLE_DEBUG] fetch_group_leaf_data: query returned {len(rows)} rows")
+    for r in rows[:10]:
+        print(f"[RECYCLE_DEBUG]   row: group_id={r[0]}, disposal={r[1]}, abs_pct={r[2]}, status={r[3]}, is_root={r[4]}, parent_id={r[5]}, id={r[6]}")
+
+    # Also check: are there ANY transport transactions for these groups (including deleted)?
+    all_rows_count = db.query(TransportTransaction.id, TransportTransaction.transaction_group_id, TransportTransaction.is_active, TransportTransaction.deleted_date).filter(
+        TransportTransaction.transaction_group_id.in_(list(group_ids)),
+    ).all()
+    print(f"[RECYCLE_DEBUG] fetch_group_leaf_data: ALL rows (incl deleted) for these groups: {len(all_rows_count)}")
+    for ar in all_rows_count[:10]:
+        print(f"[RECYCLE_DEBUG]   all_row: id={ar[0]}, group_id={ar[1]}, is_active={ar[2]}, deleted_date={ar[3]}")
 
     # Build tree to find leaves (nodes with no children)
     by_group: Dict[int, List] = {}
@@ -180,7 +195,9 @@ def fetch_group_leaf_data(db, group_ids: Set[int]) -> Tuple[Dict[int, List[dict]
     group_completion: Dict[int, float] = {}
 
     for gid, nodes in by_group.items():
-        leaves = [n for n in nodes if n["id"] not in has_children and not n["is_root"]]
+        # A leaf is any node that has no children.
+        # For single-hop transports, the root IS also the leaf (no children).
+        leaves = [n for n in nodes if n["id"] not in has_children]
         group_leaf_data[gid] = leaves
 
         total_leaf_pct = sum(float(l.get("absolute_percentage") or 0) for l in leaves)
