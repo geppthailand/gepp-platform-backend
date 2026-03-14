@@ -1853,6 +1853,21 @@ class TransactionAuditService:
                     if allow_ai_audit:
                         if audit_status == 'approved':
                             transaction.status = TransactionStatus.approved
+                            # Upsert traceability groups for approved transactions
+                            try:
+                                from ..transactions.transaction_service import TransactionService
+                                txn_svc = TransactionService(db)
+                                approved_record_ids = [
+                                    r.id for r in db.query(TransactionRecord.id).filter(
+                                        TransactionRecord.created_transaction_id == transaction_id,
+                                        TransactionRecord.is_active == True,
+                                        TransactionRecord.deleted_date.is_(None),
+                                    ).all()
+                                ]
+                                if approved_record_ids:
+                                    txn_svc._upsert_traceability_groups_for_transaction(transaction, approved_record_ids)
+                            except Exception as e:
+                                logger.warning("Traceability group upsert failed for AI-approved transaction %s: %s", transaction_id, str(e))
                         elif audit_status == 'rejected':
                             transaction.status = TransactionStatus.rejected
 

@@ -145,7 +145,7 @@ def fetch_group_leaf_data(db, group_ids: Set[int]) -> Tuple[Dict[int, List[dict]
     if not group_ids:
         return {}, {}
 
-    from ...models.transactions.transport_transaction import TransportTransaction
+    from ....models.transactions.transport_transaction import TransportTransaction
 
     rows = db.query(
         TransportTransaction.transaction_group_id,

@@ -23,7 +23,7 @@ from sqlalchemy import cast, String, text
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.exc import SQLAlchemyError
 
-from ....models.transactions.transactions import Transaction, TransactionStatus, TransactionRecordStatus
+from ....models.transactions.transactions import Transaction, TransactionStatus, TransactionRecordStatus, AIAuditStatus
 
 from ....models.transactions.transaction_records import TransactionRecord
 from ....models.transactions.traceability_transaction_group import TraceabilityTransactionGroup
@@ -2018,6 +2018,24 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
 
             # Reset transaction status to pending after edit
             transaction.status = TransactionStatus.pending
+
+            # Reset AI audit status so the transaction is re-queued for audit
+            transaction.ai_audit_status = AIAuditStatus.null
+            transaction.ai_audit_date = None
+            transaction.ai_audit_note = None
+            transaction.reject_triggers = []
+            transaction.warning_triggers = []
+
+            # Also reset ai_audit_status on all active records
+            self.db.query(TransactionRecord).filter(
+                TransactionRecord.id.in_(active_record_ids)
+            ).update(
+                {
+                    TransactionRecord.ai_audit_status: 'null',
+                    TransactionRecord.ai_audit_note: None,
+                },
+                synchronize_session=False
+            )
 
             self.db.commit()
 
