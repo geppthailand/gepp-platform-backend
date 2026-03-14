@@ -852,22 +852,25 @@ class TraceabilityService:
         if not records:
             return []
 
-        # Batch-check which traceability_group_ids are still active
-        group_ids_on_records = {r.traceability_group_id for r in records if r.traceability_group_id is not None}
-        active_group_ids: set = set()
-        if group_ids_on_records:
-            rows = self.db.query(TraceabilityTransactionGroup.id).filter(
-                TraceabilityTransactionGroup.id.in_(list(group_ids_on_records)),
-                TraceabilityTransactionGroup.is_active == True,
-                TraceabilityTransactionGroup.deleted_date.is_(None),
-            ).all()
-            active_group_ids = {r[0] for r in rows}
+        # Collect all record IDs that are already in an active group's transaction_record_id array
+        # This is the source of truth (not the traceability_group_id column which may be stale)
+        existing_groups = self.db.query(
+            TraceabilityTransactionGroup.id,
+            TraceabilityTransactionGroup.transaction_record_id,
+        ).filter(
+            TraceabilityTransactionGroup.organization_id == organization_id,
+            TraceabilityTransactionGroup.transaction_year == year,
+            TraceabilityTransactionGroup.transaction_month == month,
+            TraceabilityTransactionGroup.is_active == True,
+            TraceabilityTransactionGroup.deleted_date.is_(None),
+        ).all()
+        record_ids_in_groups: set = set()
+        for _gid, rec_ids in existing_groups:
+            if rec_ids:
+                record_ids_in_groups.update(rec_ids)
 
-        # Filter to orphaned records: no group_id or group is soft-deleted
-        orphaned = [
-            r for r in records
-            if r.traceability_group_id is None or r.traceability_group_id not in active_group_ids
-        ]
+        # Filter to orphaned records: not in any active group
+        orphaned = [r for r in records if r.id not in record_ids_in_groups]
         if not orphaned:
             return []
 
@@ -919,6 +922,10 @@ class TraceabilityService:
             material = None
             if material_id and material_id in material_map:
                 material = self._material_to_dict(material_map[material_id])
+
+            # Skip tentative groups with 0 weight (no approved records yet)
+            if total_weight <= 0:
+                continue
 
             out.append({
                 "id": tentative_id,
