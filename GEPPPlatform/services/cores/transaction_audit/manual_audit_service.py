@@ -52,8 +52,27 @@ class ManualAuditService:
         try:
             logger.info(f"Fetching pending transactions for organization: {organization_id}")
 
-            # Base query for pending transactions
-            query = db.query(Transaction).filter(Transaction.status == TransactionStatus.pending)
+            # Query transactions that have at least one active record needing audit
+            # (record status is NULL or 'pending' or 'null')
+            # This uses transaction_records.status as source of truth instead of transaction.status
+            from sqlalchemy import exists, and_, or_
+            pending_record_exists = exists().where(
+                and_(
+                    TransactionRecord.created_transaction_id == Transaction.id,
+                    TransactionRecord.is_active == True,
+                    TransactionRecord.deleted_date.is_(None),
+                    or_(
+                        TransactionRecord.status.is_(None),
+                        TransactionRecord.status == 'pending',
+                        TransactionRecord.status == 'null',
+                    )
+                )
+            )
+            query = db.query(Transaction).filter(
+                pending_record_exists,
+                Transaction.is_active == True,
+                Transaction.deleted_date.is_(None),
+            )
 
             if organization_id:
                 query = query.filter(Transaction.organization_id == organization_id)
@@ -761,13 +780,29 @@ class ManualAuditService:
         """Serialize a list of transactions to dictionaries"""
         return [self._serialize_transaction(transaction) for transaction in transactions]
 
+    def _derive_status_from_records(self, transaction: Transaction) -> str:
+        """Derive transaction display status from its active records' statuses."""
+        records = [
+            r for r in (transaction.transaction_records or [])
+            if getattr(r, 'is_active', True) and getattr(r, 'deleted_date', None) is None
+        ]
+        if not records:
+            return transaction.status.value if hasattr(transaction.status, 'value') else str(transaction.status)
+        statuses = {getattr(r, 'status', None) or 'pending' for r in records}
+        if statuses == {'approved'}:
+            return 'approved'
+        if 'rejected' in statuses:
+            return 'rejected'
+        return 'pending'
+
     def _serialize_transaction(self, transaction: Transaction) -> Dict[str, Any]:
         """Serialize a transaction to dictionary"""
+        derived_status = self._derive_status_from_records(transaction)
         return {
             'id': transaction.id,
             'transaction_records': transaction.transaction_records or [],
             'transaction_method': transaction.transaction_method,
-            'status': transaction.status.value if hasattr(transaction.status, 'value') else str(transaction.status),
+            'status': derived_status,
             'organization_id': transaction.organization_id,
             'origin_id': transaction.origin_id,
             'origin_name': transaction.origin.display_name if transaction.origin else None,
