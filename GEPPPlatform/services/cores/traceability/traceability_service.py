@@ -108,22 +108,42 @@ class TraceabilityService:
             if assigned_ids is not None:
                 group_filters.append(TraceabilityTransactionGroup.origin_id.in_(list(assigned_ids)))
 
-        groups = self.db.query(TraceabilityTransactionGroup).filter(and_(*group_filters)).all()
-        group_ids = [g.id for g in groups]
-        # First array: only groups that do NOT have any traceability_transport_transactions yet
-        group_ids_with_transport = set()
-        if group_ids:
-            rows = (
+        raw_groups = self.db.query(TraceabilityTransactionGroup).filter(and_(*group_filters)).all()
+
+        # Deduplicate groups by key (origin_id, material_id, location_tag_id, tenant_id).
+        # If multiple groups share the same key, prefer the one with transport transactions.
+        raw_group_ids = [g.id for g in raw_groups]
+        _dedup_transport_ids = set()
+        if raw_group_ids:
+            _dt_rows = (
                 self.db.query(TransportTransaction.transaction_group_id)
                 .filter(
-                    TransportTransaction.transaction_group_id.in_(group_ids),
+                    TransportTransaction.transaction_group_id.in_(raw_group_ids),
                     TransportTransaction.is_active == True,
                     TransportTransaction.deleted_date.is_(None),
                 )
                 .distinct()
                 .all()
             )
-            group_ids_with_transport = {r[0] for r in rows if r[0] is not None}
+            _dedup_transport_ids = {r[0] for r in _dt_rows if r[0] is not None}
+
+        _seen_keys: dict = {}
+        groups = []
+        for g in raw_groups:
+            key = (g.origin_id, g.material_id, g.location_tag_id, g.tenant_id)
+            if key not in _seen_keys:
+                _seen_keys[key] = g
+                groups.append(g)
+            else:
+                # Replace if this group has transport and the existing one doesn't
+                existing = _seen_keys[key]
+                if g.id in _dedup_transport_ids and existing.id not in _dedup_transport_ids:
+                    groups = [g if x.id == existing.id else x for x in groups]
+                    _seen_keys[key] = g
+
+        group_ids = [g.id for g in groups]
+        # First array: only groups that do NOT have any traceability_transport_transactions yet
+        group_ids_with_transport = _dedup_transport_ids & set(group_ids)
         groups_for_first_array = [g for g in groups if g.id not in group_ids_with_transport]
         arr0 = self._groups_to_dict_list(groups_for_first_array, organization_id)
         # Add tentative groups (approved records without active group)
