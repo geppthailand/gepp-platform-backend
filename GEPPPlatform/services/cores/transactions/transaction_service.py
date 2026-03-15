@@ -470,14 +470,14 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
 <body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f4f6f8; line-height: 1.6; color: #333;">
     <div style="max-width: 560px; margin: 0 auto; padding: 32px 24px;">
         <div style="background: #ffffff; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); overflow: hidden;">
-            <div style="background: linear-gradient(135deg, #2c3e50 0%, #e74c3c 100%); padding: 28px 24px; text-align: center;">
+            <div style="background: linear-gradient(135deg, #2c3e50 0%, #e67e22 100%); padding: 28px 24px; text-align: center;">
                 <h1 style="margin: 0; color: #ffffff; font-size: 22px; font-weight: 600; letter-spacing: -0.02em;">Transaction Deleted</h1>
                 <p style="margin: 8px 0 0 0; color: rgba(255,255,255,0.9); font-size: 14px;">GEPP Platform</p>
             </div>
             <div style="padding: 28px 24px;">
                 <p style="margin: 0 0 16px 0; font-size: 15px;">Hello,</p>
                 <p style="margin: 0 0 20px 0; font-size: 15px;">A transaction in your organization has been deleted.</p>
-                <div style="background: #f8f9fa; border-radius: 8px; padding: 16px 20px; margin: 24px 0; border-left: 4px solid #e74c3c;">
+                <div style="background: #f8f9fa; border-radius: 8px; padding: 16px 20px; margin: 24px 0; border-left: 4px solid #e67e22;">
                     <p style="margin: 0; font-size: 13px; color: #6c757d; text-transform: uppercase; letter-spacing: 0.05em;">Transaction ID &nbsp;<strong style="font-size: 18px; color: #2c3e50; text-transform: none; letter-spacing: normal;">#{transaction_id}</strong></p>{materials_html}
                 </div>
                 <p style="margin: 0; font-size: 14px; color: #6c757d;">Log in to the platform for more information.</p>
