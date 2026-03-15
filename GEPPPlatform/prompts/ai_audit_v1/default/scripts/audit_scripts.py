@@ -1252,6 +1252,7 @@ def _step8b_record_level_check(
 
     per_record_results = {}
     record_file_ids = image_data.get('record_file_ids', {})
+    tx_file_ids_set = set(image_data.get('transaction_file_ids', []))
 
     # Build classified evidence lookup by file_id
     ev_by_id = {}
@@ -1263,6 +1264,9 @@ def _step8b_record_level_check(
                 'extracted_data': ev.get('extracted_data', {}),
             }
 
+    # Pre-build tx-level evidence list (reusable for all records)
+    tx_evidence_list = [ev_by_id[fid] for fid in tx_file_ids_set if fid in ev_by_id]
+
     def _check_single_record(record):
         """Check a single record's evidence (thread-safe, no DB access), with retry on JSON parse failure."""
         rec_checklist = {
@@ -1270,8 +1274,17 @@ def _step8b_record_level_check(
             for col in unmatched_columns
         }
 
+        # Include BOTH record-level AND tx-level evidence so each record
+        # can be individually matched against tx-level documents that
+        # failed the "ALL records must match" check in Phase A.
         rec_fids = record_file_ids.get(record.id, [])
         rec_evidence = [ev_by_id[fid] for fid in rec_fids if fid in ev_by_id]
+        # Add tx-level evidence that isn't already in rec_evidence
+        seen_fids = {fid for fid in rec_fids}
+        for tx_ev in tx_evidence_list:
+            if tx_ev['file_id'] not in seen_fids:
+                rec_evidence.append(tx_ev)
+                seen_fids.add(tx_ev['file_id'])
 
         if not rec_evidence:
             return record.id, rec_checklist, {}
@@ -1540,10 +1553,12 @@ def _step9_compose_and_save(
     print(f"[AUDIT-DEBUG] Tx #{tx.id} Step9: per_record_results={per_record_results}")
     print(f"[AUDIT-DEBUG] Tx #{tx.id} Step9: determined_status={determined_status}, rejection_errors={rejection_errors}")
 
-    # Check if any record has no evidence files — reject transaction if so
+    # Check if any record has no evidence files at all (neither record-level nor tx-level)
+    # Only reject the transaction if there are NO evidence files anywhere
+    tx_has_files = len(classified_evidence) > 0
     for record in records:
         record_images = record.images if hasattr(record, 'images') and record.images else []
-        if len(record_images) == 0 and checklist_columns:
+        if len(record_images) == 0 and not tx_has_files and checklist_columns:
             determined_status = 'rejected'
             rejection_errors.append(f'รายการ #{record.id} ไม่มีเอกสารแนบ')
 
@@ -1583,39 +1598,36 @@ def _step9_compose_and_save(
         rec_checklist = per_record_results.get(record.id, {})
         rec_missing = doc_check.get('missing_record_docs', {}).get(record.id, [])
 
-        # Check if record has NO evidence files at all
+        # Check if record has NO evidence files at all (neither own images nor tx-level images)
         record_images = record.images if hasattr(record, 'images') and record.images else []
-        rec_has_no_files = len(record_images) == 0
+        rec_has_no_files = len(record_images) == 0 and not tx_has_files
 
         print(f"[AUDIT-DEBUG] Tx #{tx.id} Record #{record.id}: rec_checklist={rec_checklist}, rec_missing={rec_missing}, rec_has_no_files={rec_has_no_files}, images={record_images}")
 
         # Per-record errors: only flag issues specific to THIS record
+        # Phase B now includes tx-level evidence, so rec_checklist reflects the full picture
         rec_errors = []
         rec_has_issue = False
         for col, result in rec_checklist.items():
-            tx_col = tx_checklist.get(col, {})
-            if result.get('found') and not result.get('match'):
-                # Record-level evidence found but doesn't match → this record has an issue
+            if result.get('match') and result.get('found'):
+                # Evidence found and matches this record → PASS
+                print(f"[AUDIT-DEBUG]   Record #{record.id} col={col}: PASS (found=T, match=T)")
+            elif result.get('found') and not result.get('match'):
+                # Evidence found but doesn't match this record → REJECT
                 rec_has_issue = True
-                print(f"[AUDIT-DEBUG]   Record #{record.id} col={col}: REJECT (rec found=T, match=F, error={result.get('error')})")
+                print(f"[AUDIT-DEBUG]   Record #{record.id} col={col}: REJECT (found=T, match=F, error={result.get('error')})")
                 if result.get('error'):
                     rec_errors.append(result['error'])
             elif not result.get('found'):
-                # No record-level evidence for this column
+                # No evidence found for this column at all (neither tx nor record level)
+                tx_col = tx_checklist.get(col, {})
                 if tx_col.get('match') and tx_col.get('found'):
-                    # Tx-level already matched — no issue for this record
-                    print(f"[AUDIT-DEBUG]   Record #{record.id} col={col}: PASS (tx matched)")
-                elif tx_col.get('found') and not tx_col.get('match'):
-                    # Tx-level found evidence but didn't match collectively.
-                    # The mismatch may be caused by OTHER records, not this one.
-                    # Don't flag this record — the tx-level rejection handles it.
-                    print(f"[AUDIT-DEBUG]   Record #{record.id} col={col}: PASS (tx found but mismatch may be from other records)")
-                elif not tx_col.get('found'):
-                    # No evidence at tx-level or record-level → missing evidence
+                    # Tx-level Phase A already matched all records → PASS
+                    print(f"[AUDIT-DEBUG]   Record #{record.id} col={col}: PASS (tx-level matched all)")
+                else:
+                    # No evidence anywhere → missing evidence
                     rec_has_issue = True
                     print(f"[AUDIT-DEBUG]   Record #{record.id} col={col}: REJECT (no evidence anywhere)")
-            else:
-                print(f"[AUDIT-DEBUG]   Record #{record.id} col={col}: PASS (rec found=T, match=T)")
 
         # Record with no evidence files must be rejected
         if rec_has_no_files and checklist_columns:
