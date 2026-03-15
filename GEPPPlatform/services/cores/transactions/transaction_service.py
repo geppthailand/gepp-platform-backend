@@ -23,7 +23,7 @@ from sqlalchemy import cast, String, text
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.exc import SQLAlchemyError
 
-from ....models.transactions.transactions import Transaction, TransactionStatus, TransactionRecordStatus
+from ....models.transactions.transactions import Transaction, TransactionStatus, TransactionRecordStatus, AIAuditStatus
 
 from ....models.transactions.transaction_records import TransactionRecord
 from ....models.transactions.traceability_transaction_group import TraceabilityTransactionGroup
@@ -2019,6 +2019,24 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
             # Reset transaction status to pending after edit
             transaction.status = TransactionStatus.pending
 
+            # Reset AI audit status so the transaction is re-queued for audit
+            transaction.ai_audit_status = AIAuditStatus.null
+            transaction.ai_audit_date = None
+            transaction.ai_audit_note = None
+            transaction.reject_triggers = []
+            transaction.warning_triggers = []
+
+            # Also reset ai_audit_status on all active records
+            self.db.query(TransactionRecord).filter(
+                TransactionRecord.id.in_(active_record_ids)
+            ).update(
+                {
+                    TransactionRecord.ai_audit_status: 'null',
+                    TransactionRecord.ai_audit_note: None,
+                },
+                synchronize_session=False
+            )
+
             self.db.commit()
 
             # Get updated transaction with records
@@ -2467,96 +2485,26 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                 ).first()
 
                 if existing:
-                    # If group already has TransportTransactions, do not append; create a new group for these records
-                    has_transport = self.db.query(TransportTransaction).filter(
-                        TransportTransaction.transaction_group_id == existing.id,
-                        TransportTransaction.is_active == True,
-                        TransportTransaction.deleted_date.is_(None),
-                    ).limit(1).first() is not None
-                    if not has_transport:
-                        current_ids = set(existing.transaction_record_id or [])
-                        new_ids = [rid for rid in record_ids if rid not in current_ids]
-                        if new_ids:
-                            existing.transaction_record_id = list(current_ids) + new_ids
-                            existing.updated_date = datetime.utcnow()
-                            # Set reverse pointer on newly added records
-                            self.db.query(TransactionRecord).filter(
-                                TransactionRecord.id.in_(new_ids)
-                            ).update(
-                                {TransactionRecord.traceability_group_id: existing.id},
-                                synchronize_session=False
-                            )
-                        continue
-                # No existing group, or existing group already processed: create new group
-                if not existing:
-                    # First time creating this group: backfill with all existing records that match
-                    # the same grouping (includes records created before this code was deployed)
-                    # Extract year/month in TRACEABILITY_DATE_TZ so 2026-01-01 00:00:00+07 stays Jan 2026
-                    txn_date_at_tz = TransactionRecord.transaction_date.op("AT TIME ZONE")(TRACEABILITY_DATE_TZ)
-                    backfill_rows = self.db.query(TransactionRecord.id).join(
-                        Transaction,
-                        TransactionRecord.created_transaction_id == Transaction.id
-                    ).filter(
-                        Transaction.origin_id == origin_id,
-                        Transaction.organization_id == organization_id,
-                        Transaction.location_tag_id == location_tag_id,
-                        Transaction.tenant_id == tenant_id,
-                        Transaction.is_active == True,
-                        Transaction.deleted_date.is_(None),
-                        TransactionRecord.material_id == material_id,
-                        func.extract("year", txn_date_at_tz) == year,
-                        func.extract("month", txn_date_at_tz) == month,
-                        TransactionRecord.is_active == True,
-                        TransactionRecord.deleted_date.is_(None)
-                    ).all()
-                    all_record_ids = [r[0] for r in backfill_rows]
+                    # Always append to existing group — even if it has TransportTransactions.
+                    # This ensures new approved records inherit the group's traceability data
+                    # for automatic recycling rate updates.
+                    current_ids = set(existing.transaction_record_id or [])
+                    new_ids = [rid for rid in record_ids if rid not in current_ids]
+                    if new_ids:
+                        existing.transaction_record_id = list(current_ids) + new_ids
+                        existing.updated_date = datetime.utcnow()
+                        # Set reverse pointer on newly added records
+                        self.db.query(TransactionRecord).filter(
+                            TransactionRecord.id.in_(new_ids)
+                        ).update(
+                            {TransactionRecord.traceability_group_id: existing.id},
+                            synchronize_session=False
+                        )
+                    continue
 
-                    group = TraceabilityTransactionGroup(
-                        origin_id=origin_id,
-                        material_id=material_id,
-                        organization_id=organization_id,
-                        transaction_record_id=all_record_ids,
-                        transaction_carried_over=[],
-                        transaction_year=year,
-                        transaction_month=month,
-                        location_tag_id=location_tag_id,
-                        tenant_id=tenant_id,
-                        is_active=True
-                    )
-                    self.db.add(group)
-                    self.db.flush()  # get group.id for reverse pointer
-                    # Set reverse pointer on all backfilled records
-                    if all_record_ids:
-                        self.db.query(TransactionRecord).filter(
-                            TransactionRecord.id.in_(all_record_ids)
-                        ).update(
-                            {TransactionRecord.traceability_group_id: group.id},
-                            synchronize_session=False
-                        )
-                else:
-                    # Existing group already has TransportTransactions; create a new group for these records only
-                    group = TraceabilityTransactionGroup(
-                        origin_id=origin_id,
-                        material_id=material_id,
-                        organization_id=organization_id,
-                        transaction_record_id=record_ids,
-                        transaction_carried_over=[],
-                        transaction_year=year,
-                        transaction_month=month,
-                        location_tag_id=location_tag_id,
-                        tenant_id=tenant_id,
-                        is_active=True
-                    )
-                    self.db.add(group)
-                    self.db.flush()  # get group.id for reverse pointer
-                    # Set reverse pointer on records in new group
-                    if record_ids:
-                        self.db.query(TransactionRecord).filter(
-                            TransactionRecord.id.in_(record_ids)
-                        ).update(
-                            {TransactionRecord.traceability_group_id: group.id},
-                            synchronize_session=False
-                        )
+                # No existing group — records will appear as tentative in the traceability
+                # board until user dispatches transport (which creates the real group).
+                continue
         except Exception as e:
             logger.warning(
                 "Failed to upsert traceability_transaction_group for transaction %s: %s",

@@ -69,8 +69,8 @@ class TraceabilityService:
         # 1) Idle carry-over: idles whose group is last month -> find or create group in requested (year, month) with same (origin, material, tag, tenant), add idle id to that group's transaction_carried_over
         self._apply_idle_carry_over(organization_id, year, month)
 
-        # 2) Legacy backfill: ensure every record in org/month/year is in some group
-        self._backfill_traceability_groups_for_month(organization_id, year, month, kwargs)
+        # 2) Build tentative groups for approved records without an active group (in-memory, not persisted)
+        tentative_arr = self._build_tentative_groups(organization_id, year, month, kwargs)
 
         # 3) Load groups for this month with filters
         group_filters = [
@@ -108,24 +108,46 @@ class TraceabilityService:
             if assigned_ids is not None:
                 group_filters.append(TraceabilityTransactionGroup.origin_id.in_(list(assigned_ids)))
 
-        groups = self.db.query(TraceabilityTransactionGroup).filter(and_(*group_filters)).all()
-        group_ids = [g.id for g in groups]
-        # First array: only groups that do NOT have any traceability_transport_transactions yet
-        group_ids_with_transport = set()
-        if group_ids:
-            rows = (
+        raw_groups = self.db.query(TraceabilityTransactionGroup).filter(and_(*group_filters)).all()
+
+        # Deduplicate groups by key (origin_id, material_id, location_tag_id, tenant_id).
+        # If multiple groups share the same key, prefer the one with transport transactions.
+        raw_group_ids = [g.id for g in raw_groups]
+        _dedup_transport_ids = set()
+        if raw_group_ids:
+            _dt_rows = (
                 self.db.query(TransportTransaction.transaction_group_id)
                 .filter(
-                    TransportTransaction.transaction_group_id.in_(group_ids),
+                    TransportTransaction.transaction_group_id.in_(raw_group_ids),
                     TransportTransaction.is_active == True,
                     TransportTransaction.deleted_date.is_(None),
                 )
                 .distinct()
                 .all()
             )
-            group_ids_with_transport = {r[0] for r in rows if r[0] is not None}
+            _dedup_transport_ids = {r[0] for r in _dt_rows if r[0] is not None}
+
+        _seen_keys: dict = {}
+        groups = []
+        for g in raw_groups:
+            key = (g.origin_id, g.material_id, g.location_tag_id, g.tenant_id)
+            if key not in _seen_keys:
+                _seen_keys[key] = g
+                groups.append(g)
+            else:
+                # Replace if this group has transport and the existing one doesn't
+                existing = _seen_keys[key]
+                if g.id in _dedup_transport_ids and existing.id not in _dedup_transport_ids:
+                    groups = [g if x.id == existing.id else x for x in groups]
+                    _seen_keys[key] = g
+
+        group_ids = [g.id for g in groups]
+        # First array: only groups that do NOT have any traceability_transport_transactions yet
+        group_ids_with_transport = _dedup_transport_ids & set(group_ids)
         groups_for_first_array = [g for g in groups if g.id not in group_ids_with_transport]
         arr0 = self._groups_to_dict_list(groups_for_first_array, organization_id)
+        # Add tentative groups (approved records without active group)
+        arr0 = arr0 + tentative_arr
         # Also add arrived TransportTransactions to first array: destination becomes new origin (next leg); include transport_transaction id
         arrived_items = self._arrived_transport_as_first_array(group_ids, organization_id) if group_ids else []
         arr0 = arr0 + arrived_items
@@ -722,6 +744,7 @@ class TraceabilityService:
             TransactionRecord.is_active == True,
             TransactionRecord.deleted_date.is_(None),
             Transaction.status == TransactionStatus.approved,
+            TransactionRecord.status == 'approved',
             func.extract("year", txn_date_at_tz) == year,
             func.extract("month", txn_date_at_tz) == month,
         ]
@@ -840,6 +863,229 @@ class TraceabilityService:
                 self.db.add(group)
         self.db.flush()
 
+    def _build_tentative_groups(
+        self, organization_id: int, year: int, month: int, kwargs: Any
+    ) -> List[Dict[str, Any]]:
+        """Build in-memory tentative groups for approved records that have no active traceability group.
+        These appear as normal cards in column 1 but are not persisted until dispatch."""
+        records = self._records_for_org_month_year(organization_id, year, month, kwargs)
+        if not records:
+            return []
+
+        # Collect all record IDs that are already in an active group's transaction_record_id array
+        # This is the source of truth (not the traceability_group_id column which may be stale)
+        existing_groups = self.db.query(
+            TraceabilityTransactionGroup.id,
+            TraceabilityTransactionGroup.transaction_record_id,
+        ).filter(
+            TraceabilityTransactionGroup.organization_id == organization_id,
+            TraceabilityTransactionGroup.transaction_year == year,
+            TraceabilityTransactionGroup.transaction_month == month,
+            TraceabilityTransactionGroup.is_active == True,
+            TraceabilityTransactionGroup.deleted_date.is_(None),
+        ).all()
+        record_ids_in_groups: set = set()
+        for _gid, rec_ids in existing_groups:
+            if rec_ids:
+                record_ids_in_groups.update(rec_ids)
+
+        # Filter to orphaned records: not in any active group
+        orphaned = [r for r in records if r.id not in record_ids_in_groups]
+        if not orphaned:
+            return []
+
+        # Group by (origin_id, material_id, location_tag_id, tenant_id)
+        from collections import defaultdict
+        key_to_records: Dict[Tuple[Any, ...], List[TransactionRecord]] = defaultdict(list)
+        for r in orphaned:
+            txn = r.created_transaction
+            origin_id = txn.origin_id if txn else None
+            location_tag_id = getattr(txn, "location_tag_id", None) if txn else None
+            tenant_id = getattr(txn, "tenant_id", None) if txn else None
+            key = (origin_id, r.material_id, location_tag_id, tenant_id)
+            key_to_records[key].append(r)
+
+        # Enrich: collect location/material IDs
+        location_ids = set()
+        material_ids = set()
+        for (origin_id, material_id, _, _) in key_to_records:
+            if origin_id is not None:
+                location_ids.add(origin_id)
+            if material_id is not None:
+                material_ids.add(material_id)
+
+        path_map: Dict[int, str] = {}
+        if location_ids:
+            from ..users.user_service import UserService
+            user_service = UserService(self.db)
+            path_map = user_service._build_location_paths(organization_id, [{"id": lid} for lid in location_ids]) or {}
+        from ....models.cores.references import Material
+        material_map = {}
+        if material_ids:
+            mats = self.db.query(Material).filter(Material.id.in_(material_ids)).all()
+            material_map = {m.id: m for m in mats}
+        location_map = {}
+        if location_ids:
+            locs = self.db.query(UserLocation).filter(UserLocation.id.in_(location_ids)).all()
+            location_map = {loc.id: loc for loc in locs}
+
+        # Build tentative group dicts
+        out = []
+        for (origin_id, material_id, location_tag_id, tenant_id), recs in key_to_records.items():
+            record_ids = list(dict.fromkeys(r.id for r in recs))
+            total_weight = sum(float(r.origin_weight_kg or 0) for r in recs)
+            tentative_id = f"tentative:{origin_id}:{material_id}:{location_tag_id}:{tenant_id}:{year}:{month}"
+
+            origin = None
+            if origin_id and origin_id in location_map:
+                origin = self._location_to_dict(location_map[origin_id], path=path_map.get(origin_id, ""))
+            material = None
+            if material_id and material_id in material_map:
+                material = self._material_to_dict(material_map[material_id])
+
+            # Skip tentative groups with 0 weight (no approved records yet)
+            if total_weight <= 0:
+                continue
+
+            out.append({
+                "id": tentative_id,
+                "group_id": tentative_id,
+                "origin_id": origin_id,
+                "material_id": material_id,
+                "organization_id": organization_id,
+                "transaction_record_id": record_ids,
+                "transaction_carried_over": [],
+                "transaction_year": year,
+                "transaction_month": month,
+                "location_tag_id": location_tag_id,
+                "tenant_id": tenant_id,
+                "total_weight_kg": total_weight,
+                "weight": total_weight,
+                "record_ids": record_ids,
+                "origin": origin,
+                "material": material,
+                "source": "tentative",
+            })
+        return out
+
+    def materialize_tentative_group(
+        self, tentative_group_key: str, organization_id: int
+    ) -> Dict[str, Any]:
+        """Parse tentative key, create real TraceabilityTransactionGroup, link approved records."""
+        try:
+            parts = tentative_group_key.split(":")
+            if len(parts) != 7 or parts[0] != "tentative":
+                return {"success": False, "message": "Invalid tentative group key"}
+
+            def _parse(val: str):
+                return None if val == "None" else int(val)
+
+            origin_id = _parse(parts[1])
+            material_id = _parse(parts[2])
+            location_tag_id = _parse(parts[3])
+            tenant_id = _parse(parts[4])
+            year = int(parts[5])
+            month = int(parts[6])
+
+            # Check if a real group already exists for this key
+            existing = self.db.query(TraceabilityTransactionGroup).filter(
+                TraceabilityTransactionGroup.origin_id == origin_id if origin_id is not None
+                    else TraceabilityTransactionGroup.origin_id.is_(None),
+                TraceabilityTransactionGroup.material_id == material_id if material_id is not None
+                    else TraceabilityTransactionGroup.material_id.is_(None),
+                TraceabilityTransactionGroup.organization_id == organization_id,
+                TraceabilityTransactionGroup.location_tag_id == location_tag_id if location_tag_id is not None
+                    else TraceabilityTransactionGroup.location_tag_id.is_(None),
+                TraceabilityTransactionGroup.tenant_id == tenant_id if tenant_id is not None
+                    else TraceabilityTransactionGroup.tenant_id.is_(None),
+                TraceabilityTransactionGroup.transaction_year == year,
+                TraceabilityTransactionGroup.transaction_month == month,
+                TraceabilityTransactionGroup.is_active == True,
+                TraceabilityTransactionGroup.deleted_date.is_(None),
+            ).first()
+
+            # Find all orphaned approved records matching this key
+            txn_date_at_tz = TransactionRecord.transaction_date.op("AT TIME ZONE")(TRACEABILITY_DATE_TZ)
+            record_query = (
+                self.db.query(TransactionRecord)
+                .join(Transaction, TransactionRecord.created_transaction_id == Transaction.id)
+                .filter(
+                    Transaction.organization_id == organization_id,
+                    Transaction.status == TransactionStatus.approved,
+                    TransactionRecord.status == 'approved',
+                    TransactionRecord.is_active == True,
+                    TransactionRecord.deleted_date.is_(None),
+                    func.extract("year", txn_date_at_tz) == year,
+                    func.extract("month", txn_date_at_tz) == month,
+                    TransactionRecord.material_id == material_id if material_id is not None
+                        else TransactionRecord.material_id.is_(None),
+                    Transaction.origin_id == origin_id if origin_id is not None
+                        else Transaction.origin_id.is_(None),
+                    Transaction.location_tag_id == location_tag_id if location_tag_id is not None
+                        else Transaction.location_tag_id.is_(None),
+                    Transaction.tenant_id == tenant_id if tenant_id is not None
+                        else Transaction.tenant_id.is_(None),
+                    or_(
+                        TransactionRecord.traceability_group_id.is_(None),
+                        ~TransactionRecord.traceability_group_id.in_(
+                            self.db.query(TraceabilityTransactionGroup.id).filter(
+                                TraceabilityTransactionGroup.is_active == True,
+                                TraceabilityTransactionGroup.deleted_date.is_(None),
+                            )
+                        ),
+                    ),
+                )
+            )
+            orphaned_records = record_query.all()
+            record_ids = [r.id for r in orphaned_records]
+
+            if existing:
+                # Append orphaned records to existing group
+                current_ids = set(existing.transaction_record_id or [])
+                new_ids = [rid for rid in record_ids if rid not in current_ids]
+                if new_ids:
+                    existing.transaction_record_id = list(current_ids) + new_ids
+                    existing.updated_date = datetime.now(timezone.utc)
+                    self.db.query(TransactionRecord).filter(
+                        TransactionRecord.id.in_(new_ids)
+                    ).update(
+                        {TransactionRecord.traceability_group_id: existing.id},
+                        synchronize_session=False,
+                    )
+                self.db.flush()
+                return {"success": True, "group_id": existing.id}
+
+            # Create new group
+            group = TraceabilityTransactionGroup(
+                origin_id=origin_id,
+                material_id=material_id,
+                organization_id=organization_id,
+                transaction_record_id=record_ids,
+                transaction_carried_over=[],
+                transaction_year=year,
+                transaction_month=month,
+                location_tag_id=location_tag_id,
+                tenant_id=tenant_id,
+                is_active=True,
+            )
+            self.db.add(group)
+            self.db.flush()
+
+            # Set reverse pointer on all records
+            if record_ids:
+                self.db.query(TransactionRecord).filter(
+                    TransactionRecord.id.in_(record_ids)
+                ).update(
+                    {TransactionRecord.traceability_group_id: group.id},
+                    synchronize_session=False,
+                )
+
+            return {"success": True, "group_id": group.id}
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(f"materialize_tentative_group failed: {e}", exc_info=True)
+            return {"success": False, "message": str(e)}
+
     def _groups_to_dict_list(
         self, groups: List[TraceabilityTransactionGroup], organization_id: int
     ) -> List[Dict[str, Any]]:
@@ -877,7 +1123,8 @@ class TraceabilityService:
         weight_by_record: Dict[int, float] = {}
         if record_ids:
             rows = self.db.query(TransactionRecord.id, TransactionRecord.origin_weight_kg).filter(
-                TransactionRecord.id.in_(record_ids)
+                TransactionRecord.id.in_(record_ids),
+                TransactionRecord.status == 'approved',
             ).all()
             weight_by_record = {r[0]: float(r[1] or 0) for r in rows}
         weight_by_carried_over: Dict[int, float] = {}

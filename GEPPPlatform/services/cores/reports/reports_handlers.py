@@ -390,6 +390,7 @@ def _handle_overview_report(
     # Collect per-record data for 3-tier recycling rate calculation
     record_weights = []  # (weight, calc_ghg, cat_id, group_id)
     record_origins = []  # (origin_id, weight, calc_ghg, cat_id, group_id) for origin_waste_map
+    all_record_ids = []  # collect record IDs for group mapping
 
     group_ids = set()
 
@@ -406,7 +407,7 @@ def _handle_overview_report(
         # Fallback to TransactionRecord fields when Material is missing.
         cat_id = row[7] or row[11]           # material_category_id || record_category_id
         main_mat_id = row[8] or row[12]      # material_main_material_id || record_main_material_id
-        group_id = row[18]                   # traceability_group_id
+        record_id = row[19]                  # TransactionRecord.id
 
         # Track transactions
         tx_ids.add(tx_id)
@@ -435,23 +436,57 @@ def _handle_overview_report(
         if main_mat_id == 1 and cat_id == 1:
             plastic_saved += weight
 
-        # Collect for 3-tier recycling rate
-        record_weights.append((weight, calc_ghg, cat_id, group_id))
+        # Temporarily store with record_id; group_id will be resolved below
+        record_weights.append((weight, calc_ghg, cat_id, record_id))
         if origin_id is not None:
-            record_origins.append((origin_id, weight, calc_ghg, cat_id, group_id))
-        if group_id is not None:
-            group_ids.add(group_id)
+            record_origins.append((origin_id, weight, calc_ghg, cat_id, record_id))
+        all_record_ids.append(record_id)
 
         # Category proportions
         if cat_id is not None:
             category_waste_map[cat_id] = category_waste_map.get(cat_id, 0.0) + weight
 
+    # Build record_id → group_id mapping from TraceabilityTransactionGroup.transaction_record_id arrays
+    # This is the source of truth — does not depend on the reverse pointer (traceability_group_id column)
+    from ....models.transactions.traceability_transaction_group import TraceabilityTransactionGroup
+    record_to_group = {}
+    if all_record_ids:
+        groups = reports_service.db.query(
+            TraceabilityTransactionGroup.id,
+            TraceabilityTransactionGroup.transaction_record_id,
+        ).filter(
+            TraceabilityTransactionGroup.organization_id == organization_id,
+            TraceabilityTransactionGroup.is_active == True,
+            TraceabilityTransactionGroup.deleted_date.is_(None),
+        ).all()
+        for gid, rec_ids in groups:
+            if rec_ids:
+                for rid in rec_ids:
+                    record_to_group[rid] = gid
+
+    # Resolve group_id for each record using the mapping
+    record_weights = [
+        (w, ghg, cat, record_to_group.get(rid))
+        for w, ghg, cat, rid in record_weights
+    ]
+    record_origins = [
+        (oid, w, ghg, cat, record_to_group.get(rid))
+        for oid, w, ghg, cat, rid in record_origins
+    ]
+    group_ids = {gid for gid in record_to_group.values() if gid is not None}
+
     # 3-tier recycling rate calculation using traceability data
+    print(f"[RECYCLE_DEBUG] group_ids from mapping: {group_ids}")
+    print(f"[RECYCLE_DEBUG] total records: {len(record_weights)}, records with group_id: {sum(1 for _,_,_,g in record_weights if g is not None)}")
+
     group_leaf_data, group_completion = fetch_group_leaf_data(reports_service.db, group_ids)
+    print(f"[RECYCLE_DEBUG] group_leaf_data keys: {list(group_leaf_data.keys())}")
+    print(f"[RECYCLE_DEBUG] group_completion: {group_completion}")
     recyclable_waste, recyclable_ghg_reduction, _, traceability_fully_managed = compute_recycling_rate(
         record_weights, group_leaf_data, group_completion
     )
     recycle_rate = ((recyclable_waste / total_waste) * 100) if total_waste > 0 else 0.0
+    print(f"[RECYCLE_DEBUG] recyclable_waste={recyclable_waste}, total_waste={total_waste}, recycle_rate={recycle_rate}%, fully_managed={traceability_fully_managed}")
 
     # Build origin_waste_map using 3-tier recyclable logic
     origin_waste_map = {}
@@ -939,16 +974,16 @@ def _handle_performance_report(
 
     # Collect all category IDs from rows and fetch names
     all_category_ids = set()
-    all_group_ids = set()
     # Build location ID → list of (origin_quantity, unit_weight, category_id, main_material_id, calc_ghg, group_id) tuples
     location_records_map: Dict[int, list] = {}
+    perf_record_ids = []
     for row in rows:
-        # Unpack all 19 columns from get_overview_data query
+        # Unpack all 20 columns from get_overview_data query
         (origin_qty, txn_date, txn_id, origin_id, status,
          unit_weight, calc_ghg, mat_category_id, mat_main_material_id, material_tags,
          origin_weight_kg, record_category_id, record_main_material_id,
          _mat_id, _mat_name_en, _mat_name_th,
-         _disposal_method, _record_status, traceability_group_id) = row
+         _disposal_method, _record_status, _traceability_group_id, record_id) = row
 
         # Use Material category as primary source (matches old reportUtils logic)
         category_id = mat_category_id or record_category_id
@@ -965,15 +1000,38 @@ def _handle_performance_report(
                 int(category_id) if category_id is not None else None,
                 int(main_material_id) if main_material_id is not None else None,
                 float(calc_ghg or 0),
-                traceability_group_id,
+                record_id,  # temporarily store record_id; resolve to group_id below
             ))
-        if traceability_group_id is not None:
-            all_group_ids.add(traceability_group_id)
+            perf_record_ids.append(record_id)
         if category_id is not None:
             try:
                 all_category_ids.add(int(category_id))
             except Exception:
                 pass
+
+    # Build record_id → group_id mapping from TraceabilityTransactionGroup.transaction_record_id arrays
+    from ....models.transactions.traceability_transaction_group import TraceabilityTransactionGroup as PerfTTG
+    perf_record_to_group = {}
+    if perf_record_ids:
+        perf_groups = reports_service.db.query(
+            PerfTTG.id, PerfTTG.transaction_record_id,
+        ).filter(
+            PerfTTG.organization_id == organization_id,
+            PerfTTG.is_active == True,
+            PerfTTG.deleted_date.is_(None),
+        ).all()
+        for gid, rec_ids in perf_groups:
+            if rec_ids:
+                for rid in rec_ids:
+                    perf_record_to_group[rid] = gid
+
+    # Replace record_id with group_id in location_records_map
+    for loc_id in location_records_map:
+        location_records_map[loc_id] = [
+            (qty, uw, cat, mm, ghg, perf_record_to_group.get(rid))
+            for qty, uw, cat, mm, ghg, rid in location_records_map[loc_id]
+        ]
+    all_group_ids = set(perf_record_to_group.values())
 
     # Pre-fetch traceability leaf data for all groups across all locations (single query)
     perf_group_leaf_data, perf_group_completion = fetch_group_leaf_data(reports_service.db, all_group_ids)

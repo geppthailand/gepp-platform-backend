@@ -61,16 +61,28 @@ def handle_traceability_routes(event: Dict[str, Any], data: Dict[str, Any], **pa
         return {"message": "Traceability hierarchy (tree)", "data": result["data"]}
 
     if path == "/api/traceability" and method == "POST":
-        # Body: either "transaction_group_id" (root) or "transport_transaction_id" (children of an arrived transport).
-        # With transport_transaction_id: use it as parent_id for all new rows and same transaction_group_id as parent.
+        # Body: either "transaction_group_id" (root), "transport_transaction_id" (children of an arrived transport),
+        # or "tentative_group_key" (materializes a tentative group first, then creates transport).
         body = data or {}
         data_list = body.get("data")
         transaction_group_id = body.get("transaction_group_id")
         transport_transaction_id = body.get("transport_transaction_id")
+        tentative_group_key = body.get("tentative_group_key")
         if not isinstance(data_list, list) or len(data_list) == 0:
             raise APIException("Missing or empty required field: data (array of items with weight, origin_id)", status_code=400)
+
+        # If tentative_group_key is provided, materialize the tentative group into a real group first
+        if tentative_group_key is not None:
+            mat_result = traceability_service.materialize_tentative_group(
+                tentative_group_key=str(tentative_group_key),
+                organization_id=current_user_organization_id,
+            )
+            if not mat_result.get("success"):
+                raise APIException(mat_result.get("message", "Failed to materialize tentative group"), status_code=400)
+            transaction_group_id = mat_result["group_id"]
+
         if transaction_group_id is None and transport_transaction_id is None:
-            raise APIException("Missing required field: transaction_group_id or transport_transaction_id", status_code=400)
+            raise APIException("Missing required field: transaction_group_id, transport_transaction_id, or tentative_group_key", status_code=400)
         if transaction_group_id is not None and transport_transaction_id is not None:
             raise APIException("Provide either transaction_group_id or transport_transaction_id, not both", status_code=400)
         result = traceability_service.create_transport_transactions(
