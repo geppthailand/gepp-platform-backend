@@ -1432,34 +1432,67 @@ class InputChannelService:
             # Update transaction with record IDs
             transaction.transaction_records = transaction_record_ids
 
-            # Handle image uploads
+            # Handle image uploads using presigned URL service (same as normal transactions)
             images = data.get('b64image', [])
             if images and channel.enable_upload_image:
                 try:
-                    from GEPPPlatform.services.file_upload_service import S3FileUploadService
-                    s3_service = S3FileUploadService()
-                    uploaded_urls = []
+                    from GEPPPlatform.services.cores.transactions.presigned_url_service import TransactionPresignedUrlService
+                    from GEPPPlatform.models.cores.files import File, FileType, FileStatus
+                    import os
+
+                    presigned_service = TransactionPresignedUrlService()
+                    bucket_name = presigned_service.bucket_name
+                    s3_client = presigned_service.s3_client
+                    aws_region = os.getenv('AWS_REGION', 'ap-southeast-1')
+
+                    uploaded_file_ids = []
+                    current_date = datetime.utcnow()
 
                     for i, b64_image in enumerate(images):
-                        if b64_image:
-                            # Remove data URL prefix if present
-                            if ',' in b64_image:
-                                b64_image = b64_image.split(',')[1]
+                        if not b64_image:
+                            continue
 
-                            # Decode and upload
-                            image_data = base64.b64decode(b64_image)
-                            file_name = f"qr_input_{transaction.id}_{i}_{uuid_module.uuid4().hex[:8]}.jpg"
+                        # Remove data URL prefix if present
+                        if ',' in b64_image:
+                            b64_image = b64_image.split(',')[1]
 
-                            url = s3_service.upload_base64_image(
-                                image_data=image_data,
-                                file_name=file_name,
-                                folder='qr-transactions'
-                            )
-                            if url:
-                                uploaded_urls.append(url)
+                        image_data = base64.b64decode(b64_image)
+                        file_name = f"qr_input_{transaction.id}_{i}_{uuid_module.uuid4().hex[:8]}.jpg"
 
-                    if uploaded_urls:
-                        transaction.images = uploaded_urls
+                        # Use same S3 key structure as normal transactions
+                        s3_key = f"org/{channel.organization_id}/transactions/{current_date.year}/{current_date.month:02d}/{file_name}"
+
+                        # Upload directly to S3
+                        s3_client.put_object(
+                            Bucket=bucket_name,
+                            Key=s3_key,
+                            Body=image_data,
+                            ContentType='image/jpeg',
+                        )
+
+                        # Build the final S3 URL
+                        final_url = f"https://{bucket_name}.s3.amazonaws.com/{s3_key}"
+
+                        # Create File record in DB (same as presigned URL service does)
+                        file_record = File(
+                            file_type=FileType.transaction_image,
+                            status=FileStatus.uploaded,
+                            url=final_url,
+                            s3_key=s3_key,
+                            s3_bucket=bucket_name,
+                            original_filename=file_name,
+                            mime_type='image/jpeg',
+                            organization_id=channel.organization_id,
+                            uploader_id=creator_user_location_id,
+                            related_entity_type='transaction',
+                            related_entity_id=transaction.id,
+                        )
+                        self.db.add(file_record)
+                        self.db.flush()
+                        uploaded_file_ids.append(file_record.id)
+
+                    if uploaded_file_ids:
+                        transaction.images = uploaded_file_ids
 
                 except Exception as e:
                     # Log but don't fail transaction
