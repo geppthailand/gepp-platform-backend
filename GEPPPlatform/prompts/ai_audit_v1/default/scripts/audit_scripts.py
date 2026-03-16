@@ -19,6 +19,9 @@ from sqlalchemy import and_
 
 logger = logging.getLogger(__name__)
 
+# Version marker for deployment verification
+AUDIT_SCRIPT_VERSION = '2026-03-16-v2-per-record-fix'
+
 # Constants
 ALLOWED_TRANSACTION_METHODS = ('origin', 'qr_input')
 SETTINGS_PATH = Path(__file__).parent.parent / 'settings.json'
@@ -361,6 +364,13 @@ def _process_single_audit_history(
                 history.approved_count = (history.approved_count or 0) + approved
                 history.rejected_count = (history.rejected_count or 0) + rejected
 
+                # Collect audit_record IDs and append to history.audit_records
+                new_audit_ids = [r['audit_record_id'] for r in tx_results if r.get('audit_record_id')]
+                if new_audit_ids:
+                    existing_ids = list(history.audit_records or [])
+                    history.audit_records = existing_ids + new_audit_ids
+                    flag_modified(history, 'audit_records')
+
                 # Check if all transactions are processed
                 remaining_queued = db.query(Transaction).filter(
                     and_(
@@ -479,6 +489,7 @@ def _process_single_transaction(
 
     processing_start = time.time()
     total_token_usage = {'input_tokens': 0, 'output_tokens': 0}
+    print(f"[AUDIT-VERSION] Tx #{transaction_id}: script version={AUDIT_SCRIPT_VERSION}")
 
     db = session_factory()
     try:
@@ -569,6 +580,7 @@ def _process_single_transaction(
             tx, records, doc_check, final_determination, classified_evidence,
             per_record_results, tx_checklist, total_token_usage,
             processing_start, organization_id, model_version, db, llm,
+            image_data=image_data,
         )
         logger.info(f"Tx #{transaction_id} Step 9 (compose): {time.time()-t0:.1f}s")
 
@@ -661,8 +673,15 @@ def _step4_collect_images(
                 's3_key': f.s3_key,
             }
 
-    result['transaction_file_ids'] = tx_image_ids
-    result['transaction_images'] = [result['all_files'][fid] for fid in tx_image_ids if fid in result['all_files']]
+    # Exclude files that belong to specific records from tx-level
+    # If a file_id appears in both tx.images and record.images, it's record-level only
+    all_record_fids = set()
+    for fids in record_image_ids.values():
+        all_record_fids.update(fids)
+    pure_tx_file_ids = [fid for fid in tx_image_ids if fid not in all_record_fids]
+
+    result['transaction_file_ids'] = pure_tx_file_ids
+    result['transaction_images'] = [result['all_files'][fid] for fid in pure_tx_file_ids if fid in result['all_files']]
     result['record_file_ids'] = record_image_ids
     for rec_id, fids in record_image_ids.items():
         result['record_images'][rec_id] = [result['all_files'][fid] for fid in fids if fid in result['all_files']]
@@ -1532,7 +1551,8 @@ def _step9_compose_and_save(
     organization_id: int,
     model_version: str,
     db: Session,
-    llm: Any
+    llm: Any,
+    image_data: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Step 9: Compose final audit note, update statuses, insert TransactionAudit record.
@@ -1548,14 +1568,19 @@ def _step9_compose_and_save(
     # Derive checklist_columns from tx_checklist keys
     checklist_columns = list(tx_checklist.keys())
 
+    print(f"[AUDIT-DEBUG] Tx #{tx.id} Step9 version={AUDIT_SCRIPT_VERSION}")
+    print(f"[AUDIT-DEBUG] Tx #{tx.id} Step9: image_data tx_file_ids={image_data.get('transaction_file_ids', []) if image_data else 'None'}, record_file_ids={image_data.get('record_file_ids', {}) if image_data else 'None'}")
+    print(f"[AUDIT-DEBUG] Tx #{tx.id} Step9: checklist_columns={checklist_columns}")
     print(f"[AUDIT-DEBUG] Tx #{tx.id} Step9: tx_checklist={tx_checklist}")
-    print(f"[AUDIT-DEBUG] Tx #{tx.id} Step9: final_checklist={final_checklist}")
     print(f"[AUDIT-DEBUG] Tx #{tx.id} Step9: per_record_results={per_record_results}")
     print(f"[AUDIT-DEBUG] Tx #{tx.id} Step9: determined_status={determined_status}, rejection_errors={rejection_errors}")
 
     # Check if any record has no evidence files at all (neither record-level nor tx-level)
-    # Only reject the transaction if there are NO evidence files anywhere
-    tx_has_files = len(classified_evidence) > 0
+    # tx_has_files counts ONLY tx-level files (not other records' files)
+    if image_data is None:
+        image_data = {}
+    tx_file_ids_set = set(image_data.get('transaction_file_ids', []))
+    tx_has_files = any(ev['file_id'] in tx_file_ids_set for ev in classified_evidence)
     for record in records:
         record_images = record.images if hasattr(record, 'images') and record.images else []
         if len(record_images) == 0 and not tx_has_files and checklist_columns:
@@ -1594,20 +1619,24 @@ def _step9_compose_and_save(
     flag_modified(tx, 'audit_tokens')
 
     # Update each record's ai_audit_status and ai_audit_note
+    record_file_ids = image_data.get('record_file_ids', {})
     for record in records:
         rec_checklist = per_record_results.get(record.id, {})
         rec_missing = doc_check.get('missing_record_docs', {}).get(record.id, [])
 
         # Check if record has NO evidence files at all (neither own images nor tx-level images)
         record_images = record.images if hasattr(record, 'images') and record.images else []
-        rec_has_no_files = len(record_images) == 0 and not tx_has_files
+        rec_own_files = record_file_ids.get(record.id, [])
+        rec_has_no_files = len(record_images) == 0 and len(rec_own_files) == 0 and not tx_has_files
 
-        print(f"[AUDIT-DEBUG] Tx #{tx.id} Record #{record.id}: rec_checklist={rec_checklist}, rec_missing={rec_missing}, rec_has_no_files={rec_has_no_files}, images={record_images}")
+        print(f"[AUDIT-DEBUG] Tx #{tx.id} Record #{record.id}: rec_checklist={rec_checklist}, rec_missing={rec_missing}, rec_has_no_files={rec_has_no_files}, images={record_images}, rec_own_files={rec_own_files}, tx_has_files={tx_has_files}")
 
         # Per-record errors: only flag issues specific to THIS record
         # Phase B now includes tx-level evidence, so rec_checklist reflects the full picture
         rec_errors = []
         rec_has_issue = False
+
+        # Check columns from rec_checklist (Phase B results)
         for col, result in rec_checklist.items():
             if result.get('match') and result.get('found'):
                 # Evidence found and matches this record → PASS
@@ -1629,7 +1658,21 @@ def _step9_compose_and_save(
                     rec_has_issue = True
                     print(f"[AUDIT-DEBUG]   Record #{record.id} col={col}: REJECT (no evidence anywhere)")
 
-        # Record with no evidence files must be rejected
+        # Also check columns that were NOT in rec_checklist (Phase B skipped or returned empty)
+        # but ARE required — these need tx-level Phase A pass or they fail
+        for col in checklist_columns:
+            if col in rec_checklist:
+                continue  # Already handled above
+            tx_col = tx_checklist.get(col, {})
+            if tx_col.get('match') and tx_col.get('found'):
+                # Tx-level Phase A matched all records → PASS
+                print(f"[AUDIT-DEBUG]   Record #{record.id} col={col}: PASS (tx-level matched, not in rec_checklist)")
+            else:
+                # Required column not verified by any phase
+                rec_has_issue = True
+                print(f"[AUDIT-DEBUG]   Record #{record.id} col={col}: REJECT (not in rec_checklist, tx-level not matched)")
+
+        # Record with no evidence files must be rejected (when there are required columns)
         if rec_has_no_files and checklist_columns:
             rec_has_issue = True
             rec_errors.append('ไม่มีเอกสารแนบสำหรับรายการนี้')
@@ -1653,7 +1696,8 @@ def _step9_compose_and_save(
         flag_modified(record, 'ai_audit_note')
         print(f"[AUDIT-DEBUG]   Record #{record.id}: STATUS={record.ai_audit_status}")
 
-    # Insert TransactionAudit record
+    # Insert TransactionAudit record with status snapshots
+    tx_status_value = tx.status.value if hasattr(tx.status, 'value') else str(tx.status)
     audit_record = TransactionAudit(
         transaction_id=tx.id,
         audit_notes=tx.ai_audit_note,
@@ -1661,11 +1705,14 @@ def _step9_compose_and_save(
         auditor_id=None,
         organization_id=organization_id,
         audit_type='ai_not_sync',
+        audit_status=tx_status_value,
+        ai_audit_status=final_status,
         processing_time_ms=processing_time_ms,
         token_usage=token_usage,
         model_version=model_version,
     )
     db.add(audit_record)
+    db.flush()  # Get the audit_record.id before commit
 
     logger.info(f"Transaction #{tx.id}: audit {final_status} (processing: {processing_time_ms}ms, tokens: {token_usage})")
 
@@ -1674,4 +1721,5 @@ def _step9_compose_and_save(
         'status': final_status,
         'processing_time_ms': processing_time_ms,
         'token_usage': token_usage,
+        'audit_record_id': audit_record.id,
     }
