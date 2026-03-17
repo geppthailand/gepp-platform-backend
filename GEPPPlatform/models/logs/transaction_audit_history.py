@@ -28,6 +28,9 @@ class TransactionAuditHistory(Base):
     # List of transaction IDs included in this audit batch
     transactions = Column(ARRAY(Integer), nullable=False, default=[])
 
+    # List of transaction_audit IDs created during this batch (references transaction_audits.id)
+    audit_records = Column(ARRAY(Integer), nullable=True, default=[])
+
     # Full audit response/info from LLM for this batch
     audit_info = Column(JSON, nullable=True)
 
@@ -61,6 +64,7 @@ class TransactionAuditHistory(Base):
             'organization_id': self.organization_id,
             'triggered_by_user_id': self.triggered_by_user_id,
             'transactions': self.transactions or [],
+            'audit_records': self.audit_records or [],
             'audit_info': self.audit_info,
             'total_transactions': self.total_transactions,
             'processed_transactions': self.processed_transactions,

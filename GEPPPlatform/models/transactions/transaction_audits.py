@@ -28,6 +28,10 @@ class TransactionAudit(Base, BaseModel):
     audit_type = Column(String(50), nullable=True)  # 'ai_sync', 'ai_async', 'manual', etc.
     created_by_id = Column(BigInteger, ForeignKey('user_locations.id'), nullable=True)  # User who created this audit
 
+    # Snapshot of transaction status at audit time (independent log, survives undo)
+    audit_status = Column(String(50), nullable=True)  # transaction.status at audit time
+    ai_audit_status = Column(String(50), nullable=True)  # transaction.ai_audit_status at audit time
+
     # AI processing details
     processing_time_ms = Column(Integer, nullable=True)
     token_usage = Column(JSONB, nullable=True)
@@ -67,6 +71,8 @@ class TransactionAudit(Base, BaseModel):
             'auditor_id': self.auditor_id,
             'organization_id': self.organization_id,
             'audit_type': self.audit_type,
+            'audit_status': self.audit_status,
+            'ai_audit_status': self.ai_audit_status,
             'processing_time_ms': self.processing_time_ms,
             'token_usage': self.token_usage,
             'model_version': self.model_version,
