@@ -431,6 +431,16 @@ def main(event, context):
                         "data": materials_result
                     }
 
+            elif "/api/rewards/public" in path:
+                # Public reward/LIFF endpoints (no JWT required, auth via LINE user_id)
+                from .services.rewards.reward_handlers import handle_reward_routes
+
+                reward_result = handle_reward_routes(event, data=body, **commonParams)
+                results = {
+                    "success": True,
+                    "data": reward_result
+                }
+
             else:
                 # All other routes require authorization
                 auth_header = event.get('headers', {}).get('Authorization', '') or event.get('headers', {}).get('authorization', '')
