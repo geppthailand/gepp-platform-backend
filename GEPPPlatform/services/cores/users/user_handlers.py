@@ -289,8 +289,42 @@ def handle_user_routes(event: Dict[str, Any], data: Dict[str, Any], **params) ->
 
 
 def handle_list_users(user_service: UserService, query_params: Dict[str, Any], current_user: Dict[str, Any] = None) -> Dict[str, Any]:
-    """Handle GET /api/users - List users with filtering"""
+    """Handle GET /api/users - List users with filtering.
+    If the user is not admin role and not org owner, only their own user data is returned.
+    """
     try:
+        # Restrict to own data unless user is admin or org owner
+        current_user_id = current_user.get('user_id') if current_user else None
+        current_user_organization_id = current_user.get('organization_id') if current_user else None
+        can_see_all = user_service.is_admin_or_org_owner(
+            int(current_user_id) if current_user_id else 0,
+            int(current_user_organization_id) if current_user_organization_id else None,
+        )
+        if not can_see_all and current_user_id:
+            # Non-admin, non-owner: return only this user's data
+            filters_restrict = {'user_ids': [str(current_user_id)]}
+            if current_user_organization_id:
+                filters_restrict['organization_ids'] = [str(current_user_organization_id)]
+            page = int(query_params.get('page', 1))
+            page_size = int(query_params.get('page_size', 20))
+            sort_by_raw = query_params.get('sort_by', 'created_date')
+            sort_field_mapping = {
+                'createdAt': 'created_date',
+                'updatedAt': 'updated_date',
+                'displayName': 'display_name',
+                'companyName': 'company_name'
+            }
+            sort_by = sort_field_mapping.get(sort_by_raw, sort_by_raw)
+            sort_order = query_params.get('sort_order', 'desc')
+            result = user_service.get_users_with_filters(
+                filters=filters_restrict,
+                page=page,
+                page_size=page_size,
+                sort_by=sort_by,
+                sort_order=sort_order,
+            )
+            return result
+
         # Parse query parameters
         page = int(query_params.get('page', 1))
         page_size = int(query_params.get('page_size', 20))

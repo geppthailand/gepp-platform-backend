@@ -555,6 +555,10 @@ class UserCRUD:
         if filters.get('organization_ids'):
             query = query.filter(UserLocation.organization_id.in_(filters['organization_ids']))
 
+        if filters.get('user_ids'):
+            ids = [int(x) if isinstance(x, str) and x.isdigit() else x for x in filters['user_ids']]
+            query = query.filter(UserLocation.id.in_(ids))
+
         if filters.get('status'):
             if filters['status'] == 'active':
                 query = query.filter(UserLocation.is_active == True)
