@@ -1,50 +1,27 @@
 """
-Rewards Module
-Comprehensive reward system for user points, claims, catalog, and redemption management
+Rewards Module — 14 focused models for B2B2C reward system
 """
 
-# Points and claim rules
-from .points import (
-    ClaimRuleType, PointsStatus, UserPoints, ClaimRule, UserPointTransaction,
-    PointsTier, PointsPromotion, PointsAdjustment
-)
-
-# Rewards catalog
-from .catalog import (
-    RewardType, RewardStatus, DeliveryMethod, Reward, RewardCategory,
-    RewardRating, RewardPromotion, RewardInventoryLog, RewardWishlist
-)
-
-# Redemption and transactions
-from .redemptions import (
-    RedemptionStatus, FulfillmentStatus, RewardRedemption, RedemptionStatusHistory,
-    RedemptionDocument, RedemptionBatch, RedemptionBatchItem, RedemptionReport,
-    RedemptionAlert
-)
-
-# Management and analytics
 from .management import (
-    CampaignType, CampaignStatus, NotificationType, RewardCampaign,
-    CampaignParticipant, RewardAnalytics, RewardNotification,
-    RewardConfiguration, RewardAuditLog, RewardIntegration
+    RewardSetup, RewardCampaign, RewardActivityMaterial,
+    RewardCampaignClaim, RewardCampaignCatalog, RewardCampaignDroppoint
+)
+from .catalog import RewardCatalog, RewardStock
+from .points import RewardPointTransaction
+from .redemptions import (
+    RewardRedemption, RewardUser, OrganizationRewardUser,
+    Droppoint, DroppointType
 )
 
 __all__ = [
-    # Points models
-    'ClaimRuleType', 'PointsStatus', 'UserPoints', 'ClaimRule', 'UserPointTransaction',
-    'PointsTier', 'PointsPromotion', 'PointsAdjustment',
-    
-    # Catalog models
-    'RewardType', 'RewardStatus', 'DeliveryMethod', 'Reward', 'RewardCategory',
-    'RewardRating', 'RewardPromotion', 'RewardInventoryLog', 'RewardWishlist',
-    
-    # Redemption models
-    'RedemptionStatus', 'FulfillmentStatus', 'RewardRedemption', 'RedemptionStatusHistory',
-    'RedemptionDocument', 'RedemptionBatch', 'RedemptionBatchItem', 'RedemptionReport',
-    'RedemptionAlert',
-    
-    # Management models
-    'CampaignType', 'CampaignStatus', 'NotificationType', 'RewardCampaign',
-    'CampaignParticipant', 'RewardAnalytics', 'RewardNotification',
-    'RewardConfiguration', 'RewardAuditLog', 'RewardIntegration'
+    # Management
+    'RewardSetup', 'RewardCampaign', 'RewardActivityMaterial',
+    'RewardCampaignClaim', 'RewardCampaignCatalog', 'RewardCampaignDroppoint',
+    # Catalog
+    'RewardCatalog', 'RewardStock',
+    # Points
+    'RewardPointTransaction',
+    # Redemptions & Users
+    'RewardRedemption', 'RewardUser', 'OrganizationRewardUser',
+    'Droppoint', 'DroppointType',
 ]

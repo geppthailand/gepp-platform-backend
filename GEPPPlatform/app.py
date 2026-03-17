@@ -567,6 +567,16 @@ def main(event, context):
                             "data": gri_result
                         }
                         
+                    elif "/api/rewards" in path:
+                        # Handle all reward management routes
+                        from .services.rewards.reward_handlers import handle_reward_routes
+
+                        reward_result = handle_reward_routes(event, data=body, **commonParams)
+                        results = {
+                            "success": True,
+                            "data": reward_result
+                        }
+
                     elif "/api/transactions" in path:
                         # Handle all transaction management routes
                         from .services.cores.transactions.transaction_handlers import handle_transaction_routes

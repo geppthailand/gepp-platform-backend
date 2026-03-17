@@ -1,0 +1,129 @@
+"""
+Campaign Catalog Service - Links catalog items to campaigns with redeem rules
+"""
+
+from datetime import datetime, timezone
+
+from sqlalchemy.orm import Session
+
+from ...models.rewards.management import RewardCampaignCatalog
+from ...models.rewards.catalog import RewardCatalog
+from ...exceptions import APIException, NotFoundException, BadRequestException
+
+
+class CampaignCatalogService:
+    def __init__(self, db: Session):
+        self.db = db
+
+    def _to_dict(self, item: RewardCampaignCatalog, catalog=None) -> dict:
+        result = {
+            "id": item.id,
+            "campaign_id": item.campaign_id,
+            "catalog_id": item.catalog_id,
+            "points_cost": item.points_cost,
+            "start_date": item.start_date.isoformat() if item.start_date else None,
+            "end_date": item.end_date.isoformat() if item.end_date else None,
+            "status": item.status,
+            "created_date": item.created_date.isoformat() if item.created_date else None,
+            "updated_date": item.updated_date.isoformat() if item.updated_date else None,
+        }
+        if catalog:
+            result["catalog_name"] = catalog.name
+            result["catalog_thumbnail_id"] = catalog.thumbnail_id
+        return result
+
+    def list(self, campaign_id: int) -> list[dict]:
+        """Return all active campaign catalog entries, joined with catalog info."""
+        rows = (
+            self.db.query(RewardCampaignCatalog, RewardCatalog)
+            .outerjoin(
+                RewardCatalog,
+                RewardCampaignCatalog.catalog_id == RewardCatalog.id,
+            )
+            .filter(
+                RewardCampaignCatalog.campaign_id == campaign_id,
+                RewardCampaignCatalog.deleted_date.is_(None),
+            )
+            .order_by(RewardCampaignCatalog.id.desc())
+            .all()
+        )
+        return [self._to_dict(cc, cat) for cc, cat in rows]
+
+    def create(self, data: dict) -> dict:
+        """Create a new campaign catalog entry."""
+        if not data.get("campaign_id"):
+            raise BadRequestException("Campaign ID is required")
+        if not data.get("catalog_id"):
+            raise BadRequestException("Catalog ID is required")
+        if data.get("points_cost") is None:
+            raise BadRequestException("Points cost is required")
+
+        item = RewardCampaignCatalog(
+            campaign_id=data["campaign_id"],
+            catalog_id=data["catalog_id"],
+            points_cost=data["points_cost"],
+            start_date=data.get("start_date"),
+            end_date=data.get("end_date"),
+            status=data.get("status", "active"),
+        )
+        self.db.add(item)
+        self.db.flush()
+
+        row = (
+            self.db.query(RewardCampaignCatalog, RewardCatalog)
+            .outerjoin(
+                RewardCatalog,
+                RewardCampaignCatalog.catalog_id == RewardCatalog.id,
+            )
+            .filter(RewardCampaignCatalog.id == item.id)
+            .first()
+        )
+        return self._to_dict(row[0], row[1]) if row else self._to_dict(item)
+
+    def update(self, id: int, data: dict) -> dict:
+        """Update an existing campaign catalog entry."""
+        item = (
+            self.db.query(RewardCampaignCatalog)
+            .filter(
+                RewardCampaignCatalog.id == id,
+                RewardCampaignCatalog.deleted_date.is_(None),
+            )
+            .first()
+        )
+        if not item:
+            raise NotFoundException("Campaign catalog entry not found")
+
+        for field in ("points_cost", "start_date", "end_date", "status"):
+            if field in data:
+                setattr(item, field, data[field])
+
+        self.db.flush()
+
+        row = (
+            self.db.query(RewardCampaignCatalog, RewardCatalog)
+            .outerjoin(
+                RewardCatalog,
+                RewardCampaignCatalog.catalog_id == RewardCatalog.id,
+            )
+            .filter(RewardCampaignCatalog.id == item.id)
+            .first()
+        )
+        return self._to_dict(row[0], row[1]) if row else self._to_dict(item)
+
+    def delete(self, id: int) -> dict:
+        """Soft delete a campaign catalog entry."""
+        item = (
+            self.db.query(RewardCampaignCatalog)
+            .filter(
+                RewardCampaignCatalog.id == id,
+                RewardCampaignCatalog.deleted_date.is_(None),
+            )
+            .first()
+        )
+        if not item:
+            raise NotFoundException("Campaign catalog entry not found")
+
+        item.deleted_date = datetime.now(timezone.utc)
+        self.db.flush()
+
+        return {"id": id, "deleted": True}
