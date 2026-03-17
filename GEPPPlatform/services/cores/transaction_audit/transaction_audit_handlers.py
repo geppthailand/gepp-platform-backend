@@ -12,6 +12,7 @@ from .transaction_audit_service import TransactionAuditService
 from ....models.logs.transaction_audit_history import TransactionAuditHistory
 from ....models.transactions.transactions import Transaction, TransactionStatus, AIAuditStatus
 from ....models.transactions.transaction_records import TransactionRecord
+from ....models.transactions.transaction_audits import TransactionAudit
 
 logger = logging.getLogger(__name__)
 from ....exceptions import (
@@ -969,14 +970,52 @@ def handle_get_audit_queue_batches(
                     'material_name': material_map_by_tx.get(t.id, '-'),
                 }
 
+        # Batch-fetch TransactionAudit records to get ai_audit_status snapshots
+        # (these survive undo, unlike transaction.ai_audit_status)
+        all_audit_record_ids = set()
+        for batch in batches:
+            if batch.audit_records:
+                all_audit_record_ids.update(batch.audit_records)
+
+        # Map: audit_record.transaction_id → ai_audit_status (per audit record)
+        # Group by batch for per-batch override
+        audit_record_map = {}  # audit_record.id → {transaction_id, ai_audit_status}
+        if all_audit_record_ids:
+            audit_records = db_session.query(
+                TransactionAudit.id,
+                TransactionAudit.transaction_id,
+                TransactionAudit.ai_audit_status,
+            ).filter(
+                TransactionAudit.id.in_(all_audit_record_ids)
+            ).all()
+            for ar in audit_records:
+                audit_record_map[ar.id] = {
+                    'transaction_id': ar.transaction_id,
+                    'ai_audit_status': ar.ai_audit_status,
+                }
+
         # Build response
         batch_list = []
         for batch in batches:
             batch_tx_ids = batch.transactions or []
-            batch_transactions = sorted(
-                [tx_map[tid] for tid in batch_tx_ids if tid in tx_map],
-                key=lambda x: x['id']
-            )
+
+            # Build per-batch tx_id → ai_audit_status override from audit_records
+            batch_audit_status_override = {}
+            if batch.audit_records:
+                for ar_id in batch.audit_records:
+                    ar_info = audit_record_map.get(ar_id)
+                    if ar_info and ar_info.get('ai_audit_status'):
+                        batch_audit_status_override[ar_info['transaction_id']] = ar_info['ai_audit_status']
+
+            batch_transactions = []
+            for tid in batch_tx_ids:
+                if tid in tx_map:
+                    tx_item = dict(tx_map[tid])  # copy to avoid mutation
+                    # Override ai_audit_status from audit record snapshot if available
+                    if tid in batch_audit_status_override:
+                        tx_item['ai_audit_status'] = batch_audit_status_override[tid]
+                    batch_transactions.append(tx_item)
+            batch_transactions.sort(key=lambda x: x['id'])
 
             batch_list.append({
                 'id': batch.id,
