@@ -17,8 +17,6 @@ class RewardSetup(Base, BaseModel):
     program_name = Column(String(255), nullable=True)
     program_name_local = Column(String(255), nullable=True)
     points_rounding_method = Column(String(20), default='round')  # floor / ceil / round
-    points_per_transaction_limit = Column(Integer, default=100)
-    points_per_day_limit = Column(Integer, default=500)
     timezone = Column(String(100), default='Asia/Bangkok')
     cost_per_point = Column(DECIMAL(10, 4), default=0.25)
     qr_code_size = Column(Integer, default=200)
@@ -39,6 +37,8 @@ class RewardCampaign(Base, BaseModel):
     start_date = Column(DateTime(timezone=True), nullable=False)
     end_date = Column(DateTime(timezone=True), nullable=True)  # null = no expiry
     status = Column(String(20), default='active')  # active / inactive
+    points_per_transaction_limit = Column(Integer, nullable=True)  # null = no limit
+    points_per_day_limit = Column(Integer, nullable=True)  # null = no limit
 
 
 class RewardActivityMaterial(Base, BaseModel):

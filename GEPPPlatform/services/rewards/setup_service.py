@@ -16,8 +16,8 @@ class RewardSetupService:
     def __init__(self, db: Session):
         self.db = db
 
-    def get_setup(self, organization_id: int) -> dict | None:
-        """Get reward setup for an organization, returns dict or None."""
+    def get_setup(self, organization_id: int) -> dict:
+        """Get reward setup for an organization. Auto-creates with defaults if not found."""
         setup = (
             self.db.query(RewardSetup)
             .filter(
@@ -27,7 +27,17 @@ class RewardSetupService:
             .first()
         )
         if not setup:
-            return None
+            setup = RewardSetup(
+                organization_id=organization_id,
+                hash=uuid.uuid4().hex,
+                points_rounding_method="floor",
+                timezone="Asia/Bangkok",
+                cost_per_point=Decimal("0.25"),
+                qr_code_size=200,
+                qr_error_correction="M",
+            )
+            self.db.add(setup)
+            self.db.flush()
 
         return {
             "id": setup.id,
@@ -35,8 +45,6 @@ class RewardSetupService:
             "program_name": setup.program_name,
             "program_name_local": setup.program_name_local,
             "points_rounding_method": setup.points_rounding_method,
-            "points_per_transaction_limit": setup.points_per_transaction_limit,
-            "points_per_day_limit": setup.points_per_day_limit,
             "timezone": setup.timezone,
             "cost_per_point": float(setup.cost_per_point) if setup.cost_per_point is not None else None,
             "qr_code_size": setup.qr_code_size,
@@ -61,8 +69,7 @@ class RewardSetupService:
 
         updatable_fields = [
             "program_name", "program_name_local", "points_rounding_method",
-            "points_per_transaction_limit", "points_per_day_limit", "timezone",
-            "cost_per_point", "qr_code_size", "qr_error_correction",
+            "timezone", "cost_per_point", "qr_code_size", "qr_error_correction",
             "receipt_template", "welcome_message",
         ]
 

@@ -24,6 +24,8 @@ class CampaignService:
             "start_date": item.start_date.isoformat() if item.start_date else None,
             "end_date": item.end_date.isoformat() if item.end_date else None,
             "status": item.status,
+            "points_per_transaction_limit": item.points_per_transaction_limit,
+            "points_per_day_limit": item.points_per_day_limit,
             "created_date": item.created_date.isoformat() if item.created_date else None,
             "updated_date": item.updated_date.isoformat() if item.updated_date else None,
         }
@@ -56,6 +58,8 @@ class CampaignService:
             start_date=data["start_date"],
             end_date=data.get("end_date"),
             status=data.get("status", "active"),
+            points_per_transaction_limit=data.get("points_per_transaction_limit"),
+            points_per_day_limit=data.get("points_per_day_limit"),
         )
         self.db.add(item)
         self.db.flush()
@@ -75,7 +79,7 @@ class CampaignService:
         if not item:
             raise NotFoundException("Campaign not found")
 
-        for field in ("name", "description", "image_id", "start_date", "end_date", "status"):
+        for field in ("name", "description", "image_id", "start_date", "end_date", "status", "points_per_transaction_limit", "points_per_day_limit"):
             if field in data:
                 setattr(item, field, data[field])
 
