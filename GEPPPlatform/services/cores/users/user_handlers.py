@@ -67,6 +67,9 @@ def handle_user_routes(event: Dict[str, Any], data: Dict[str, Any], **params) ->
     elif '/api/users/check-email' in path and method == 'POST':
         return handle_check_email_availability(user_service, data)
 
+    elif '/api/users/check-qr-name' in path and method == 'POST':
+        return handle_check_qr_name_availability(user_service, data, current_user_organization_id)
+
     elif '/api/users/notifications/mark-all-read' in path and method == 'POST':
         return handle_mark_all_notifications_read(user_service, current_user_id)
     elif '/api/users/notifications/delete-all' in path and method == 'POST':
@@ -122,9 +125,9 @@ def handle_user_routes(event: Dict[str, Any], data: Dict[str, Any], **params) ->
         return handle_regenerate_input_channel(db_session, user_id, current_user_organization_id)
 
     elif '/api/users/' in path and '/input-channel' in path and method == 'GET':
-        # Get input channel: /api/users/{user_id}/input-channel
-        user_id = path.split('/users/')[1].split('/')[0]
-        return handle_get_input_channel(db_session, user_id)
+        # Get input channel: /api/users/{qr_name}/input-channel
+        qr_name = path.split('/users/')[1].split('/')[0]
+        return handle_get_input_channel(db_session, qr_name)
 
     elif '/api/users/' in path and '/input-channel' in path and method == 'POST':
         # Create input channel: /api/users/{user_id}/input-channel
@@ -467,6 +470,50 @@ def handle_check_email_availability(
         raise
     except Exception as e:
         raise APIException(f'Failed to check email availability: {str(e)}')
+
+
+def handle_check_qr_name_availability(
+    user_service: UserService,
+    data: Dict[str, Any],
+    organization_id: Optional[int]
+) -> Dict[str, Any]:
+    """Handle POST /api/users/check-qr-name - Check if qr_name is available within the organization"""
+    try:
+        from GEPPPlatform.models.users.user_location import UserLocation
+        from sqlalchemy import and_
+
+        qr_name = data.get('qr_name', '').strip()
+
+        if not qr_name:
+            raise ValidationException('qr_name is required')
+
+        if not organization_id:
+            raise ValidationException('Organization context is required')
+
+        existing = user_service.db.query(UserLocation).filter(
+            and_(
+                UserLocation.qr_name == qr_name,
+                UserLocation.organization_id == organization_id,
+                UserLocation.deleted_date.is_(None)
+            )
+        ).first()
+
+        if existing:
+            return {
+                'available': False,
+                'error': 'qr_name_exists',
+                'message': 'QR name already exists in this organization'
+            }
+
+        return {
+            'available': True,
+            'message': 'QR name is available'
+        }
+
+    except ValidationException:
+        raise
+    except Exception as e:
+        raise APIException(f'Failed to check QR name availability: {str(e)}')
 
 
 def handle_mark_all_notifications_read(
@@ -1626,13 +1673,13 @@ def handle_get_profile_upload_presigned_url(
 
 
 # Input Channel Handlers
-def handle_get_input_channel(db_session, user_id: str) -> Dict[str, Any]:
-    """Handle GET /api/users/{user_id}/input-channel - Get input channel"""
+def handle_get_input_channel(db_session, qr_name: str) -> Dict[str, Any]:
+    """Handle GET /api/users/{qr_name}/input-channel - Get input channel by qr_name"""
     try:
         from .input_channel_service import InputChannelService
         service = InputChannelService(db_session)
 
-        result = service.get_input_channel(int(user_id))
+        result = service.get_input_channel(qr_name)
         if not result:
             return {'channel': None, 'message': 'No input channel found'}
 
