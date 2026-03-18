@@ -466,22 +466,11 @@ class InputChannelService:
 
     # ==================== Legacy User-based Methods (kept for backward compatibility) ====================
 
-    def get_input_channel(self, qr_name: str) -> Optional[Dict[str, Any]]:
-        """Get input channel for a user location identified by qr_name"""
-        user_location = self.db.query(UserLocation).filter(
-            and_(
-                UserLocation.qr_name == qr_name,
-                UserLocation.is_active == True,
-                UserLocation.deleted_date.is_(None)
-            )
-        ).first()
-
-        if not user_location:
-            return None
-
+    def get_input_channel(self, user_location_id: int) -> Optional[Dict[str, Any]]:
+        """Get input channel for a specific user location"""
         channel = self.db.query(UserInputChannel).filter(
             and_(
-                UserInputChannel.user_location_id == user_location.id,
+                UserInputChannel.user_location_id == user_location_id,
                 UserInputChannel.is_active == True,
                 UserInputChannel.deleted_date.is_(None)
             )
@@ -495,8 +484,7 @@ class InputChannelService:
     def get_input_channel_by_hash(
         self,
         hash_value: str,
-        subuser: Optional[str] = None,
-        display_name: Optional[str] = None
+        qr_name: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Get input channel by hash (for QR code access)"""
         channel = self.db.query(UserInputChannel).filter(
@@ -524,28 +512,18 @@ class InputChannelService:
             result['userDisplayName'] = user_location.display_name
             result['userId'] = str(user_location.id)
 
-        # Validate subuser if provided - check organization membership
-        if subuser:
-            # First check if subuser is in legacy subuser_names list
-            subuser_names = channel.subuser_names or []
-            is_valid = subuser in subuser_names
+        # Validate user by qr_name within the channel's organization
+        if qr_name:
+            validated_user = self.db.query(UserLocation).filter(
+                and_(
+                    UserLocation.qr_name == qr_name,
+                    UserLocation.organization_id == channel.organization_id,
+                    UserLocation.is_active == True,
+                    UserLocation.deleted_date.is_(None)
+                )
+            ).first()
 
-            # If not in legacy list, check organization membership with display_name validation
-            validated_user = None
-            if not is_valid:
-                validated_user = self._validate_organization_member(
-                    channel.organization_id,
-                    subuser,
-                    display_name
-                )
-                is_valid = validated_user is not None
-            else:
-                # For legacy subusers, still need to find the user to check their role
-                validated_user = self._validate_organization_member(
-                    channel.organization_id,
-                    subuser,
-                    display_name
-                )
+            is_valid = validated_user is not None
 
             # Check if user has data_input role (or admin role) - required for access
             has_access_role = False
@@ -554,9 +532,8 @@ class InputChannelService:
                     organization_role = self.db.query(OrganizationRole).filter(
                         OrganizationRole.id == validated_user.organization_role_id
                     ).first()
-                    
+
                     if organization_role:
-                        # Check if role key/name matches data_input or admin
                         role_key = (organization_role.key or '').lower()
                         role_name = (organization_role.name or '').lower()
                         has_access_role = (
@@ -564,7 +541,7 @@ class InputChannelService:
                             'data_input' in role_name or
                             'admin' in role_name
                         )
-                
+
                 # If user doesn't have required role, return access denied response
                 if not has_access_role:
                     return {
@@ -572,28 +549,27 @@ class InputChannelService:
                         'message': 'You do not have permission to access this input channel. Data input or admin role is required.',
                         'reason': 'missing_data_input_or_admin_role',
                         'subUser': {
-                            'name': subuser,
-                            'userId': str(validated_user.id) if validated_user else None,
-                            'displayName': validated_user.display_name if validated_user else subuser
+                            'name': validated_user.display_name,
+                            'userId': str(validated_user.id),
+                            'displayName': validated_user.display_name,
+                            'qrName': qr_name,
                         }
                     }
-            elif is_valid and not validated_user:
-                # Legacy subuser exists but we couldn't find the user - keep legacy invalid behavior
-                is_valid = False
 
-            # Get saved preferences for this subuser
+            # Get saved preferences keyed by qr_name
             preferences = channel.subuser_material_preferences or {}
-            saved_material_ids = preferences.get(subuser, [])
+            saved_material_ids = preferences.get(qr_name, [])
 
             result['subUser'] = {
                 'isValid': is_valid,
-                'name': subuser if is_valid else None,
+                'name': validated_user.display_name if is_valid else None,
                 'userId': str(validated_user.id) if validated_user else None,
-                'displayName': validated_user.display_name if validated_user else subuser,
+                'displayName': validated_user.display_name if validated_user else None,
+                'qrName': qr_name,
                 'savedMaterialIds': saved_material_ids if is_valid else []
             }
 
-            # Get materials with details and locations if valid subuser
+            # Get materials with details and locations if valid user
             if is_valid:
                 result['materials'] = self._get_materials_with_details(channel)
                 location_data = self._get_user_locations_with_tree(channel, validated_user)
@@ -1611,7 +1587,7 @@ class InputChannelService:
     def get_all_materials_for_picker(
         self,
         hash_value: str,
-        subuser: str
+        qr_name: str
     ) -> Dict[str, Any]:
         """
         Get all materials, categories, and main_materials for the material picker.
@@ -1630,15 +1606,18 @@ class InputChannelService:
         if not channel:
             return {'success': False, 'message': 'Input channel not found', 'materials': [], 'categories': [], 'main_materials': []}
 
-        # Validate subuser
-        subuser_names = channel.subuser_names or []
-        is_valid = subuser in subuser_names
-        if not is_valid:
-            validated_user = self._validate_organization_member(channel.organization_id, subuser)
-            is_valid = validated_user is not None
+        # Validate user by qr_name within the channel's organization
+        validated_user = self.db.query(UserLocation).filter(
+            and_(
+                UserLocation.qr_name == qr_name,
+                UserLocation.organization_id == channel.organization_id,
+                UserLocation.is_active == True,
+                UserLocation.deleted_date.is_(None)
+            )
+        ).first()
 
-        if not is_valid:
-            return {'success': False, 'message': 'Invalid subuser', 'materials': [], 'categories': [], 'main_materials': []}
+        if not validated_user:
+            return {'success': False, 'message': 'Invalid qr_name', 'materials': [], 'categories': [], 'main_materials': []}
 
         # Get all active materials (global + organization-specific)
         materials = self.db.query(Material).filter(
@@ -1712,7 +1691,7 @@ class InputChannelService:
     def get_location_materials(
         self,
         hash_value: str,
-        subuser: str,
+        qr_name: str,
         location_id: int
     ) -> Dict[str, Any]:
         """
@@ -1736,15 +1715,18 @@ class InputChannelService:
         if not channel:
             return {'success': False, 'message': 'Input channel not found'}
 
-        # Validate subuser
-        subuser_names = channel.subuser_names or []
-        is_valid = subuser in subuser_names
-        if not is_valid:
-            validated_user = self._validate_organization_member(channel.organization_id, subuser)
-            is_valid = validated_user is not None
+        # Validate user by qr_name within the channel's organization
+        validated_user = self.db.query(UserLocation).filter(
+            and_(
+                UserLocation.qr_name == qr_name,
+                UserLocation.organization_id == channel.organization_id,
+                UserLocation.is_active == True,
+                UserLocation.deleted_date.is_(None)
+            )
+        ).first()
 
-        if not is_valid:
-            return {'success': False, 'message': 'Invalid subuser'}
+        if not validated_user:
+            return {'success': False, 'message': 'Invalid qr_name'}
 
         # Get the organization setup to access root_nodes tree
         org_setup = self.db.query(OrganizationSetup).filter(
@@ -1823,20 +1805,26 @@ class InputChannelService:
 
         materials = material_query.all()
 
-        # Get categories and main materials (always return all for filtering UI)
+        # Collect IDs from the filtered materials to scope categories and main_materials
+        matched_category_ids = {mat.category_id for mat in materials if mat.category_id}
+        matched_main_material_ids = {mat.main_material_id for mat in materials if mat.main_material_id}
+
+        # Get only categories and main_materials that appear in the filtered materials
         categories = self.db.query(MaterialCategory).filter(
             and_(
                 MaterialCategory.is_active == True,
-                MaterialCategory.deleted_date.is_(None)
+                MaterialCategory.deleted_date.is_(None),
+                MaterialCategory.id.in_(matched_category_ids)
             )
-        ).order_by(MaterialCategory.name_th).all()
+        ).order_by(MaterialCategory.name_th).all() if matched_category_ids else []
 
         main_materials = self.db.query(MainMaterial).filter(
             and_(
                 MainMaterial.is_active == True,
-                MainMaterial.deleted_date.is_(None)
+                MainMaterial.deleted_date.is_(None),
+                MainMaterial.id.in_(matched_main_material_ids)
             )
-        ).order_by(MainMaterial.display_order).all()
+        ).order_by(MainMaterial.display_order).all() if matched_main_material_ids else []
 
         # Serialize
         materials_data = [{

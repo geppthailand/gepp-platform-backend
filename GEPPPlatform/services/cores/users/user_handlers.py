@@ -125,9 +125,9 @@ def handle_user_routes(event: Dict[str, Any], data: Dict[str, Any], **params) ->
         return handle_regenerate_input_channel(db_session, user_id, current_user_organization_id)
 
     elif '/api/users/' in path and '/input-channel' in path and method == 'GET':
-        # Get input channel: /api/users/{qr_name}/input-channel
-        qr_name = path.split('/users/')[1].split('/')[0]
-        return handle_get_input_channel(db_session, qr_name)
+        # Get input channel: /api/users/{user_id}/input-channel
+        user_id = path.split('/users/')[1].split('/')[0]
+        return handle_get_input_channel(db_session, user_id)
 
     elif '/api/users/' in path and '/input-channel' in path and method == 'POST':
         # Create input channel: /api/users/{user_id}/input-channel
@@ -1673,13 +1673,13 @@ def handle_get_profile_upload_presigned_url(
 
 
 # Input Channel Handlers
-def handle_get_input_channel(db_session, qr_name: str) -> Dict[str, Any]:
-    """Handle GET /api/users/{qr_name}/input-channel - Get input channel by qr_name"""
+def handle_get_input_channel(db_session, user_id: str) -> Dict[str, Any]:
+    """Handle GET /api/users/{user_id}/input-channel - Get input channel"""
     try:
         from .input_channel_service import InputChannelService
         service = InputChannelService(db_session)
 
-        result = service.get_input_channel(qr_name)
+        result = service.get_input_channel(int(user_id))
         if not result:
             return {'channel': None, 'message': 'No input channel found'}
 

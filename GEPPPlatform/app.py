@@ -279,9 +279,9 @@ def main(event, context):
 
                 if is_location_materials and http_method == 'GET':
                     # Get allowed materials for a specific location (hierarchy-based filtering)
-                    subuser = query_params.get('subuser', '')
+                    qr_name = query_params.get('qr_name', '')
                     location_id = int(query_params.get('location_id', '0'))
-                    loc_materials_result = input_service.get_location_materials(hash_value, subuser, location_id)
+                    loc_materials_result = input_service.get_location_materials(hash_value, qr_name, location_id)
                     results = {
                         "success": loc_materials_result.get('success', False),
                         "data": {
@@ -295,8 +295,8 @@ def main(event, context):
                         results["message"] = loc_materials_result.get('message', '')
                 elif is_materials and http_method == 'GET':
                     # Get all materials for the material picker (with channel-based auth)
-                    subuser = query_params.get('subuser', '')
-                    materials_result = input_service.get_all_materials_for_picker(hash_value, subuser)
+                    qr_name = query_params.get('qr_name', '')
+                    materials_result = input_service.get_all_materials_for_picker(hash_value, qr_name)
                     results = {
                         "success": materials_result.get('success', False),
                         "data": {
@@ -358,9 +358,8 @@ def main(event, context):
                         }
                 else:
                     # Get channel data
-                    subuser = query_params.get('subuser')
-                    display_name = query_params.get('display_name')
-                    channel_data = input_service.get_input_channel_by_hash(hash_value, subuser, display_name)
+                    qr_name = query_params.get('qr_name')
+                    channel_data = input_service.get_input_channel_by_hash(hash_value, qr_name)
 
                     if channel_data:
                         results = {
@@ -378,13 +377,13 @@ def main(event, context):
             elif path.startswith('/api/materials') and http_method == 'GET':
                 # Allow materials access with channel_hash + subuser authentication
                 channel_hash = query_params.get('channel_hash')
-                subuser = query_params.get('subuser')
+                qr_name = query_params.get('qr_name')
 
-                if channel_hash and subuser:
-                    # Validate channel and subuser
+                if channel_hash and qr_name:
+                    # Validate channel and user by qr_name
                     from GEPPPlatform.services.cores.users.input_channel_service import InputChannelService
                     input_service = InputChannelService(session)
-                    channel_data = input_service.get_input_channel_by_hash(channel_hash, subuser)
+                    channel_data = input_service.get_input_channel_by_hash(channel_hash, qr_name)
 
                     if channel_data and channel_data.get('subUser', {}).get('isValid'):
                         # Valid channel access - serve materials data without token
