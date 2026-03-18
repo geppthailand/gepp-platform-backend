@@ -1697,3 +1697,166 @@ class InputChannelService:
             'categories': categories_data,
             'main_materials': main_materials_data
         }
+
+    def get_location_materials(
+        self,
+        hash_value: str,
+        subuser: str,
+        location_id: int
+    ) -> Dict[str, Any]:
+        """
+        Get allowed materials for a specific location based on tree hierarchy.
+
+        Logic: trace up from the selected location through the organization tree.
+        Use the nearest ancestor (including self) that has materials configured.
+        If no ancestor has materials set, return all materials.
+        """
+        from GEPPPlatform.models.cores.references import Material, MaterialCategory, MainMaterial
+        from GEPPPlatform.models.subscriptions.organizations import OrganizationSetup
+
+        channel = self.db.query(UserInputChannel).filter(
+            and_(
+                UserInputChannel.hash == hash_value,
+                UserInputChannel.is_active == True,
+                UserInputChannel.deleted_date.is_(None)
+            )
+        ).first()
+
+        if not channel:
+            return {'success': False, 'message': 'Input channel not found'}
+
+        # Validate subuser
+        subuser_names = channel.subuser_names or []
+        is_valid = subuser in subuser_names
+        if not is_valid:
+            validated_user = self._validate_organization_member(channel.organization_id, subuser)
+            is_valid = validated_user is not None
+
+        if not is_valid:
+            return {'success': False, 'message': 'Invalid subuser'}
+
+        # Get the organization setup to access root_nodes tree
+        org_setup = self.db.query(OrganizationSetup).filter(
+            and_(
+                OrganizationSetup.organization_id == channel.organization_id,
+                OrganizationSetup.is_active == True,
+                OrganizationSetup.deleted_date.is_(None)
+            )
+        ).order_by(OrganizationSetup.created_date.desc()).first()
+
+        if not org_setup or not org_setup.root_nodes:
+            return {'success': False, 'message': 'Organization setup not found'}
+
+        # Build parent map from root_nodes tree
+        root_nodes = org_setup.root_nodes
+        if not isinstance(root_nodes, list):
+            root_nodes = [root_nodes] if root_nodes else []
+
+        parent_map: Dict[int, int] = {}
+
+        def build_parent_map(nodes, parent_id=None):
+            for node in nodes:
+                node_id = node.get('nodeId')
+                if node_id is not None:
+                    node_id = int(node_id) if isinstance(node_id, str) else node_id
+                    if parent_id is not None:
+                        parent_map[node_id] = parent_id
+                    children = node.get('children', [])
+                    if children:
+                        build_parent_map(children, node_id)
+
+        build_parent_map(root_nodes, None)
+
+        # Trace up from location_id to find nearest ancestor with materials
+        # Collect the chain: self -> parent -> grandparent -> ... -> root
+        chain = []
+        current_id = location_id
+        visited = set()
+        while current_id is not None and current_id not in visited:
+            visited.add(current_id)
+            chain.append(current_id)
+            current_id = parent_map.get(current_id)
+
+        # Query user_locations for all nodes in the chain to check their materials
+        if chain:
+            chain_locations = self.db.query(UserLocation).filter(
+                UserLocation.id.in_(chain)
+            ).all()
+            chain_map = {loc.id: loc for loc in chain_locations}
+        else:
+            chain_map = {}
+
+        # Find the nearest node (starting from self) that has materials set
+        allowed_material_ids = None
+        for node_id in chain:
+            loc = chain_map.get(node_id)
+            if loc and loc.materials and isinstance(loc.materials, list) and len(loc.materials) > 0:
+                allowed_material_ids = [int(mid) for mid in loc.materials]
+                break
+
+        # Get all active materials (global + organization-specific)
+        material_query = self.db.query(Material).filter(
+            and_(
+                Material.is_active == True,
+                Material.deleted_date.is_(None),
+                or_(
+                    Material.is_global == True,
+                    Material.organization_id == channel.organization_id
+                )
+            )
+        )
+
+        # If we found materials configured in the hierarchy, filter by those IDs
+        if allowed_material_ids is not None:
+            material_query = material_query.filter(Material.id.in_(allowed_material_ids))
+
+        materials = material_query.all()
+
+        # Get categories and main materials (always return all for filtering UI)
+        categories = self.db.query(MaterialCategory).filter(
+            and_(
+                MaterialCategory.is_active == True,
+                MaterialCategory.deleted_date.is_(None)
+            )
+        ).order_by(MaterialCategory.name_th).all()
+
+        main_materials = self.db.query(MainMaterial).filter(
+            and_(
+                MainMaterial.is_active == True,
+                MainMaterial.deleted_date.is_(None)
+            )
+        ).order_by(MainMaterial.display_order).all()
+
+        # Serialize
+        materials_data = [{
+            'id': mat.id,
+            'name_th': mat.name_th,
+            'name_en': mat.name_en,
+            'unit_name_th': mat.unit_name_th,
+            'unit_name_en': mat.unit_name_en,
+            'color': mat.color,
+            'category_id': mat.category_id,
+            'main_material_id': mat.main_material_id,
+        } for mat in materials]
+
+        categories_data = [{
+            'id': cat.id,
+            'name_th': cat.name_th,
+            'name_en': cat.name_en,
+            'color': cat.color,
+        } for cat in categories]
+
+        main_materials_data = [{
+            'id': mm.id,
+            'name_th': mm.name_th,
+            'name_en': mm.name_en,
+            'color': mm.color,
+        } for mm in main_materials]
+
+        return {
+            'success': True,
+            'materials': materials_data,
+            'categories': categories_data,
+            'main_materials': main_materials_data,
+            'is_filtered': allowed_material_ids is not None,
+        }
