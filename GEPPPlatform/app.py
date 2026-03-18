@@ -267,16 +267,33 @@ def main(event, context):
                 # Used for QR code mobile input
                 from GEPPPlatform.services.cores.users.input_channel_service import InputChannelService
 
-                # Extract hash from path: /api/input-channel/{hash} or /api/input-channel/{hash}/submit or /api/input-channel/{hash}/preferences or /api/input-channel/{hash}/materials
+                # Extract hash from path: /api/input-channel/{hash} or /api/input-channel/{hash}/submit or /api/input-channel/{hash}/preferences or /api/input-channel/{hash}/materials or /api/input-channel/{hash}/location-materials
                 path_parts = path.split('/api/input-channel/')[1].split('/')
                 hash_value = path_parts[0].split('?')[0]
                 is_submit = len(path_parts) > 1 and path_parts[1] == 'submit'
                 is_preferences = len(path_parts) > 1 and path_parts[1].startswith('preferences')
-                is_materials = len(path_parts) > 1 and path_parts[1].startswith('materials')
+                is_location_materials = len(path_parts) > 1 and path_parts[1] == 'location-materials'
+                is_materials = len(path_parts) > 1 and path_parts[1] == 'materials'
 
                 input_service = InputChannelService(session)
 
-                if is_materials and http_method == 'GET':
+                if is_location_materials and http_method == 'GET':
+                    # Get allowed materials for a specific location (hierarchy-based filtering)
+                    subuser = query_params.get('subuser', '')
+                    location_id = int(query_params.get('location_id', '0'))
+                    loc_materials_result = input_service.get_location_materials(hash_value, subuser, location_id)
+                    results = {
+                        "success": loc_materials_result.get('success', False),
+                        "data": {
+                            "materials": loc_materials_result.get('materials', []),
+                            "categories": loc_materials_result.get('categories', []),
+                            "main_materials": loc_materials_result.get('main_materials', []),
+                            "is_filtered": loc_materials_result.get('is_filtered', False),
+                        }
+                    }
+                    if not loc_materials_result.get('success'):
+                        results["message"] = loc_materials_result.get('message', '')
+                elif is_materials and http_method == 'GET':
                     # Get all materials for the material picker (with channel-based auth)
                     subuser = query_params.get('subuser', '')
                     materials_result = input_service.get_all_materials_for_picker(hash_value, subuser)
