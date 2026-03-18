@@ -661,6 +661,7 @@ class UserService:
             'organization_id': user.organization_id,
             'parent_user_id': user.parent_user_id,
             'organization_level': user.organization_level,
+            'qr_name': user.qr_name,
         }
 
         # Add organization role information if available

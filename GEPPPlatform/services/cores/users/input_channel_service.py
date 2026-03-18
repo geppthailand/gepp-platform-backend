@@ -466,11 +466,22 @@ class InputChannelService:
 
     # ==================== Legacy User-based Methods (kept for backward compatibility) ====================
 
-    def get_input_channel(self, user_location_id: int) -> Optional[Dict[str, Any]]:
-        """Get input channel for a specific user location"""
+    def get_input_channel(self, qr_name: str) -> Optional[Dict[str, Any]]:
+        """Get input channel for a user location identified by qr_name"""
+        user_location = self.db.query(UserLocation).filter(
+            and_(
+                UserLocation.qr_name == qr_name,
+                UserLocation.is_active == True,
+                UserLocation.deleted_date.is_(None)
+            )
+        ).first()
+
+        if not user_location:
+            return None
+
         channel = self.db.query(UserInputChannel).filter(
             and_(
-                UserInputChannel.user_location_id == user_location_id,
+                UserInputChannel.user_location_id == user_location.id,
                 UserInputChannel.is_active == True,
                 UserInputChannel.deleted_date.is_(None)
             )

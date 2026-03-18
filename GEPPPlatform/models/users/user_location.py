@@ -115,6 +115,9 @@ class UserLocation(Base, BaseModel):
     currency_id = Column(ForeignKey('currencies.id'), nullable=False, default=12)
     phone_code_id = Column(ForeignKey('phone_number_country_code.id'))
     
+    # QR code name for input channel lookup
+    qr_name = Column(String(255))
+
     # Additional fields
     note = Column(Text)
     expired_date = Column(DateTime)
