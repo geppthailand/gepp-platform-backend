@@ -1084,6 +1084,12 @@ def handle_update_location(
                         tenant.user_locations = current_locations + [location_id_int]
                         flag_modified(tenant, 'user_locations')
 
+        # Handle materials assignment - store array of material IDs in materials JSONB column
+        if 'material_ids' in data:
+            new_material_ids = data['material_ids'] or []
+            location.materials = [int(mid) for mid in new_material_ids]
+            flag_modified(location, 'materials')
+
         location.updated_date = datetime.utcnow()
 
         db_session.flush()
@@ -1154,6 +1160,7 @@ def handle_update_location(
                     }
                     for tenant in tenants
                 ],
+                'materials': location.materials or [],
                 'updated_date': location.updated_date.isoformat() if location.updated_date else None
             },
             'message': 'Location updated successfully'

@@ -872,6 +872,7 @@ class UserService:
                 # Legacy and additional fields
                 'sub_users': location.sub_users,
                 'members': location.members,  # User assignments for this location
+                'materials': location.materials or [],  # Material IDs assigned to this location
                 'locale': location.locale,
                 'nationality_id': location.nationality_id,
                 'currency_id': location.currency_id,
