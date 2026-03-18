@@ -3,7 +3,7 @@ High-level user management service
 """
 
 from typing import List, Optional, Dict, Any, Tuple
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import text
 from datetime import datetime, timedelta
 import secrets
@@ -12,6 +12,7 @@ import string
 from .user_crud import UserCRUD
 from .user_permissions import UserPermissionService
 from ....models.users.user_location import UserLocation
+from ....models.subscriptions.organizations import Organization
 from ....models.users.user_related import UserRoleEnum
 from ....models.users.user_location_materials import UserLocationMaterial
 from ....models.cores.references import Material
@@ -100,6 +101,28 @@ class UserService:
         except Exception as e:
             # Re-raise the exception to be handled by the caller
             raise e
+
+    def is_admin_or_org_owner(self, user_id: int, organization_id: Optional[int]) -> bool:
+        """Return True if the user has admin role or is the organization owner (and can see all org users)."""
+        if not organization_id or not user_id:
+            return False
+        # Check org owner
+        org = self.db.query(Organization).filter(
+            Organization.id == organization_id,
+            Organization.owner_id == user_id,
+        ).first()
+        if org:
+            return True
+        # Check admin role (organization_roles.key == 'admin')
+        user = self.db.query(UserLocation).options(
+            joinedload(UserLocation.organization_role),
+        ).filter(
+            UserLocation.id == user_id,
+            UserLocation.organization_id == organization_id,
+        ).first()
+        if user and user.organization_role and getattr(user.organization_role, 'key', None) == 'admin':
+            return True
+        return False
 
     def get_users_with_filters(
         self,
