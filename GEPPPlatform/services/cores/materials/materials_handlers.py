@@ -64,6 +64,11 @@ def handle_materials_routes(event: Dict[str, Any], **common_params) -> Dict[str,
                 categories_service, path, method, query_params, path_params, data, current_user
             )
 
+        elif '/api/materials/location-materials' in path:
+            if method == 'GET':
+                return handle_get_location_materials(db_session, current_user)
+            raise APIException("Method not allowed", status_code=405, error_code="METHOD_NOT_ALLOWED")
+
         elif '/api/materials/main-materials' in path:
             return handle_main_materials_routes(
                 main_materials_service, path, method, query_params, path_params, data, current_user
@@ -419,3 +424,129 @@ def handle_material_categories_routes(service: MaterialCategoriesService, path: 
             return service.delete_material_category(category_id, soft_delete)
 
     raise APIException("Route not found", status_code=404, error_code="ROUTE_NOT_FOUND")
+
+
+def handle_get_location_materials(db_session, current_user: Dict) -> Dict[str, Any]:
+    """Handle GET /api/materials/location-materials
+    Returns all materials available to the current user based on:
+    1. Locations where the user is a member
+    2. All descendant locations of those locations (via org tree)
+    3. Union of material IDs stored in those locations' `materials` JSONB column
+    """
+    from GEPPPlatform.models.users.user_location import UserLocation
+    from GEPPPlatform.models.cores.references import Material
+    from GEPPPlatform.models.subscriptions.organizations import OrganizationSetup
+    from sqlalchemy import and_, or_
+
+    user_id = current_user.get('user_id')
+    organization_id = current_user.get('organization_id')
+
+    if not user_id or not organization_id:
+        raise ValidationException('User context is required')
+
+    uid_int = int(user_id)
+    uid_str = str(user_id)
+
+    # Step 1: Find all locations in the org that have the user as a member
+    all_locations = db_session.query(UserLocation).filter(
+        and_(
+            UserLocation.organization_id == organization_id,
+            UserLocation.is_location == True,
+            UserLocation.is_active == True,
+            UserLocation.deleted_date.is_(None)
+        )
+    ).all()
+
+    def is_member_of(members_list):
+        if not members_list:
+            return False
+        for m in members_list:
+            if isinstance(m, dict):
+                mid = m.get('user_id') or m.get('id')
+                if mid is not None and (mid == uid_int or str(mid) == uid_str):
+                    return True
+            else:
+                if m == uid_int or str(m) == uid_str:
+                    return True
+        return False
+
+    member_loc_ids = {loc.id for loc in all_locations if is_member_of(loc.members)}
+
+    # Step 2: Walk the org tree to collect member locations + all their descendants
+    org_setup = db_session.query(OrganizationSetup).filter(
+        and_(
+            OrganizationSetup.organization_id == organization_id,
+            OrganizationSetup.is_active == True,
+            OrganizationSetup.deleted_date.is_(None)
+        )
+    ).order_by(OrganizationSetup.created_date.desc()).first()
+
+    relevant_ids = set(member_loc_ids)
+
+    if org_setup and org_setup.root_nodes and member_loc_ids:
+        root_nodes = org_setup.root_nodes
+        if not isinstance(root_nodes, list):
+            root_nodes = [root_nodes] if root_nodes else []
+
+        def collect_descendants(nodes, ids_set):
+            for node in nodes:
+                nid = int(node.get('nodeId', 0))
+                ids_set.add(nid)
+                children = node.get('children', [])
+                if children:
+                    collect_descendants(children, ids_set)
+
+        def walk_tree(nodes):
+            for node in nodes:
+                nid = int(node.get('nodeId', 0))
+                children = node.get('children', [])
+                if nid in member_loc_ids and children:
+                    collect_descendants(children, relevant_ids)
+                elif children:
+                    walk_tree(children)
+
+        walk_tree(root_nodes)
+
+    # Step 3: Collect all material IDs from relevant locations
+    loc_map = {loc.id: loc for loc in all_locations}
+    material_ids = set()
+    for loc_id in relevant_ids:
+        loc = loc_map.get(loc_id)
+        if loc and loc.materials and isinstance(loc.materials, list):
+            for mid in loc.materials:
+                try:
+                    material_ids.add(int(mid))
+                except (ValueError, TypeError):
+                    pass
+
+    # Step 4: Fetch materials — if no IDs configured, return all org-accessible materials
+    query = db_session.query(Material).filter(
+        and_(
+            Material.is_active == True,
+            Material.deleted_date.is_(None),
+            or_(
+                Material.is_global == True,
+                Material.organization_id == organization_id
+            )
+        )
+    )
+
+    if material_ids:
+        query = query.filter(Material.id.in_(material_ids))
+
+    total_count = query.count()
+    materials = query.order_by(Material.name_th).all()
+
+    service = MaterialsService(db_session)
+
+    return {
+        'data': [service._serialize_material(mat) for mat in materials],
+        'pagination': {
+            'page': 1,
+            'page_size': total_count,
+            'total': total_count,
+            'pages': 1,
+            'has_next': False,
+            'has_prev': False,
+        },
+    }
