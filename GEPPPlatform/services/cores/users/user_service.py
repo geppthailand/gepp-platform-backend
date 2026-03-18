@@ -130,7 +130,8 @@ class UserService:
         page: int = 1,
         page_size: int = 20,
         sort_by: str = 'created_date',
-        sort_order: str = 'desc'
+        sort_order: str = 'desc',
+        include_sensitive: bool = True
     ) -> Dict[str, Any]:
         """
         Get users with enhanced filtering and metadata
@@ -147,7 +148,7 @@ class UserService:
         aggregations = self._get_user_aggregations(filters)
 
         return {
-            'data': [self._serialize_user(user) for user in users],
+            'data': [self._serialize_user(user, include_sensitive=include_sensitive) for user in users],
             'pagination': {
                 'page': page,
                 'page_size': page_size,
@@ -633,10 +634,12 @@ class UserService:
         # For now, return None to use system defaults
         return None
 
-    def _serialize_user(self, user: UserLocation, include_sensitive: bool = False) -> Dict[str, Any]:
-        """Serialize user for API response"""
+    def _serialize_user(self, user: UserLocation, include_sensitive: bool = True) -> Dict[str, Any]:
+        """Serialize user for API response.
+        When include_sensitive=False, email, qr_name and id are omitted (non-admin/non-owner view).
+        """
         data = {
-            'id': user.id,
+            'id': user.id if include_sensitive else None,
             'is_user': user.is_user,
             'is_location': user.is_location,
             'display_name': user.display_name,
@@ -644,7 +647,7 @@ class UserService:
             'name_th': user.name_th,
             'first_name': user.first_name,
             'last_name': user.last_name,
-            'email': user.email,
+            'email': user.email if include_sensitive else None,
             'phone': user.phone,
             'username': user.username,
             'platform': user.platform.value if user.platform else None,
@@ -661,7 +664,7 @@ class UserService:
             'organization_id': user.organization_id,
             'parent_user_id': user.parent_user_id,
             'organization_level': user.organization_level,
-            'qr_name': user.qr_name,
+            'qr_name': user.qr_name if include_sensitive else None,
         }
 
         # Add organization role information if available

@@ -330,6 +330,7 @@ def handle_list_users(user_service: UserService, query_params: Dict[str, Any], c
                 page_size=page_size,
                 sort_by=sort_by,
                 sort_order=sort_order,
+                include_sensitive=False,
             )
             return result
 
@@ -393,7 +394,8 @@ def handle_list_users(user_service: UserService, query_params: Dict[str, Any], c
             page=page,
             page_size=page_size,
             sort_by=sort_by,
-            sort_order=sort_order
+            sort_order=sort_order,
+            include_sensitive=can_see_all
         )
 
         return result
