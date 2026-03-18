@@ -195,6 +195,11 @@ def handle_user_routes(event: Dict[str, Any], data: Dict[str, Any], **params) ->
         location_id = path.split('/locations/')[1].split('/')[0]
         return handle_check_location_dependencies(db_session, location_id, current_user_organization_id)
 
+    elif '/api/locations/' in path and '/allowed-materials' in path and method == 'GET':
+        # Get allowed materials for a location (hierarchy-based): /api/locations/{location_id}/allowed-materials
+        location_id = path.split('/locations/')[1].split('/')[0]
+        return handle_get_location_allowed_materials(db_session, location_id, current_user_organization_id)
+
     elif '/api/locations/' in path and '/migrate-transactions' in path and method == 'POST':
         # Migrate transactions to new location: /api/locations/{location_id}/migrate-transactions
         location_id = path.split('/locations/')[1].split('/')[0]
@@ -1252,6 +1257,124 @@ def handle_update_location(
     except Exception as e:
         db_session.rollback()
         raise APIException(f'Failed to update location: {str(e)}')
+
+
+def handle_get_location_allowed_materials(
+    db_session,
+    location_id: str,
+    organization_id: int
+) -> Dict[str, Any]:
+    """
+    Handle GET /api/locations/{location_id}/allowed-materials
+    Trace up the organization tree from this location to find the nearest ancestor
+    with materials configured. If none found, return all materials (unfiltered).
+    """
+    try:
+        from GEPPPlatform.models.users.user_location import UserLocation
+        from GEPPPlatform.models.subscriptions.organizations import OrganizationSetup
+        from GEPPPlatform.models.cores.references import Material, MaterialCategory, MainMaterial
+        from sqlalchemy import and_, or_
+
+        loc_id = int(location_id)
+
+        # Get organization setup for the tree structure
+        org_setup = db_session.query(OrganizationSetup).filter(
+            and_(
+                OrganizationSetup.organization_id == organization_id,
+                OrganizationSetup.is_active == True,
+                OrganizationSetup.deleted_date.is_(None)
+            )
+        ).order_by(OrganizationSetup.created_date.desc()).first()
+
+        allowed_material_ids = None
+
+        if org_setup and org_setup.root_nodes:
+            root_nodes = org_setup.root_nodes
+            if not isinstance(root_nodes, list):
+                root_nodes = [root_nodes] if root_nodes else []
+
+            # Build parent map from tree
+            parent_map = {}
+
+            def build_parent_map(nodes, parent_id=None):
+                for node in nodes:
+                    node_id = node.get('nodeId')
+                    if node_id is not None:
+                        node_id = int(node_id) if isinstance(node_id, str) else node_id
+                        if parent_id is not None:
+                            parent_map[node_id] = parent_id
+                        children = node.get('children', [])
+                        if children:
+                            build_parent_map(children, node_id)
+
+            build_parent_map(root_nodes, None)
+
+            # Trace up from location_id
+            chain = []
+            current = loc_id
+            visited = set()
+            while current is not None and current not in visited:
+                visited.add(current)
+                chain.append(current)
+                current = parent_map.get(current)
+
+            # Query locations in the chain
+            if chain:
+                chain_locations = db_session.query(UserLocation).filter(
+                    UserLocation.id.in_(chain)
+                ).all()
+                chain_map = {loc.id: loc for loc in chain_locations}
+
+                # Find nearest ancestor with materials
+                for node_id in chain:
+                    loc = chain_map.get(node_id)
+                    if loc and loc.materials and isinstance(loc.materials, list) and len(loc.materials) > 0:
+                        allowed_material_ids = [int(mid) for mid in loc.materials]
+                        break
+
+        # Query materials
+        material_query = db_session.query(Material).filter(
+            and_(
+                Material.is_active == True,
+                Material.deleted_date.is_(None),
+                or_(
+                    Material.is_global == True,
+                    Material.organization_id == organization_id
+                )
+            )
+        )
+
+        if allowed_material_ids is not None:
+            material_query = material_query.filter(Material.id.in_(allowed_material_ids))
+
+        materials_list = material_query.all()
+
+        categories = db_session.query(MaterialCategory).filter(
+            and_(MaterialCategory.is_active == True, MaterialCategory.deleted_date.is_(None))
+        ).order_by(MaterialCategory.name_th).all()
+
+        main_materials = db_session.query(MainMaterial).filter(
+            and_(MainMaterial.is_active == True, MainMaterial.deleted_date.is_(None))
+        ).order_by(MainMaterial.display_order).all()
+
+        return {
+            'materials': [{
+                'id': m.id, 'name_th': m.name_th, 'name_en': m.name_en,
+                'unit_name_th': m.unit_name_th, 'unit_name_en': m.unit_name_en,
+                'color': m.color, 'category_id': m.category_id,
+                'main_material_id': m.main_material_id,
+            } for m in materials_list],
+            'categories': [{
+                'id': c.id, 'name_th': c.name_th, 'name_en': c.name_en, 'color': c.color,
+            } for c in categories],
+            'main_materials': [{
+                'id': mm.id, 'name_th': mm.name_th, 'name_en': mm.name_en, 'color': mm.color,
+            } for mm in main_materials],
+            'is_filtered': allowed_material_ids is not None,
+            'allowed_material_ids': allowed_material_ids,
+        }
+    except Exception as e:
+        raise APIException(f'Failed to get location materials: {str(e)}')
 
 
 def handle_check_location_dependencies(
