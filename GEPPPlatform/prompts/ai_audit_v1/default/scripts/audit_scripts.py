@@ -20,7 +20,7 @@ from sqlalchemy import and_
 logger = logging.getLogger(__name__)
 
 # Version marker for deployment verification
-AUDIT_SCRIPT_VERSION = '2026-03-16-v2-per-record-fix'
+AUDIT_SCRIPT_VERSION = '2026-03-19-v5-per-record-evidence-only'
 
 # Constants
 ALLOWED_TRANSACTION_METHODS = ('origin', 'qr_input')
@@ -1293,9 +1293,8 @@ def _step8b_record_level_check(
             for col in unmatched_columns
         }
 
-        # Include BOTH record-level AND tx-level evidence so each record
-        # can be individually matched against tx-level documents that
-        # failed the "ALL records must match" check in Phase A.
+        # Each record gets its OWN files + tx-level files only.
+        # A record without its own evidence should be rejected independently.
         rec_fids = record_file_ids.get(record.id, [])
         rec_evidence = [ev_by_id[fid] for fid in rec_fids if fid in ev_by_id]
         # Add tx-level evidence that isn't already in rec_evidence
@@ -1306,10 +1305,13 @@ def _step8b_record_level_check(
                 seen_fids.add(tx_ev['file_id'])
 
         if not rec_evidence:
+            print(f"[AUDIT-DEBUG] Phase B record #{record.id}: NO evidence available (rec_fids={rec_fids}, tx_evidence_count={len(tx_evidence_list)})")
             return record.id, rec_checklist, {}
 
         total_usage = {}
         record_data = _build_record_data(record, names)
+        print(f"[AUDIT-DEBUG] Phase B record #{record.id}: evidence_count={len(rec_evidence)}, evidence_file_ids={[e['file_id'] for e in rec_evidence]}, unmatched_columns={unmatched_columns}")
+        print(f"[AUDIT-DEBUG] Phase B record #{record.id}: record_data={json.dumps(record_data, ensure_ascii=False)}")
         prompt = build_record_checklist_prompt(
             record_data=record_data,
             record_evidence_list=rec_evidence,
@@ -1327,6 +1329,7 @@ def _step8b_record_level_check(
                 match_result = parsed.get('match', {})
                 found_result = parsed.get('found', {})
                 errors_result = parsed.get('errors', {})
+                print(f"[AUDIT-DEBUG] Phase B record #{record.id}: LLM response match={match_result}, found={found_result}, errors={errors_result}")
 
                 for col in unmatched_columns:
                     rec_checklist[col] = {
@@ -1451,14 +1454,31 @@ def _determine_final_status(
             col_desc = _get_column_description(col)
             rejection_errors.append(f"ไม่พบข้อมูล {col_desc} ในเอกสารแนบ")
 
-    # Also check missing docs
+    # Also check missing docs — only reject records whose column checks also failed.
+    # If a record's columns all pass (data verified from evidence), missing doc type is informational.
     missing_record_docs = doc_check.get('missing_record_docs', {})
     if missing_record_docs:
-        is_rejected = True
         for rec_id, missing_list in missing_record_docs.items():
-            for doc_info in missing_list:
-                doc_name = doc_info.get('name_th', doc_info.get('name_en', '')) if isinstance(doc_info, dict) else str(doc_info)
-                rejection_errors.append(f"ไม่พบเอกสาร '{doc_name}' สำหรับรายการ #{rec_id}")
+            # Check if this record's columns all passed in Phase B
+            rec_results = per_record_results.get(rec_id, {})
+            rec_all_columns_passed = True
+            if rec_results:
+                for col_result in rec_results.values():
+                    if not (col_result.get('match') and col_result.get('found')):
+                        rec_all_columns_passed = False
+                        break
+            else:
+                # No Phase B results — check if tx-level covers all columns
+                rec_all_columns_passed = all(
+                    tx_checklist.get(col, {}).get('match') and tx_checklist.get(col, {}).get('found')
+                    for col in checklist_columns
+                ) if checklist_columns else True
+
+            if not rec_all_columns_passed:
+                is_rejected = True
+                for doc_info in missing_list:
+                    doc_name = doc_info.get('name_th', doc_info.get('name_en', '')) if isinstance(doc_info, dict) else str(doc_info)
+                    rejection_errors.append(f"ไม่พบเอกสาร '{doc_name}' สำหรับรายการ #{rec_id}")
 
     status = 'rejected' if is_rejected else 'approved'
 
@@ -1575,15 +1595,15 @@ def _step9_compose_and_save(
     print(f"[AUDIT-DEBUG] Tx #{tx.id} Step9: per_record_results={per_record_results}")
     print(f"[AUDIT-DEBUG] Tx #{tx.id} Step9: determined_status={determined_status}, rejection_errors={rejection_errors}")
 
-    # Check if any record has no evidence files at all (neither record-level nor tx-level)
-    # tx_has_files counts ONLY tx-level files (not other records' files)
+    # Check per-record: reject records that have no evidence (no own files + no tx-level files)
     if image_data is None:
         image_data = {}
     tx_file_ids_set = set(image_data.get('transaction_file_ids', []))
     tx_has_files = any(ev['file_id'] in tx_file_ids_set for ev in classified_evidence)
     for record in records:
         record_images = record.images if hasattr(record, 'images') and record.images else []
-        if len(record_images) == 0 and not tx_has_files and checklist_columns:
+        rec_own_files = image_data.get('record_file_ids', {}).get(record.id, [])
+        if len(record_images) == 0 and len(rec_own_files) == 0 and not tx_has_files and checklist_columns:
             determined_status = 'rejected'
             rejection_errors.append(f'รายการ #{record.id} ไม่มีเอกสารแนบ')
 
@@ -1624,7 +1644,8 @@ def _step9_compose_and_save(
         rec_checklist = per_record_results.get(record.id, {})
         rec_missing = doc_check.get('missing_record_docs', {}).get(record.id, [])
 
-        # Check if record has NO evidence files at all (neither own images nor tx-level images)
+        # Check if the ENTIRE transaction has NO evidence files at all
+        # Check if THIS record has no evidence files (neither own images nor tx-level images)
         record_images = record.images if hasattr(record, 'images') and record.images else []
         rec_own_files = record_file_ids.get(record.id, [])
         rec_has_no_files = len(record_images) == 0 and len(rec_own_files) == 0 and not tx_has_files
@@ -1644,9 +1665,10 @@ def _step9_compose_and_save(
             elif result.get('found') and not result.get('match'):
                 # Evidence found but doesn't match this record → REJECT
                 rec_has_issue = True
-                print(f"[AUDIT-DEBUG]   Record #{record.id} col={col}: REJECT (found=T, match=F, error={result.get('error')})")
-                if result.get('error'):
-                    rec_errors.append(result['error'])
+                col_desc = _get_column_description(col)
+                err_msg = result.get('error') or f'{col_desc} ไม่ตรงกับเอกสาร'
+                rec_errors.append(err_msg)
+                print(f"[AUDIT-DEBUG]   Record #{record.id} col={col}: REJECT (found=T, match=F, error={err_msg})")
             elif not result.get('found'):
                 # No evidence found for this column at all (neither tx nor record level)
                 tx_col = tx_checklist.get(col, {})
@@ -1656,6 +1678,8 @@ def _step9_compose_and_save(
                 else:
                     # No evidence anywhere → missing evidence
                     rec_has_issue = True
+                    col_desc = _get_column_description(col)
+                    rec_errors.append(f'ไม่พบข้อมูล {col_desc} ในเอกสารแนบ')
                     print(f"[AUDIT-DEBUG]   Record #{record.id} col={col}: REJECT (no evidence anywhere)")
 
         # Also check columns that were NOT in rec_checklist (Phase B skipped or returned empty)
@@ -1670,6 +1694,8 @@ def _step9_compose_and_save(
             else:
                 # Required column not verified by any phase
                 rec_has_issue = True
+                col_desc = _get_column_description(col)
+                rec_errors.append(f'ไม่พบข้อมูล {col_desc} ในเอกสารแนบ')
                 print(f"[AUDIT-DEBUG]   Record #{record.id} col={col}: REJECT (not in rec_checklist, tx-level not matched)")
 
         # Record with no evidence files must be rejected (when there are required columns)
@@ -1678,9 +1704,28 @@ def _step9_compose_and_save(
             rec_errors.append('ไม่มีเอกสารแนบสำหรับรายการนี้')
             print(f"[AUDIT-DEBUG]   Record #{record.id}: REJECT (no files at all)")
 
-        print(f"[AUDIT-DEBUG]   Record #{record.id}: final rec_has_issue={rec_has_issue}, rec_missing={rec_missing}")
+        # Safety net: if rec_has_issue but no errors were added, add a generic message
+        if rec_has_issue and not rec_errors:
+            rec_errors.append('ข้อมูลในเอกสารแนบไม่ตรงกับรายการ')
+            print(f"[AUDIT-DEBUG]   Record #{record.id}: added fallback error (rec_has_issue=True but rec_errors was empty)")
 
-        if rec_has_issue or rec_missing:
+        # Determine per-record status independently:
+        # - Column matching (rec_has_issue) is the primary check
+        # - Missing doc types (rec_missing) only reject if column checks ALSO failed
+        #   or if the record has no evidence at all. If all required columns matched
+        #   from the evidence, the record's data is verified regardless of doc type classification.
+        rec_columns_all_passed = not rec_has_issue and checklist_columns
+        if rec_missing and rec_columns_all_passed:
+            # Record has missing doc types BUT all column checks passed from evidence
+            # → data is verified, doc type mismatch is informational only
+            print(f"[AUDIT-DEBUG]   Record #{record.id}: missing docs={rec_missing} but all columns passed → APPROVED (data verified)")
+            rec_missing_for_status = []
+        else:
+            rec_missing_for_status = rec_missing
+
+        print(f"[AUDIT-DEBUG]   Record #{record.id}: final rec_has_issue={rec_has_issue}, rec_missing={rec_missing}, rec_missing_for_status={rec_missing_for_status}")
+
+        if rec_has_issue or rec_missing_for_status:
             record.ai_audit_status = 'rejected'
         else:
             # Record has no individual issues — approve it even if tx-level is rejected
@@ -1691,7 +1736,7 @@ def _step9_compose_and_save(
             'status': record.ai_audit_status,
             'checklist': rec_checklist,
             'errors': rec_errors,
-            'missing_docs': rec_missing,
+            'missing_docs': rec_missing,  # Keep original for informational display
         }
         flag_modified(record, 'ai_audit_note')
         print(f"[AUDIT-DEBUG]   Record #{record.id}: STATUS={record.ai_audit_status}")
