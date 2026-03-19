@@ -47,6 +47,9 @@ from .ai_audit_models import AiAuditRuleSet, AiAuditResponsePattern
 # Import custom API models
 from .custom import CustomApi, OrganizationCustomApi
 
+# Import ESG models
+from .esg import *
+
 # Add input_channels relationship to UserLocation
 from sqlalchemy.orm import relationship
 from .users.user_location import UserLocation
@@ -130,5 +133,11 @@ __all__ = [
     'AiAuditRuleSet', 'AiAuditResponsePattern',
     
     # Custom API models
-    'CustomApi', 'OrganizationCustomApi'
+    'CustomApi', 'OrganizationCustomApi',
+
+    # ESG models
+    'EsgOrganizationSettings', 'EsgEmissionFactor',
+    'EsgDocument', 'EsgCategory', 'EsgClassificationStatus',
+    'EsgWasteRecord', 'DataQuality', 'VerificationStatus',
+    'EsgScope3Summary', 'EsgLineMessage',
 ]
