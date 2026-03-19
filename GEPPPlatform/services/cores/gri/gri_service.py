@@ -351,14 +351,24 @@ class GriService:
             MaterialCategory.name_th
         ).all()
         
-        # Process aggregated transaction data
+        # Process aggregated transaction data (material/category as name: { nameTH, nameEN })
         aggregated_data = []
         for row in results:
-             aggregated_data.append({
+            aggregated_data.append({
                 "material_id": row.material_id,
-                "material_name": row.name_en or row.name_th,
+                "material": {
+                    "name": {
+                        "nameTH": row.name_th or "",
+                        "nameEN": row.name_en or ""
+                    }
+                },
                 "category_id": row.category_id,
-                "category_name": row.category_name_en or row.category_name_th,
+                "category": {
+                    "name": {
+                        "nameTH": row.category_name_th or "",
+                        "nameEN": row.category_name_en or ""
+                    }
+                },
                 "value": float(row.total_weight) if row.total_weight else 0.0
             })
 
@@ -558,10 +568,11 @@ class GriService:
             output_category = record.get("output_category")
             category_name = "Unknown"
             
-            # Try to get category name from enriched data
+            # Try to get category name from enriched data (name: { nameTH, nameEN })
             if isinstance(output_category, dict):
                 category_id = output_category.get("id")
-                category_name = output_category.get("name_en") or output_category.get("name_th") or "Unknown"
+                name_obj = output_category.get("name") or {}
+                category_name = name_obj.get("nameEN") or name_obj.get("nameTH") or "Unknown"
             elif output_category:
                 category_id = output_category
                 # Fetch category name from database
@@ -654,9 +665,10 @@ class GriService:
             output_category = record.get("output_category")
             category_name = "Unknown"
             
-            # Try to get category name from enriched data
+            # Try to get category name from enriched data (name: { nameTH, nameEN })
             if isinstance(output_category, dict):
-                category_name = output_category.get("name_en") or output_category.get("name_th") or "Unknown"
+                name_obj = output_category.get("name") or {}
+                category_name = name_obj.get("nameEN") or name_obj.get("nameTH") or "Unknown"
             elif output_category:
                 # Fetch category name from database
                 category = self.db.query(MaterialCategory).filter(MaterialCategory.id == output_category).first()
@@ -715,9 +727,10 @@ class GriService:
             output_category = record.get("output_category")
             category_name = "Unknown"
             
-            # Try to get category name from enriched data
+            # Try to get category name from enriched data (name: { nameTH, nameEN })
             if isinstance(output_category, dict):
-                category_name = output_category.get("name_en") or output_category.get("name_th") or "Unknown"
+                name_obj = output_category.get("name") or {}
+                category_name = name_obj.get("nameEN") or name_obj.get("nameTH") or "Unknown"
             elif output_category:
                 # Fetch category name from database
                 category = self.db.query(MaterialCategory).filter(MaterialCategory.id == output_category).first()
@@ -800,14 +813,16 @@ class GriService:
         }
 
     def _enrich_gri_1_names(self, record, serialized_data):
-        """Helper to enrich output material/category names in serialized data"""
+        """Helper to enrich output material/category with name: { nameTH, nameEN } in serialized data"""
         if record.output_material:
             material = self.db.query(Material).filter(Material.id == record.output_material).first()
             if material:
                 serialized_data['output_material'] = {
                     "id": material.id,
-                    "name_th": material.name_th,
-                    "name_en": material.name_en
+                    "name": {
+                        "nameTH": material.name_th or "",
+                        "nameEN": material.name_en or ""
+                    }
                 }
         
         if record.output_category:
@@ -815,8 +830,10 @@ class GriService:
             if category:
                 serialized_data['output_category'] = {
                     "id": category.id,
-                    "name_th": category.name_th,
-                    "name_en": category.name_en
+                    "name": {
+                        "nameTH": category.name_th or "",
+                        "nameEN": category.name_en or ""
+                    }
                 }
 
     def _serialize_gri306_1(self, record: Gri306_1) -> Dict[str, Any]:

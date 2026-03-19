@@ -2,7 +2,7 @@
 High-level user management service
 """
 
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Any, Tuple, Set
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import text
 from datetime import datetime, timedelta
@@ -123,6 +123,47 @@ class UserService:
         if user and user.organization_role and getattr(user.organization_role, 'key', None) == 'admin':
             return True
         return False
+
+    def get_visible_user_ids_for_member(self, current_user_id: int, organization_id: int) -> List[int]:
+        """
+        For a non-admin, non-owner user: return user IDs they are allowed to see —
+        all users who are members of the current user's location(s) and of those locations' descendants.
+        E.g. user in Building 1 sees everyone in Building 1 and everyone in Building 1's descendant locations.
+        If the user is not a member of any location, returns only [current_user_id].
+        """
+        setup_location_ids = self._get_setup_location_ids(organization_id)
+        if setup_location_ids is None:
+            return [current_user_id]
+        locations = self.crud.get_user_locations(
+            organization_id=organization_id,
+            location_ids=setup_location_ids,
+        )
+        if not locations:
+            return [current_user_id]
+        tiers = self._resolve_location_tiers(locations, organization_id, current_user_id)
+        if tiers['is_owner']:
+            return [current_user_id]
+        assigned_ids = tiers['assigned_ids']
+        if not assigned_ids:
+            return [current_user_id]
+        visible_user_ids: Set[int] = set()
+        for loc in locations:
+            if (loc.id if hasattr(loc, 'id') else loc.get('id')) not in assigned_ids:
+                continue
+            members = loc.members if hasattr(loc, 'members') else (loc.get('members') if isinstance(loc, dict) else []) or []
+            for m in members:
+                if isinstance(m, dict):
+                    uid = m.get('user_id') or m.get('id')
+                else:
+                    uid = m
+                if uid is not None:
+                    try:
+                        visible_user_ids.add(int(uid))
+                    except (TypeError, ValueError):
+                        pass
+        if not visible_user_ids:
+            return [current_user_id]
+        return list(visible_user_ids)
 
     def get_users_with_filters(
         self,
@@ -636,10 +677,10 @@ class UserService:
 
     def _serialize_user(self, user: UserLocation, include_sensitive: bool = True) -> Dict[str, Any]:
         """Serialize user for API response.
-        When include_sensitive=False, email, qr_name and id are omitted (non-admin/non-owner view).
+        When include_sensitive=False, only email and qr_name are omitted (id is always included for reference).
         """
         data = {
-            'id': user.id if include_sensitive else None,
+            'id': user.id,
             'is_user': user.is_user,
             'is_location': user.is_location,
             'display_name': user.display_name,
