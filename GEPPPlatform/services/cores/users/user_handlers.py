@@ -309,8 +309,15 @@ def handle_list_users(user_service: UserService, query_params: Dict[str, Any], c
             int(current_user_organization_id) if current_user_organization_id else None,
         )
         if not can_see_all and current_user_id:
-            # Non-admin, non-owner: return only this user's data
-            filters_restrict = {'user_ids': [str(current_user_id)]}
+            # Non-admin, non-owner: return users in their location(s) and those locations' descendants (members only)
+            visible_user_ids = [str(current_user_id)]
+            if current_user_organization_id:
+                visible_user_ids = [
+                    str(uid) for uid in user_service.get_visible_user_ids_for_member(
+                        int(current_user_id), int(current_user_organization_id)
+                    )
+                ]
+            filters_restrict = {'user_ids': visible_user_ids}
             if current_user_organization_id:
                 filters_restrict['organization_ids'] = [str(current_user_organization_id)]
             page = int(query_params.get('page', 1))
