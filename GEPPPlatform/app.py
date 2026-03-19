@@ -262,6 +262,21 @@ def main(event, context):
                         })
                     }
 
+            elif path == '/api/esg/line/webhook' and http_method == 'POST':
+                # Public ESG LINE webhook (no JWT required, signature verified internally)
+                from GEPPPlatform.services.esg.esg_line_service import EsgLineService
+
+                signature = event.get('headers', {}).get('x-line-signature', '')
+                raw_body = event.get('body', '{}')
+
+                with get_session() as session:
+                    line_service = EsgLineService(session)
+                    webhook_result = line_service.handle_webhook(raw_body, signature)
+                    results = {
+                        "success": True,
+                        "data": webhook_result
+                    }
+
             elif "/api/input-channel/" in path:
                 # Public input channel access (no authorization required)
                 # Used for QR code mobile input
@@ -664,6 +679,16 @@ def main(event, context):
                                 "data": rules_result
                             }
 
+                    elif "/api/esg" in path:
+                        # Handle all ESG routes (settings, documents, waste records, dashboard)
+                        from .services.esg.esg_handlers import handle_esg_routes
+
+                        esg_result = handle_esg_routes(event, data=body, **commonParams)
+                        results = {
+                            "success": True,
+                            "data": esg_result
+                        }
+
                     elif "/api/debug" in path:
                         # Handle all debug routes (development only)
                         from .services.debug.debug_handlers import handle_debug_routes
@@ -974,7 +999,7 @@ def main(event, context):
 
                     else:
                         # Handle other future modules here
-                        available_routes = ["/api/auth/*", "/api/users/*", "/api/organizations/*", "/api/materials/*", "/api/locations/*", "/api/reports/*", "/api/transactions/*", "/api/transaction_audit/*", "/api/traceability/*", "/api/audit/*", "/api/debug/*", "/api/integration/*", "/api/userapi/{api_path}/{service_path}/*", "/health"]
+                        available_routes = ["/api/auth/*", "/api/users/*", "/api/organizations/*", "/api/materials/*", "/api/locations/*", "/api/reports/*", "/api/transactions/*", "/api/transaction_audit/*", "/api/traceability/*", "/api/audit/*", "/api/esg/*", "/api/debug/*", "/api/integration/*", "/api/userapi/{api_path}/{service_path}/*", "/health"]
                         return {
                             "statusCode": 404,
                             "headers": headers,
