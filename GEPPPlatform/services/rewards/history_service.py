@@ -242,3 +242,49 @@ class HistoryService:
         ]
 
         return {"items": items, "pagination": pagination}
+
+    def get_staff_daily_stats(
+        self,
+        staff_org_user_id: int,
+        organization_id: int,
+    ) -> dict:
+        """Get aggregated stats for a staff member for today."""
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+        claims_row = (
+            self.db.query(
+                func.count(RewardPointTransaction.id).label("count"),
+                func.coalesce(func.sum(RewardPointTransaction.value), 0).label("total_weight"),
+                func.coalesce(func.sum(RewardPointTransaction.points), 0).label("total_points"),
+            )
+            .filter(
+                RewardPointTransaction.staff_id == staff_org_user_id,
+                RewardPointTransaction.organization_id == organization_id,
+                RewardPointTransaction.reference_type == "claim",
+                RewardPointTransaction.claimed_date >= today_start,
+                RewardPointTransaction.deleted_date.is_(None),
+            )
+            .first()
+        )
+
+        confirms_count = (
+            self.db.query(func.count(RewardRedemption.id))
+            .filter(
+                RewardRedemption.staff_id == staff_org_user_id,
+                RewardRedemption.organization_id == organization_id,
+                RewardRedemption.status == "completed",
+                RewardRedemption.updated_date >= today_start,
+                RewardRedemption.deleted_date.is_(None),
+            )
+            .scalar()
+        ) or 0
+
+        return {
+            "today_claims_count": claims_row.count if claims_row else 0,
+            "today_weight_total": float(claims_row.total_weight) if claims_row else 0,
+            "today_points_issued": float(claims_row.total_points) if claims_row else 0,
+            "today_confirms_count": confirms_count,
+        }

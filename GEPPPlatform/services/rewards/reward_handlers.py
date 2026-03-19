@@ -346,6 +346,13 @@ def handle_reward_routes(event: Dict[str, Any], data: Dict[str, Any], **params) 
                 per_page=int(query_params.get("per_page", 20)),
             )
 
+        if path == "/api/rewards/public/staff/daily-stats" and method == "GET":
+            svc = HistoryService(db_session)
+            return svc.get_staff_daily_stats(
+                staff_org_user_id=int(query_params.get("staff_org_user_id")),
+                organization_id=int(query_params.get("organization_id")),
+            )
+
         # No matching route
         raise NotFoundException(f"Route not found: {method} {path}")
 
