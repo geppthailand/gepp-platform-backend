@@ -4,6 +4,7 @@ Point transaction models
 
 from sqlalchemy import Column, String, ForeignKey, BigInteger, DateTime
 from sqlalchemy.types import DECIMAL
+from sqlalchemy.dialects.postgresql import JSONB
 from ..base import Base, BaseModel
 
 
@@ -23,3 +24,4 @@ class RewardPointTransaction(Base, BaseModel):
     droppoint_id = Column(BigInteger, ForeignKey('droppoints.id'), nullable=True)
     reference_type = Column(String(20), nullable=True)  # claim / redeem / adjust / expire / summary
     reference_id = Column(BigInteger, nullable=True)  # FK to source record
+    image_ids = Column(JSONB, nullable=True)  # array of file IDs from claim photo

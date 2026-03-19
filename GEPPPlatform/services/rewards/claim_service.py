@@ -1,5 +1,6 @@
 """
 Claim Service - Staff claiming points on behalf of users at droppoints
+Creates both reward point transactions AND real transactions in the main system
 """
 
 from datetime import datetime, timezone
@@ -15,7 +16,9 @@ from ...models.rewards.management import (
     RewardActivityMaterial,
 )
 from ...models.rewards.points import RewardPointTransaction
-from ...models.rewards.redemptions import OrganizationRewardUser
+from ...models.rewards.redemptions import OrganizationRewardUser, Droppoint
+from ...models.transactions.transactions import Transaction, TransactionStatus
+from ...models.transactions.transaction_records import TransactionRecord
 from ...exceptions import NotFoundException, BadRequestException
 
 
@@ -32,10 +35,12 @@ class ClaimService:
         campaign_id: int,
         items: list[dict],
         droppoint_id: int,
+        image_ids: list[int] | None = None,
     ) -> dict:
         """
         Claim points for a user.
         items = [{"activity_material_id": int, "value": float}, ...]
+        Also creates a real Transaction + TransactionRecords in the main system.
         """
         # 1. Verify campaign is active
         campaign = (
@@ -63,9 +68,33 @@ class ClaimService:
         if not dp_link:
             raise BadRequestException("Droppoint is not linked to this campaign")
 
+        # Get droppoint for origin_id mapping
+        droppoint = (
+            self.db.query(Droppoint)
+            .filter(Droppoint.id == droppoint_id)
+            .first()
+        )
+
         total_points = Decimal("0")
+        total_weight = Decimal("0")
         items_claimed = []
         now = datetime.now(timezone.utc)
+
+        # 2. Create main Transaction (method='reward')
+        transaction = Transaction(
+            transaction_method="reward",
+            status=TransactionStatus.completed,
+            organization_id=campaign.organization_id,
+            origin_id=droppoint.user_location_id if droppoint else None,
+            transaction_date=now,
+            images=image_ids or [],
+            notes=f"Reward claim - Campaign: {campaign.name}",
+            created_by_id=droppoint.user_location_id if droppoint else None,
+        )
+        self.db.add(transaction)
+        self.db.flush()
+
+        record_ids = []
 
         for item in items:
             activity_material_id = item.get("activity_material_id")
@@ -127,14 +156,31 @@ class ClaimService:
             # 2d. Calculate points
             points = claim_rule.points * value
 
-            # Get activity material for unit snapshot
+            # Get activity material for unit snapshot and material_id
             activity_mat = (
                 self.db.query(RewardActivityMaterial)
                 .filter(RewardActivityMaterial.id == activity_material_id)
                 .first()
             )
 
-            # 2e. Create point transaction
+            # 2e. Create TransactionRecord in main system
+            tx_record = TransactionRecord(
+                status="completed",
+                created_transaction_id=transaction.id,
+                transaction_type="rewards",
+                material_id=activity_mat.material_id if activity_mat else None,
+                origin_quantity=value,
+                origin_weight_kg=value,
+                unit=activity_mat.name if activity_mat else "kg",
+                created_by_id=droppoint.user_location_id if droppoint else None,
+                transaction_date=now,
+                completed_date=now,
+            )
+            self.db.add(tx_record)
+            self.db.flush()
+            record_ids.append(tx_record.id)
+
+            # 2f. Create reward point transaction
             txn = RewardPointTransaction(
                 organization_id=campaign.organization_id,
                 reward_user_id=reward_user_id,
@@ -147,19 +193,27 @@ class ClaimService:
                 staff_id=staff_org_user_id,
                 droppoint_id=droppoint_id,
                 reference_type="claim",
+                image_ids=image_ids,
             )
             self.db.add(txn)
             self.db.flush()
 
             total_points += points
+            total_weight += value
             items_claimed.append({
                 "activity_material_id": activity_material_id,
                 "value": float(value),
                 "points": float(points),
                 "transaction_id": txn.id,
+                "record_id": tx_record.id,
             })
 
-        # 3. Auto-register user in organization if not already a member
+        # 3. Update Transaction with record IDs and weight
+        transaction.transaction_records = record_ids
+        transaction.weight_kg = total_weight
+        self.db.flush()
+
+        # 4. Auto-register user in organization if not already a member
         existing_membership = (
             self.db.query(OrganizationRewardUser)
             .filter(
@@ -181,5 +235,7 @@ class ClaimService:
         return {
             "success": True,
             "total_points": float(total_points),
+            "total_weight_kg": float(total_weight),
+            "transaction_id": transaction.id,
             "items_claimed": items_claimed,
         }

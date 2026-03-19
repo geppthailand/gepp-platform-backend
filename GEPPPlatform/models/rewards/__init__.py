@@ -1,5 +1,5 @@
 """
-Rewards Module — 14 focused models for B2B2C reward system
+Rewards Module — 15 focused models for B2B2C reward system
 """
 
 from .management import (
@@ -9,7 +9,7 @@ from .management import (
 from .catalog import RewardCatalog, RewardStock
 from .points import RewardPointTransaction
 from .redemptions import (
-    RewardRedemption, RewardUser, OrganizationRewardUser,
+    RewardRedemption, RewardStaffInvite, RewardUser, OrganizationRewardUser,
     Droppoint, DroppointType
 )
 
@@ -22,6 +22,6 @@ __all__ = [
     # Points
     'RewardPointTransaction',
     # Redemptions & Users
-    'RewardRedemption', 'RewardUser', 'OrganizationRewardUser',
+    'RewardRedemption', 'RewardStaffInvite', 'RewardUser', 'OrganizationRewardUser',
     'Droppoint', 'DroppointType',
 ]

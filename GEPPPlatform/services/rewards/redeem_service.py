@@ -114,22 +114,10 @@ class RedeemService:
                 f"Insufficient points. Available: {float(available_points)}, required: {float(total_cost)}"
             )
 
-        # 4. Create stock withdrawals and redemption records
+        # 4. Create redemption records with shared group hash (NO stock withdrawal yet)
+        group_hash = uuid.uuid4().hex
         redemptions = []
         for ri in redemption_items:
-            # 4a. Withdraw stock
-            stock_record = RewardStock(
-                reward_catalog_id=ri["catalog_id"],
-                values=-ri["quantity"],
-                reward_campaign_id=campaign_id,
-                note="redemption",
-                reward_user_id=reward_user_id,
-            )
-            self.db.add(stock_record)
-            self.db.flush()
-
-            # 4b. Create redemption record
-            redemption_hash = uuid.uuid4().hex
             redemption = RewardRedemption(
                 organization_id=organization_id,
                 reward_user_id=reward_user_id,
@@ -138,8 +126,9 @@ class RedeemService:
                 points_redeemed=int(ri["item_cost"]),
                 quantity=ri["quantity"],
                 status="inprogress",
-                stock_action_id=stock_record.id,
-                hash=redemption_hash,
+                stock_action_id=None,  # stock deducted at confirm time
+                hash=uuid.uuid4().hex,  # per-item hash (backward compat)
+                redemption_group_hash=group_hash,  # shared cart hash
             )
             self.db.add(redemption)
             self.db.flush()
@@ -151,7 +140,7 @@ class RedeemService:
             )
 
             redemptions.append({
-                "hash": redemption_hash,
+                "hash": redemption.hash,
                 "catalog_name": catalog.name if catalog else None,
                 "quantity": ri["quantity"],
                 "points_cost": ri["points_cost"],
@@ -171,6 +160,7 @@ class RedeemService:
 
         return {
             "success": True,
+            "group_hash": group_hash,
             "redemptions": redemptions,
         }
 
