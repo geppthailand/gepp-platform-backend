@@ -11,7 +11,7 @@ from ...models.rewards.redemptions import (
     Droppoint,
 )
 from ...models.rewards.points import RewardPointTransaction
-from ...models.rewards.management import RewardCampaign
+from ...models.rewards.management import RewardCampaign, RewardCampaignDroppoint
 from ...exceptions import NotFoundException, BadRequestException, UnauthorizedException
 
 
@@ -147,20 +147,48 @@ class PublicRewardService:
         return profile
 
     def verify_staff(self, reward_user_id: int, droppoint_hash: str) -> dict:
-        """Verify a user is staff at the droppoint's organization."""
-        # 1. Find droppoint by hash
-        droppoint = (
-            self.db.query(Droppoint)
+        """Verify a user is staff. Tries campaign-droppoint hash first (returns campaign context),
+        then falls back to plain droppoint hash (backward compat)."""
+
+        campaign_id = None
+        campaign_name = None
+        droppoint = None
+
+        # 1. Try campaign-droppoint hash first (new QR: locks campaign + droppoint)
+        cd_link = (
+            self.db.query(RewardCampaignDroppoint)
             .filter(
-                Droppoint.hash == droppoint_hash,
-                Droppoint.deleted_date.is_(None),
+                RewardCampaignDroppoint.hash == droppoint_hash,
+                RewardCampaignDroppoint.deleted_date.is_(None),
             )
             .first()
         )
+
+        if cd_link:
+            droppoint = (
+                self.db.query(Droppoint)
+                .filter(Droppoint.id == cd_link.droppoint_id, Droppoint.deleted_date.is_(None))
+                .first()
+            )
+            campaign = (
+                self.db.query(RewardCampaign)
+                .filter(RewardCampaign.id == cd_link.campaign_id)
+                .first()
+            )
+            campaign_id = cd_link.campaign_id
+            campaign_name = campaign.name if campaign else None
+        else:
+            # 2. Fallback: plain droppoint hash (backward compat)
+            droppoint = (
+                self.db.query(Droppoint)
+                .filter(Droppoint.hash == droppoint_hash, Droppoint.deleted_date.is_(None))
+                .first()
+            )
+
         if not droppoint:
             raise NotFoundException("Droppoint not found")
 
-        # 2. Find staff membership
+        # 3. Verify staff membership
         org_user = (
             self.db.query(OrganizationRewardUser)
             .filter(
@@ -173,13 +201,17 @@ class PublicRewardService:
         )
         if not org_user:
             raise UnauthorizedException("Not a staff member")
-
         if not org_user.is_active:
             raise UnauthorizedException("Staff account is inactive")
 
-        return {
+        result = {
             "organization_id": droppoint.organization_id,
             "droppoint_id": droppoint.id,
             "droppoint_name": droppoint.name,
             "org_reward_user_id": org_user.id,
         }
+        if campaign_id:
+            result["campaign_id"] = campaign_id
+            result["campaign_name"] = campaign_name
+
+        return result

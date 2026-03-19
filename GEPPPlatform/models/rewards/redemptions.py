@@ -1,8 +1,8 @@
 """
-Redemption, user, and droppoint models
+Redemption, user, droppoint, and staff invite models
 """
 
-from sqlalchemy import Column, String, Text, ForeignKey, BigInteger, Integer
+from sqlalchemy import Column, String, Text, ForeignKey, BigInteger, Integer, DateTime
 from ..base import Base, BaseModel
 
 
@@ -19,8 +19,22 @@ class RewardRedemption(Base, BaseModel):
     status = Column(String(20), default='inprogress')  # inprogress / completed / canceled
     stock_action_id = Column(BigInteger, nullable=True)  # FK reward_stocks.id
     hash = Column(String(64), unique=True, nullable=False)
+    redemption_group_hash = Column(String(64), nullable=True)  # shared hash for cart (1 QR per cart)
     staff_id = Column(BigInteger, nullable=True)  # FK organization_reward_users.id
     note = Column(Text, nullable=True)
+
+
+class RewardStaffInvite(Base, BaseModel):
+    """One-time staff invite deep links"""
+    __tablename__ = 'reward_staff_invites'
+
+    hash = Column(String(64), unique=True, nullable=False)
+    organization_id = Column(BigInteger, ForeignKey('organizations.id'), nullable=False)
+    created_by_id = Column(BigInteger, nullable=False)  # admin user who created
+    status = Column(String(20), nullable=False, default='pending')  # pending / used / expired
+    used_by_id = Column(BigInteger, ForeignKey('reward_users.id'), nullable=True)
+    used_date = Column(DateTime(timezone=True), nullable=True)
+    expires_date = Column(DateTime(timezone=True), nullable=True)
 
 
 class RewardUser(Base, BaseModel):

@@ -2,6 +2,7 @@
 Campaign Droppoint Service - Links droppoints to campaigns
 """
 
+import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
@@ -21,6 +22,7 @@ class CampaignDroppointService:
             "campaign_id": item.campaign_id,
             "droppoint_id": item.droppoint_id,
             "tag_id": item.tag_id,
+            "hash": item.hash,  # campaign-droppoint QR hash
             "created_date": item.created_date.isoformat() if item.created_date else None,
             "updated_date": item.updated_date.isoformat() if item.updated_date else None,
         }
@@ -57,6 +59,7 @@ class CampaignDroppointService:
             campaign_id=data["campaign_id"],
             droppoint_id=data["droppoint_id"],
             tag_id=data.get("tag_id"),
+            hash=uuid.uuid4().hex,
         )
         self.db.add(item)
         self.db.flush()

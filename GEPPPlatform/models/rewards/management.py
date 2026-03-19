@@ -78,9 +78,10 @@ class RewardCampaignCatalog(Base, BaseModel):
 
 
 class RewardCampaignDroppoint(Base, BaseModel):
-    """Links droppoints to campaigns"""
+    """Links droppoints to campaigns — each pair gets a unique hash for QR check-in"""
     __tablename__ = 'reward_campaign_droppoints'
 
     campaign_id = Column(BigInteger, ForeignKey('reward_campaigns.id'), nullable=False)
     droppoint_id = Column(BigInteger, ForeignKey('droppoints.id'), nullable=False)
     tag_id = Column(BigInteger, nullable=True)  # override tag for this campaign+droppoint
+    hash = Column(String(64), unique=True, nullable=False)  # QR code hash for staff check-in
