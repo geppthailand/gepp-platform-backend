@@ -34,7 +34,7 @@ class InputChannelService:
     ) -> Optional[UserLocation]:
         """
         Validate if a user identifier belongs to an organization member.
-        User identifier can be user_id, username, display_name, or name.
+        User identifier can be user_id, username, display_name, name, or qr_name.
         If display_name is provided, also validates that it matches.
         Returns the UserLocation if valid, None otherwise.
         """
@@ -45,12 +45,13 @@ class InputChannelService:
             UserLocation.deleted_date.is_(None),
         ]
 
-        # Try to find user by various identifiers
+        # Try to find user by various identifiers (including qr_name for QR-based input)
         id_conditions = [
             UserLocation.username == user_identifier,
             UserLocation.display_name == user_identifier,
             UserLocation.name_en == user_identifier,
             UserLocation.name_th == user_identifier,
+            UserLocation.qr_name == user_identifier,
         ]
 
         # Also try numeric ID
