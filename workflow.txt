@@ -1,0 +1,17 @@
+┌─────────────────────────────────────────────────────┐
+│  1. SYNC: Pull prod data to local                   │
+│     ./sync_from_prod.sh                             │
+│     (.env = prod)  ───data───>  (.env.local = local)│
+├─────────────────────────────────────────────────────┤
+│  2. DEV: Write new migration SQL files              │
+│     migrations/20260321_100000_007_xxx.sql          │
+├─────────────────────────────────────────────────────┤
+│  3. TEST: Run migrations on local                   │
+│     ./run_local.sh              (.env.local)        │
+├─────────────────────────────────────────────────────┤
+│  4. VERIFY: Check diff between local and prod       │
+│     ./sync_from_prod.sh --diff                      │
+├─────────────────────────────────────────────────────┤
+│  5. DEPLOY: Run same migrations on prod             │
+│     ./run_migrations.sh         (.env = production) │
+└─────────────────────────────────────────────────────┘

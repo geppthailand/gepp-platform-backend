@@ -1,0 +1,13 @@
+python3.13 -m pip install \
+  --platform manylinux2014_x86_64 \
+  --target=python \
+  --implementation cp \
+  --python-version 3.13 \
+  --only-binary=:all: \
+  --upgrade \
+  --constraint constraints.txt \
+  pgvector psycopg2-binary bcrypt pyjwt sqlalchemy GeoAlchemy2 pillow \
+  langchain-core \
+  langchain-openrouter \
+  openai \
+  pyyaml

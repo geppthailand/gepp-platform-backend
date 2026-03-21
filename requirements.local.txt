@@ -1,0 +1,34 @@
+# ── Lambda Layer: platform.txt ────────────────────────
+pgvector
+psycopg2-binary>=2.9
+bcrypt
+PyJWT
+sqlalchemy>=2.0
+GeoAlchemy2
+Pillow
+langchain-core
+openai
+pyyaml
+
+# ── Lambda Layer: layer-installation.txt ──────────────
+google-cloud-firestore
+google-genai
+protobuf
+langfuse
+pika
+firebase-admin
+pymilvus
+python-dotenv
+ujson
+CacheControl
+msgpack
+
+# ── App imports ───────────────────────────────────────
+numpy
+scipy
+python-dateutil
+boto3
+reportlab
+
+# ── Local server ──────────────────────────────────────
+flask
