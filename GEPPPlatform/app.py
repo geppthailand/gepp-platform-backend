@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from time import time
 from urllib.parse import urlencode
 from urllib.request import urlopen, Request
@@ -840,7 +840,6 @@ def main(event, context):
                                     )
                                 
                                 # Check expiration
-                                from datetime import datetime, timezone
                                 if org_api.expired_date and org_api.expired_date < datetime.now(timezone.utc):
                                     raise APIException(
                                         status_code=403,

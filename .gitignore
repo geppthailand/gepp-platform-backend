@@ -1,3 +1,11 @@
 deploy_functions.zip
 */deploy_functions.zip
 *__pycache__*
+
+# Environment files with secrets
+.env
+.env.local
+.env.production
+migrations/.env
+migrations/.env.local
+.venv/
