@@ -363,10 +363,11 @@ def handle_create_organization_setup(org_service: OrganizationService, user_id: 
         if 'locations' in body:
             setup_data_dict['locations'] = body['locations']
 
-        # Create organization setup
+        # Create organization setup (pass user_id for non-owner tree merge protection)
         setup_data = org_service.create_organization_setup(
             organization_id=organization.id,
-            setup_data=setup_data_dict
+            setup_data=setup_data_dict,
+            current_user_id=user_id
         )
 
         # Convert to response DTO
@@ -408,10 +409,11 @@ def handle_update_organization_setup(org_service: OrganizationService, user_id: 
         if 'locations' in body:
             setup_data_dict['locations'] = body['locations']
 
-        # Update organization setup (creates new version)
+        # Update organization setup (creates new version, pass user_id for non-owner tree merge protection)
         setup_data = org_service.update_organization_setup(
             organization_id=organization.id,
-            setup_data=setup_data_dict
+            setup_data=setup_data_dict,
+            current_user_id=user_id
         )
 
         # Convert to response DTO
