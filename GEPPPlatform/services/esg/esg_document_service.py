@@ -9,7 +9,6 @@ import logging
 import os
 
 from ...models.esg.documents import EsgDocument
-from ...models.esg.waste_records import EsgWasteRecord
 
 logger = logging.getLogger(__name__)
 
@@ -55,10 +54,6 @@ class EsgDocumentService:
                 doc.summary = classification_result.get('summary')
                 doc.tags = classification_result.get('tags', [])
                 self.db.flush()
-
-                # Step 2: If waste document, extract waste data
-                if doc.esg_category == 'environment' and doc.esg_subcategory == 'scope3_waste':
-                    self._extract_waste_data(doc, classification_result)
         except Exception as e:
             logger.error(f"Classification failed for document {doc.id}: {str(e)}")
             doc.ai_classification_status = 'failed'
@@ -96,10 +91,6 @@ class EsgDocumentService:
                 doc.tags = classification_result.get('tags', [])
                 self.db.flush()
 
-                # Step 2: If waste document, extract waste data
-                if doc.esg_category == 'environment' and doc.esg_subcategory == 'scope3_waste':
-                    self._extract_waste_data(doc, classification_result)
-
                 return {'success': True, 'message': 'Classification completed', 'document': doc.to_dict()}
             else:
                 doc.ai_classification_status = 'failed'
@@ -127,30 +118,3 @@ class EsgDocumentService:
         except Exception as e:
             logger.error(f"AI classification error: {str(e)}")
             raise
-
-    def _extract_waste_data(self, doc: EsgDocument, classification_result: Dict[str, Any]):
-        """
-        Step 2: Extract waste data from waste-related documents
-        Creates EsgWasteRecord entries
-        """
-        try:
-            from ...prompts.esg_classify.clients.llm_client import extract_waste_data
-            from .esg_service import EsgService
-
-            waste_result = extract_waste_data(doc.file_url, doc.file_name)
-            if waste_result and waste_result.get('waste_items'):
-                esg_service = EsgService(self.db)
-                for item in waste_result['waste_items']:
-                    item['document_id'] = doc.id
-                    item['source'] = 'ai'
-                    if not item.get('record_date'):
-                        item['record_date'] = doc.document_date or datetime.utcnow().date()
-                    esg_service.create_waste_record(
-                        organization_id=doc.organization_id,
-                        data=item,
-                        created_by_id=doc.uploaded_by_id
-                    )
-        except ImportError:
-            logger.warning("ESG classify module not available for waste extraction")
-        except Exception as e:
-            logger.error(f"Waste data extraction error: {str(e)}")

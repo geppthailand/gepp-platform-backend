@@ -33,59 +33,6 @@ class UpdateEsgSettingsRequest:
 
 
 @dataclass
-class CreateWasteRecordRequest:
-    """DTO for creating a waste record"""
-    record_date: str
-    waste_type: str
-    treatment_method: str
-    weight_kg: float
-
-    # Optional
-    waste_category: Optional[str] = None
-    data_quality: str = 'estimated'
-    source: str = 'manual'
-    origin_location_id: Optional[int] = None
-    vendor_name: Optional[str] = None
-    cost: Optional[float] = None
-    currency: str = 'THB'
-    notes: Optional[str] = None
-    document_id: Optional[int] = None
-
-    def validate(self) -> List[str]:
-        errors = []
-        if not self.record_date:
-            errors.append('record_date is required')
-        if not self.waste_type:
-            errors.append('waste_type is required')
-        if not self.treatment_method:
-            errors.append('treatment_method is required')
-        if self.weight_kg is None or self.weight_kg <= 0:
-            errors.append('weight_kg must be greater than 0')
-        valid_waste_types = ['general', 'organic', 'plastic', 'paper', 'glass', 'metal', 'electronic', 'hazardous']
-        if self.waste_type and self.waste_type not in valid_waste_types:
-            errors.append(f'waste_type must be one of: {", ".join(valid_waste_types)}')
-        valid_treatments = ['landfill', 'incineration', 'recycling', 'composting', 'anaerobic_digestion']
-        if self.treatment_method and self.treatment_method not in valid_treatments:
-            errors.append(f'treatment_method must be one of: {", ".join(valid_treatments)}')
-        return errors
-
-
-@dataclass
-class BulkCreateWasteRecordsRequest:
-    """DTO for bulk creating waste records from AI extraction"""
-    document_id: int
-    records: List[Dict[str, Any]] = field(default_factory=list)
-
-    def validate(self) -> List[str]:
-        errors = []
-        if not self.document_id:
-            errors.append('document_id is required')
-        if not self.records:
-            errors.append('records list is required and must not be empty')
-        return errors
-
-
-@dataclass
 class UploadDocumentRequest:
     """DTO for document upload metadata"""
     file_name: str
