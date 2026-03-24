@@ -728,7 +728,9 @@ class UserCRUD:
             query = query.filter(UserLocation.organization_id == organization_id)
 
         # Filter by specific location IDs if provided
-        if location_ids:
+        if location_ids is not None:
+            if len(location_ids) == 0:
+                return []
             query = query.filter(UserLocation.id.in_(location_ids))
 
         # Order by created_date descending

@@ -1350,7 +1350,7 @@ class UserService:
                     if 'children' in setup.hub_node and isinstance(setup.hub_node['children'], list):
                         self._extract_node_ids(setup.hub_node['children'], location_ids)
 
-            result = list(location_ids) if location_ids else None
+            result = list(location_ids) if location_ids else []
             print(f"Organization {organization_id} setup filtering: found {len(location_ids) if location_ids else 0} location IDs: {result}")
             return result
 
