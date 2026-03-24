@@ -1282,7 +1282,7 @@ def handle_get_location_allowed_materials(
         from GEPPPlatform.models.users.user_location import UserLocation
         from GEPPPlatform.models.subscriptions.organizations import OrganizationSetup
         from GEPPPlatform.models.cores.references import Material, MaterialCategory, MainMaterial
-        from sqlalchemy import and_, or_
+        from sqlalchemy import and_, or_, text
 
         loc_id = int(location_id)
 
@@ -1358,6 +1358,27 @@ def handle_get_location_allowed_materials(
 
         materials_list = material_query.all()
 
+        # Fetch material images grouped by material_id
+        material_ids = [m.id for m in materials_list]
+        material_images_map = {}
+        if material_ids:
+            image_rows = db_session.execute(
+                text("""
+                    SELECT id, image_url, material_id, created_date
+                    FROM material_images
+                    WHERE material_id = ANY(:material_ids)
+                      AND deleted_date IS NULL
+                    ORDER BY created_date
+                """),
+                {'material_ids': material_ids}
+            ).fetchall()
+            for row in image_rows:
+                material_images_map.setdefault(row[2], []).append({
+                    'id': row[0],
+                    'image_url': row[1],
+                    'material_id': row[2],
+                })
+
         categories = db_session.query(MaterialCategory).filter(
             and_(MaterialCategory.is_active == True, MaterialCategory.deleted_date.is_(None))
         ).order_by(MaterialCategory.name_th).all()
@@ -1372,6 +1393,7 @@ def handle_get_location_allowed_materials(
                 'unit_name_th': m.unit_name_th, 'unit_name_en': m.unit_name_en,
                 'color': m.color, 'category_id': m.category_id,
                 'main_material_id': m.main_material_id,
+                'images': material_images_map.get(m.id, []),
             } for m in materials_list],
             'categories': [{
                 'id': c.id, 'name_th': c.name_th, 'name_en': c.name_en, 'color': c.color,
