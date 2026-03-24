@@ -977,6 +977,7 @@ def handle_get_locations(db_session, user_service: UserService, query_params: Di
         locations = result['data']
         ancestors = result['ancestors']
         is_owner = result['is_owner']
+        manageable_user_ids = result.get('manageable_user_ids', [])
 
         # Enrich each assigned location with tag and tenant info (id, name, start_date, end_date, members)
         def _trim_tag_or_tenant(item: Dict[str, Any]) -> Dict[str, Any]:
@@ -1008,6 +1009,7 @@ def handle_get_locations(db_session, user_service: UserService, query_params: Di
             'data': locations,
             'ancestors': ancestors,
             'is_owner': is_owner,
+            'manageable_user_ids': manageable_user_ids,
             'total': len(locations),
             'organization_id': organization_id,
             'include_all': include_all,

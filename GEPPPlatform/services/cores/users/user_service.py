@@ -196,15 +196,43 @@ class UserService:
 
         return False
 
+    def _get_created_by_descendants(self, user_id: int, organization_id: int) -> Set[int]:
+        """
+        BFS down the created_by_id chain.
+        A created B, B created C → returns {B, C}.
+        Does NOT include user_id itself. Cycle-safe via visited set.
+        """
+        descendants: Set[int] = set()
+        queue = [user_id]
+        visited: Set[int] = {user_id}
+        while queue:
+            parent_ids = queue
+            queue = []
+            children = self.db.query(UserLocation.id).filter(
+                UserLocation.created_by_id.in_(parent_ids),
+                UserLocation.organization_id == organization_id,
+                UserLocation.deleted_date.is_(None),
+            ).all()
+            for (uid,) in children:
+                if uid not in visited:
+                    visited.add(uid)
+                    descendants.add(uid)
+                    queue.append(uid)
+        return descendants
+
     def get_visible_user_ids_for_member(self, current_user_id: int, organization_id: int) -> List[int]:
         """
         For a non-owner user: return user IDs they are allowed to see:
-        1. Members of assigned locations (and descendant locations)
-        2. Users created by the current user (created_by_id = current_user_id)
+        1. Members of assigned locations (union'd with chain descendants' locations)
+        2. All users in the created_by_id chain
         """
         visible_user_ids: Set[int] = {current_user_id}
 
-        # --- 1. Members in assigned locations ---
+        # created_by chain descendants
+        chain_descendants = self._get_created_by_descendants(current_user_id, organization_id)
+        visible_user_ids |= chain_descendants
+
+        # Members in assigned locations (already union'd via _resolve_location_tiers)
         setup_location_ids = self._get_setup_location_ids(organization_id)
         if setup_location_ids is not None:
             locations = self.crud.get_user_locations(
@@ -231,23 +259,6 @@ class UserService:
                                 visible_user_ids.add(int(uid))
                             except (TypeError, ValueError):
                                 pass
-
-        # --- 2. Users in created_by_id chain (BFS: A->B->C, A sees B and C) ---
-        queue = [current_user_id]
-        visited: Set[int] = {current_user_id}
-        while queue:
-            parent_ids = queue
-            queue = []
-            children = self.db.query(UserLocation.id).filter(
-                UserLocation.created_by_id.in_(parent_ids),
-                UserLocation.organization_id == organization_id,
-                UserLocation.deleted_date.is_(None),
-            ).all()
-            for (uid,) in children:
-                if uid not in visited:
-                    visited.add(uid)
-                    visible_user_ids.add(uid)
-                    queue.append(uid)
 
         return list(visible_user_ids)
 
@@ -1096,10 +1107,19 @@ class UserService:
             loc['path'] = location_paths.get(loc['id'], '')
 
         is_owner = tiers['is_owner'] if tiers else True
+
+        # Compute manageable_user_ids for non-owner admins:
+        # users in their created_by chain that they can add/remove as members
+        manageable_user_ids: List[int] = []
+        if current_user_id and not is_owner:
+            chain = self._get_created_by_descendants(current_user_id, organization_id)
+            manageable_user_ids = sorted(chain)
+
         return {
             'data': location_data,
             'ancestors': ancestor_data,
             'is_owner': is_owner,
+            'manageable_user_ids': manageable_user_ids,
         }
 
     def get_orphan_locations(
@@ -1326,15 +1346,20 @@ class UserService:
                         return True
             return False
 
-        uid_int = current_user_id
-        uid_str = str(current_user_id)
+        # Build the set of user IDs whose membership grants visibility:
+        # current user + all created_by_id chain descendants
+        chain_user_ids = {current_user_id} | self._get_created_by_descendants(current_user_id, organization_id)
 
-        # Find which locations the user is a direct member of
+        # Find locations where ANY user in the chain is a direct member
         member_loc_ids = set()
         for loc in locations:
             loc_members = loc.members if hasattr(loc, 'members') else (loc.get('members') if isinstance(loc, dict) else [])
-            if loc_members and is_member_of(loc_members, uid_int, uid_str):
-                member_loc_ids.add(loc.id if hasattr(loc, 'id') else loc.get('id'))
+            if not loc_members:
+                continue
+            for chain_uid in chain_user_ids:
+                if is_member_of(loc_members, chain_uid, str(chain_uid)):
+                    member_loc_ids.add(loc.id if hasattr(loc, 'id') else loc.get('id'))
+                    break  # no need to check other chain users for this location
 
         if not member_loc_ids:
             return {'is_owner': False, 'assigned_ids': set(), 'ancestor_ids': set(), 'member_ids': set()}
