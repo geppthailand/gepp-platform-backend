@@ -162,7 +162,7 @@ def handle_user_routes(event: Dict[str, Any], data: Dict[str, Any], **params) ->
     elif '/api/users/' in path and method == 'GET':
         # Get user details: /api/users/{user_id}
         user_id = path.split('/users/')[1].rstrip('/')
-        return handle_get_user_details(user_service, user_id)
+        return handle_get_user_details(user_service, user_id, current_user_id, current_user_organization_id)
 
     elif '/api/users/' in path and method == 'PUT':
         # Update user: /api/users/{user_id}
@@ -172,7 +172,7 @@ def handle_user_routes(event: Dict[str, Any], data: Dict[str, Any], **params) ->
     elif '/api/users/' in path and method == 'DELETE':
         # Delete user: /api/users/{user_id}
         user_id = path.split('/users/')[1].rstrip('/')
-        return handle_delete_user(user_service, user_id, current_user_id)
+        return handle_delete_user(user_service, user_id, current_user_id, current_user_organization_id)
 
     elif '/api/users' == path and method == 'GET':
         # List users with filters (pass current_user for organization filtering)
@@ -298,54 +298,22 @@ def handle_user_routes(event: Dict[str, Any], data: Dict[str, Any], **params) ->
 
 def handle_list_users(user_service: UserService, query_params: Dict[str, Any], current_user: Dict[str, Any] = None) -> Dict[str, Any]:
     """Handle GET /api/users - List users with filtering.
-    If the user is not admin role and not org owner, only their own user data is returned.
+    - Owner: sees all users in the organization (no location filter)
+    - Admin/member: sees only users who are members of their assigned locations
     """
     try:
-        # Restrict to own data unless user is admin or org owner
         current_user_id = current_user.get('user_id') if current_user else None
         current_user_organization_id = current_user.get('organization_id') if current_user else None
-        can_see_all = user_service.is_admin_or_org_owner(
-            int(current_user_id) if current_user_id else 0,
-            int(current_user_organization_id) if current_user_organization_id else None,
-        )
-        if not can_see_all and current_user_id:
-            # Non-admin, non-owner: return users in their location(s) and those locations' descendants (members only)
-            visible_user_ids = [str(current_user_id)]
-            if current_user_organization_id:
-                visible_user_ids = [
-                    str(uid) for uid in user_service.get_visible_user_ids_for_member(
-                        int(current_user_id), int(current_user_organization_id)
-                    )
-                ]
-            filters_restrict = {'user_ids': visible_user_ids}
-            if current_user_organization_id:
-                filters_restrict['organization_ids'] = [str(current_user_organization_id)]
-            page = int(query_params.get('page', 1))
-            page_size = int(query_params.get('page_size', 20))
-            sort_by_raw = query_params.get('sort_by', 'created_date')
-            sort_field_mapping = {
-                'createdAt': 'created_date',
-                'updatedAt': 'updated_date',
-                'displayName': 'display_name',
-                'companyName': 'company_name'
-            }
-            sort_by = sort_field_mapping.get(sort_by_raw, sort_by_raw)
-            sort_order = query_params.get('sort_order', 'desc')
-            result = user_service.get_users_with_filters(
-                filters=filters_restrict,
-                page=page,
-                page_size=page_size,
-                sort_by=sort_by,
-                sort_order=sort_order,
-                include_sensitive=False,
-            )
-            return result
 
-        # Parse query parameters
+        uid_int = int(current_user_id) if current_user_id else 0
+        org_id = int(current_user_organization_id) if current_user_organization_id else None
+
+        is_owner = user_service.is_org_owner(uid_int, org_id)
+        is_admin = user_service.is_admin(uid_int, org_id) if not is_owner else False
+
+        # Parse common query parameters
         page = int(query_params.get('page', 1))
         page_size = int(query_params.get('page_size', 20))
-
-        # Map frontend field names to database field names
         sort_by_raw = query_params.get('sort_by', 'created_date')
         sort_field_mapping = {
             'createdAt': 'created_date',
@@ -356,7 +324,31 @@ def handle_list_users(user_service: UserService, query_params: Dict[str, Any], c
         sort_by = sort_field_mapping.get(sort_by_raw, sort_by_raw)
         sort_order = query_params.get('sort_order', 'desc')
 
-        # Build filters
+        # Non-owner: filter by assigned locations (admin and regular members alike)
+        if not is_owner and current_user_id:
+            visible_user_ids = [str(current_user_id)]
+            if org_id:
+                visible_user_ids = [
+                    str(uid) for uid in user_service.get_visible_user_ids_for_member(
+                        uid_int, org_id
+                    )
+                ]
+            filters_restrict = {'user_ids': visible_user_ids}
+            if org_id:
+                filters_restrict['organization_ids'] = [str(org_id)]
+            if query_params.get('query'):
+                filters_restrict['query'] = query_params['query']
+            result = user_service.get_users_with_filters(
+                filters=filters_restrict,
+                page=page,
+                page_size=page_size,
+                sort_by=sort_by,
+                sort_order=sort_order,
+                include_sensitive=is_admin,
+            )
+            return result
+
+        # Owner: sees all org users (no location filter)
         filters = {}
         if query_params.get('query'):
             filters['query'] = query_params['query']
@@ -368,41 +360,33 @@ def handle_list_users(user_service: UserService, query_params: Dict[str, Any], c
             filters['organization_roles'] = query_params['organization_roles'].split(',')
 
         if query_params.get('platforms'):
-            # Platform values as they appear in database (from screenshot, without BUSINESS and REWARDS)
-            # Valid values: NA, WEB, MOBILE, API, GEPP_BUSINESS_WEB, GEPP_REWARD_APP, ADMIN_WEB, GEPP_EPR_WEB
             platform_list = [p.strip().upper() for p in query_params['platforms'].split(',')]
-
-            # Map frontend aliases to actual database values (using full names only)
             platform_mapping = {
-                'BUSINESS': 'GEPP_BUSINESS_WEB',  # Map old BUSINESS to GEPP_BUSINESS_WEB
-                'REWARDS': 'GEPP_REWARD_APP',    # Map old REWARDS to GEPP_REWARD_APP
+                'BUSINESS': 'GEPP_BUSINESS_WEB',
+                'REWARDS': 'GEPP_REWARD_APP',
                 'EPR': 'GEPP_EPR_WEB',
                 'ADMIN': 'ADMIN_WEB'
             }
-
             mapped_platforms = []
             for platform in platform_list:
                 mapped_platforms.append(platform_mapping.get(platform, platform))
-
             filters['platforms'] = mapped_platforms
 
         if query_params.get('organization_ids'):
             filters['organization_ids'] = query_params['organization_ids'].split(',')
         elif current_user and current_user.get('organization_id'):
-            # If no organization_ids specified but user has organization, filter by user's organization
             filters['organization_ids'] = [str(current_user['organization_id'])]
 
         if query_params.get('status'):
             filters['status'] = query_params['status']
 
-        # Get users
         result = user_service.get_users_with_filters(
             filters=filters,
             page=page,
             page_size=page_size,
             sort_by=sort_by,
             sort_order=sort_order,
-            include_sensitive=can_see_all
+            include_sensitive=True
         )
 
         return result
@@ -660,15 +644,32 @@ def handle_get_user_notifications(
         },
     }
 
-def handle_get_user_details(user_service: UserService, user_id: str) -> Dict[str, Any]:
-    """Handle GET /api/users/{user_id} - Get user details"""
+def handle_get_user_details(
+    user_service: UserService,
+    user_id: str,
+    current_user_id: Optional[str] = None,
+    current_user_organization_id: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Handle GET /api/users/{user_id} - Get user details with can_delete flag"""
     try:
         result = user_service.get_user_details(user_id)
         if not result:
             raise NotFoundException('User not found')
 
+        # Add can_delete flag (checked per-user, not in list for performance)
+        can_delete = False
+        if current_user_id and current_user_organization_id:
+            can_delete = user_service.can_delete_user(
+                int(current_user_id),
+                int(user_id),
+                int(current_user_organization_id),
+            )
+        result['can_delete'] = can_delete
+
         return result
 
+    except NotFoundException:
+        raise
     except Exception as e:
         raise APIException(f'Failed to get user details: {str(e)}')
 
@@ -696,16 +697,27 @@ def handle_update_user(
 def handle_delete_user(
     user_service: UserService,
     user_id: str,
-    current_user_id: Optional[str]
+    current_user_id: Optional[str],
+    current_user_organization_id: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Handle DELETE /api/users/{user_id} - Delete user"""
+    """Handle DELETE /api/users/{user_id} - Delete user with permission check"""
     try:
+        # Enforce delete permission
+        if current_user_id and current_user_organization_id:
+            can_delete = user_service.can_delete_user(
+                int(current_user_id),
+                int(user_id),
+                int(current_user_organization_id),
+            )
+            if not can_delete:
+                raise UnauthorizedException('You do not have permission to delete this user')
+
         from .user_crud import UserCRUD
         crud = UserCRUD(user_service.db)
 
         success = crud.delete_user(
             user_id=user_id,
-            soft_delete=True,  # Default to soft delete
+            soft_delete=True,
             deleted_by_id=current_user_id
         )
 
@@ -714,6 +726,8 @@ def handle_delete_user(
         else:
             raise NotFoundException('User not found or could not be deleted')
 
+    except (UnauthorizedException, NotFoundException):
+        raise
     except Exception as e:
         raise APIException(f'Failed to delete user: {str(e)}')
 
@@ -963,6 +977,7 @@ def handle_get_locations(db_session, user_service: UserService, query_params: Di
         locations = result['data']
         ancestors = result['ancestors']
         is_owner = result['is_owner']
+        manageable_user_ids = result.get('manageable_user_ids', [])
 
         # Enrich each assigned location with tag and tenant info (id, name, start_date, end_date, members)
         def _trim_tag_or_tenant(item: Dict[str, Any]) -> Dict[str, Any]:
@@ -994,6 +1009,7 @@ def handle_get_locations(db_session, user_service: UserService, query_params: Di
             'data': locations,
             'ancestors': ancestors,
             'is_owner': is_owner,
+            'manageable_user_ids': manageable_user_ids,
             'total': len(locations),
             'organization_id': organization_id,
             'include_all': include_all,

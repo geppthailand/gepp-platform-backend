@@ -10,10 +10,12 @@ from sqlalchemy.orm import Session
 
 # Import function modules
 from .functions.ai_audit_v1 import main as ai_audit_v1_module
+from .functions.event_dashboard_v1 import main as event_dashboard_v1_module
 
 # Function Registry: Maps root_fn_name to module
 FUNCTION_REGISTRY: Dict[str, Any] = {
     'ai_audit_v1': ai_audit_v1_module,
+    'event_dashboard_v1': event_dashboard_v1_module,
 }
 
 

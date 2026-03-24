@@ -102,18 +102,20 @@ class UserService:
             # Re-raise the exception to be handled by the caller
             raise e
 
-    def is_admin_or_org_owner(self, user_id: int, organization_id: Optional[int]) -> bool:
-        """Return True if the user has admin role or is the organization owner (and can see all org users)."""
+    def is_org_owner(self, user_id: int, organization_id: Optional[int]) -> bool:
+        """Return True if the user is the organization owner."""
         if not organization_id or not user_id:
             return False
-        # Check org owner
         org = self.db.query(Organization).filter(
             Organization.id == organization_id,
             Organization.owner_id == user_id,
         ).first()
-        if org:
-            return True
-        # Check admin role (organization_roles.key == 'admin')
+        return bool(org)
+
+    def is_admin(self, user_id: int, organization_id: Optional[int]) -> bool:
+        """Return True if the user has admin role in the organization."""
+        if not organization_id or not user_id:
+            return False
         user = self.db.query(UserLocation).options(
             joinedload(UserLocation.organization_role),
         ).filter(
@@ -124,45 +126,196 @@ class UserService:
             return True
         return False
 
+    def is_admin_or_org_owner(self, user_id: int, organization_id: Optional[int]) -> bool:
+        """Return True if the user has admin role or is the organization owner."""
+        return self.is_org_owner(user_id, organization_id) or self.is_admin(user_id, organization_id)
+
+    def can_delete_user(self, current_user_id: int, target_user_id: int, organization_id: int) -> bool:
+        """
+        Check if current_user can delete target_user.
+        - Owner: can delete anyone (except self)
+        - Admin: can delete users traceable via created_by_id chain back to self
+        - Orphan (chain leads to hard-deleted record): only owner can delete
+        - Others: cannot delete
+        """
+        if not current_user_id or not target_user_id:
+            return False
+        current_user_id = int(current_user_id)
+        target_user_id = int(target_user_id)
+
+        # Can't delete yourself
+        if current_user_id == target_user_id:
+            return False
+
+        # Owner can delete anyone
+        if self.is_org_owner(current_user_id, organization_id):
+            return True
+
+        # Must be admin to delete
+        if not self.is_admin(current_user_id, organization_id):
+            return False
+
+        # Admin: trace created_by_id chain from target back to current user
+        return self._trace_created_by_chain(current_user_id, target_user_id)
+
+    def _trace_created_by_chain(self, admin_id: int, target_id: int) -> bool:
+        """
+        Trace created_by_id chain from target back to admin.
+        - If chain reaches admin_id: True
+        - If chain reaches hard-deleted record (orphan): False
+        - If chain ends (created_by_id is None) without reaching admin: False
+        Soft-deleted records are still in the DB and can be traced through.
+        """
+        visited = set()
+        current_id = target_id
+
+        while current_id and current_id not in visited:
+            visited.add(current_id)
+
+            # Query WITHOUT filtering deleted_date so soft-deleted records are included
+            row = self.db.query(
+                UserLocation.id, UserLocation.created_by_id
+            ).filter(
+                UserLocation.id == current_id,
+            ).first()
+
+            if not row:
+                # Hard deleted — orphan node, only owner can delete
+                return False
+
+            created_by = row.created_by_id
+            if created_by is None:
+                # Reached root without finding admin
+                return False
+
+            created_by_int = int(created_by)
+            if created_by_int == admin_id:
+                return True
+
+            current_id = created_by_int
+
+        return False
+
+    # Mapping from organization_role.key to the member JSONB role value
+    _ORG_ROLE_KEY_TO_MEMBER_ROLE = {
+        'admin': 'admin',
+        'data_input': 'dataInput',
+        'auditor': 'auditor',
+        'viewer': 'viewer',
+    }
+
+    def _sync_member_role_in_locations(self, user_id: int, organization_id: int, new_org_role_id: int) -> None:
+        """
+        When a user's organization_role changes, update their role in all
+        user_locations.members JSONB arrays where they appear.
+        """
+        from ....models.subscriptions.subscription_models import OrganizationRole
+
+        new_role = self.db.query(OrganizationRole).filter(
+            OrganizationRole.id == new_org_role_id
+        ).first()
+        if not new_role:
+            return
+
+        new_member_role = self._ORG_ROLE_KEY_TO_MEMBER_ROLE.get(new_role.key, new_role.key)
+        user_id_str = str(user_id)
+
+        # Find all locations in this org that have members JSONB containing this user
+        locations = self.db.query(UserLocation).filter(
+            UserLocation.organization_id == organization_id,
+            UserLocation.is_location == True,
+            UserLocation.deleted_date.is_(None),
+            UserLocation.members.isnot(None),
+        ).all()
+
+        for loc in locations:
+            if not loc.members or not isinstance(loc.members, list):
+                continue
+
+            updated = False
+            new_members = []
+            for m in loc.members:
+                if not isinstance(m, dict):
+                    new_members.append(m)
+                    continue
+                m_uid = str(m.get('user_id', ''))
+                if m_uid == user_id_str and m.get('role') != new_member_role:
+                    new_members.append({'user_id': m['user_id'], 'role': new_member_role})
+                    updated = True
+                else:
+                    new_members.append(m)
+
+            if updated:
+                loc.members = new_members
+                from sqlalchemy.orm.attributes import flag_modified
+                flag_modified(loc, 'members')
+
+        self.db.flush()
+
+    def _get_created_by_descendants(self, user_id: int, organization_id: int) -> Set[int]:
+        """
+        BFS down the created_by_id chain.
+        A created B, B created C → returns {B, C}.
+        Does NOT include user_id itself. Cycle-safe via visited set.
+        """
+        descendants: Set[int] = set()
+        queue = [user_id]
+        visited: Set[int] = {user_id}
+        while queue:
+            parent_ids = queue
+            queue = []
+            children = self.db.query(UserLocation.id).filter(
+                UserLocation.created_by_id.in_(parent_ids),
+                UserLocation.organization_id == organization_id,
+                UserLocation.deleted_date.is_(None),
+            ).all()
+            for (uid,) in children:
+                if uid not in visited:
+                    visited.add(uid)
+                    descendants.add(uid)
+                    queue.append(uid)
+        return descendants
+
     def get_visible_user_ids_for_member(self, current_user_id: int, organization_id: int) -> List[int]:
         """
-        For a non-admin, non-owner user: return user IDs they are allowed to see —
-        all users who are members of the current user's location(s) and of those locations' descendants.
-        E.g. user in Building 1 sees everyone in Building 1 and everyone in Building 1's descendant locations.
-        If the user is not a member of any location, returns only [current_user_id].
+        For a non-owner user: return user IDs they are allowed to see:
+        1. Members of assigned locations (union'd with chain descendants' locations)
+        2. All users in the created_by_id chain
         """
+        visible_user_ids: Set[int] = {current_user_id}
+
+        # created_by chain descendants
+        chain_descendants = self._get_created_by_descendants(current_user_id, organization_id)
+        visible_user_ids |= chain_descendants
+
+        # Members in assigned locations (already union'd via _resolve_location_tiers)
         setup_location_ids = self._get_setup_location_ids(organization_id)
-        if setup_location_ids is None:
-            return [current_user_id]
-        locations = self.crud.get_user_locations(
-            organization_id=organization_id,
-            location_ids=setup_location_ids,
-        )
-        if not locations:
-            return [current_user_id]
-        tiers = self._resolve_location_tiers(locations, organization_id, current_user_id)
-        if tiers['is_owner']:
-            return [current_user_id]
-        assigned_ids = tiers['assigned_ids']
-        if not assigned_ids:
-            return [current_user_id]
-        visible_user_ids: Set[int] = set()
-        for loc in locations:
-            if (loc.id if hasattr(loc, 'id') else loc.get('id')) not in assigned_ids:
-                continue
-            members = loc.members if hasattr(loc, 'members') else (loc.get('members') if isinstance(loc, dict) else []) or []
-            for m in members:
-                if isinstance(m, dict):
-                    uid = m.get('user_id') or m.get('id')
-                else:
-                    uid = m
-                if uid is not None:
-                    try:
-                        visible_user_ids.add(int(uid))
-                    except (TypeError, ValueError):
-                        pass
-        if not visible_user_ids:
-            return [current_user_id]
+        if setup_location_ids is not None:
+            locations = self.crud.get_user_locations(
+                organization_id=organization_id,
+                location_ids=setup_location_ids,
+            )
+            if locations:
+                tiers = self._resolve_location_tiers(locations, organization_id, current_user_id)
+                if tiers['is_owner']:
+                    return [current_user_id]  # owner path handled by caller
+                assigned_ids = tiers['assigned_ids']
+                for loc in locations:
+                    loc_id = loc.id if hasattr(loc, 'id') else loc.get('id')
+                    if loc_id not in assigned_ids:
+                        continue
+                    members = loc.members if hasattr(loc, 'members') else (loc.get('members') if isinstance(loc, dict) else []) or []
+                    for m in members:
+                        if isinstance(m, dict):
+                            uid = m.get('user_id') or m.get('id')
+                        else:
+                            uid = m
+                        if uid is not None:
+                            try:
+                                visible_user_ids.add(int(uid))
+                            except (TypeError, ValueError):
+                                pass
+
         return list(visible_user_ids)
 
     def get_users_with_filters(
@@ -382,11 +535,27 @@ class UserService:
                         from ....exceptions import ValidationException
                         raise ValidationException(f'Destination name "{new_name}" already exists in this organization')
 
+            # Check if organization_role_id is changing (need to sync member roles)
+            old_role_key = None
+            if 'organization_role_id' in updates:
+                existing_user = self.crud.get_user_by_id(user_id)
+                if existing_user and existing_user.organization_role_id:
+                    from ....models.subscriptions.subscription_models import OrganizationRole
+                    old_role = self.db.query(OrganizationRole).filter(
+                        OrganizationRole.id == existing_user.organization_role_id
+                    ).first()
+                    if old_role:
+                        old_role_key = old_role.key
+
             # Apply updates
             user = self.crud.update_user(user_id, updates, updated_by_id)
             if not user:
                 from ....exceptions import NotFoundException
                 raise NotFoundException('User not found')
+
+            # Sync member role in all location members JSONB if org role changed
+            if 'organization_role_id' in updates and user.organization_role_id:
+                self._sync_member_role_in_locations(int(user_id), user.organization_id, user.organization_role_id)
 
             return {
                 'success': True,
@@ -1010,10 +1179,19 @@ class UserService:
             loc['path'] = location_paths.get(loc['id'], '')
 
         is_owner = tiers['is_owner'] if tiers else True
+
+        # Compute manageable_user_ids for non-owner admins:
+        # users in their created_by chain that they can add/remove as members
+        manageable_user_ids: List[int] = []
+        if current_user_id and not is_owner:
+            chain = self._get_created_by_descendants(current_user_id, organization_id)
+            manageable_user_ids = sorted(chain)
+
         return {
             'data': location_data,
             'ancestors': ancestor_data,
             'is_owner': is_owner,
+            'manageable_user_ids': manageable_user_ids,
         }
 
     def get_orphan_locations(
@@ -1172,7 +1350,7 @@ class UserService:
                     if 'children' in setup.hub_node and isinstance(setup.hub_node['children'], list):
                         self._extract_node_ids(setup.hub_node['children'], location_ids)
 
-            result = list(location_ids) if location_ids else None
+            result = list(location_ids) if location_ids else []
             print(f"Organization {organization_id} setup filtering: found {len(location_ids) if location_ids else 0} location IDs: {result}")
             return result
 
@@ -1218,9 +1396,9 @@ class UserService:
             OrganizationSetup.deleted_date.is_(None)
         ).order_by(OrganizationSetup.created_date.desc()).first()
 
-        if not org_setup or not org_setup.root_nodes:
-            # No setup, treat as owner (can't filter without tree)
-            return {'is_owner': True, 'assigned_ids': set(), 'ancestor_ids': set(), 'member_ids': set()}
+        if not org_setup or not org_setup.root_nodes or (isinstance(org_setup.root_nodes, list) and len(org_setup.root_nodes) == 0):
+            # No setup or empty root_nodes — user already failed owner check above, so not owner
+            return {'is_owner': False, 'assigned_ids': set(), 'ancestor_ids': set(), 'member_ids': set()}
 
         root_nodes = org_setup.root_nodes
         if not isinstance(root_nodes, list):
@@ -1240,15 +1418,20 @@ class UserService:
                         return True
             return False
 
-        uid_int = current_user_id
-        uid_str = str(current_user_id)
+        # Build the set of user IDs whose membership grants visibility:
+        # current user + all created_by_id chain descendants
+        chain_user_ids = {current_user_id} | self._get_created_by_descendants(current_user_id, organization_id)
 
-        # Find which locations the user is a direct member of
+        # Find locations where ANY user in the chain is a direct member
         member_loc_ids = set()
         for loc in locations:
             loc_members = loc.members if hasattr(loc, 'members') else (loc.get('members') if isinstance(loc, dict) else [])
-            if loc_members and is_member_of(loc_members, uid_int, uid_str):
-                member_loc_ids.add(loc.id if hasattr(loc, 'id') else loc.get('id'))
+            if not loc_members:
+                continue
+            for chain_uid in chain_user_ids:
+                if is_member_of(loc_members, chain_uid, str(chain_uid)):
+                    member_loc_ids.add(loc.id if hasattr(loc, 'id') else loc.get('id'))
+                    break  # no need to check other chain users for this location
 
         if not member_loc_ids:
             return {'is_owner': False, 'assigned_ids': set(), 'ancestor_ids': set(), 'member_ids': set()}
