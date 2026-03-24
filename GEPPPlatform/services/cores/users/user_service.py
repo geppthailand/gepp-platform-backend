@@ -102,18 +102,20 @@ class UserService:
             # Re-raise the exception to be handled by the caller
             raise e
 
-    def is_admin_or_org_owner(self, user_id: int, organization_id: Optional[int]) -> bool:
-        """Return True if the user has admin role or is the organization owner (and can see all org users)."""
+    def is_org_owner(self, user_id: int, organization_id: Optional[int]) -> bool:
+        """Return True if the user is the organization owner."""
         if not organization_id or not user_id:
             return False
-        # Check org owner
         org = self.db.query(Organization).filter(
             Organization.id == organization_id,
             Organization.owner_id == user_id,
         ).first()
-        if org:
-            return True
-        # Check admin role (organization_roles.key == 'admin')
+        return bool(org)
+
+    def is_admin(self, user_id: int, organization_id: Optional[int]) -> bool:
+        """Return True if the user has admin role in the organization."""
+        if not organization_id or not user_id:
+            return False
         user = self.db.query(UserLocation).options(
             joinedload(UserLocation.organization_role),
         ).filter(
@@ -124,45 +126,129 @@ class UserService:
             return True
         return False
 
+    def is_admin_or_org_owner(self, user_id: int, organization_id: Optional[int]) -> bool:
+        """Return True if the user has admin role or is the organization owner."""
+        return self.is_org_owner(user_id, organization_id) or self.is_admin(user_id, organization_id)
+
+    def can_delete_user(self, current_user_id: int, target_user_id: int, organization_id: int) -> bool:
+        """
+        Check if current_user can delete target_user.
+        - Owner: can delete anyone (except self)
+        - Admin: can delete users traceable via created_by_id chain back to self
+        - Orphan (chain leads to hard-deleted record): only owner can delete
+        - Others: cannot delete
+        """
+        if not current_user_id or not target_user_id:
+            return False
+        current_user_id = int(current_user_id)
+        target_user_id = int(target_user_id)
+
+        # Can't delete yourself
+        if current_user_id == target_user_id:
+            return False
+
+        # Owner can delete anyone
+        if self.is_org_owner(current_user_id, organization_id):
+            return True
+
+        # Must be admin to delete
+        if not self.is_admin(current_user_id, organization_id):
+            return False
+
+        # Admin: trace created_by_id chain from target back to current user
+        return self._trace_created_by_chain(current_user_id, target_user_id)
+
+    def _trace_created_by_chain(self, admin_id: int, target_id: int) -> bool:
+        """
+        Trace created_by_id chain from target back to admin.
+        - If chain reaches admin_id: True
+        - If chain reaches hard-deleted record (orphan): False
+        - If chain ends (created_by_id is None) without reaching admin: False
+        Soft-deleted records are still in the DB and can be traced through.
+        """
+        visited = set()
+        current_id = target_id
+
+        while current_id and current_id not in visited:
+            visited.add(current_id)
+
+            # Query WITHOUT filtering deleted_date so soft-deleted records are included
+            row = self.db.query(
+                UserLocation.id, UserLocation.created_by_id
+            ).filter(
+                UserLocation.id == current_id,
+            ).first()
+
+            if not row:
+                # Hard deleted — orphan node, only owner can delete
+                return False
+
+            created_by = row.created_by_id
+            if created_by is None:
+                # Reached root without finding admin
+                return False
+
+            created_by_int = int(created_by)
+            if created_by_int == admin_id:
+                return True
+
+            current_id = created_by_int
+
+        return False
+
     def get_visible_user_ids_for_member(self, current_user_id: int, organization_id: int) -> List[int]:
         """
-        For a non-admin, non-owner user: return user IDs they are allowed to see —
-        all users who are members of the current user's location(s) and of those locations' descendants.
-        E.g. user in Building 1 sees everyone in Building 1 and everyone in Building 1's descendant locations.
-        If the user is not a member of any location, returns only [current_user_id].
+        For a non-owner user: return user IDs they are allowed to see:
+        1. Members of assigned locations (and descendant locations)
+        2. Users created by the current user (created_by_id = current_user_id)
         """
+        visible_user_ids: Set[int] = {current_user_id}
+
+        # --- 1. Members in assigned locations ---
         setup_location_ids = self._get_setup_location_ids(organization_id)
-        if setup_location_ids is None:
-            return [current_user_id]
-        locations = self.crud.get_user_locations(
-            organization_id=organization_id,
-            location_ids=setup_location_ids,
-        )
-        if not locations:
-            return [current_user_id]
-        tiers = self._resolve_location_tiers(locations, organization_id, current_user_id)
-        if tiers['is_owner']:
-            return [current_user_id]
-        assigned_ids = tiers['assigned_ids']
-        if not assigned_ids:
-            return [current_user_id]
-        visible_user_ids: Set[int] = set()
-        for loc in locations:
-            if (loc.id if hasattr(loc, 'id') else loc.get('id')) not in assigned_ids:
-                continue
-            members = loc.members if hasattr(loc, 'members') else (loc.get('members') if isinstance(loc, dict) else []) or []
-            for m in members:
-                if isinstance(m, dict):
-                    uid = m.get('user_id') or m.get('id')
-                else:
-                    uid = m
-                if uid is not None:
-                    try:
-                        visible_user_ids.add(int(uid))
-                    except (TypeError, ValueError):
-                        pass
-        if not visible_user_ids:
-            return [current_user_id]
+        if setup_location_ids is not None:
+            locations = self.crud.get_user_locations(
+                organization_id=organization_id,
+                location_ids=setup_location_ids,
+            )
+            if locations:
+                tiers = self._resolve_location_tiers(locations, organization_id, current_user_id)
+                if tiers['is_owner']:
+                    return [current_user_id]  # owner path handled by caller
+                assigned_ids = tiers['assigned_ids']
+                for loc in locations:
+                    loc_id = loc.id if hasattr(loc, 'id') else loc.get('id')
+                    if loc_id not in assigned_ids:
+                        continue
+                    members = loc.members if hasattr(loc, 'members') else (loc.get('members') if isinstance(loc, dict) else []) or []
+                    for m in members:
+                        if isinstance(m, dict):
+                            uid = m.get('user_id') or m.get('id')
+                        else:
+                            uid = m
+                        if uid is not None:
+                            try:
+                                visible_user_ids.add(int(uid))
+                            except (TypeError, ValueError):
+                                pass
+
+        # --- 2. Users in created_by_id chain (BFS: A->B->C, A sees B and C) ---
+        queue = [current_user_id]
+        visited: Set[int] = {current_user_id}
+        while queue:
+            parent_ids = queue
+            queue = []
+            children = self.db.query(UserLocation.id).filter(
+                UserLocation.created_by_id.in_(parent_ids),
+                UserLocation.organization_id == organization_id,
+                UserLocation.deleted_date.is_(None),
+            ).all()
+            for (uid,) in children:
+                if uid not in visited:
+                    visited.add(uid)
+                    visible_user_ids.add(uid)
+                    queue.append(uid)
+
         return list(visible_user_ids)
 
     def get_users_with_filters(
