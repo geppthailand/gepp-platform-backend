@@ -363,6 +363,11 @@ def handle_create_organization_setup(org_service: OrganizationService, user_id: 
         if 'locations' in body:
             setup_data_dict['locations'] = body['locations']
 
+        # Pass through level naming fields
+        for key in ('branch_level_name', 'building_level_name', 'floor_level_name', 'room_level_name'):
+            if key in body:
+                setup_data_dict[key] = body[key]
+
         # Create organization setup
         setup_data = org_service.create_organization_setup(
             organization_id=organization.id,
@@ -397,22 +402,36 @@ def handle_update_organization_setup(org_service: OrganizationService, user_id: 
 
         # Convert to request DTO and validate
         setup_request = UpdateOrganizationSetupRequest.from_dict(body)
-        validation_errors = setup_request.validate()
+        level_names_only = setup_request.has_level_names_only(body)
+        validation_errors = setup_request.validate(allow_level_names_only=level_names_only)
 
         if validation_errors:
             raise ValidationException(validation_errors)
 
-        # Prepare setup data including locations
-        setup_data_dict = setup_request.to_dict()
-        # Add locations from the original request body
-        if 'locations' in body:
-            setup_data_dict['locations'] = body['locations']
+        if level_names_only:
+            # Only update level names on the existing active setup (no new version)
+            level_names = {k: body[k] for k in ('branch_level_name', 'building_level_name', 'floor_level_name', 'room_level_name') if k in body}
+            setup_data = org_service.update_organization_setup_level_names(
+                organization_id=organization.id,
+                level_names=level_names
+            )
+        else:
+            # Prepare setup data including locations
+            setup_data_dict = setup_request.to_dict()
+            # Add locations from the original request body
+            if 'locations' in body:
+                setup_data_dict['locations'] = body['locations']
 
-        # Update organization setup (creates new version)
-        setup_data = org_service.update_organization_setup(
-            organization_id=organization.id,
-            setup_data=setup_data_dict
-        )
+            # Pass through level naming fields
+            for key in ('branch_level_name', 'building_level_name', 'floor_level_name', 'room_level_name'):
+                if key in body:
+                    setup_data_dict[key] = body[key]
+
+            # Update organization setup (creates new version)
+            setup_data = org_service.update_organization_setup(
+                organization_id=organization.id,
+                setup_data=setup_data_dict
+            )
 
         # Convert to response DTO
         setup_response = OrganizationSetupResponse.from_dict(setup_data)

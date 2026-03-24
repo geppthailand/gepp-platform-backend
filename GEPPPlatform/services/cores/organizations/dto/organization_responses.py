@@ -324,6 +324,10 @@ class OrganizationSetupResponse:
     root_nodes: Optional[List[Dict[str, Any]]] = None
     hub_node: Optional[Dict[str, Any]] = None
     metadata: Optional[Dict[str, Any]] = None
+    branch_level_name: Optional[str] = None
+    building_level_name: Optional[str] = None
+    floor_level_name: Optional[str] = None
+    room_level_name: Optional[str] = None
     created_date: Optional[str] = None
     updated_date: Optional[str] = None
 
@@ -342,6 +346,10 @@ class OrganizationSetupResponse:
             result['hub_node'] = self.hub_node
         if self.metadata is not None:
             result['metadata'] = self.metadata
+        result['branch_level_name'] = self.branch_level_name
+        result['building_level_name'] = self.building_level_name
+        result['floor_level_name'] = self.floor_level_name
+        result['room_level_name'] = self.room_level_name
         if self.created_date:
             result['created_date'] = self.created_date
         if self.updated_date:
@@ -360,6 +368,10 @@ class OrganizationSetupResponse:
             root_nodes=data.get('root_nodes'),
             hub_node=data.get('hub_node'),
             metadata=data.get('metadata'),
+            branch_level_name=data.get('branch_level_name'),
+            building_level_name=data.get('building_level_name'),
+            floor_level_name=data.get('floor_level_name'),
+            room_level_name=data.get('room_level_name'),
             created_date=data.get('created_date'),
             updated_date=data.get('updated_date')
         )
