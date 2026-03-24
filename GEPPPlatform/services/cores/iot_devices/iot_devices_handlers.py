@@ -3,7 +3,7 @@ IoT Devices HTTP handlers
 Handles all /api/iot-devices/* routes
 """
 
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional, Set
 from sqlalchemy.orm import joinedload
 
 from GEPPPlatform.services.cores.transactions.transaction_handlers import handle_create_transaction
@@ -12,6 +12,7 @@ from GEPPPlatform.services.cores.transactions.transaction_service import Transac
 from GEPPPlatform.services.cores.users.user_service import UserService
 from GEPPPlatform.models.users.user_location import UserLocation
 from GEPPPlatform.models.users.user_related import UserLocationTag, UserTenant
+from GEPPPlatform.models.subscriptions.organizations import OrganizationSetup
 from GEPPPlatform.models.cores.references import Material
 from GEPPPlatform.models.cores.iot_devices import IoTDevice
 
@@ -24,26 +25,109 @@ def handle_get_locations_by_membership(user_service: UserService, query_params: 
         if not current_user or not current_user.get('user_id'):
             raise UnauthorizedException('Unauthorized')
 
-        role = (query_params.get('role') or 'data_input').strip()
+        role = (query_params.get('role') or 'dataInput').strip()
+        # Normalize common role variants used by clients/DB
+        # DB memberships commonly store camelCase role (e.g. "dataInput")
+        if role in ('data_input', 'data-input', 'datainput'):
+            role = 'dataInput'
         organization_id = current_user.get('organization_id') if current_user else None
 
         if not organization_id:
             raise NotFoundException('User is not part of any organization')
 
-        locations = user_service.get_locations_by_member(
+        member_locations = user_service.get_locations_by_member(
             member_user_id=current_user['user_id'],
             role=role,
             organization_id=organization_id
         )
-        
-        # Build location paths using the _build_location_paths method
-        # Transform locations to have 'id' key for the method
-        location_data_for_paths = [
-            {'id': loc.get('origin_id')} for loc in locations
+
+        member_origin_ids: List[int] = [
+            int(loc.get('origin_id'))
+            for loc in member_locations
+            if loc.get('origin_id') is not None
         ]
+
+        # Expand to include all descendants of member locations (based on org setup tree)
+        def _expand_descendants_from_setup(
+            setup_root_nodes,
+            seed_ids: Set[int],
+        ) -> Set[int]:
+            if not setup_root_nodes or not seed_ids:
+                return set(seed_ids)
+
+            roots = setup_root_nodes
+            if isinstance(roots, dict):
+                roots = [roots]
+            if not isinstance(roots, list):
+                return set(seed_ids)
+
+            expanded: Set[int] = set(seed_ids)
+
+            def to_int(v) -> Optional[int]:
+                if v is None:
+                    return None
+                if isinstance(v, int):
+                    return v
+                if isinstance(v, str) and v.isdigit():
+                    return int(v)
+                return None
+
+            def collect_all(node: Dict[str, Any]) -> None:
+                nid = to_int(node.get('nodeId'))
+                if nid is not None:
+                    expanded.add(nid)
+                children = node.get('children') or []
+                if isinstance(children, list):
+                    for ch in children:
+                        if isinstance(ch, dict):
+                            collect_all(ch)
+
+            def walk(nodes: List[Dict[str, Any]]) -> None:
+                for node in nodes:
+                    if not isinstance(node, dict):
+                        continue
+                    nid = to_int(node.get('nodeId'))
+                    children = node.get('children') or []
+                    if nid is not None and nid in seed_ids:
+                        collect_all(node)
+                    else:
+                        if isinstance(children, list) and children:
+                            walk([ch for ch in children if isinstance(ch, dict)])
+
+            walk([n for n in roots if isinstance(n, dict)])
+            return expanded
+
+        setup = (
+            db_session.query(OrganizationSetup)
+            .filter(
+                OrganizationSetup.organization_id == organization_id,
+                OrganizationSetup.is_active == True,
+                OrganizationSetup.deleted_date.is_(None),
+            )
+            .order_by(OrganizationSetup.created_date.desc())
+            .first()
+        )
+
+        expanded_ids = _expand_descendants_from_setup(
+            setup.root_nodes if setup else None,
+            set(member_origin_ids),
+        )
+
+        # Keep original membership order first, then append remaining descendants
+        ordered_ids: List[int] = []
+        seen: Set[int] = set()
+        for mid in member_origin_ids:
+            if mid not in seen:
+                ordered_ids.append(mid)
+                seen.add(mid)
+        for did in sorted(expanded_ids - seen):
+            ordered_ids.append(did)
+            seen.add(did)
+
+        # Build location paths for all returned locations
         location_paths = user_service._build_location_paths(
             organization_id=organization_id,
-            location_data=location_data_for_paths
+            location_data=[{'id': loc_id} for loc_id in ordered_ids],
         )
         
         # Get ALL materials (active and not deleted, no organization filtering)
@@ -96,7 +180,7 @@ def handle_get_locations_by_membership(user_service: UserService, query_params: 
             materials_list.append(material_obj)
         
         # Load tags and tenants per location (id, name, members)
-        origin_ids = [loc.get('origin_id') for loc in locations if loc.get('origin_id') is not None]
+        origin_ids = ordered_ids
         origin_to_loc = {}
         tag_ids_all = set()
         tenant_ids_all = set()
@@ -133,8 +217,7 @@ def handle_get_locations_by_membership(user_service: UserService, query_params: 
             tenant_by_id = {t.id: t for t in tenants_orm}
         # Build locations_list with tags and tenants (id, name, members)
         locations_list = []
-        for location in locations:
-            origin_id = location.get('origin_id')
+        for origin_id in ordered_ids:
             location_path = location_paths.get(origin_id, '')
             loc_orm = origin_to_loc.get(origin_id)
             tags_list = []
@@ -164,7 +247,7 @@ def handle_get_locations_by_membership(user_service: UserService, query_params: 
                         })
             locations_list.append({
                 'origin_id': origin_id,
-                'display_name': location.get('display_name'),
+                'display_name': (loc_orm.display_name if loc_orm else None),
                 'path': location_path,
                 'tags': tags_list,
                 'tenants': tenants_list
