@@ -119,5 +119,11 @@ class OrganizationSetup(Base, BaseModel):
     # Setup metadata
     setup_metadata = Column('metadata', JSON, nullable=True)
 
+    # Level naming
+    branch_level_name = Column(String(255), nullable=True)
+    building_level_name = Column(String(255), nullable=True)
+    floor_level_name = Column(String(255), nullable=True)
+    room_level_name = Column(String(255), nullable=True)
+
     # Relationships
     organization = relationship("Organization", foreign_keys=[organization_id])

@@ -192,6 +192,10 @@ class OrganizationService:
             'root_nodes': setup.root_nodes,
             'hub_node': setup.hub_node,
             'metadata': setup.setup_metadata,
+            'branch_level_name': setup.branch_level_name,
+            'building_level_name': setup.building_level_name,
+            'floor_level_name': setup.floor_level_name,
+            'room_level_name': setup.room_level_name,
             'created_date': setup.created_date.isoformat() if setup.created_date else None,
             'updated_date': setup.updated_date.isoformat() if setup.updated_date else None
         }
@@ -440,7 +444,11 @@ class OrganizationService:
                 'created_at': None,  # Will be set by database
                 'total_nodes': 0,
                 'max_level': 0
-            })
+            }),
+            branch_level_name=setup_data.get('branch_level_name'),
+            building_level_name=setup_data.get('building_level_name'),
+            floor_level_name=setup_data.get('floor_level_name'),
+            room_level_name=setup_data.get('room_level_name'),
         )
 
         # Add and commit new setup
@@ -456,6 +464,10 @@ class OrganizationService:
             'root_nodes': new_setup.root_nodes,
             'hub_node': new_setup.hub_node,
             'metadata': new_setup.setup_metadata,
+            'branch_level_name': new_setup.branch_level_name,
+            'building_level_name': new_setup.building_level_name,
+            'floor_level_name': new_setup.floor_level_name,
+            'room_level_name': new_setup.room_level_name,
             'created_date': new_setup.created_date.isoformat() if new_setup.created_date else None,
             'updated_date': new_setup.updated_date.isoformat() if new_setup.updated_date else None,
             'location_mappings': location_id_mapping  # Include mapping info for debugging
@@ -467,6 +479,43 @@ class OrganizationService:
         This preserves the old version and creates a new active one.
         """
         return self.create_organization_setup(organization_id, setup_data, current_user_id=current_user_id)
+
+    def update_organization_setup_level_names(self, organization_id: int, level_names: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Update only the level naming fields on the current active organization setup
+        without creating a new version.
+        """
+        setup = self.db.query(OrganizationSetup).filter(
+            and_(
+                OrganizationSetup.organization_id == organization_id,
+                OrganizationSetup.is_active == True
+            )
+        ).first()
+
+        if not setup:
+            raise ValueError('No active organization setup found')
+
+        for key in ('branch_level_name', 'building_level_name', 'floor_level_name', 'room_level_name'):
+            if key in level_names:
+                setattr(setup, key, level_names[key])
+
+        self.db.flush()
+
+        return {
+            'id': setup.id,
+            'organization_id': setup.organization_id,
+            'version': setup.version,
+            'is_active': setup.is_active,
+            'root_nodes': setup.root_nodes,
+            'hub_node': setup.hub_node,
+            'metadata': setup.setup_metadata,
+            'branch_level_name': setup.branch_level_name,
+            'building_level_name': setup.building_level_name,
+            'floor_level_name': setup.floor_level_name,
+            'room_level_name': setup.room_level_name,
+            'created_date': setup.created_date.isoformat() if setup.created_date else None,
+            'updated_date': setup.updated_date.isoformat() if setup.updated_date else None
+        }
 
     def update_ai_audit_permission(self, organization_id: int, allow_ai_audit: bool) -> Dict[str, Any]:
         """

@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session, joinedload
 from GEPPPlatform.models.users.user_location import UserLocation
 from GEPPPlatform.models.users.integration_tokens import IntegrationToken
 from GEPPPlatform.models.users.user_reset_password_log import UserResetPasswordLog
-from GEPPPlatform.models.subscriptions.organizations import Organization, OrganizationInfo
+from GEPPPlatform.models.subscriptions.organizations import Organization, OrganizationInfo, OrganizationSetup
 from GEPPPlatform.models.subscriptions.subscription_models import SubscriptionPlan, Subscription
 from GEPPPlatform.models.cores.iot_devices import IoTDevice
 from ..cores.organizations.organization_role_presets import OrganizationRolePresets
@@ -430,13 +430,29 @@ class AuthHandlers:
                     'name': user.organization_role.name
                 }
 
+            # Fetch active organization setup level names
+            org_setup = session.query(OrganizationSetup).filter(
+                OrganizationSetup.organization_id == user.organization_id,
+                OrganizationSetup.is_active == True
+            ).first()
+
+            organization_setup = None
+            if org_setup:
+                organization_setup = {
+                    'branch_level_name': org_setup.branch_level_name,
+                    'building_level_name': org_setup.building_level_name,
+                    'floor_level_name': org_setup.floor_level_name,
+                    'room_level_name': org_setup.room_level_name,
+                }
+
             return {
                 'success': True,
                 'auth_token': tokens['auth_token'],
                 'refresh_token': tokens['refresh_token'],
                 'token_type': 'Bearer',
                 'expires_in': 86400,  # 1 day in seconds
-                'user': user_data
+                'user': user_data,
+                'organization_setup': organization_setup
             }
 
         except UnauthorizedException:
