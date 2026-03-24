@@ -358,17 +358,25 @@ class UpdateOrganizationSetupRequest:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'UpdateOrganizationSetupRequest':
         """Create DTO from dictionary"""
-        print("^^^^^^", data['treeStructure'].get('locations'))
+        tree_structure = data.get('treeStructure')
         return cls(
             organization_id=data.get('organizationId'),
-            tree_structure=data.get('treeStructure'),
-            locations=data['treeStructure'].get('locations'),
+            tree_structure=tree_structure,
+            locations=tree_structure.get('locations') if tree_structure else None,
             metadata=data.get('metadata')
         )
 
-    def validate(self) -> List[str]:
+    def has_level_names_only(self, body: Dict[str, Any]) -> bool:
+        """Check if the request only contains level naming fields (no tree structure)."""
+        level_keys = {'branch_level_name', 'building_level_name', 'floor_level_name', 'room_level_name'}
+        return not self.tree_structure and bool(level_keys & set(body.keys()))
+
+    def validate(self, allow_level_names_only: bool = False) -> List[str]:
         """Validate the request data"""
         errors = []
+
+        if allow_level_names_only:
+            return errors
 
         # tree_structure is required
         if not self.tree_structure:

@@ -1806,6 +1806,28 @@ class InputChannelService:
 
         materials = material_query.all()
 
+        # Fetch material images grouped by material_id
+        material_ids = [m.id for m in materials]
+        material_images_map = {}
+        if material_ids:
+            from sqlalchemy import text
+            image_rows = self.db.execute(
+                text("""
+                    SELECT id, image_url, material_id, created_date
+                    FROM material_images
+                    WHERE material_id = ANY(:material_ids)
+                      AND deleted_date IS NULL
+                    ORDER BY created_date
+                """),
+                {'material_ids': material_ids}
+            ).fetchall()
+            for row in image_rows:
+                material_images_map.setdefault(row[2], []).append({
+                    'id': row[0],
+                    'image_url': row[1],
+                    'material_id': row[2],
+                })
+
         # Collect IDs from the filtered materials to scope categories and main_materials
         matched_category_ids = {mat.category_id for mat in materials if mat.category_id}
         matched_main_material_ids = {mat.main_material_id for mat in materials if mat.main_material_id}
@@ -1837,6 +1859,7 @@ class InputChannelService:
             'color': mat.color,
             'category_id': mat.category_id,
             'main_material_id': mat.main_material_id,
+            'images': material_images_map.get(mat.id, []),
         } for mat in materials]
 
         categories_data = [{

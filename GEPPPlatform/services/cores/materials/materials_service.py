@@ -5,7 +5,7 @@ Handles CRUD operations for materials with tag-based system support
 
 from typing import List, Optional, Dict, Any, Tuple
 from sqlalchemy.orm import Session
-from sqlalchemy import and_, or_
+from sqlalchemy import and_, or_, text
 
 from ....models.cores.references import Material, MaterialTag, MaterialTagGroup, MaterialCategory, MainMaterial
 from ....exceptions import ValidationException, NotFoundException
@@ -116,8 +116,11 @@ class MaterialsService:
             offset = (page - 1) * page_size
             materials = query.offset(offset).limit(page_size).all()
 
+            # Fetch material images
+            images_map = self._fetch_material_images([m.id for m in materials])
+
             return {
-                'data': [self._serialize_material(material) for material in materials],
+                'data': [{**self._serialize_material(material), 'images': images_map.get(material.id, [])} for material in materials],
                 'pagination': {
                     'page': page,
                     'page_size': page_size,
@@ -162,6 +165,10 @@ class MaterialsService:
                 return None
 
             material_data = self._serialize_material(material)
+
+            # Fetch material images
+            images_map = self._fetch_material_images([material.id])
+            material_data['images'] = images_map.get(material.id, [])
 
             # Add resolved tag information if using tag-based system
             if material.main_material_id and material.tags:
@@ -282,6 +289,29 @@ class MaterialsService:
             raise e
 
     # ========== HELPER METHODS ==========
+
+    def _fetch_material_images(self, material_ids: List[int]) -> Dict[int, list]:
+        """Fetch material images grouped by material_id"""
+        images_map = {}
+        if not material_ids:
+            return images_map
+        image_rows = self.db.execute(
+            text("""
+                SELECT id, image_url, material_id, created_date
+                FROM material_images
+                WHERE material_id = ANY(:material_ids)
+                  AND deleted_date IS NULL
+                ORDER BY created_date
+            """),
+            {'material_ids': material_ids}
+        ).fetchall()
+        for row in image_rows:
+            images_map.setdefault(row[2], []).append({
+                'id': row[0],
+                'image_url': row[1],
+                'material_id': row[2],
+            })
+        return images_map
 
     def _validate_material_data(self, material_data: Dict[str, Any]) -> Dict[str, Any]:
         """Validate material creation data"""
