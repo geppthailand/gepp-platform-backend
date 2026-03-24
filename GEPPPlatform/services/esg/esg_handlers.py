@@ -8,7 +8,8 @@ import traceback
 
 from .esg_service import EsgService
 from .esg_document_service import EsgDocumentService
-from .esg_calculation_service import EsgCalculationService
+from .esg_ideas_service import EsgIdeasService
+from .esg_line_service import EsgLineService
 from ...exceptions import (
     APIException, UnauthorizedException, NotFoundException,
     BadRequestException, ValidationException
@@ -29,7 +30,6 @@ def handle_esg_routes(event: Dict[str, Any], data: Dict[str, Any], **params) -> 
 
     esg_service = EsgService(db_session)
     doc_service = EsgDocumentService(db_session)
-    calc_service = EsgCalculationService(db_session)
 
     current_user = params.get('current_user', {})
     current_user_id = current_user.get('user_id')
@@ -42,6 +42,90 @@ def handle_esg_routes(event: Dict[str, Any], data: Dict[str, Any], **params) -> 
 
         elif path == '/api/esg/settings' and method == 'POST':
             return esg_service.update_settings(current_user_org_id, data or {})
+
+        # ===== ORG SETUP =====
+        elif path == '/api/esg/org-setup' and method == 'GET':
+            return esg_service.get_org_setup(current_user_org_id)
+
+        elif path == '/api/esg/org-setup' and method == 'POST':
+            return esg_service.update_org_setup(current_user_org_id, data or {})
+
+        # ===== PLATFORM BINDINGS =====
+        elif path == '/api/esg/platform-bindings' and method == 'GET':
+            return esg_service.list_platform_bindings(current_user_org_id)
+
+        elif path == '/api/esg/platform-bindings' and method == 'POST':
+            if not data:
+                raise BadRequestException('Request body is required')
+            return esg_service.create_platform_binding(current_user_org_id, data)
+
+        elif path == '/api/esg/platform-bindings/pair' and method == 'POST':
+            if not data or not data.get('pairing_code'):
+                raise BadRequestException('pairing_code is required')
+            line_service = EsgLineService(db_session)
+            return line_service.pair_group_by_code(current_user_org_id, data['pairing_code'])
+
+        elif '/api/esg/platform-bindings/' in path and '/groups/' in path and method == 'DELETE':
+            parts = path.split('/')
+            binding_id = int(parts[parts.index('platform-bindings') + 1])
+            group_id = parts[parts.index('groups') + 1]
+            return esg_service.remove_authorized_group(binding_id, current_user_org_id, group_id)
+
+        elif '/api/esg/platform-bindings/' in path and '/groups' in path and method == 'POST':
+            binding_id = _extract_id_from_path(path, 'platform-bindings')
+            if not data:
+                raise BadRequestException('Request body is required')
+            return esg_service.add_authorized_group(binding_id, current_user_org_id, data)
+
+        elif '/api/esg/platform-bindings/' in path and method == 'PUT':
+            binding_id = _extract_id_from_path(path, 'platform-bindings')
+            if not data:
+                raise BadRequestException('Request body is required')
+            return esg_service.update_platform_binding(binding_id, current_user_org_id, data)
+
+        # ===== DATA HIERARCHY =====
+        elif path == '/api/esg/categories' and method == 'GET':
+            return esg_service.list_categories(query_params.get('pillar'))
+
+        elif path == '/api/esg/subcategories' and method == 'GET':
+            category_id = query_params.get('category_id')
+            return esg_service.list_subcategories(
+                category_id=int(category_id) if category_id else None,
+                pillar=query_params.get('pillar'),
+            )
+
+        elif path == '/api/esg/datapoints' and method == 'GET':
+            subcategory_id = query_params.get('subcategory_id')
+            return esg_service.list_datapoints(
+                subcategory_id=int(subcategory_id) if subcategory_id else None,
+                pillar=query_params.get('pillar'),
+            )
+
+        # ===== COMPLETENESS & POSITIONING =====
+        elif path == '/api/esg/completeness' and method == 'GET':
+            return esg_service.get_data_completeness(current_user_org_id)
+
+        elif path == '/api/esg/positioning' and method == 'GET':
+            return esg_service.get_esg_positioning(current_user_org_id)
+
+        # ===== EXTRACTIONS =====
+        elif path == '/api/esg/extractions' and method == 'GET':
+            return esg_service.list_extractions(
+                organization_id=current_user_org_id,
+                page=int(query_params.get('page', 1)),
+                page_size=min(int(query_params.get('page_size', 20)), 100),
+                channel=query_params.get('channel'),
+                status=query_params.get('status'),
+            )
+
+        elif '/api/esg/extractions/' in path and method == 'GET':
+            extraction_id = _extract_id_from_path(path, 'extractions')
+            return esg_service.get_extraction(extraction_id, current_user_org_id)
+
+        # ===== IDEAS =====
+        elif path == '/api/esg/ideas' and method == 'GET':
+            ideas_service = EsgIdeasService(db_session)
+            return ideas_service.get_ideas(current_user_org_id)
 
         # ===== DOCUMENTS =====
         elif path == '/api/esg/documents' and method == 'GET':
@@ -71,81 +155,6 @@ def handle_esg_routes(event: Dict[str, Any], data: Dict[str, Any], **params) -> 
         elif '/api/esg/documents/' in path and method == 'GET':
             doc_id = _extract_id_from_path(path, 'documents')
             return esg_service.get_document(doc_id, current_user_org_id)
-
-        # ===== WASTE RECORDS =====
-        elif path == '/api/esg/waste-records' and method == 'GET':
-            return esg_service.list_waste_records(
-                organization_id=current_user_org_id,
-                page=int(query_params.get('page', 1)),
-                page_size=min(int(query_params.get('page_size', 20)), 100),
-                waste_type=query_params.get('waste_type'),
-                treatment_method=query_params.get('treatment_method'),
-                date_from=query_params.get('date_from'),
-                date_to=query_params.get('date_to'),
-                verification_status=query_params.get('verification_status'),
-            )
-
-        elif path == '/api/esg/waste-records' and method == 'POST':
-            if not data:
-                raise BadRequestException('Request body is required')
-            return esg_service.create_waste_record(
-                organization_id=current_user_org_id,
-                data=data,
-                created_by_id=int(current_user_id) if current_user_id else None,
-            )
-
-        elif path == '/api/esg/waste-records/bulk' and method == 'POST':
-            if not data or not data.get('document_id') or not data.get('records'):
-                raise BadRequestException('document_id and records are required')
-            return esg_service.bulk_create_waste_records(
-                organization_id=current_user_org_id,
-                document_id=data['document_id'],
-                records_data=data['records'],
-                created_by_id=int(current_user_id) if current_user_id else None,
-            )
-
-        elif '/api/esg/waste-records/' in path and method == 'PUT':
-            record_id = _extract_id_from_path(path, 'waste-records')
-            if not data:
-                raise BadRequestException('Request body is required')
-            return esg_service.update_waste_record(record_id, current_user_org_id, data)
-
-        elif '/api/esg/waste-records/' in path and method == 'DELETE':
-            record_id = _extract_id_from_path(path, 'waste-records')
-            return esg_service.delete_waste_record(record_id, current_user_org_id)
-
-        elif '/api/esg/waste-records/' in path and method == 'GET':
-            record_id = _extract_id_from_path(path, 'waste-records')
-            return esg_service.get_waste_record(record_id, current_user_org_id)
-
-        # ===== EMISSION FACTORS =====
-        elif path == '/api/esg/emission-factors' and method == 'GET':
-            return esg_service.list_emission_factors(
-                waste_type=query_params.get('waste_type'),
-                treatment_method=query_params.get('treatment_method'),
-                source=query_params.get('source'),
-            )
-
-        # ===== DASHBOARD =====
-        elif path == '/api/esg/dashboard' and method == 'GET':
-            year = int(query_params.get('year', 0)) or None
-            return esg_service.get_dashboard_kpis(current_user_org_id, year)
-
-        elif path == '/api/esg/dashboard/trends' and method == 'GET':
-            year = int(query_params.get('year', 0)) or None
-            return esg_service.get_dashboard_trends(current_user_org_id, year)
-
-        elif path == '/api/esg/dashboard/breakdown' and method == 'GET':
-            year = int(query_params.get('year', 0)) or None
-            group_by = query_params.get('group_by', 'treatment_method')
-            return esg_service.get_dashboard_breakdown(current_user_org_id, year, group_by)
-
-        # ===== SUMMARIES / RECALCULATE =====
-        elif path == '/api/esg/summaries/recalculate' and method == 'POST':
-            year = int((data or {}).get('year', 0)) or None
-            if not year:
-                raise BadRequestException('year is required')
-            return calc_service.recalculate_all_summaries(current_user_org_id, year)
 
         # ===== PRESIGNED URLs =====
         elif path == '/api/esg/presigneds' and method == 'POST':

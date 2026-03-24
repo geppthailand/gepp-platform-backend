@@ -254,15 +254,84 @@ class OrganizationService:
 
         return setup
 
-    def create_organization_setup(self, organization_id: int, setup_data: Dict[str, Any]) -> Dict[str, Any]:
+    def _merge_tree_nodes(self, full_nodes: list, partial_nodes: list) -> list:
+        """
+        Merge a partial tree (from a non-owner user) into the full existing tree.
+        Nodes present in partial_nodes update the corresponding node in full_nodes.
+        Nodes only in full_nodes (unseen by user) are preserved as-is.
+        Nodes only in partial_nodes (newly created by user) are appended.
+        """
+        if not full_nodes:
+            return partial_nodes or []
+        if not partial_nodes:
+            return full_nodes
+
+        # Index partial nodes by nodeId for fast lookup
+        partial_map = {}
+        for node in partial_nodes:
+            nid = str(node.get('nodeId', ''))
+            if nid:
+                partial_map[nid] = node
+
+        merged = []
+        seen_ids = set()
+
+        for full_node in full_nodes:
+            nid = str(full_node.get('nodeId', ''))
+            if nid in partial_map:
+                # User can see this node — use user's version but recurse into children
+                user_node = partial_map[nid]
+                merged_node = dict(user_node)
+                # Recursively merge children
+                full_children = full_node.get('children') or []
+                user_children = user_node.get('children') or []
+                merged_node['children'] = self._merge_tree_nodes(full_children, user_children)
+                merged.append(merged_node)
+                seen_ids.add(nid)
+            else:
+                # User cannot see this node — preserve it entirely from full tree
+                merged.append(full_node)
+                seen_ids.add(nid)
+
+        # Append any new nodes from partial that don't exist in full (newly created)
+        for node in partial_nodes:
+            nid = str(node.get('nodeId', ''))
+            if nid and nid not in seen_ids:
+                merged.append(node)
+
+        return merged
+
+    def _count_tree_nodes(self, nodes: Any) -> int:
+        """Count total nodes in a tree structure for sanity checking."""
+        if not nodes:
+            return 0
+        if isinstance(nodes, dict):
+            count = 1
+            for child in (nodes.get('children') or []):
+                count += self._count_tree_nodes(child)
+            return count
+        if isinstance(nodes, list):
+            return sum(self._count_tree_nodes(n) for n in nodes)
+        return 0
+
+    def create_organization_setup(self, organization_id: int, setup_data: Dict[str, Any], current_user_id: int = None) -> Dict[str, Any]:
         """
         Create a new organization setup structure.
         This will process locations first, then deactivate any existing active setup and create a new version.
+
+        If current_user_id is provided and the user is NOT the org owner, the incoming
+        (possibly pruned) tree is merged into the existing full tree so that unseen nodes
+        are preserved.
         """
         # Validate organization exists
         organization = self.get_organization_by_id(organization_id)
         if not organization:
             raise ValueError(f"Organization with ID {organization_id} not found")
+
+        # Determine if user is org owner
+        is_owner = True
+        if current_user_id is not None:
+            is_owner = (organization.owner_id == current_user_id)
 
         # Process locations if provided (locations can be inside treeStructure or at root level)
         location_id_mapping = {}
@@ -302,6 +371,51 @@ class OrganizationService:
         updated_hub_node = self._update_node_ids_in_structure(
             hub_node_data, location_id_mapping
         )
+
+        # --- Non-owner protection: merge partial tree into full existing tree ---
+        if not is_owner:
+            existing_setup = self.get_organization_setup(organization_id)
+            if existing_setup:
+                existing_root = existing_setup.get('root_nodes') or []
+                existing_hub = existing_setup.get('hub_node') or {}
+
+                # Count nodes before merge for sanity check
+                existing_root_count = self._count_tree_nodes(existing_root)
+                incoming_root_count = self._count_tree_nodes(updated_root_nodes)
+
+                # Merge root_nodes
+                if updated_root_nodes is not None:
+                    updated_root_nodes = self._merge_tree_nodes(existing_root, updated_root_nodes)
+
+                # Merge hub_node children
+                if updated_hub_node and isinstance(updated_hub_node, dict):
+                    existing_hub_children = (existing_hub.get('children') or []) if isinstance(existing_hub, dict) else []
+                    incoming_hub_children = updated_hub_node.get('children') or []
+                    updated_hub_node['children'] = self._merge_tree_nodes(existing_hub_children, incoming_hub_children)
+                elif existing_hub:
+                    # User sent no hub data — preserve existing
+                    updated_hub_node = existing_hub
+
+                # Count total nodes (root + hub) for sanity check
+                existing_hub_count = self._count_tree_nodes(existing_hub.get('children')) if isinstance(existing_hub, dict) else 0
+                merged_root_count = self._count_tree_nodes(updated_root_nodes)
+                merged_hub_count = self._count_tree_nodes(updated_hub_node.get('children')) if isinstance(updated_hub_node, dict) else 0
+
+                existing_total = existing_root_count + existing_hub_count
+                merged_total = merged_root_count + merged_hub_count
+
+                print(f"[Tree Merge] Non-owner save by user {current_user_id}: "
+                      f"existing={existing_total} nodes (root={existing_root_count}, hub={existing_hub_count}), "
+                      f"merged={merged_total} nodes (root={merged_root_count}, hub={merged_hub_count})")
+
+                # Safety: merged tree should never have fewer total nodes than existing
+                if merged_total < existing_total:
+                    print(f"[Tree Merge] WARNING: Merged tree has fewer nodes ({merged_total}) "
+                          f"than existing ({existing_total}). Aborting save to prevent data loss.")
+                    raise ValueError(
+                        f"Save rejected: merged tree would lose {existing_total - merged_total} nodes. "
+                        f"Please refresh and try again."
+                    )
 
         # Determine version number
         latest_setup = self.db.query(OrganizationSetup).filter(
@@ -359,12 +473,12 @@ class OrganizationService:
             'location_mappings': location_id_mapping  # Include mapping info for debugging
         }
 
-    def update_organization_setup(self, organization_id: int, setup_data: Dict[str, Any]) -> Dict[str, Any]:
+    def update_organization_setup(self, organization_id: int, setup_data: Dict[str, Any], current_user_id: int = None) -> Dict[str, Any]:
         """
         Update organization setup by creating a new version.
         This preserves the old version and creates a new active one.
         """
-        return self.create_organization_setup(organization_id, setup_data)
+        return self.create_organization_setup(organization_id, setup_data, current_user_id=current_user_id)
 
     def update_organization_setup_level_names(self, organization_id: int, level_names: Dict[str, Any]) -> Dict[str, Any]:
         """

@@ -539,8 +539,11 @@ def handle_get_location_materials(db_session, current_user: Dict) -> Dict[str, A
 
     service = MaterialsService(db_session)
 
+    # Fetch material images
+    images_map = service._fetch_material_images([m.id for m in materials])
+
     return {
-        'data': [service._serialize_material(mat) for mat in materials],
+        'data': [{**service._serialize_material(mat), 'images': images_map.get(mat.id, [])} for mat in materials],
         'pagination': {
             'page': 1,
             'page_size': total_count,
