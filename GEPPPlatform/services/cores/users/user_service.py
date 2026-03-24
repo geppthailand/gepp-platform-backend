@@ -196,6 +196,62 @@ class UserService:
 
         return False
 
+    # Mapping from organization_role.key to the member JSONB role value
+    _ORG_ROLE_KEY_TO_MEMBER_ROLE = {
+        'admin': 'admin',
+        'data_input': 'dataInput',
+        'auditor': 'auditor',
+        'viewer': 'viewer',
+    }
+
+    def _sync_member_role_in_locations(self, user_id: int, organization_id: int, new_org_role_id: int) -> None:
+        """
+        When a user's organization_role changes, update their role in all
+        user_locations.members JSONB arrays where they appear.
+        """
+        from ....models.subscriptions.subscription_models import OrganizationRole
+
+        new_role = self.db.query(OrganizationRole).filter(
+            OrganizationRole.id == new_org_role_id
+        ).first()
+        if not new_role:
+            return
+
+        new_member_role = self._ORG_ROLE_KEY_TO_MEMBER_ROLE.get(new_role.key, new_role.key)
+        user_id_str = str(user_id)
+
+        # Find all locations in this org that have members JSONB containing this user
+        locations = self.db.query(UserLocation).filter(
+            UserLocation.organization_id == organization_id,
+            UserLocation.is_location == True,
+            UserLocation.deleted_date.is_(None),
+            UserLocation.members.isnot(None),
+        ).all()
+
+        for loc in locations:
+            if not loc.members or not isinstance(loc.members, list):
+                continue
+
+            updated = False
+            new_members = []
+            for m in loc.members:
+                if not isinstance(m, dict):
+                    new_members.append(m)
+                    continue
+                m_uid = str(m.get('user_id', ''))
+                if m_uid == user_id_str and m.get('role') != new_member_role:
+                    new_members.append({'user_id': m['user_id'], 'role': new_member_role})
+                    updated = True
+                else:
+                    new_members.append(m)
+
+            if updated:
+                loc.members = new_members
+                from sqlalchemy.orm.attributes import flag_modified
+                flag_modified(loc, 'members')
+
+        self.db.flush()
+
     def _get_created_by_descendants(self, user_id: int, organization_id: int) -> Set[int]:
         """
         BFS down the created_by_id chain.
@@ -479,11 +535,27 @@ class UserService:
                         from ....exceptions import ValidationException
                         raise ValidationException(f'Destination name "{new_name}" already exists in this organization')
 
+            # Check if organization_role_id is changing (need to sync member roles)
+            old_role_key = None
+            if 'organization_role_id' in updates:
+                existing_user = self.crud.get_user_by_id(user_id)
+                if existing_user and existing_user.organization_role_id:
+                    from ....models.subscriptions.subscription_models import OrganizationRole
+                    old_role = self.db.query(OrganizationRole).filter(
+                        OrganizationRole.id == existing_user.organization_role_id
+                    ).first()
+                    if old_role:
+                        old_role_key = old_role.key
+
             # Apply updates
             user = self.crud.update_user(user_id, updates, updated_by_id)
             if not user:
                 from ....exceptions import NotFoundException
                 raise NotFoundException('User not found')
+
+            # Sync member role in all location members JSONB if org role changed
+            if 'organization_role_id' in updates and user.organization_role_id:
+                self._sync_member_role_in_locations(int(user_id), user.organization_id, user.organization_role_id)
 
             return {
                 'success': True,
