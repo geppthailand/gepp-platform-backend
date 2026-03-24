@@ -1396,9 +1396,9 @@ class UserService:
             OrganizationSetup.deleted_date.is_(None)
         ).order_by(OrganizationSetup.created_date.desc()).first()
 
-        if not org_setup or not org_setup.root_nodes:
-            # No setup, treat as owner (can't filter without tree)
-            return {'is_owner': True, 'assigned_ids': set(), 'ancestor_ids': set(), 'member_ids': set()}
+        if not org_setup or not org_setup.root_nodes or (isinstance(org_setup.root_nodes, list) and len(org_setup.root_nodes) == 0):
+            # No setup or empty root_nodes — user already failed owner check above, so not owner
+            return {'is_owner': False, 'assigned_ids': set(), 'ancestor_ids': set(), 'member_ids': set()}
 
         root_nodes = org_setup.root_nodes
         if not isinstance(root_nodes, list):
