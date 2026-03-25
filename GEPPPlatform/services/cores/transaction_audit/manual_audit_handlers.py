@@ -11,6 +11,7 @@ from .manual_audit_service import ManualAuditService
 from ..transactions.transaction_service import TransactionService
 
 logger = logging.getLogger(__name__)
+
 from ....exceptions import (
     APIException,
     UnauthorizedException,
@@ -18,6 +19,7 @@ from ....exceptions import (
     BadRequestException,
     ValidationException
 )
+
 
 def _upsert_traceability_group_on_approve(db_session: Any, transaction_id: int) -> None:
     """After a transaction or its records are approved, upsert records into traceability groups."""
@@ -41,6 +43,31 @@ def _upsert_traceability_group_on_approve(db_session: Any, transaction_id: int) 
             db_session.commit()
     except Exception as e:
         logger.warning("Traceability group upsert failed for transaction %s: %s", transaction_id, str(e))
+
+
+def _bulk_upsert_traceability_groups_on_approve(db_session: Any, transaction_ids: list) -> None:
+    """Batch upsert traceability groups for multiple approved transactions in one commit."""
+    if not transaction_ids:
+        return
+    try:
+        from ....models.transactions.transactions import Transaction
+        from ....models.transactions.transaction_records import TransactionRecord
+        txn_service = TransactionService(db_session)
+        transactions = db_session.query(Transaction).filter(Transaction.id.in_(transaction_ids)).all()
+        for transaction in transactions:
+            record_ids = [
+                r.id for r in db_session.query(TransactionRecord.id).filter(
+                    TransactionRecord.created_transaction_id == transaction.id,
+                    TransactionRecord.is_active == True,
+                    TransactionRecord.deleted_date.is_(None),
+                    TransactionRecord.status == "approved",
+                ).all()
+            ]
+            if record_ids:
+                txn_service._upsert_traceability_groups_for_transaction(transaction, record_ids)
+        db_session.commit()
+    except Exception as e:
+        logger.warning("Bulk traceability group upsert failed: %s", str(e))
 
 
 def _remove_records_from_traceability_group_on_reject(db_session: Any, transaction_id: int) -> None:
@@ -76,6 +103,44 @@ def _remove_records_from_traceability_group_on_reject(db_session: Any, transacti
         db_session.commit()
     except Exception as e:
         logger.warning("Traceability group removal failed for transaction %s: %s", transaction_id, str(e))
+
+
+def _bulk_remove_records_from_traceability_group_on_reject(db_session: Any, transaction_ids: list) -> None:
+    """Batch remove traceability groups for multiple rejected transactions in one commit."""
+    if not transaction_ids:
+        return
+    try:
+        from ....models.transactions.transaction_records import TransactionRecord
+        from ....models.transactions.traceability_transaction_group import TraceabilityTransactionGroup
+        # Get all rejected record IDs in one query
+        all_record_ids = [
+            r.id for r in db_session.query(TransactionRecord.id).filter(
+                TransactionRecord.created_transaction_id.in_(transaction_ids),
+                TransactionRecord.is_active == True,
+                TransactionRecord.deleted_date.is_(None),
+                TransactionRecord.status == "rejected",
+            ).all()
+        ]
+        if not all_record_ids:
+            return
+        record_id_set = set(all_record_ids)
+        groups = db_session.query(TraceabilityTransactionGroup).filter(
+            TraceabilityTransactionGroup.is_active == True,
+            TraceabilityTransactionGroup.deleted_date.is_(None),
+            TraceabilityTransactionGroup.transaction_record_id.overlap(all_record_ids),
+        ).all()
+        now = datetime.now(timezone.utc)
+        for group in groups:
+            remaining = [rid for rid in (group.transaction_record_id or []) if rid not in record_id_set]
+            if remaining:
+                group.transaction_record_id = remaining
+                group.updated_date = now
+            else:
+                group.is_active = False
+                group.deleted_date = now
+        db_session.commit()
+    except Exception as e:
+        logger.warning("Bulk traceability group removal failed: %s", str(e))
 
 
 def handle_manual_audit_routes(event: Dict[str, Any], data: Dict[str, Any], **params) -> Dict[str, Any]:
@@ -571,13 +636,10 @@ def handle_approve_transaction_record(
                 )
                 txn_service.notify_owner_if_different(int(transaction_id), 'TXN_APPROVED', int(current_user_id))
             except Exception as e:
-                logger.warning(
-                    "TXN_APPROVED notifications failed for transaction_id=%s: %s",
-                    transaction_id,
-                    str(e),
-                )
+                logger.warning("TXN_APPROVED notifications failed for transaction_id=%s: %s", transaction_id, str(e))
         if transaction_id is not None:
             _upsert_traceability_group_on_approve(db_session, int(transaction_id))
+
         return {
             'success': True,
             'message': result['message'],
@@ -657,13 +719,10 @@ def handle_reject_transaction_record(
                 )
                 txn_service.notify_owner_if_different(int(transaction_id), 'TXN_REJECTED', int(current_user_id))
             except Exception as e:
-                logger.warning(
-                    "TXN_REJECTED (record) notifications failed for record_id=%s: %s",
-                    record_id,
-                    str(e),
-                )
+                logger.warning("TXN_REJECTED notifications failed for record_id=%s: %s", record_id, str(e))
         if transaction_id is not None:
             _remove_records_from_traceability_group_on_reject(db_session, int(transaction_id))
+
         return {
             'success': True,
             'message': result['message'],
@@ -694,10 +753,12 @@ def _create_txn_approved_notifications_for_bulk(
     current_user_id: int,
     transaction_ids: list,
 ) -> None:
-    """Create TXN_APPROVED notifications (BELL + EMAIL stub) for each successfully approved transaction."""
+    """Create per-transaction TXN_APPROVED notifications + emails for all approved transactions.
+    DB work runs sequentially, emails are collected then sent in parallel (joined before return)."""
     if not transaction_ids or organization_id is None:
         return
     txn_service = TransactionService(db_session)
+    txn_service._deferred_emails = []  # Enable deferred email collection
     for tid in transaction_ids:
         try:
             txn_service.create_txn_approved_notifications(
@@ -708,6 +769,7 @@ def _create_txn_approved_notifications_for_bulk(
             txn_service.notify_owner_if_different(int(tid), 'TXN_APPROVED', int(current_user_id))
         except Exception as e:
             logger.warning("TXN_APPROVED notifications failed for transaction_id=%s: %s", tid, str(e))
+    txn_service.flush_deferred_emails_parallel()  # Send all emails in parallel, wait for all
 
 
 def _create_txn_rejected_notifications_for_bulk(
@@ -716,10 +778,12 @@ def _create_txn_rejected_notifications_for_bulk(
     current_user_id: int,
     transaction_ids: list,
 ) -> None:
-    """Create TXN_REJECTED notifications (BELL + EMAIL stub) for each successfully rejected transaction."""
+    """Create per-transaction TXN_REJECTED notifications + emails for all rejected transactions.
+    DB work runs sequentially, emails are collected then sent in parallel (joined before return)."""
     if not transaction_ids or organization_id is None:
         return
     txn_service = TransactionService(db_session)
+    txn_service._deferred_emails = []  # Enable deferred email collection
     for tid in transaction_ids:
         try:
             txn_service.create_txn_rejected_notifications(
@@ -730,6 +794,7 @@ def _create_txn_rejected_notifications_for_bulk(
             txn_service.notify_owner_if_different(int(tid), 'TXN_REJECTED', int(current_user_id))
         except Exception as e:
             logger.warning("TXN_REJECTED notifications failed for transaction_id=%s: %s", tid, str(e))
+    txn_service.flush_deferred_emails_parallel()  # Send all emails in parallel, wait for all
 
 
 def handle_bulk_approve_transactions(
@@ -818,11 +883,9 @@ def handle_bulk_approve_transactions(
                     })
 
             approved_tids = [r['transaction_id'] for r in results]
-            _create_txn_approved_notifications_for_bulk(
-                db_session, organization_id, current_user_id, approved_tids
-            )
-            for tid in approved_tids:
-                _upsert_traceability_group_on_approve(db_session, tid)
+            if approved_tids:
+                _create_txn_approved_notifications_for_bulk(db_session, organization_id, current_user_id, approved_tids)
+                _bulk_upsert_traceability_groups_on_approve(db_session, approved_tids)
             return {
                 'success': len(errors) == 0,
                 'message': f'Bulk approve completed: {len(results)} successful, {len(errors)} failed',
@@ -845,11 +908,9 @@ def handle_bulk_approve_transactions(
                 notes=global_notes
             )
             approved_tids = [r['transaction_id'] for r in result.get('results', [])]
-            _create_txn_approved_notifications_for_bulk(
-                db_session, organization_id, current_user_id, approved_tids
-            )
-            for tid in approved_tids:
-                _upsert_traceability_group_on_approve(db_session, tid)
+            if approved_tids:
+                _create_txn_approved_notifications_for_bulk(db_session, organization_id, current_user_id, approved_tids)
+                _bulk_upsert_traceability_groups_on_approve(db_session, approved_tids)
             return {
                 'success': result['success'],
                 'message': f'Bulk approve completed: {result["summary"]["successful"]} successful, {result["summary"]["failed"]} failed',
@@ -956,11 +1017,9 @@ def handle_bulk_reject_transactions(
                     })
 
             rejected_tids = [r['transaction_id'] for r in results]
-            _create_txn_rejected_notifications_for_bulk(
-                db_session, organization_id, current_user_id, rejected_tids
-            )
-            for tid in rejected_tids:
-                _remove_records_from_traceability_group_on_reject(db_session, tid)
+            if rejected_tids:
+                _create_txn_rejected_notifications_for_bulk(db_session, organization_id, current_user_id, rejected_tids)
+                _bulk_remove_records_from_traceability_group_on_reject(db_session, rejected_tids)
             return {
                 'success': len(errors) == 0,
                 'message': f'Bulk reject completed: {len(results)} successful, {len(errors)} failed',
@@ -983,11 +1042,9 @@ def handle_bulk_reject_transactions(
                 rejection_reason=global_rejection_reason
             )
             rejected_tids = [r['transaction_id'] for r in result.get('results', [])]
-            _create_txn_rejected_notifications_for_bulk(
-                db_session, organization_id, current_user_id, rejected_tids
-            )
-            for tid in rejected_tids:
-                _remove_records_from_traceability_group_on_reject(db_session, tid)
+            if rejected_tids:
+                _create_txn_rejected_notifications_for_bulk(db_session, organization_id, current_user_id, rejected_tids)
+                _bulk_remove_records_from_traceability_group_on_reject(db_session, rejected_tids)
             return {
                 'success': result['success'],
                 'message': f'Bulk reject completed: {result["summary"]["successful"]} successful, {result["summary"]["failed"]} failed',

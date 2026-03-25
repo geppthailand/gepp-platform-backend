@@ -4,6 +4,7 @@ Handles manual approval/rejection of pending transactions by auditors
 """
 
 import logging
+import traceback
 from typing import List, Dict, Any, Optional
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.exc import SQLAlchemyError
@@ -237,6 +238,15 @@ class ManualAuditService:
             transaction.is_user_audit = True  # Mark as manually audited by user
             transaction.audit_date = datetime.now(timezone.utc)  # Set audit date when manual audit is performed
 
+            # Also update all active transaction_records for this transaction
+            active_records = db.query(TransactionRecord).filter(
+                TransactionRecord.created_transaction_id == transaction.id,
+                TransactionRecord.is_active == True,
+                TransactionRecord.deleted_date.is_(None),
+            ).all()
+            for record in active_records:
+                record.status = 'approved'
+
             # Add audit notes
             audit_note = f"Manual Audit - APPROVED by User #{auditor_user_id} at {datetime.now(timezone.utc).isoformat()}"
             if notes:
@@ -290,7 +300,8 @@ class ManualAuditService:
             }
 
         except SQLAlchemyError as e:
-            logger.error(f"Database error approving transaction {transaction_id}: {str(e)}")
+            print(f"[DEBUG] Database error approving transaction {transaction_id}: {str(e)}")
+            print(f"[DEBUG] Traceback: {traceback.format_exc()}")
             db.rollback()
             return {
                 'success': False,
@@ -298,7 +309,8 @@ class ManualAuditService:
                 'data': None
             }
         except Exception as e:
-            logger.error(f"Unexpected error approving transaction {transaction_id}: {str(e)}")
+            print(f"[DEBUG] Unexpected error approving transaction {transaction_id}: {str(e)}")
+            print(f"[DEBUG] Traceback: {traceback.format_exc()}")
             db.rollback()
             return {
                 'success': False,
@@ -345,6 +357,15 @@ class ManualAuditService:
             transaction.updated_date = datetime.now(timezone.utc)
             transaction.is_user_audit = True  # Mark as manually audited by user
             transaction.audit_date = datetime.now(timezone.utc)  # Set audit date when manual audit is performed
+
+            # Also update all active transaction_records for this transaction
+            active_records = db.query(TransactionRecord).filter(
+                TransactionRecord.created_transaction_id == transaction.id,
+                TransactionRecord.is_active == True,
+                TransactionRecord.deleted_date.is_(None),
+            ).all()
+            for record in active_records:
+                record.status = 'rejected'
 
             # Add rejection notes
             rejection_note = f"Manual Audit - REJECTED by User #{auditor_user_id} at {datetime.now(timezone.utc).isoformat()}"
@@ -664,57 +685,130 @@ class ManualAuditService:
         notes: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Bulk approve multiple transactions
-
-        Args:
-            db: Database session
-            transaction_ids: List of transaction IDs to approve
-            auditor_user_id: ID of the user performing the audit
-            notes: Optional audit notes (applied to all transactions)
-
-        Returns:
-            Dict containing operation results with successes and errors
+        Bulk approve multiple transactions in a single DB transaction.
         """
-        results = []
-        errors = []
+        try:
+            now = datetime.now(timezone.utc)
+            results = []
+            errors = []
+            unchanged_count = 0
 
-        for transaction_id in transaction_ids:
-            try:
-                result = self.approve_transaction(
-                    db=db,
-                    transaction_id=transaction_id,
-                    auditor_user_id=auditor_user_id,
-                    notes=notes
-                )
-                if result['success']:
+            # Fetch all transactions in one query
+            transactions = db.query(Transaction).filter(
+                Transaction.id.in_(transaction_ids)
+            ).all()
+            found_ids = {t.id for t in transactions}
+
+            # Track missing transactions as real errors
+            for tid in transaction_ids:
+                if tid not in found_ids:
+                    errors.append({'transaction_id': tid, 'error': f'Transaction {tid} not found'})
+
+            # Filter: only process pending transactions, non-pending goes to results as skipped
+            pending_transactions = []
+            for transaction in transactions:
+                if transaction.status != TransactionStatus.pending:
+                    unchanged_count += 1
                     results.append({
-                        'transaction_id': transaction_id,
-                        'success': True,
-                        'message': result['message'],
-                        'data': result['data']
+                        'transaction_id': transaction.id,
+                        'success': False,
+                        'message': f'Transaction {transaction.id} already {transaction.status.value}, skipped',
+                        'data': {'transaction_id': transaction.id}
                     })
                 else:
-                    errors.append({
-                        'transaction_id': transaction_id,
-                        'error': result.get('error', 'Failed to approve transaction')
-                    })
-            except Exception as e:
-                logger.error(f"Error approving transaction {transaction_id} in bulk operation: {str(e)}")
-                errors.append({
-                    'transaction_id': transaction_id,
-                    'error': str(e)
+                    pending_transactions.append(transaction)
+
+            # Update all pending transactions
+            approved_ids = set()
+            for transaction in pending_transactions:
+                transaction.status = TransactionStatus.approved
+                transaction.approved_by_id = auditor_user_id
+                transaction.updated_by_id = auditor_user_id
+                transaction.updated_date = now
+                transaction.is_user_audit = True
+                transaction.audit_date = now
+
+                # Audit notes text
+                audit_note = f"Manual Audit - APPROVED by User #{auditor_user_id} at {now.isoformat()}"
+                if notes:
+                    audit_note += f"\nAuditor Notes: {notes}"
+                if transaction.notes:
+                    transaction.notes += f"\n\n{audit_note}"
+                else:
+                    transaction.notes = audit_note
+
+                # Audit notes JSON
+                audit_notes = {'s': 'approved', 'v': []}
+                transaction.ai_audit_notes = audit_notes
+
+                # Create audit history record
+                db.add(TransactionAudit(
+                    transaction_id=transaction.id,
+                    audit_notes=audit_notes,
+                    by_human=True,
+                    auditor_id=auditor_user_id,
+                    organization_id=transaction.organization_id,
+                    audit_type='manual',
+                    processing_time_ms=None,
+                    token_usage=None,
+                    model_version=None,
+                    created_date=now,
+                    created_by_id=auditor_user_id
+                ))
+
+                approved_ids.add(transaction.id)
+                results.append({
+                    'transaction_id': transaction.id,
+                    'success': True,
+                    'message': f'Transaction {transaction.id} approved successfully',
+                    'data': {
+                        'transaction_id': transaction.id,
+                        'new_status': TransactionStatus.approved.value,
+                        'approved_by': auditor_user_id,
+                        'approved_at': now.isoformat()
+                    }
                 })
 
-        return {
-            'success': len(errors) == 0,
-            'results': results,
-            'errors': errors,
-            'summary': {
-                'total_requested': len(transaction_ids),
-                'successful': len(results),
-                'failed': len(errors)
+            # Bulk update all active transaction_records for approved transactions
+            if approved_ids:
+                db.query(TransactionRecord).filter(
+                    TransactionRecord.created_transaction_id.in_(approved_ids),
+                    TransactionRecord.is_active == True,
+                    TransactionRecord.deleted_date.is_(None),
+                ).update({'status': 'approved'}, synchronize_session='fetch')
+
+            # Single commit for all changes
+            db.commit()
+            successful_count = len(approved_ids)
+            print(f"[DEBUG] Bulk approved {successful_count} transactions, {unchanged_count} unchanged, {len(errors)} failed")
+
+            return {
+                'success': len(errors) == 0,
+                'results': results,
+                'errors': errors,
+                'summary': {
+                    'total_requested': len(transaction_ids),
+                    'successful': successful_count,
+                    'unchanged': unchanged_count,
+                    'failed': len(errors)
+                }
             }
-        }
+
+        except Exception as e:
+            print(f"[DEBUG] Bulk approve failed, rolling back: {str(e)}")
+            print(f"[DEBUG] Traceback: {traceback.format_exc()}")
+            db.rollback()
+            return {
+                'success': False,
+                'results': [],
+                'errors': [{'transaction_id': tid, 'error': str(e)} for tid in transaction_ids],
+                'summary': {
+                    'total_requested': len(transaction_ids),
+                    'successful': 0,
+                    'unchanged': 0,
+                    'failed': len(transaction_ids)
+                }
+            }
 
     def bulk_reject_transactions(
         self,
@@ -724,57 +818,134 @@ class ManualAuditService:
         rejection_reason: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Bulk reject multiple transactions
-
-        Args:
-            db: Database session
-            transaction_ids: List of transaction IDs to reject
-            auditor_user_id: ID of the user performing the audit
-            rejection_reason: Optional rejection reason (applied to all transactions)
-
-        Returns:
-            Dict containing operation results with successes and errors
+        Bulk reject multiple transactions in a single DB transaction.
         """
-        results = []
-        errors = []
+        try:
+            now = datetime.now(timezone.utc)
+            results = []
+            errors = []
+            unchanged_count = 0
 
-        for transaction_id in transaction_ids:
-            try:
-                result = self.reject_transaction(
-                    db=db,
-                    transaction_id=transaction_id,
-                    auditor_user_id=auditor_user_id,
-                    rejection_reason=rejection_reason
-                )
-                if result['success']:
+            # Fetch all transactions in one query
+            transactions = db.query(Transaction).filter(
+                Transaction.id.in_(transaction_ids)
+            ).all()
+            found_ids = {t.id for t in transactions}
+
+            # Track missing transactions as real errors
+            for tid in transaction_ids:
+                if tid not in found_ids:
+                    errors.append({'transaction_id': tid, 'error': f'Transaction {tid} not found'})
+
+            # Filter: only process pending transactions, non-pending goes to results as skipped
+            pending_transactions = []
+            for transaction in transactions:
+                if transaction.status != TransactionStatus.pending:
+                    unchanged_count += 1
                     results.append({
-                        'transaction_id': transaction_id,
-                        'success': True,
-                        'message': result['message'],
-                        'data': result['data']
+                        'transaction_id': transaction.id,
+                        'success': False,
+                        'message': f'Transaction {transaction.id} already {transaction.status.value}, skipped',
+                        'data': {'transaction_id': transaction.id}
                     })
                 else:
-                    errors.append({
-                        'transaction_id': transaction_id,
-                        'error': result.get('error', 'Failed to reject transaction')
-                    })
-            except Exception as e:
-                logger.error(f"Error rejecting transaction {transaction_id} in bulk operation: {str(e)}")
-                errors.append({
-                    'transaction_id': transaction_id,
-                    'error': str(e)
+                    pending_transactions.append(transaction)
+
+            # Update all pending transactions
+            rejected_ids = set()
+            for transaction in pending_transactions:
+                transaction.status = TransactionStatus.rejected
+                transaction.approved_by_id = auditor_user_id
+                transaction.updated_by_id = auditor_user_id
+                transaction.updated_date = now
+                transaction.is_user_audit = True
+                transaction.audit_date = now
+
+                # Rejection notes text
+                rejection_note = f"Manual Audit - REJECTED by User #{auditor_user_id} at {now.isoformat()}"
+                if rejection_reason:
+                    rejection_note += f"\nRejection Reason: {rejection_reason}"
+                if transaction.notes:
+                    transaction.notes += f"\n\n{rejection_note}"
+                else:
+                    transaction.notes = rejection_note
+
+                # Audit notes JSON
+                audit_notes = {
+                    's': 'rejected',
+                    'v': [{'id': None, 'm': rejection_reason if rejection_reason else 'Manually rejected by auditor'}]
+                }
+                transaction.ai_audit_notes = audit_notes
+
+                # Create audit history record
+                db.add(TransactionAudit(
+                    transaction_id=transaction.id,
+                    audit_notes=audit_notes,
+                    by_human=True,
+                    auditor_id=auditor_user_id,
+                    organization_id=transaction.organization_id,
+                    audit_type='manual',
+                    processing_time_ms=None,
+                    token_usage=None,
+                    model_version=None,
+                    created_date=now,
+                    created_by_id=auditor_user_id
+                ))
+
+                rejected_ids.add(transaction.id)
+                results.append({
+                    'transaction_id': transaction.id,
+                    'success': True,
+                    'message': f'Transaction {transaction.id} rejected successfully',
+                    'data': {
+                        'transaction_id': transaction.id,
+                        'new_status': TransactionStatus.rejected.value,
+                        'rejected_by': auditor_user_id,
+                        'rejected_at': now.isoformat(),
+                        'rejection_reason': rejection_reason
+                    }
                 })
 
-        return {
-            'success': len(errors) == 0,
-            'results': results,
-            'errors': errors,
-            'summary': {
-                'total_requested': len(transaction_ids),
-                'successful': len(results),
-                'failed': len(errors)
+            # Bulk update all active transaction_records for rejected transactions
+            if rejected_ids:
+                db.query(TransactionRecord).filter(
+                    TransactionRecord.created_transaction_id.in_(rejected_ids),
+                    TransactionRecord.is_active == True,
+                    TransactionRecord.deleted_date.is_(None),
+                ).update({'status': 'rejected'}, synchronize_session='fetch')
+
+            # Single commit for all changes
+            db.commit()
+            successful_count = len(rejected_ids)
+            print(f"[DEBUG] Bulk rejected {successful_count} transactions, {unchanged_count} unchanged, {len(errors)} failed")
+
+            return {
+                'success': len(errors) == 0,
+                'results': results,
+                'errors': errors,
+                'summary': {
+                    'total_requested': len(transaction_ids),
+                    'successful': successful_count,
+                    'unchanged': unchanged_count,
+                    'failed': len(errors)
+                }
             }
-        }
+
+        except Exception as e:
+            print(f"[DEBUG] Bulk reject failed, rolling back: {str(e)}")
+            print(f"[DEBUG] Traceback: {traceback.format_exc()}")
+            db.rollback()
+            return {
+                'success': False,
+                'results': [],
+                'errors': [{'transaction_id': tid, 'error': str(e)} for tid in transaction_ids],
+                'summary': {
+                    'total_requested': len(transaction_ids),
+                    'successful': 0,
+                    'unchanged': 0,
+                    'failed': len(transaction_ids)
+                }
+            }
 
     def _serialize_transactions(self, transactions: List[Transaction]) -> List[Dict[str, Any]]:
         """Serialize a list of transactions to dictionaries"""

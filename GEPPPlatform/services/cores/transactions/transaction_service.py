@@ -62,6 +62,7 @@ class TransactionService:
 
     def __init__(self, db: Session):
         self.db = db
+        self._deferred_emails: Optional[list] = None  # When set to a list, emails are collected instead of sent immediately
 
     # ========== TRANSACTION CRUD OPERATIONS ==========
 
@@ -205,7 +206,20 @@ class TransactionService:
         html_content: str,
         text_content: Optional[str] = None,
     ) -> bool:
-        """Send email via Lambda (same contract as auth_handlers)."""
+        """Send email via Lambda. If deferred mode is active, collect instead of sending."""
+        if self._deferred_emails is not None:
+            self._deferred_emails.append((to_email, subject, html_content, text_content))
+            return True
+        return self._do_send_email_via_lambda(to_email, subject, html_content, text_content)
+
+    def _do_send_email_via_lambda(
+        self,
+        to_email: str,
+        subject: str,
+        html_content: str,
+        text_content: Optional[str] = None,
+    ) -> bool:
+        """Actually send email via Lambda invocation."""
         try:
             lambda_function_name = os.environ.get("EMAIL_LAMBDA_FUNCTION", "PROD-GEPPEmailNotification")
             message = {
@@ -236,6 +250,27 @@ class TransactionService:
         except Exception as e:
             logger.exception("Error sending email via Lambda: %s", e)
             return False
+
+    def flush_deferred_emails_parallel(self) -> None:
+        """Send all deferred emails in parallel using ThreadPoolExecutor, wait for all to complete."""
+        if not self._deferred_emails:
+            self._deferred_emails = None
+            return
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        emails = list(self._deferred_emails)
+        self._deferred_emails = None
+        logger.info("Sending %d deferred emails in parallel", len(emails))
+        with ThreadPoolExecutor(max_workers=min(len(emails), 10)) as executor:
+            futures = {
+                executor.submit(self._do_send_email_via_lambda, *args): args[0]
+                for args in emails
+            }
+            for future in as_completed(futures):
+                to_email = futures[future]
+                try:
+                    future.result()
+                except Exception as e:
+                    logger.warning("Parallel email to %s failed: %s", to_email, str(e))
 
     def _get_transaction_materials(self, transaction_id: int) -> List[Dict[str, Any]]:
         """Fetch material name (Thai) and weight for each record in a transaction."""
