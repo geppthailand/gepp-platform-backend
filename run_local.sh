@@ -135,11 +135,11 @@ needs_install() {
 
 if needs_install; then
   log "Installing / syncing dependencies ..."
-  pip install --quiet --upgrade pip
+  "$VENV_DIR/bin/python" -m pip install --quiet --upgrade pip
 
   # Install everything from requirements.local.txt
   if [ -f "$REQ_FILE" ]; then
-    pip install --quiet -r "$REQ_FILE" 2>&1 | grep -v "already satisfied" || true
+    "$VENV_DIR/bin/python" -m pip install --quiet -r "$REQ_FILE" 2>&1 | grep -v "already satisfied" || true
   else
     err "requirements.local.txt not found at $REQ_FILE"
     exit 1
@@ -152,7 +152,7 @@ else
   # Quick check: verify a few critical packages are importable
   MISSING=()
   for pkg in flask sqlalchemy psycopg2 jwt bcrypt boto3 numpy scipy pgvector yaml dateutil openai; do
-    if ! python3 -c "import $pkg" 2>/dev/null; then
+    if ! "$VENV_DIR/bin/python" -c "import $pkg" 2>/dev/null; then
       MISSING+=("$pkg")
     fi
   done
@@ -160,7 +160,7 @@ else
   if [ ${#MISSING[@]} -gt 0 ]; then
     warn "Missing packages detected: ${MISSING[*]}"
     log "Re-installing dependencies ..."
-    pip install --quiet -r "$REQ_FILE" 2>&1 | grep -v "already satisfied" || true
+    "$VENV_DIR/bin/python" -m pip install --quiet -r "$REQ_FILE" 2>&1 | grep -v "already satisfied" || true
     touch "$STAMP_FILE"
     ok "Dependencies fixed."
   fi

@@ -22,6 +22,7 @@ from GEPPPlatform.models.users.user_reset_password_log import UserResetPasswordL
 from GEPPPlatform.models.subscriptions.organizations import Organization, OrganizationInfo, OrganizationSetup
 from GEPPPlatform.models.subscriptions.subscription_models import SubscriptionPlan, Subscription
 from GEPPPlatform.models.cores.iot_devices import IoTDevice
+from GEPPPlatform.models.cores.roles import SystemPermission
 from ..cores.organizations.organization_role_presets import OrganizationRolePresets
 from ...exceptions import (
     APIException,
@@ -445,6 +446,25 @@ class AuthHandlers:
                     'room_level_name': org_setup.room_level_name,
                 }
 
+            # Fetch plan-level permissions for the user's organization subscription
+            permissions = []
+            if user.organization_id:
+                active_sub = session.query(Subscription).options(
+                    joinedload(Subscription.plan)
+                ).filter(
+                    Subscription.organization_id == user.organization_id,
+                    Subscription.status == 'active',
+                    Subscription.is_active == True
+                ).first()
+                if active_sub and active_sub.plan and active_sub.plan.permission_ids:
+                    perm_rows = session.query(SystemPermission.code).filter(
+                        SystemPermission.id.in_(active_sub.plan.permission_ids),
+                        SystemPermission.is_active == True
+                    ).all()
+                    permissions = [row.code for row in perm_rows]
+
+            user_data['permissions'] = permissions
+
             return {
                 'success': True,
                 'auth_token': tokens['auth_token'],
@@ -575,9 +595,16 @@ class AuthHandlers:
             raise APIException(str(e))
 
     def validate_token(self, data: Dict[str, Any], **kwargs) -> Dict[str, Any]:
-        """Validate JWT token from request body"""
+        """Validate JWT token from request body or Authorization header"""
         try:
-            token = data.get('token')
+            token = data.get('token') if data else None
+
+            # Fallback to Authorization header if not in body
+            if not token:
+                headers = kwargs.get('headers', {})
+                auth_header = headers.get('Authorization') or headers.get('authorization')
+                if auth_header and auth_header.startswith("Bearer "):
+                    token = auth_header.split(" ")[1]
 
             if not token:
                 raise ValidationException('Token is required')
@@ -674,6 +701,56 @@ class AuthHandlers:
                 'expires_in': 86400  # 1 day in seconds
             }
 
+        except Exception as e:
+            raise APIException(str(e))
+
+    def get_permissions(self, **kwargs) -> Dict[str, Any]:
+        """Get current user's plan-level permissions from JWT token in Authorization header"""
+        try:
+            headers = kwargs.get('headers', {})
+            auth_header = headers.get('Authorization') or headers.get('authorization')
+
+            if not auth_header or not auth_header.startswith("Bearer "):
+                raise UnauthorizedException('Authorization header with Bearer token is required')
+
+            token = auth_header.split(" ")[1]
+            payload = self.verify_jwt_token(token)
+
+            if not payload:
+                raise UnauthorizedException('Invalid or expired token')
+
+            session = self.db_session
+            user = session.query(UserLocation).filter_by(
+                id=payload['user_id'],
+                is_active=True
+            ).first()
+
+            if not user:
+                raise NotFoundException('User not found')
+
+            permissions = []
+            if user.organization_id:
+                active_sub = session.query(Subscription).options(
+                    joinedload(Subscription.plan)
+                ).filter(
+                    Subscription.organization_id == user.organization_id,
+                    Subscription.status == 'active',
+                    Subscription.is_active == True
+                ).first()
+                if active_sub and active_sub.plan and active_sub.plan.permission_ids:
+                    perm_rows = session.query(SystemPermission.code).filter(
+                        SystemPermission.id.in_(active_sub.plan.permission_ids),
+                        SystemPermission.is_active == True
+                    ).all()
+                    permissions = [row.code for row in perm_rows]
+
+            return {
+                'success': True,
+                'permissions': permissions,
+            }
+
+        except (UnauthorizedException, NotFoundException):
+            raise
         except Exception as e:
             raise APIException(str(e))
 

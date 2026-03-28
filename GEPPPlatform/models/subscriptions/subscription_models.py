@@ -34,7 +34,10 @@ class SubscriptionPlan(Base, BaseModel):
     
     # Features as JSON
     features = Column(JSON)  # JSON array of feature strings
-    
+
+    # Permission IDs as JSONB array — stores system_permission IDs granted by this plan
+    permission_ids = Column(JSON, nullable=False, default=[])
+
     # Relationships
     subscriptions = relationship("Subscription", back_populates="plan")
     
