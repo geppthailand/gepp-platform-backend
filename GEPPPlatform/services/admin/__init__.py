@@ -34,6 +34,10 @@ def handle_admin_routes(path: str, data: dict, **commonParams):
             # POST /admin/{resource}
             resource = path_parts[0]
             return admin_handler.create_resource(resource, data)
+        elif len(path_parts) == 4 and path_parts[2] == "permissions" and path_parts[3] == "batch":
+            # POST /admin/subscription-plans/{id}/permissions/batch
+            resource_id = int(path_parts[1])
+            return admin_handler.batch_permissions(resource_id, data)
         elif len(path_parts) == 3 and path_parts[2] == "permissions":
             # POST /admin/subscription-plans/{id}/permissions
             resource = path_parts[0]

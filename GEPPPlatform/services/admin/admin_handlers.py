@@ -183,5 +183,8 @@ class AdminHandlers:
             return self.admin_service.toggle_plan_permission(resource_id, data)
         raise NotFoundException(f'Permission assignment not supported for {resource}')
 
+    def batch_permissions(self, plan_id: int, data: dict) -> Dict[str, Any]:
+        return self.admin_service.batch_toggle_permissions(plan_id, data)
+
     def remove_permission(self, subscription_id: int, perm_id: int) -> Dict[str, Any]:
         return self.admin_service.remove_permission_from_subscription(subscription_id, perm_id)

@@ -11,7 +11,7 @@ BEGIN;
 -- 1. Ensure platform_role column exists (idempotent)
 ALTER TABLE user_locations ADD COLUMN IF NOT EXISTS platform_role VARCHAR(50) DEFAULT NULL;
 
--- 2. Insert super-admin user
+-- 2. Insert super-admin user only if not already exists (no unique constraint on email)
 -- Password: 1qaz!QAZ (bcrypt hashed)
 INSERT INTO user_locations (
     is_user,
@@ -31,7 +31,7 @@ INSERT INTO user_locations (
     created_date,
     updated_date
 )
-VALUES (
+SELECT
     TRUE,
     FALSE,
     'GEPP Admin',
@@ -48,10 +48,11 @@ VALUES (
     TRUE,
     NOW(),
     NOW()
-)
-ON CONFLICT DO NOTHING;
+WHERE NOT EXISTS (
+    SELECT 1 FROM user_locations WHERE email = 'manager@gepp.me'
+);
 
--- If user already exists, update password and platform_role
+-- If user already exists, ensure it has the correct platform_role and password
 UPDATE user_locations
 SET
     password = '$2b$12$4OY69MuBoOAvm/e8gDsVw.GRWuipIb9XxTfiArTIn0efbIyRMG/KW',

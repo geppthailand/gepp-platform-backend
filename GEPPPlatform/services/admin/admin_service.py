@@ -475,7 +475,8 @@ class AdminService:
         if not plan:
             raise NotFoundException(f'Subscription plan {plan_id} not found')
 
-        for field in ['name', 'display_name', 'description', 'price_monthly', 'price_yearly',
+        # name is immutable — only display_name and other fields can be changed
+        for field in ['display_name', 'description', 'price_monthly', 'price_yearly',
                       'max_users', 'max_transactions_monthly', 'max_storage_gb', 'max_api_calls_daily', 'features']:
             camel = self._to_camel(field)
             if camel in data:
@@ -484,8 +485,39 @@ class AdminService:
         self.db_session.flush()
         return {'id': plan.id, 'message': 'Subscription plan updated'}
 
+    def _create_plan_version(self, old_plan: 'SubscriptionPlan', new_permission_ids: list) -> 'SubscriptionPlan':
+        """Create a new plan version with updated permissions, deactivate the old one, and migrate subscriptions."""
+        new_plan = SubscriptionPlan(
+            name=old_plan.name,
+            display_name=old_plan.display_name,
+            description=old_plan.description,
+            price_monthly=old_plan.price_monthly,
+            price_yearly=old_plan.price_yearly,
+            max_users=old_plan.max_users,
+            max_transactions_monthly=old_plan.max_transactions_monthly,
+            max_storage_gb=old_plan.max_storage_gb,
+            max_api_calls_daily=old_plan.max_api_calls_daily,
+            features=old_plan.features,
+            permission_ids=new_permission_ids,
+        )
+        self.db_session.add(new_plan)
+
+        # Deactivate old plan
+        old_plan.is_active = False
+        self.db_session.flush()
+
+        # Migrate active subscriptions to the new plan version
+        self.db_session.query(Subscription).filter(
+            Subscription.plan_id == old_plan.id,
+            Subscription.status == 'active',
+            Subscription.is_active == True
+        ).update({Subscription.plan_id: new_plan.id}, synchronize_session='fetch')
+        self.db_session.flush()
+
+        return new_plan
+
     def toggle_plan_permission(self, plan_id: int, data: dict) -> Dict[str, Any]:
-        """Toggle a system permission on/off for a subscription plan"""
+        """Toggle a system permission — creates a new plan version for historical tracking"""
         plan = self.db_session.query(SubscriptionPlan).filter(
             SubscriptionPlan.id == plan_id, SubscriptionPlan.is_active == True
         ).first()
@@ -512,13 +544,55 @@ class AdminService:
         elif not enabled and permission_id in current_ids:
             current_ids.remove(permission_id)
 
-        plan.permission_ids = current_ids
-        self.db_session.flush()
+        new_plan = self._create_plan_version(plan, current_ids)
 
         return {
-            'message': f'Permission {perm.code} {"enabled" if enabled else "disabled"} for plan {plan.name}',
+            'message': f'Permission {perm.code} {"enabled" if enabled else "disabled"} for plan {new_plan.name}',
             'permissionId': permission_id,
             'enabled': enabled,
+            'newPlanId': new_plan.id,
+        }
+
+    def batch_toggle_permissions(self, plan_id: int, data: dict) -> Dict[str, Any]:
+        """Enable or disable all permissions (optionally filtered by category/subGroup) — creates a new plan version"""
+        plan = self.db_session.query(SubscriptionPlan).filter(
+            SubscriptionPlan.id == plan_id, SubscriptionPlan.is_active == True
+        ).first()
+        if not plan:
+            raise NotFoundException(f'Subscription plan {plan_id} not found')
+
+        action = data.get('action')  # 'enable_all' or 'disable_all'
+        category = data.get('category')  # optional: filter by category
+        sub_group = data.get('subGroup')  # optional: filter by sub-group (e.g. 'rewards')
+
+        if action not in ('enable_all', 'disable_all'):
+            raise BadRequestException('action must be "enable_all" or "disable_all"')
+
+        # Get target permissions
+        query = self.db_session.query(SystemPermission).filter(SystemPermission.is_active == True)
+        if category:
+            query = query.filter(SystemPermission.category == category)
+
+        target_perms = query.all()
+
+        # Further filter by sub-group code prefix if specified
+        if sub_group:
+            target_perms = [p for p in target_perms if p.code.split('.')[1] == sub_group if len(p.code.split('.')) >= 3]
+
+        target_ids = {p.id for p in target_perms}
+        current_ids = set(plan.permission_ids or [])
+
+        if action == 'enable_all':
+            new_ids = list(current_ids | target_ids)
+        else:
+            new_ids = list(current_ids - target_ids)
+
+        new_plan = self._create_plan_version(plan, new_ids)
+
+        return {
+            'message': f'{action} completed for plan {new_plan.name}',
+            'newPlanId': new_plan.id,
+            'action': action,
         }
 
     def delete_subscription_plan(self, plan_id: int) -> Dict[str, Any]:
