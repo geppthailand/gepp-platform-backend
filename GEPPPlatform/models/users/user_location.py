@@ -50,6 +50,7 @@ class UserLocation(Base, BaseModel):
     
     # Platform and permissions
     platform = Column(Enum(PlatformEnum), nullable=False, default=PlatformEnum.NA)
+    platform_role = Column(String(50))  # 'super-admin', 'gepp-admin', or None (maps to UserRoleEnum)
     organization_role_id = Column(ForeignKey('organization_roles.id'))
     
     # Location and address information

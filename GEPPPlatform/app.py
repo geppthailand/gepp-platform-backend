@@ -13,6 +13,15 @@ import zlib
 import base64
 
 import json
+from decimal import Decimal
+
+class DateTimeEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        if isinstance(obj, Decimal):
+            return float(obj)
+        return super().default(obj)
 import os
 from glob import glob
 import math
@@ -113,7 +122,13 @@ def main(event, context):
             }
 
             # Route based on path and method
-            if "/api/auth" in path:
+            if "/api/admin/login" in path and http_method == "POST":
+                # Admin login endpoint (no authorization required)
+                from GEPPPlatform.services.admin import handle_admin_routes
+                admin_result = handle_admin_routes(path, data=body, **commonParams)
+                results = {"data": admin_result}
+
+            elif "/api/auth" in path:
                 # Handle all auth routes through auth module (no authorization required)
                 # Includes: login, register, register/check-email, refresh, validate, etc.
                 # Support both legacy format and direct data for POST requests
@@ -542,7 +557,22 @@ def main(event, context):
 
                 # Route to appropriate handler (all handlers can assume user is authenticated)
                 try:
-                    if "/api/iot-devices" in path:
+                    if "/api/admin" in path:
+                        # Admin backoffice routes (require admin role in JWT)
+                        admin_role = token_data.get('admin_role')
+                        if admin_role not in ['super-admin', 'gepp-admin']:
+                            return {
+                                "statusCode": 403,
+                                "headers": headers,
+                                "body": json.dumps({'success': False, 'message': 'Admin access required'})
+                            }
+                        from GEPPPlatform.services.admin import handle_admin_routes
+                        admin_result = handle_admin_routes(path, data=body, **commonParams)
+                        results = {
+                            "success": True,
+                            "data": admin_result
+                        }
+                    elif "/api/iot-devices" in path:
                         # Handle all IoT devices management routes
                         from GEPPPlatform.services.cores.iot_devices.iot_devices_handlers import handle_iot_devices_routes
 
@@ -1049,7 +1079,7 @@ def main(event, context):
                 "headers": {
                     "Content-Type": "application/json",
                 },
-                "body": json.dumps(results),
+                "body": json.dumps(results, cls=DateTimeEncoder),
             }
         
     except UnauthorizedException as auth_error:

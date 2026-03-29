@@ -26,6 +26,9 @@ class Organization(Base, BaseModel):
     # Custom API Configuration
     api_path = Column(String(100), unique=True, nullable=True)  # Unique path for /api/userapi/{api_path}/
 
+    # Organization structure limits
+    max_org_structure_nodes = Column(Integer, nullable=False, default=50)
+
     # Relationships
     organization_info = relationship("OrganizationInfo", back_populates="organization")
     owner = relationship("UserLocation", foreign_keys=[owner_id])

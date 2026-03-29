@@ -14,6 +14,7 @@ class PlatformEnum(enum.Enum):
     WEB = 'WEB'
     MOBILE = 'MOBILE'
     API = 'API'
+    BUSINESS = 'BUSINESS'
     GEPP_BUSINESS_WEB = 'GEPP_BUSINESS_WEB'
     GEPP_REWARD_APP = 'GEPP_REWARD_APP'
     ADMIN_WEB = 'ADMIN_WEB'

@@ -20,7 +20,7 @@ class SubscriptionPlan(Base, BaseModel):
     """Subscription plans available in the system"""
     __tablename__ = 'subscription_plans'
     
-    name = Column(String(100), unique=True, nullable=False)  # e.g., 'free', 'starter', 'professional', 'enterprise'
+    name = Column(String(100), nullable=False)  # e.g., 'free', 'starter', 'professional', 'enterprise' — uniqueness enforced via partial index (is_active=true)
     display_name = Column(String(255))
     description = Column(Text)
     price_monthly = Column(Integer, default=0)  # Price in cents
@@ -34,7 +34,10 @@ class SubscriptionPlan(Base, BaseModel):
     
     # Features as JSON
     features = Column(JSON)  # JSON array of feature strings
-    
+
+    # Permission IDs as JSONB array — stores system_permission IDs granted by this plan
+    permission_ids = Column(JSON, nullable=False, default=[])
+
     # Relationships
     subscriptions = relationship("Subscription", back_populates="plan")
     

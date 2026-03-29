@@ -50,6 +50,8 @@ def handle_auth_routes(path: str, data: dict, **commonParams):
     elif method == "GET":
         if internal_path == "/validate":
             return auth_handler.validate_token_header(**commonParams)
+        elif internal_path == "/permissions":
+            return auth_handler.get_permissions(**commonParams)
         elif internal_path == "/profile":
             return auth_handler.get_profile(**commonParams)
         elif internal_path == "/check-email":

@@ -118,7 +118,8 @@ class OrganizationService:
                 'tax_id': org.organization_info.tax_id,
             } if org.organization_info else None,
             'created_date': org.created_date.isoformat() if org.created_date else None,
-            'is_active': org.is_active
+            'is_active': org.is_active,
+            'max_org_structure_nodes': org.max_org_structure_nodes if hasattr(org, 'max_org_structure_nodes') else 50,
         }
 
     def create_organization_with_default_roles(self, org_data: Dict[str, Any]) -> Organization:
@@ -416,6 +417,21 @@ class OrganizationService:
                         f"Save rejected: merged tree would lose {existing_total - merged_total} nodes. "
                         f"Please refresh and try again."
                     )
+
+        # --- Enforce max_org_structure_nodes limit ---
+        max_nodes = getattr(organization, 'max_org_structure_nodes', 50) or 50
+        root_count = self._count_tree_nodes(updated_root_nodes)
+        hub_count = 0
+        if updated_hub_node and isinstance(updated_hub_node, dict):
+            hub_count = 1  # hub-main itself
+            hub_count += self._count_tree_nodes(updated_hub_node.get('children'))
+        total_nodes = root_count + hub_count
+        if total_nodes > max_nodes:
+            raise ValueError(
+                f"Node limit exceeded: the tree contains {total_nodes} nodes "
+                f"but the maximum allowed is {max_nodes}. "
+                f"Please reduce the number of nodes before saving."
+            )
 
         # Determine version number
         latest_setup = self.db.query(OrganizationSetup).filter(
