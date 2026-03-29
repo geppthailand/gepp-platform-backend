@@ -155,6 +155,7 @@ class AdminService:
                 for sub in (org.subscriptions or [])
             ],
             'allowAiAudit': org.allow_ai_audit,
+            'maxOrgStructureNodes': org.max_org_structure_nodes if hasattr(org, 'max_org_structure_nodes') else 50,
             'isActive': org.is_active,
             'createdDate': org.created_date.isoformat() if org.created_date else None,
         }
@@ -172,6 +173,8 @@ class AdminService:
             org.description = data['description']
         if 'allowAiAudit' in data:
             org.allow_ai_audit = data['allowAiAudit']
+        if 'maxOrgStructureNodes' in data:
+            org.max_org_structure_nodes = int(data['maxOrgStructureNodes'])
 
         self.db_session.flush()
         return {'id': org.id, 'message': 'Organization updated'}
