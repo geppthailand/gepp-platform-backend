@@ -270,9 +270,25 @@ def _fetch_main_material_names(db_session, material_ids: set) -> Dict[int, str]:
         rows = db_session.query(
             MainMaterial.id, MainMaterial.name_en, MainMaterial.name_th
         ).filter(MainMaterial.id.in_(material_ids)).all()
-        
+
         return {
             mm_id: (name_en or name_th or f"Material {mm_id}")
+            for mm_id, name_en, name_th in rows
+        }
+    except Exception:
+        return {}
+
+
+def _fetch_main_material_names_bilingual(db_session, material_ids: set) -> Dict[int, Dict[str, str]]:
+    """Fetch main material names (both TH and EN) from database"""
+    if not material_ids:
+        return {}
+    try:
+        rows = db_session.query(
+            MainMaterial.id, MainMaterial.name_en, MainMaterial.name_th
+        ).filter(MainMaterial.id.in_(material_ids)).all()
+        return {
+            mm_id: {"name_en": name_en or f"Material {mm_id}", "name_th": name_th or name_en or f"Material {mm_id}"}
             for mm_id, name_en, name_th in rows
         }
     except Exception:
@@ -879,13 +895,16 @@ def _handle_diversion_report(
 
     # --- Fetch main material names ---
     main_material_names = _fetch_main_material_names(reports_service.db, material_ids_set)
+    main_material_names_bilingual = _fetch_main_material_names_bilingual(reports_service.db, material_ids_set)
 
     # --- Sankey ---
-    sankey_data = [["From", "To", "Weight"]]
+    sankey_data = [["From", "From_TH", "To", "Weight"]]
     for (mm_id_key, method), w in sankey_map.items():
-        from_name = main_material_names.get(mm_id_key, f"Material {mm_id_key}")
+        names = main_material_names_bilingual.get(mm_id_key, {"name_en": f"Material {mm_id_key}", "name_th": f"Material {mm_id_key}"})
+        from_name_en = names["name_en"]
+        from_name_th = names["name_th"]
         to_name = method or "Unknown Disposal"
-        sankey_data.append([from_name, to_name, w])
+        sankey_data.append([from_name_en, from_name_th, to_name, w])
 
     # --- Material table ---
     month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
@@ -897,9 +916,12 @@ def _handle_diversion_report(
             if m in entry["monthly_data"]
         ]
         status = "Processing" if entry["has_incomplete"] else "Completed"
+        names = main_material_names_bilingual.get(mid, {"name_en": f"Material {mid}", "name_th": f"Material {mid}"})
         material_table.append({
             "key": mid,
-            "materials": main_material_names.get(mid, f"Material {mid}"),
+            "materials": names["name_en"],
+            "materials_th": names["name_th"],
+            "materials_en": names["name_en"],
             "data": monthly_data,
             "status": status,
             "destination": list(entry["destinations"]),
@@ -917,7 +939,12 @@ def _handle_diversion_report(
 
     def build_main_children(mm_ids: set) -> list:
         return [
-            {"id": mid, "name": main_material_names.get(mid, f"Material {mid}")}
+            {
+                "id": mid,
+                "name": main_material_names.get(mid, f"Material {mid}"),
+                "name_en": main_material_names_bilingual.get(mid, {}).get("name_en", f"Material {mid}"),
+                "name_th": main_material_names_bilingual.get(mid, {}).get("name_th", f"Material {mid}"),
+            }
             for mid in sorted(mm_ids)
         ]
 
