@@ -1317,7 +1317,7 @@ class InputChannelService:
                 'destination_id': dest_id,
                 'weight_kg': weight_decimal,
                 'quantity': quantity,
-                'images': mat.get('image', []) or [],
+                'images': mat.get('images', []) or [],
             })
 
         if not transaction_records_data:
