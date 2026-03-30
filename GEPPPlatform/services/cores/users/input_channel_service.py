@@ -1317,6 +1317,7 @@ class InputChannelService:
                 'destination_id': dest_id,
                 'weight_kg': weight_decimal,
                 'quantity': quantity,
+                'images': mat.get('image', []) or [],
             })
 
         if not transaction_records_data:
@@ -1384,6 +1385,69 @@ class InputChannelService:
             self.db.add(transaction)
             self.db.flush()
 
+            # Initialize image upload service once if any images are expected
+            _presigned_service = None
+            _s3_client = None
+            _bucket_name = None
+
+            def upload_b64_images(b64_images, entity_type, entity_id, prefix):
+                """Upload base64 images to S3 and return list of File record IDs."""
+                nonlocal _presigned_service, _s3_client, _bucket_name
+                if not b64_images:
+                    return []
+
+                from GEPPPlatform.services.cores.transactions.presigned_url_service import TransactionPresignedUrlService
+                from GEPPPlatform.models.cores.files import File, FileType, FileStatus
+
+                if _presigned_service is None:
+                    _presigned_service = TransactionPresignedUrlService()
+                    _bucket_name = _presigned_service.bucket_name
+                    _s3_client = _presigned_service.s3_client
+
+                uploaded_ids = []
+                current_date = datetime.utcnow()
+
+                for i, b64_image in enumerate(b64_images):
+                    if not b64_image:
+                        continue
+
+                    # Remove data URL prefix if present
+                    if ',' in b64_image:
+                        b64_image = b64_image.split(',')[1]
+
+                    image_data = base64.b64decode(b64_image)
+                    file_name = f"{prefix}_{entity_id}_{i}_{uuid_module.uuid4().hex[:8]}.jpg"
+
+                    s3_key = f"org/{channel.organization_id}/transactions/{current_date.year}/{current_date.month:02d}/{file_name}"
+
+                    _s3_client.put_object(
+                        Bucket=_bucket_name,
+                        Key=s3_key,
+                        Body=image_data,
+                        ContentType='image/jpeg',
+                    )
+
+                    final_url = f"https://{_bucket_name}.s3.amazonaws.com/{s3_key}"
+
+                    file_record = File(
+                        file_type=FileType.transaction_image,
+                        status=FileStatus.uploaded,
+                        url=final_url,
+                        s3_key=s3_key,
+                        s3_bucket=_bucket_name,
+                        original_filename=file_name,
+                        mime_type='image/jpeg',
+                        organization_id=channel.organization_id,
+                        uploader_id=creator_user_location_id,
+                        related_entity_type=entity_type,
+                        related_entity_id=entity_id,
+                    )
+                    self.db.add(file_record)
+                    self.db.flush()
+                    uploaded_ids.append(file_record.id)
+
+                return uploaded_ids
+
             # Create transaction records (no destination for QR input)
             transaction_record_ids = []
             for record_data in transaction_records_data:
@@ -1417,73 +1481,32 @@ class InputChannelService:
                 self.db.flush()
                 transaction_record_ids.append(record.id)
 
+                # Upload per-record images from matData
+                record_images = record_data.get('images', [])
+                if record_images and channel.enable_upload_image:
+                    try:
+                        record_file_ids = upload_b64_images(
+                            record_images, 'transaction_record', record.id, f"qr_record_{transaction.id}"
+                        )
+                        if record_file_ids:
+                            record.images = record_file_ids
+                    except Exception as e:
+                        import logging
+                        logging.error(f"Failed to upload record images: {str(e)}")
+
             # Update transaction with record IDs
             transaction.transaction_records = transaction_record_ids
 
-            # Handle image uploads using presigned URL service (same as normal transactions)
+            # Handle transaction-level image uploads (b64image field)
             images = data.get('b64image', [])
             if images and channel.enable_upload_image:
                 try:
-                    from GEPPPlatform.services.cores.transactions.presigned_url_service import TransactionPresignedUrlService
-                    from GEPPPlatform.models.cores.files import File, FileType, FileStatus
-                    import os
-
-                    presigned_service = TransactionPresignedUrlService()
-                    bucket_name = presigned_service.bucket_name
-                    s3_client = presigned_service.s3_client
-                    aws_region = os.getenv('AWS_REGION', 'ap-southeast-1')
-
-                    uploaded_file_ids = []
-                    current_date = datetime.utcnow()
-
-                    for i, b64_image in enumerate(images):
-                        if not b64_image:
-                            continue
-
-                        # Remove data URL prefix if present
-                        if ',' in b64_image:
-                            b64_image = b64_image.split(',')[1]
-
-                        image_data = base64.b64decode(b64_image)
-                        file_name = f"qr_input_{transaction.id}_{i}_{uuid_module.uuid4().hex[:8]}.jpg"
-
-                        # Use same S3 key structure as normal transactions
-                        s3_key = f"org/{channel.organization_id}/transactions/{current_date.year}/{current_date.month:02d}/{file_name}"
-
-                        # Upload directly to S3
-                        s3_client.put_object(
-                            Bucket=bucket_name,
-                            Key=s3_key,
-                            Body=image_data,
-                            ContentType='image/jpeg',
-                        )
-
-                        # Build the final S3 URL
-                        final_url = f"https://{bucket_name}.s3.amazonaws.com/{s3_key}"
-
-                        # Create File record in DB (same as presigned URL service does)
-                        file_record = File(
-                            file_type=FileType.transaction_image,
-                            status=FileStatus.uploaded,
-                            url=final_url,
-                            s3_key=s3_key,
-                            s3_bucket=bucket_name,
-                            original_filename=file_name,
-                            mime_type='image/jpeg',
-                            organization_id=channel.organization_id,
-                            uploader_id=creator_user_location_id,
-                            related_entity_type='transaction',
-                            related_entity_id=transaction.id,
-                        )
-                        self.db.add(file_record)
-                        self.db.flush()
-                        uploaded_file_ids.append(file_record.id)
-
+                    uploaded_file_ids = upload_b64_images(
+                        images, 'transaction', transaction.id, f"qr_input"
+                    )
                     if uploaded_file_ids:
                         transaction.images = uploaded_file_ids
-
                 except Exception as e:
-                    # Log but don't fail transaction
                     import logging
                     logging.error(f"Failed to upload images: {str(e)}")
 
