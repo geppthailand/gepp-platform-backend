@@ -654,6 +654,8 @@ def _handle_materials_report(
                     sub_material_agg_map[mat_id_int] = {
                         'material_id': mat_id_int,
                         'material_name': mat_name_en or mat_name_th,
+                        'material_name_en': mat_name_en,
+                        'material_name_th': mat_name_th,
                         'main_material_id': main_id_int,
                         'total_waste': 0.0,
                         'ghg_reduction': 0.0,
@@ -661,14 +663,16 @@ def _handle_materials_report(
                 sub_material_agg_map[mat_id_int]['total_waste'] += weight
                 sub_material_agg_map[mat_id_int]['ghg_reduction'] += ghg
 
-    # Fetch main material names
-    name_map = _fetch_main_material_names(reports_service.db, set(main_material_agg_map.keys()))
+    # Fetch main material names (bilingual)
+    name_map = _fetch_main_material_names_bilingual(reports_service.db, set(main_material_agg_map.keys()))
 
     # Build proportions for main materials
     proportions = [
         {
             'main_material_id': mid,
-            'main_material_name': name_map.get(mid),
+            'main_material_name': (name_map.get(mid) or {}).get('name_en') or (name_map.get(mid) or {}).get('name_th'),
+            'main_material_name_en': (name_map.get(mid) or {}).get('name_en'),
+            'main_material_name_th': (name_map.get(mid) or {}).get('name_th'),
             'total_waste': agg['total_waste'],
             'ghg_reduction': agg['ghg_reduction'],
             'proportion_percent': (agg['total_waste'] / total_waste_main * 100) if total_waste_main > 0 else 0.0,
@@ -691,13 +695,15 @@ def _handle_materials_report(
     grouped_by_main: Dict[str, list] = {}
     for item in sub_proportions:
         main_id = item.get('main_material_id')
-        main_name = name_map.get(main_id) if main_id is not None else None
-        key_name = main_name or f"Material {main_id}" if main_id is not None else "Unknown"
+        main_names = name_map.get(main_id) if main_id is not None else None
+        key_name = (main_names or {}).get('name_en') or (main_names or {}).get('name_th') or (f"Material {main_id}" if main_id is not None else "Unknown")
         if key_name not in grouped_by_main:
             grouped_by_main[key_name] = []
         grouped_by_main[key_name].append({
             'material_id': item.get('material_id'),
             'material_name': item.get('material_name'),
+            'material_name_en': item.get('material_name_en'),
+            'material_name_th': item.get('material_name_th'),
             'total_waste': item.get('total_waste'),
             'ghg_reduction': item.get('ghg_reduction'),
             'proportion_percent': item.get('proportion_percent'),
