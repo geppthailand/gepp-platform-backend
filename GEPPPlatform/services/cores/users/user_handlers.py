@@ -1698,8 +1698,46 @@ def handle_delete_location_with_transactions(
             )
         ).first()
 
-        # If location doesn't exist or is already deleted, return success (idempotent delete)
+        # Helper function to remove a node (and its subtree) from the tree by nodeId
+        def remove_node_from_tree(nodes, node_id_to_remove):
+            """Remove a node (and its subtree) from the tree structure by nodeId."""
+            if not nodes:
+                return nodes
+            result = []
+            for node in nodes:
+                if node.get('nodeId') == node_id_to_remove:
+                    continue  # skip this node and its entire subtree
+                node_copy = dict(node)
+                if 'children' in node_copy:
+                    node_copy['children'] = remove_node_from_tree(node_copy['children'], node_id_to_remove)
+                result.append(node_copy)
+            return result
+
+        def cleanup_tree_node(target_node_id):
+            """Remove a node from org_setup tree hierarchy and commit."""
+            setup = db_session.query(OrganizationSetup).filter(
+                and_(
+                    OrganizationSetup.organization_id == organization_id,
+                    OrganizationSetup.deleted_date.is_(None)
+                )
+            ).order_by(OrganizationSetup.id.desc()).first()
+            if not setup:
+                return
+            from sqlalchemy.orm.attributes import flag_modified
+            if setup.root_nodes:
+                setup.root_nodes = remove_node_from_tree(setup.root_nodes, target_node_id)
+                flag_modified(setup, 'root_nodes')
+            if setup.hub_node:
+                hub_copy = dict(setup.hub_node)
+                if 'children' in hub_copy:
+                    hub_copy['children'] = remove_node_from_tree(hub_copy['children'], target_node_id)
+                setup.hub_node = hub_copy
+                flag_modified(setup, 'hub_node')
+            db_session.commit()
+
+        # If location doesn't exist or is already deleted, still clean up tree (stale data) then return
         if not location:
+            cleanup_tree_node(int(location_id))
             return {
                 'success': True,
                 'deleted_locations_count': 0,
@@ -1769,8 +1807,9 @@ def handle_delete_location_with_transactions(
             ).update({
                 'deleted_date': now
             }, synchronize_session=False)
-        
-        db_session.commit()
+
+        # Remove deleted nodes from the tree hierarchy so they no longer appear in the org chart
+        cleanup_tree_node(target_id)
 
         return {
             'success': True,
