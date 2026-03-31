@@ -97,9 +97,11 @@ def handle_traceability_routes(event: Dict[str, Any], data: Dict[str, Any], **pa
 
     if path == "/api/traceability/export/pdf" and method == "GET":
         from ..pdf_export_hub import generate_pdf_via_lambda
+        language = query_params.get('language', 'en') if query_params else 'en'
         summary_result = traceability_service.get_traceability(organization_id=current_user_organization_id, current_user_id=current_user_id, **query_params)
         hierarchy_result = traceability_service.get_traceability_hierarchy(organization_id=current_user_organization_id, current_user_id=current_user_id, **query_params)
         payload = {
+            "language": language,
             "hierarchy": hierarchy_result["data"],
             "summary": summary_result.get("summary"),
             "date_from": query_params.get("date_from"),
