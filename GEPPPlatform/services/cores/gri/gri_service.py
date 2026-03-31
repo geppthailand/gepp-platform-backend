@@ -501,7 +501,7 @@ class GriService:
             "gri306_3": self.get_gri306_3_records(organization_id, record_year)
         }
 
-    def calculate_gri_export_data(self, organization_id: int, record_year: Optional[str] = None, gri_1_ids: Optional[List[int]] = None) -> Dict[str, Any]:
+    def calculate_gri_export_data(self, organization_id: int, record_year: Optional[str] = None, gri_1_ids: Optional[List[int]] = None, language: str = 'en') -> Dict[str, Any]:
         """
         Calculate GRI export data:
         - Waste Generated: Total weight from GRI-1
@@ -509,11 +509,12 @@ class GriService:
         - Directed to Disposal: Sum of weights by method
         - Total Spills: Sum of volumes from GRI-3
         - Waste Composition: Breakdown by material category
-        
+
         Args:
             organization_id: Organization ID
             record_year: Optional year filter
             gri_1_ids: Optional list of GRI-1 IDs to filter by. If None, uses all records. If empty list, skips GRI-1 data entirely.
+            language: Language code for export ('en' or 'th'). Defaults to 'en'.
         """
         WASTE_MANAGEMENT_GROUPS = {
             "Diverted from Disposal": [
@@ -572,16 +573,22 @@ class GriService:
             if isinstance(output_category, dict):
                 category_id = output_category.get("id")
                 name_obj = output_category.get("name") or {}
-                category_name = name_obj.get("nameEN") or name_obj.get("nameTH") or "Unknown"
+                if language == 'th':
+                    category_name = name_obj.get("nameTH") or name_obj.get("nameEN") or "Unknown"
+                else:
+                    category_name = name_obj.get("nameEN") or name_obj.get("nameTH") or "Unknown"
             elif output_category:
                 category_id = output_category
                 # Fetch category name from database
                 category = self.db.query(MaterialCategory).filter(MaterialCategory.id == category_id).first()
                 if category:
-                    category_name = category.name_en or category.name_th or "Unknown"
+                    if language == 'th':
+                        category_name = category.name_th or category.name_en or "Unknown"
+                    else:
+                        category_name = category.name_en or category.name_th or "Unknown"
             else:
                 category_id = None
-            
+
             # Add to totals
             if method in WASTE_MANAGEMENT_GROUPS["Diverted from Disposal"]:
                 diverted_weight += weight
@@ -668,17 +675,18 @@ class GriService:
             # Try to get category name from enriched data (name: { nameTH, nameEN })
             if isinstance(output_category, dict):
                 name_obj = output_category.get("name") or {}
-                category_name = name_obj.get("nameEN") or name_obj.get("nameTH") or "Unknown"
+                # Always use English name for hazardous classification
+                category_name_for_classification = name_obj.get("nameEN") or name_obj.get("nameTH") or "Unknown"
             elif output_category:
                 # Fetch category name from database
                 category = self.db.query(MaterialCategory).filter(MaterialCategory.id == output_category).first()
                 if category:
-                    category_name = category.name_en or category.name_th or "Unknown"
-            
-            # Determine if hazardous or non-hazardous
-            is_hazardous = is_hazardous_category(category_name)
+                    category_name_for_classification = category.name_en or category.name_th or "Unknown"
+
+            # Determine if hazardous or non-hazardous (always use English name for classification)
+            is_hazardous = is_hazardous_category(category_name_for_classification)
             category_key = "hazardous" if is_hazardous else "non_hazardous"
-            
+
             # Add to diverted_data
             if method in diverted_data[category_key]:
                 if onsite:
@@ -730,17 +738,18 @@ class GriService:
             # Try to get category name from enriched data (name: { nameTH, nameEN })
             if isinstance(output_category, dict):
                 name_obj = output_category.get("name") or {}
-                category_name = name_obj.get("nameEN") or name_obj.get("nameTH") or "Unknown"
+                # Always use English name for hazardous classification
+                category_name_for_classification = name_obj.get("nameEN") or name_obj.get("nameTH") or "Unknown"
             elif output_category:
                 # Fetch category name from database
                 category = self.db.query(MaterialCategory).filter(MaterialCategory.id == output_category).first()
                 if category:
-                    category_name = category.name_en or category.name_th or "Unknown"
-            
-            # Determine if hazardous or non-hazardous
-            is_hazardous = is_hazardous_category(category_name)
+                    category_name_for_classification = category.name_en or category.name_th or "Unknown"
+
+            # Determine if hazardous or non-hazardous (always use English name for classification)
+            is_hazardous = is_hazardous_category(category_name_for_classification)
             category_key = "hazardous" if is_hazardous else "non_hazardous"
-            
+
             # Add to directed_data
             if method in directed_data[category_key]:
                 if onsite:
@@ -778,6 +787,7 @@ class GriService:
         return {
             "organization_id": organization_id,
             "year": record_year,
+            "language": language,
             "table_summary": {
                 "waste_generated": float(waste_generated),
                 "diverted_from_disposal": float(diverted_weight),

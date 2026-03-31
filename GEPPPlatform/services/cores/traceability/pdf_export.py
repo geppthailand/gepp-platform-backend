@@ -21,6 +21,25 @@ _THAI_MONTHS = [
 ]
 
 
+_EN_MONTHS = [
+    "", "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+]
+
+def _format_en_date(date_str: str) -> str:
+    """Convert date string (YYYY-MM-DD or YYYY-MM) to English month+year format."""
+    if not date_str:
+        return ""
+    try:
+        parts = date_str.strip().split("-")
+        y = int(parts[0])
+        m = int(parts[1]) if len(parts) >= 2 else 0
+        if 1 <= m <= 12:
+            return f"{_EN_MONTHS[m]} {y}"
+        return str(y)
+    except (ValueError, IndexError):
+        return date_str
+
 def _format_thai_date(date_str: str) -> str:
     """Convert date string (YYYY-MM-DD or YYYY-MM) to Thai month+year format."""
     if not date_str:
@@ -38,7 +57,67 @@ def _format_thai_date(date_str: str) -> str:
 PRIMARY = colors.HexColor("#54937a")
 padding = 0.50 * inch
 
-# Card row: (header_text, icon_filename). Value row comes from data["card_values"][i] or "-"
+# --- i18n ---
+_TR = {
+    'en': {
+        'header_title': 'Waste Traceability',
+        'location_label': 'Location',
+        'date_label': 'Date',
+        'all': 'All',
+        'kg': 'kg.',
+        'card_total_waste': 'Total Waste',
+        'card_managed': 'Managed Waste',
+        'card_treatment': 'Treatment',
+        'card_disposal': 'Disposal',
+        'no_data': 'No data',
+        'total_weight': 'Total Weight',
+        'deliverer': 'Deliverer',
+        'pending': 'Pending management',
+        'more': 'more',
+        'destination_label': 'Destination',
+        'method_label': 'Method',
+        'item_details': 'Item Details',
+        'table_headers': ['Material Type', 'Weight (kg.)', 'Origin', 'Destination', 'Delivered By', 'Disposal Method', 'Status'],
+        'status_arrived': 'Arrived',
+        'status_pending': 'Pending',
+    },
+    'th': {
+        'header_title': 'เส้นทางของเสียและวัสดุรีไซเคิล',
+        'location_label': 'สถานที่',
+        'date_label': 'วันที่',
+        'all': 'ทั้งหมด',
+        'kg': 'กก.',
+        'card_total_waste': 'ปริมาณทั้งหมด',
+        'card_managed': 'ของเสียถูกจัดการแล้ว',
+        'card_treatment': 'นำไปใช้ประโยชน์',
+        'card_disposal': 'นำไปฝังกลบ/เผากำจัด',
+        'no_data': 'ไม่มีข้อมูล',
+        'total_weight': 'ปริมาณรวม',
+        'deliverer': 'ชื่อผู้จัดส่ง',
+        'pending': 'กำลังรอการจัดการ',
+        'more': 'เพิ่มเติม',
+        'destination_label': 'ปลายทาง',
+        'method_label': 'วิธีการจัดการ',
+        'item_details': 'รายละเอียดรายการ',
+        'table_headers': ['ประเภทวัสดุ', 'น้ำหนัก (กก.)', 'ต้นทาง', 'ปลายทาง', 'จัดส่งโดย', 'วิธีการกำจัด', 'สถานะ'],
+        'status_arrived': 'มาถึงแล้ว',
+        'status_pending': 'รอดำเนินการ',
+    },
+}
+
+def _t(key: str, data: dict) -> str:
+    lang = (data or {}).get('language', 'th') or 'th'
+    return _TR.get(lang, _TR['th']).get(key, _TR['th'].get(key, key))
+
+def _t_card_config(data: dict) -> list:
+    return [
+        (_t('card_total_waste', data), "totalWaste.png"),
+        (_t('card_managed', data), "totalManaged.png"),
+        (_t('card_treatment', data), "totalRecycle.png"),
+        (_t('card_disposal', data), "totalLandfill.png"),
+    ]
+
+# Legacy constant (kept for backward compat, overridden by _t_card_config at runtime)
 CARD_CONFIG = [
     ("ปริมาณทั้งหมด", "totalWaste.png"),
     ("ของเสียถูกจัดการแล้ว", "totalManaged.png"),
@@ -76,10 +155,12 @@ def _register_fonts() -> None:
     Try to register IBMPlexSansThai fonts from common locations (repo scripts/, lambda layer /opt/fonts, cwd).
     If not found, silently continue (ReportLab will use default fonts).
     """
+    _this_dir = os.path.dirname(os.path.abspath(__file__))
+    _gri_fonts = os.path.join(_this_dir, '..', 'gri', 'assets', 'fonts')
     candidates = [
-        ("IBMPlexSansThai-Bold",   ["scripts/IBMPlexSansThai-Bold.ttf",   "/opt/fonts/IBMPlexSansThai-Bold.ttf",   "IBMPlexSansThai-Bold.ttf"]),
-        ("IBMPlexSansThai-Regular",["scripts/IBMPlexSansThai-Regular.ttf","/opt/fonts/IBMPlexSansThai-Regular.ttf","IBMPlexSansThai-Regular.ttf"]),
-        ("IBMPlexSansThai-Medium", ["scripts/IBMPlexSansThai-Medium.ttf", "/opt/fonts/IBMPlexSansThai-Medium.ttf", "IBMPlexSansThai-Medium.ttf"]),
+        ("IBMPlexSansThai-Bold",   ["scripts/IBMPlexSansThai-Bold.ttf",   "/opt/fonts/IBMPlexSansThai-Bold.ttf",   "IBMPlexSansThai-Bold.ttf",   os.path.join(_gri_fonts, "IBMPlexSansThai-Bold.ttf")]),
+        ("IBMPlexSansThai-Regular",["scripts/IBMPlexSansThai-Regular.ttf","/opt/fonts/IBMPlexSansThai-Regular.ttf","IBMPlexSansThai-Regular.ttf",os.path.join(_gri_fonts, "IBMPlexSansThai-Regular.ttf")]),
+        ("IBMPlexSansThai-Medium", ["scripts/IBMPlexSansThai-Medium.ttf", "/opt/fonts/IBMPlexSansThai-Medium.ttf", "IBMPlexSansThai-Medium.ttf", os.path.join(_gri_fonts, "IBMPlexSansThai-Medium.ttf")]),
     ]
     for family, paths in candidates:
         for p in paths:
@@ -94,33 +175,39 @@ def _register_fonts() -> None:
 
 def _draw_header(pdf, page_width_points: float, page_height_points: float, data: dict) -> None:
     """Draw header at top of page: title เส้นทางของเสียและวัสดุรีไซเคิล, location, and date range."""
-    header_text = "เส้นทางของเสียและวัสดุรีไซเคิล"
+    header_text = _t('header_title', data)
+    _all_text = _t('all', data)
     location_data = data.get("location")
     if location_data is None:
-        location_text = "ทั้งหมด"
+        location_text = _all_text
     elif isinstance(location_data, list):
-        location_text = ", ".join(map(str, location_data)) if location_data else "ทั้งหมด"
+        location_text = ", ".join(map(str, location_data)) if location_data else _all_text
     else:
-        location_text = str(location_data) if location_data else "ทั้งหมด"
+        location_text = str(location_data) if location_data else _all_text
     date_from = data.get("date_from") or ""
     date_to = data.get("date_to") or ""
-    thai_from = _format_thai_date(date_from)
-    thai_to = _format_thai_date(date_to)
-    if thai_from and thai_to:
-        date_text = f"{thai_from} - {thai_to}" if thai_from != thai_to else thai_from
-    elif thai_from:
-        date_text = thai_from
-    elif thai_to:
-        date_text = thai_to
+    lang = (data or {}).get('language', 'th') or 'th'
+    if lang == 'th':
+        fmt_from = _format_thai_date(date_from)
+        fmt_to = _format_thai_date(date_to)
     else:
-        date_text = "ทั้งหมด"
+        fmt_from = _format_en_date(date_from)
+        fmt_to = _format_en_date(date_to)
+    if fmt_from and fmt_to:
+        date_text = f"{fmt_from} - {fmt_to}" if fmt_from != fmt_to else fmt_from
+    elif fmt_from:
+        date_text = fmt_from
+    elif fmt_to:
+        date_text = fmt_to
+    else:
+        date_text = _all_text
     pdf.setFillColor(PRIMARY)
     pdf.setFont("IBMPlexSansThai-Bold", 42)
     pdf.drawString(padding, page_height_points - (1.08 * inch), header_text)
     pdf.setFont("IBMPlexSansThai-Regular", 12)
     pdf.setFillColor(colors.HexColor("#656565"))
-    pdf.drawString(padding, page_height_points - (1.35 * inch), f"สถานที่: {_safe(location_text)}")
-    pdf.drawString(padding, page_height_points - (1.56 * inch), f"วันที่: {_safe(date_text)}")
+    pdf.drawString(padding, page_height_points - (1.35 * inch), f"{_t('location_label', data)}: {_safe(location_text)}")
+    pdf.drawString(padding, page_height_points - (1.56 * inch), f"{_t('date_label', data)}: {_safe(date_text)}")
 
 
 def _draw_card_row(pdf, page_width_points: float, page_height_points: float, data: dict) -> float:
@@ -144,6 +231,8 @@ def _draw_card_row(pdf, page_width_points: float, page_height_points: float, dat
     icon_size = 0.6 * inch
     card_pad = 0.1 * inch
     text_left = icon_size + card_pad * 2
+    _cards = _t_card_config(data)
+    _kg = _t('kg', data)
     for i in range(4):
         x = padding + i * (card_width + gap)
         pdf.setFillColor(fill_color)
@@ -152,7 +241,7 @@ def _draw_card_row(pdf, page_width_points: float, page_height_points: float, dat
         pdf.roundRect(x, row_top_y, card_width, card_height, radius)
         # Icon on the left (centered vertically in card)
         icon_y = row_top_y + (card_height - icon_size) / 2
-        icon_path = _asset_path(CARD_CONFIG[i][1])
+        icon_path = _asset_path(_cards[i][1])
         if os.path.exists(icon_path):
             try:
                 pdf.drawImage(icon_path, x + card_pad, icon_y, width=icon_size, height=icon_size, mask="auto")
@@ -165,10 +254,10 @@ def _draw_card_row(pdf, page_width_points: float, page_height_points: float, dat
         value_y = mid_y - 0.16 * inch
         pdf.setFont("IBMPlexSansThai-Regular", 10)
         pdf.setFillColor(colors.HexColor("#656565"))
-        pdf.drawString(text_x, header_y, _safe(CARD_CONFIG[i][0]))
+        pdf.drawString(text_x, header_y, _safe(_cards[i][0]))
         pdf.setFont("IBMPlexSansThai-Bold", 16)
         pdf.setFillColor(PRIMARY)
-        pdf.drawString(text_x, value_y, _fmt_num(card_values[i]) + " กก.")
+        pdf.drawString(text_x, value_y, _fmt_num(card_values[i]) + f" {_kg}")
     return row_top_y - (0.25 * inch)
 
 
@@ -331,7 +420,7 @@ def _collect_transit_info(transports: list) -> list:
     return results
 
 
-def _collect_disposal_methods(transports: list, group_weight: float = 0) -> list:
+def _collect_disposal_methods(transports: list, group_weight: float = 0, lang: str = 'th') -> list:
     """Collect unique (material, destination, disposal_method) combos from leaf nodes with summed percentage and weight.
     Leaves without a disposal_method are summed into a 'pending' entry.
     Returns list of dicts with method (label), percentage_of_group, weight, pending.
@@ -349,7 +438,7 @@ def _collect_disposal_methods(transports: list, group_weight: float = 0) -> list
     def _mat_label(t: dict) -> str:
         mat = t.get("material")
         if isinstance(mat, dict):
-            return mat.get("name_th") or mat.get("name_en") or ""
+            return mat.get(f"name_{lang}") or mat.get("name_th") or mat.get("name_en") or ""
         return ""
 
     def _walk(nodes):
@@ -402,7 +491,7 @@ def _collect_disposal_methods(transports: list, group_weight: float = 0) -> list
         })
     if total_pending_pct > 0:
         results.append({
-            "method_name": "กำลังรอการจัดการ",
+            "method_name": _TR.get(lang, _TR['th']).get('pending', 'กำลังรอการจัดการ'),
             "material_name": "",
             "destination_name": "",
             "percentage_of_group": total_pending_pct,
@@ -429,10 +518,11 @@ def _method_stack_height(disposal_methods: list) -> float:
     return sum(heights) + (len(heights) - 1) * gap
 
 
-def _build_chart_rows(hierarchy_data: list):
+def _build_chart_rows(hierarchy_data: list, data: dict = None):
     """Build flat rows and origin-groups from hierarchy data for the flow chart.
     Returns (rows, groups) where rows is a flat list of dicts and groups is a list of lists of indices (grouped by origin).
     """
+    _lang = (data or {}).get('language', 'th') or 'th'
     rows = []
     groups = []
     for origin_node in hierarchy_data:
@@ -446,7 +536,7 @@ def _build_chart_rows(hierarchy_data: list):
             group_indices.append(idx)
             group_transports = group_node.get("children") or []
             group_w = float(group_node.get("weight") or group_node.get("total_weight_kg") or 0)
-            dmethods = _collect_disposal_methods(group_transports, group_w)
+            dmethods = _collect_disposal_methods(group_transports, group_w, lang=_lang)
             methods_h = _method_stack_height(dmethods)
             rh = max(_FLOW_ROW_H, methods_h + 0.08 * inch)
             rows.append({
@@ -474,6 +564,7 @@ def _draw_flow_chart(
     records: list,
     groups_override: list = None,
     original_indices_override: list = None,
+    data: dict = None,
 ) -> None:
     """
     Draw flowchart inside the box: Origin | Group/Material | Delivered By | Status.
@@ -486,7 +577,7 @@ def _draw_flow_chart(
         except Exception:
             pdf.setFont("Helvetica", 10)
         pdf.setFillColor(colors.HexColor("#656565"))
-        pdf.drawString(box_left + 0.2 * inch, box_bottom + box_height / 2 - 0.05 * inch, "ไม่มีข้อมูล")
+        pdf.drawString(box_left + 0.2 * inch, box_bottom + box_height / 2 - 0.05 * inch, _t('no_data', data))
         return
     n = len(records)
     if groups_override is not None and original_indices_override is not None:
@@ -602,7 +693,7 @@ def _draw_flow_chart(
         pdf.line(cx0 + inset, divider_y, cx0 + col_w0 - inset, divider_y)
 
         # Total weight centered below divider
-        weight_label = f"ปริมาณรวม  {_fmt_num(total_weight)} กก."
+        weight_label = f"{_t('total_weight', data or {})}  {_fmt_num(total_weight)} {_t('kg', data or {})}"
         label_y = divider_y - 0.14 * inch
         try:
             pdf.setFont("IBMPlexSansThai-Regular", 7)
@@ -639,7 +730,8 @@ def _draw_flow_chart(
             if isinstance(mat, str):
                 mat_name = _safe(mat)
             elif isinstance(mat, dict):
-                mat_name = _safe(mat.get("name_th") or mat.get("name_en") or "-")
+                _lang = (data or {}).get('language', 'th') or 'th'
+                mat_name = _safe(mat.get(f"name_{_lang}") or mat.get("name_th") or mat.get("name_en") or "-")
             else:
                 mat_name = "-"
             accent_color = colors.HexColor("#85bbae")
@@ -672,7 +764,7 @@ def _draw_flow_chart(
                 mat_display = mat_display.rstrip() + "..."
             pdf.drawString(cx1 + accent_w + 0.12 * inch, row_y + node_h / 2 - 0.04 * inch, mat_display)
             # Weight pill upper-right
-            pill_text = f"{_fmt_num(w)} กก."
+            pill_text = f"{_fmt_num(w)} {_t('kg', data or {})}"
             pill_w = 0.52 * inch
             pill_h_m = 0.20 * inch
             pill_x = cx1 + col_w_rest - pill_w - 0.08 * inch
@@ -715,7 +807,7 @@ def _draw_flow_chart(
                 pdf.setFont("IBMPlexSansThai-Bold", 7)
             except Exception:
                 pdf.setFont("Helvetica-Bold", 7)
-            transit_title = "ชื่อผู้จัดส่ง"
+            transit_title = _t('deliverer', data or {})
             title_y_t = transit_card_y + transit_card_h - top_pad_t
             pdf.drawString(cx2 + 0.08 * inch, title_y_t, transit_title)
             if max_display > 0:
@@ -730,7 +822,7 @@ def _draw_flow_chart(
                     line_y_t -= line_spacing_t
                 if has_overflow:
                     pdf.setFillColor(colors.HexColor("#999999"))
-                    pdf.drawString(cx2 + 0.08 * inch, line_y_t, f"+{n_info - max_display} เพิ่มเติม")
+                    pdf.drawString(cx2 + 0.08 * inch, line_y_t, f"+{n_info - max_display} {_t('more', data or {})}")
 
             # --- Column 3: Disposal Method(s) ---
             disposal_methods = rec.get("disposal_methods") or []
@@ -761,7 +853,7 @@ def _draw_flow_chart(
                     pdf.setFont("IBMPlexSansThai-Regular", 7)
                 except Exception:
                     pdf.setFont("Helvetica", 7)
-                status_label = "กำลังรอการจัดการ"
+                status_label = _t('pending', data or {})
                 try:
                     sw = pdf.stringWidth(status_label, "IBMPlexSansThai-Regular", 7)
                 except Exception:
@@ -852,15 +944,16 @@ def _draw_flow_chart(
                             disp = txt[:35]
                         pdf.drawString(text_x, y_pos, disp)
 
-                    mat_weight_label = f"{mat_name} ({_fmt_num(dm_weight)} กก.)" if mat_name else f"{_fmt_num(dm_weight)} กก."
+                    _kg_l = _t('kg', data or {})
+                    mat_weight_label = f"{mat_name} ({_fmt_num(dm_weight)} {_kg_l})" if mat_name else f"{_fmt_num(dm_weight)} {_kg_l}"
                     _draw_clipped(f"\u25B8 {mat_weight_label}", "IBMPlexSansThai-Bold", 6, node_title_color, line_y)
                     line_y -= method_line_h
 
                     if dest_name:
-                        _draw_clipped(f"\u25B8 ปลายทาง : {dest_name}", "IBMPlexSansThai-Regular", 5.5, colors.HexColor("#595959"), line_y)
+                        _draw_clipped(f"\u25B8 {_t('destination_label', data or {})} : {dest_name}", "IBMPlexSansThai-Regular", 5.5, colors.HexColor("#595959"), line_y)
                         line_y -= method_line_h
 
-                    _draw_clipped(f"\u25B8 วิธีการจัดการ : {meth_name}", "IBMPlexSansThai-Regular", 5.5, colors.HexColor("#595959"), line_y)
+                    _draw_clipped(f"\u25B8 {_t('method_label', data or {})} : {meth_name}", "IBMPlexSansThai-Regular", 5.5, colors.HexColor("#595959"), line_y)
 
                     pdf.setFillColor(node_pill_bg)
                     pdf.roundRect(pill_x_s, pill_y_s, pill_w_s, pill_h_s, pill_h_s / 2, fill=1, stroke=0)
@@ -918,12 +1011,16 @@ TABLE_ROW_ALT = colors.HexColor("#f9f9f9")
 TABLE_ROW_HEIGHT = 0.32 * inch
 TABLE_TITLE_GAP = 0.2 * inch
 TABLE_CORNER_RADIUS = 0.08 * inch
-TABLE_HEADERS = ["ประเภทวัสดุ", "น้ำหนัก (กก.)", "ต้นทาง", "ปลายทาง", "จัดส่งโดย", "วิธีการกำจัด", "สถานะ"]
+TABLE_HEADERS = ["ประเภทวัสดุ", "น้ำหนัก (กก.)", "ต้นทาง", "ปลายทาง", "จัดส่งโดย", "วิธีการกำจัด", "สถานะ"]  # default Thai, overridden at runtime
 TABLE_COL_RATIOS = [3.0, 0.8, 1.8, 1.5, 1.5, 1.8, 0.8]
-_STATUS_PILLS = {
-    "completed": (colors.HexColor("#d4edda"), colors.HexColor("#155724"), "เสร็จสิ้น"),
-    "in_transit": (colors.HexColor("#cce5ff"), colors.HexColor("#004085"), "กำลังขนส่ง"),
-    "idle":       (colors.HexColor("#e2e3e5"), colors.HexColor("#383d41"), "รอดำเนินการ"),
+_STATUS_PILLS_COLORS = {
+    "completed": (colors.HexColor("#d4edda"), colors.HexColor("#155724")),
+    "in_transit": (colors.HexColor("#cce5ff"), colors.HexColor("#004085")),
+    "idle":       (colors.HexColor("#e2e3e5"), colors.HexColor("#383d41")),
+}
+_STATUS_PILLS_LABELS = {
+    'en': {"completed": "Completed", "in_transit": "In Transit", "idle": "Pending"},
+    'th': {"completed": "เสร็จสิ้น", "in_transit": "กำลังขนส่ง", "idle": "รอดำเนินการ"},
 }
 _INDENT_STEP = 0.18 * inch
 _ACCENT_COLOR = colors.HexColor("#85bbae")
@@ -950,7 +1047,7 @@ def _transport_status_key(t) -> str:
     return "in_transit" if status else ""
 
 
-def _flatten_hierarchy_for_table(hierarchy_data: list) -> list:
+def _flatten_hierarchy_for_table(hierarchy_data: list, data: dict = None) -> list:
     """Flatten hierarchy into table rows with indent/type metadata."""
     rows = []
     for origin_node in hierarchy_data:
@@ -970,7 +1067,8 @@ def _flatten_hierarchy_for_table(hierarchy_data: list) -> list:
             mat = group_node.get("material") or {}
             if isinstance(mat, str):
                 mat = {"name_th": mat}
-            mat_name = _safe(mat.get("name_th") or mat.get("name_en") or "-") if isinstance(mat, dict) else _safe(mat)
+            _lang = (data or {}).get('language', 'th') or 'th'
+            mat_name = _safe(mat.get(f"name_{_lang}") or mat.get("name_th") or mat.get("name_en") or "-") if isinstance(mat, dict) else _safe(mat)
             g_origin = group_node.get("origin") or origin
             rows.append({
                 "type": "group", "indent": 1,
@@ -1050,7 +1148,7 @@ def _draw_item_details_table(
     If rows overflow, continue on new pages.
     """
     hierarchy_data = data.get("hierarchy") or []
-    flat_rows = _flatten_hierarchy_for_table(hierarchy_data)
+    flat_rows = _flatten_hierarchy_for_table(hierarchy_data, data=data)
     if not flat_rows:
         return
     table_left = padding
@@ -1082,7 +1180,7 @@ def _draw_item_details_table(
             pdf.setFont("IBMPlexSansThai-Bold", 16)
         except Exception:
             pdf.setFont("Helvetica-Bold", 16)
-        pdf.drawString(table_left, y, "รายละเอียดรายการ")
+        pdf.drawString(table_left, y, _t('item_details', data))
         return y - TABLE_TITLE_GAP
 
     def draw_header_row(y: float) -> float:
@@ -1096,7 +1194,8 @@ def _draw_item_details_table(
         except Exception:
             pdf.setFont("Helvetica-Bold", 8)
         x = table_left + cell_pad_left
-        for i, h in enumerate(TABLE_HEADERS):
+        _headers = _t('table_headers', data) if isinstance(_t('table_headers', data), list) else TABLE_HEADERS
+        for i, h in enumerate(_headers):
             pdf.drawString(x, y - row_height / 2 - 0.03 * inch, h)
             x += col_widths[i]
         pdf.setStrokeColor(colors.HexColor("#d9d9d9"))
@@ -1157,9 +1256,11 @@ def _draw_item_details_table(
 
         # --- Column 6: Status pill ---
         status_key = row.get("status_key", "")
-        pill_info = _STATUS_PILLS.get(status_key)
-        if pill_info:
-            pill_bg, pill_fg, pill_label = pill_info
+        _pill_colors = _STATUS_PILLS_COLORS.get(status_key)
+        if _pill_colors:
+            _lang = (data or {}).get('language', 'th') or 'th'
+            pill_bg, pill_fg = _pill_colors
+            pill_label = _STATUS_PILLS_LABELS.get(_lang, _STATUS_PILLS_LABELS['th']).get(status_key, status_key)
             pill_w = 0.58 * inch
             pill_h = 0.15 * inch
             pill_left = x
@@ -1238,13 +1339,13 @@ def _draw_diagram_section(pdf, page_width_points: float, page_height_points: flo
     Section title + rounded box with flow chart from hierarchy data.
     Returns (y_bottom_of_diagram_box_on_current_page, chart_rows) for table to start below.
     """
-    section_title = "แผนภาพเส้นทางของเสียและวัสดุรีไซเคิล"
+    section_title = _t('header_title', data)
     section_gap = 0.3 * inch
     radius = 0.12 * inch
     box_left = padding
     box_width = page_width_points - 2 * padding
     hierarchy_data = data.get("hierarchy") or []
-    records, origin_groups = _build_chart_rows(hierarchy_data)
+    records, origin_groups = _build_chart_rows(hierarchy_data, data=data)
 
     if not records:
         header_y = y_below_cards - 0.15 * inch
@@ -1261,7 +1362,7 @@ def _draw_diagram_section(pdf, page_width_points: float, page_height_points: flo
         pdf.setStrokeColor(colors.HexColor("#d9d9d9"))
         pdf.setLineWidth(1)
         pdf.roundRect(box_left, box_bottom, box_width, box_height, radius)
-        _draw_flow_chart(pdf, box_left, box_bottom, box_width, box_height, [])
+        _draw_flow_chart(pdf, box_left, box_bottom, box_width, box_height, [], data=data)
         return (box_bottom, records)
 
     original_indices = list(range(len(records)))
@@ -1312,6 +1413,7 @@ def _draw_diagram_section(pdf, page_width_points: float, page_height_points: flo
             _draw_flow_chart(
                 pdf, box_left, box_bottom_page, box_width, box_height_page,
                 page_records, groups_override=page_info["page_groups"], original_indices_override=page_orig,
+                data=data,
             )
             continue
 
@@ -1337,6 +1439,7 @@ def _draw_diagram_section(pdf, page_width_points: float, page_height_points: flo
         _draw_flow_chart(
             pdf, box_left, box_bottom, box_width, box_height,
             page_records, groups_override=page_info["page_groups"], original_indices_override=page_orig,
+            data=data,
         )
 
     return (last_box_bottom, records)

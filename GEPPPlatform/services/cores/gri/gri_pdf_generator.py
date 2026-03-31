@@ -16,6 +16,177 @@ MARGIN_IN = 0.75
 # Color constants
 TEXT = colors.HexColor("#5b6e8c")
 
+# ── Translation dictionary ──────────────────────────────────────────────
+_GRI_TRANSLATIONS = {
+    "en": {
+        "gri_report": "GRI REPORT",
+        "subtitle": "| Sustainability & Annual Progress",
+        "full_disclosure": "Full Disclosure Report",
+        "all_location": "All Location",
+        "jan": "Jan", "dec": "Dec",
+        "waste_generated": "Waste Generated",
+        "diverted": "Diverted",
+        "directed": "Directed",
+        "total_spills": "Total Spills",
+        "table_1_title": "Table 1: Waste by composition",
+        "waste_composition": "Waste Composition",
+        "generated_t": "Generated (T)",
+        "diverted_t": "Diverted (T)",
+        "directed_t": "Directed (T)",
+        "total": "Total",
+        "table_2_title": "Table 2: Diverted from Disposal",
+        "method": "Method",
+        "onsite_t": "Onsite (T)",
+        "offsite_t": "Offsite (T)",
+        "total_t": "Total (T)",
+        "hazardous": "Hazardous",
+        "non_hazardous": "Non-Hazardous",
+        "table_3_title": "Table 3: Waste Directed from Disposal",
+        "table_4_title": "Table 4: Significant Spills",
+        "material_type": "Material Type",
+        "surface_type": "Surface Type",
+        "location": "Location",
+        "volume_liters": "Volume (Liters)",
+        "cleanup_cost_thb": "Cleanup Cost (THB)",
+        "unit_ton": "t",
+        "unit_liters": "Liters",
+        "thank_you": "Thank you",
+        "continued_support": "for your continued support.",
+        # Method names
+        "method_preparation_for_reuse": "Preparation for reuse",
+        "method_recycling_own": "Recycling (Own)",
+        "method_other_recover_operation": "Other recover operation",
+        "method_recycle": "Recycle",
+        "method_composted_by_municipality": "Composted by municipality",
+        "method_municipality_receive": "Municipality receive",
+        "method_incineration_without_energy": "Incineration without energy",
+        "method_incineration_with_energy": "Incineration with energy",
+        # Spill material types
+        "spill_oil_spills": "Oil Spills",
+        "spill_fuel_spills": "Fuel Spills",
+        "spill_spills_of_wastes": "Spills of Wastes",
+        "spill_spills_of_chemicals": "Spills of Chemicals",
+        # Surface types
+        "surface_soil": "Soil surfaces",
+        "surface_water": "Water surfaces",
+        "surface_concrete": "Concrete surfaces",
+        "surface_asphalt": "Asphalt surfaces",
+    },
+    "th": {
+        "gri_report": "รายงาน GRI",
+        "subtitle": "| ความยั่งยืนและความก้าวหน้าประจำปี",
+        "full_disclosure": "รายงานการเปิดเผยข้อมูลฉบับสมบูรณ์",
+        "all_location": "ทุกสถานที่",
+        "jan": "ม.ค.", "dec": "ธ.ค.",
+        "waste_generated": "ขยะที่เกิดขึ้น",
+        "diverted": "นำกลับมาใช้ประโยชน์",
+        "directed": "ส่งไปกำจัด",
+        "total_spills": "การรั่วไหลทั้งหมด",
+        "table_1_title": "ตาราง 1: ขยะตามองค์ประกอบ",
+        "waste_composition": "องค์ประกอบขยะ",
+        "generated_t": "เกิดขึ้น (ตัน)",
+        "diverted_t": "นำกลับมาใช้ (ตัน)",
+        "directed_t": "ส่งกำจัด (ตัน)",
+        "total": "รวม",
+        "table_2_title": "ตาราง 2: นำออกจากการกำจัด",
+        "method": "วิธีการ",
+        "onsite_t": "ในพื้นที่ (ตัน)",
+        "offsite_t": "นอกพื้นที่ (ตัน)",
+        "total_t": "รวม (ตัน)",
+        "hazardous": "ของเสียอันตราย",
+        "non_hazardous": "ของเสียไม่อันตราย",
+        "table_3_title": "ตาราง 3: ขยะที่ส่งไปกำจัด",
+        "table_4_title": "ตาราง 4: การรั่วไหลที่สำคัญ",
+        "material_type": "ประเภทวัสดุ",
+        "surface_type": "ประเภทพื้นผิว",
+        "location": "สถานที่",
+        "volume_liters": "ปริมาตร (ลิตร)",
+        "cleanup_cost_thb": "ค่าทำความสะอาด (บาท)",
+        "unit_ton": "ตัน",
+        "unit_liters": "ลิตร",
+        "thank_you": "ขอบคุณ",
+        "continued_support": "สำหรับการสนับสนุนอย่างต่อเนื่อง",
+        # Method names
+        "method_preparation_for_reuse": "การเตรียมเพื่อนำกลับมาใช้ใหม่",
+        "method_recycling_own": "รีไซเคิล (ด้วยตนเอง)",
+        "method_other_recover_operation": "การนำกลับคืนอื่น ๆ",
+        "method_recycle": "รีไซเคิล",
+        "method_composted_by_municipality": "หมักปุ๋ยโดยเทศบาล",
+        "method_municipality_receive": "เทศบาลรับไป",
+        "method_incineration_without_energy": "เผาโดยไม่ผลิตพลังงาน",
+        "method_incineration_with_energy": "เผาโดยผลิตพลังงาน",
+        # Spill material types
+        "spill_oil_spills": "น้ำมันรั่วไหล",
+        "spill_fuel_spills": "เชื้อเพลิงรั่วไหล",
+        "spill_spills_of_wastes": "ของเสียรั่วไหล",
+        "spill_spills_of_chemicals": "สารเคมีรั่วไหล",
+        # Surface types
+        "surface_soil": "พื้นดิน",
+        "surface_water": "พื้นน้ำ",
+        "surface_concrete": "พื้นคอนกรีต",
+        "surface_asphalt": "พื้นยางมะตอย",
+    },
+}
+
+
+def _t(key: str, lang: str) -> str:
+    """Get translated string for the given key and language."""
+    return _GRI_TRANSLATIONS.get(lang, _GRI_TRANSLATIONS["en"]).get(
+        key, _GRI_TRANSLATIONS["en"].get(key, key)
+    )
+
+_SPILL_TYPE_MAP = {
+    "Oil Spills": "spill_oil_spills",
+    "Fuel Spills": "spill_fuel_spills",
+    "Spills of Wastes": "spill_spills_of_wastes",
+    "Spills of Chemicals": "spill_spills_of_chemicals",
+}
+_SURFACE_TYPE_MAP = {
+    "Soil surfaces": "surface_soil",
+    "Water surfaces": "surface_water",
+    "Concrete surfaces": "surface_concrete",
+    "Asphalt surfaces": "surface_asphalt",
+}
+
+def _translate_spill_type(value: str, lang: str) -> str:
+    key = _SPILL_TYPE_MAP.get(value)
+    return _t(key, lang) if key else value
+
+def _translate_surface_type(value: str, lang: str) -> str:
+    key = _SURFACE_TYPE_MAP.get(value)
+    return _t(key, lang) if key else value
+
+
+_METHOD_KEY_MAP = {
+    "Preparation for reuse": "method_preparation_for_reuse",
+    "Recycling (Own)": "method_recycling_own",
+    "Other recover operation": "method_other_recover_operation",
+    "Recycle": "method_recycle",
+    "Composted by municipality": "method_composted_by_municipality",
+    "Municipality receive": "method_municipality_receive",
+    "Incineration without energy": "method_incineration_without_energy",
+    "Incineration with energy": "method_incineration_with_energy",
+}
+
+
+def _t_method(method_name: str, lang: str) -> str:
+    """Translate a waste management method name."""
+    key = _METHOD_KEY_MAP.get(method_name)
+    if key:
+        return _t(key, lang)
+    return method_name
+
+
+def _get_lang(data: dict) -> str:
+    """Extract language from nested data structure, defaulting to 'en'."""
+    lang = (
+        data.get("language")
+        or data.get("data", {}).get("language")
+        or data.get("data", {}).get("data", {}).get("language")
+        or "en"
+    )
+    return lang if lang in _GRI_TRANSLATIONS else "en"
+
 BASE_DIR = os.path.dirname(__file__)
 ASSETS_DIR = os.path.join(BASE_DIR, "assets")
 FONTS_DIR = os.path.join(ASSETS_DIR, "fonts")
@@ -180,8 +351,10 @@ def _draw_cover_page(pdf: canvas.Canvas, data: dict) -> None:
     dark_green = colors.HexColor("#52947a")
 
     # Title
-    title_text = f"GRI REPORT {year}" if year else "GRI REPORT"
-    subtitle_text = "| Sustainability & Annual Progress"
+    lang = _get_lang(data)
+    gri_label = _t("gri_report", lang)
+    title_text = f"{gri_label} {year}" if year else gri_label
+    subtitle_text = _t("subtitle", lang)
 
     pdf.setFillColor(dark_green)
 
@@ -300,16 +473,17 @@ def _draw_outro_cover_page(pdf: canvas.Canvas, data: dict) -> None:
             pass
 
     # "Thank you" text (large, bold, dark green) - below logo
+    lang = _get_lang(data)
     thank_you_y = logo_y_top - logo_height - (0.9 * inch)
     pdf.setFillColor(dark_green)
     pdf.setFont(title_font, 48)
-    thank_you_text = "Thank you"
+    thank_you_text = _t("thank_you", lang)
     thank_you_width = pdf.stringWidth(thank_you_text, title_font, 48)
     thank_you_x = (width_points - thank_you_width) / 2.0
     pdf.drawString(thank_you_x, thank_you_y, thank_you_text)
 
     # "for your continued support." text (smaller, dark gray) - below "Thank you"
-    support_text = "for your continued support."
+    support_text = _t("continued_support", lang)
     pdf.setFillColor(dark_gray)
     pdf.setFont(body_font, 22)
     support_width = pdf.stringWidth(support_text, body_font, 22)
@@ -378,7 +552,7 @@ def _draw_outro_cover_page(pdf: canvas.Canvas, data: dict) -> None:
         current_x += item_widths[idx] + spacing_between_items
 
 
-def _draw_page_header(pdf: canvas.Canvas, year: str, width_points: float, height_points: float, margin_points: float) -> None:
+def _draw_page_header(pdf: canvas.Canvas, year: str, width_points: float, height_points: float, margin_points: float, lang: str = "en") -> None:
     """Draw the page header with rounded box, title and subtitle"""
     # Fonts
     title_font = _get_font_name("IBMPlexSansThai-Bold", "Helvetica-Bold")
@@ -399,17 +573,20 @@ def _draw_page_header(pdf: canvas.Canvas, year: str, width_points: float, height
     # Title
     pdf.setFillColor(dark_green)
     pdf.setFont(title_font, 32)
-    title_text = "Full Disclosure Report"
+    title_text = _t("full_disclosure", lang)
     pdf.drawString(title_x, title_y, title_text)
-    
+
     # Subtitle
     pdf.setFillColor(dark_green)
     pdf.setFont(subtitle_font, 14)
     # Format date range - assuming full year
+    jan = _t("jan", lang)
+    dec = _t("dec", lang)
+    all_loc = _t("all_location", lang)
     if year:
-        subtitle_text = f"All Location • Jan 1 - Dec 31, {year}"
+        subtitle_text = f"{all_loc} • {jan} 1 - {dec} 31, {year}"
     else:
-        subtitle_text = "All Location • Jan 1 - Dec 31, 2024"
+        subtitle_text = f"{all_loc} • {jan} 1 - {dec} 31, 2024"
     pdf.drawString(title_x, subtitle_y, subtitle_text)
 
 
@@ -428,7 +605,8 @@ def _draw_table_rows(
     table_header_font: str,
     totals: dict = None,
     is_last_page: bool = False,
-    is_first_row_on_page: bool = False
+    is_first_row_on_page: bool = False,
+    lang: str = "en"
 ) -> None:
     """Draw table rows for a given page"""
     row_start_y = row_start_y_pos
@@ -512,7 +690,7 @@ def _draw_table_rows(
         text_y = total_row_y - (row_height / 2) - 3
         
         # Draw "Total" label - aligned with row number column
-        pdf.drawString(table_title_x, text_y, "Total")
+        pdf.drawString(table_title_x, text_y, _t("total", lang))
         
         # Draw total generated (convert kg to tons)
         total_generated = totals.get("generated", 0.0)
@@ -546,19 +724,20 @@ def _draw_full_disclosure_page(pdf: canvas.Canvas, data: dict) -> None:
     
     # Fonts
     title_font = _get_font_name("IBMPlexSansThai-Bold", "Helvetica-Bold")
-    subtitle_font = _get_font_name("IBMPlexSansThai-Light", "Helvetica")
     card_font = _get_font_name("IBMPlexSansThai-Light", "Helvetica-Bold")
     table_title_font = _get_font_name("IBMPlexSansThai-Bold", "Helvetica-Bold")
     table_header_font = _get_font_name("IBMPlexSansThai-SemiBold", "Helvetica-Bold")
-    
+
     # Colors - All colors defined here
     dark_green = colors.HexColor("#52947a")
     light_green = colors.HexColor("#b7d7c8")
-    badge_pill_bg = colors.HexColor("#e7f2f1")
+
+    # Language
+    lang = _get_lang(data)
 
     # Draw page header
-    _draw_page_header(pdf, year, width_points, height_points, margin_points)
-    
+    _draw_page_header(pdf, year, width_points, height_points, margin_points, lang=lang)
+
     # Calculate subtitle_y for positioning cards
     title_x = margin_points + 12
     title_y = height_points - (margin_points * 1.5)
@@ -572,28 +751,28 @@ def _draw_full_disclosure_page(pdf: canvas.Canvas, data: dict) -> None:
     
     cards = [
         {
-            "label": "Waste Generated",
+            "label": _t("waste_generated", lang),
             "value": table_summary.get("waste_generated", 0.0),
-            "unit": "t",
-            "table_tag": "Table 1"
+            "unit": _t("unit_ton", lang),
+            "is_weight": True,
         },
         {
-            "label": "Diverted",
+            "label": _t("diverted", lang),
             "value": table_summary.get("diverted_from_disposal", 0.0),
-            "unit": "t",
-            "table_tag": "Table 2"
+            "unit": _t("unit_ton", lang),
+            "is_weight": True,
         },
         {
-            "label": "Directed",
+            "label": _t("directed", lang),
             "value": table_summary.get("directed_to_disposal", 0.0),
-            "unit": "t",
-            "table_tag": "Table 3"
+            "unit": _t("unit_ton", lang),
+            "is_weight": True,
         },
         {
-            "label": "Total Spills",
+            "label": _t("total_spills", lang),
             "value": table_summary.get("total_spills", 0.0),
-            "unit": "Liters",
-            "table_tag": "Table 4"
+            "unit": _t("unit_liters", lang),
+            "is_weight": False,
         }
     ]
     
@@ -613,28 +792,7 @@ def _draw_full_disclosure_page(pdf: canvas.Canvas, data: dict) -> None:
         icon_y = card_y + card_height - 0.6 * inch
         pdf.setFillColor(light_green)
         pdf.circle(icon_x + icon_size/2, icon_y + icon_size/2, icon_size/2, fill=1)
-        
-        # Table tag with badge pill background
-        pdf.setFont(subtitle_font, 6)
-        tag_text = card["table_tag"]
-        tag_text_width = pdf.stringWidth(tag_text, subtitle_font, 6)
-        tag_padding_x = 0.1 * inch
-        tag_bg_width = tag_text_width + (tag_padding_x * 2)
-        tag_bg_height = 0.2 * inch
-        tag_x = card_x + card_width - tag_bg_width - 0.2 * inch
-        tag_y = card_y + card_height - 0.4 * inch
-        
-        # Draw badge pill background
-        pdf.setFillColor(badge_pill_bg)
-        pdf.setStrokeColor(badge_pill_bg)
-        pdf.roundRect(tag_x, tag_y, tag_bg_width, tag_bg_height, tag_bg_height / 2, fill=1, stroke=0)
-        
-        # Draw tag text
-        pdf.setFillColor(dark_green)
-        text_x = tag_x + tag_padding_x
-        text_y = tag_y + (tag_bg_height / 2) - 3  # Center vertically
-        pdf.drawString(text_x, text_y + 1, tag_text)
-        
+
         # Card label
         pdf.setFillColor(dark_green)
         pdf.setFont(card_font, 13)
@@ -646,7 +804,7 @@ def _draw_full_disclosure_page(pdf: canvas.Canvas, data: dict) -> None:
         pdf.setFillColor(dark_green)
         pdf.setFont(table_header_font, 18)
         # Convert kg to tons for weight values (not spills which are in liters)
-        if card['unit'] == 't':
+        if card['is_weight']:
             value_text = f"{_kg_to_tons_formatted(card['value'], use_comma=False)} {card['unit']}"
         else:
             value_text = f"{card['value']:.3f} {card['unit']}"
@@ -683,7 +841,7 @@ def _draw_full_disclosure_page(pdf: canvas.Canvas, data: dict) -> None:
         pdf.setFillColor(dark_green)
         pdf.setFont(table_title_font, 12)
         table_title_y = table_height + table_start_y - 0.35 * inch
-        table_title = "Table 1: Waste by composition"
+        table_title = _t("table_1_title", lang)
         pdf.drawString(table_title_x, table_title_y, table_title)
         
         table_header_start_y = table_title_y - 0.5 * inch - 0.17 * inch
@@ -693,10 +851,10 @@ def _draw_full_disclosure_page(pdf: canvas.Canvas, data: dict) -> None:
         pdf.setFont(card_font, 9)
         table_header_y = table_header_start_y + 0.16 * inch
         pdf.drawString(table_title_x, table_header_y, "#")
-        pdf.drawString(table_title_x + 0.4 * inch, table_header_y, "Waste Composition")
-        pdf.drawString(table_title_x + 5 * inch, table_header_y, "Generated (T)")
-        pdf.drawString(table_title_x + 6.9 * inch, table_header_y, "Diverted (T)")
-        pdf.drawString(table_title_x + 8.8 * inch, table_header_y, "Directed (T)")
+        pdf.drawString(table_title_x + 0.4 * inch, table_header_y, _t("waste_composition", lang))
+        pdf.drawString(table_title_x + 5 * inch, table_header_y, _t("generated_t", lang))
+        pdf.drawString(table_title_x + 6.9 * inch, table_header_y, _t("diverted_t", lang))
+        pdf.drawString(table_title_x + 8.8 * inch, table_header_y, _t("directed_t", lang))
         
         # Draw rows
         # 2 or fewer categories: show all + total = max 3 rows
@@ -705,7 +863,7 @@ def _draw_full_disclosure_page(pdf: canvas.Canvas, data: dict) -> None:
             row_height=row_height, margin_points=margin_points, width_points=width_points,
             table_title_x=table_title_x, dark_green=dark_green, light_green=light_green,
             card_font=card_font, table_header_font=table_header_font, totals=totals,
-            is_last_page=True, is_first_row_on_page=False
+            is_last_page=True, is_first_row_on_page=False, lang=lang
         )
     elif len(categories) == 3:
         # Exactly 3 categories: show 2 categories + total = 3 rows on first page
@@ -730,7 +888,7 @@ def _draw_full_disclosure_page(pdf: canvas.Canvas, data: dict) -> None:
         pdf.setFillColor(dark_green)
         pdf.setFont(table_title_font, 12)
         table_title_y = table_height + table_start_y - 0.35 * inch
-        table_title = "Table 1: Waste by composition"
+        table_title = _t("table_1_title", lang)
         pdf.drawString(table_title_x, table_title_y, table_title)
         
         table_header_start_y = table_title_y - 0.5 * inch - 0.17 * inch
@@ -740,10 +898,10 @@ def _draw_full_disclosure_page(pdf: canvas.Canvas, data: dict) -> None:
         pdf.setFont(card_font, 9)
         table_header_y = table_header_start_y + 0.16 * inch
         pdf.drawString(table_title_x, table_header_y, "#")
-        pdf.drawString(table_title_x + 0.4 * inch, table_header_y, "Waste Composition")
-        pdf.drawString(table_title_x + 5 * inch, table_header_y, "Generated (T)")
-        pdf.drawString(table_title_x + 6.9 * inch, table_header_y, "Diverted (T)")
-        pdf.drawString(table_title_x + 8.8 * inch, table_header_y, "Directed (T)")
+        pdf.drawString(table_title_x + 0.4 * inch, table_header_y, _t("waste_composition", lang))
+        pdf.drawString(table_title_x + 5 * inch, table_header_y, _t("generated_t", lang))
+        pdf.drawString(table_title_x + 6.9 * inch, table_header_y, _t("diverted_t", lang))
+        pdf.drawString(table_title_x + 8.8 * inch, table_header_y, _t("directed_t", lang))
         
         # First page: 2 categories + total
         _draw_table_rows(
@@ -751,14 +909,14 @@ def _draw_full_disclosure_page(pdf: canvas.Canvas, data: dict) -> None:
             row_height=row_height, margin_points=margin_points, width_points=width_points,
             table_title_x=table_title_x, dark_green=dark_green, light_green=light_green,
             card_font=card_font, table_header_font=table_header_font, totals=totals,
-            is_last_page=True, is_first_row_on_page=False
+            is_last_page=True, is_first_row_on_page=False, lang=lang
         )
         
         # Remaining category goes to next page
         if remaining_categories:
             _footer(pdf, width_points)
             pdf.showPage()
-            _draw_page_header(pdf, year, width_points, height_points, margin_points)
+            _draw_page_header(pdf, year, width_points, height_points, margin_points, lang=lang)
             
             # Calculate dynamic table height for remaining category
             total_height = len(remaining_categories) * row_height - 26
@@ -774,7 +932,7 @@ def _draw_full_disclosure_page(pdf: canvas.Canvas, data: dict) -> None:
             pdf.setFillColor(dark_green)
             pdf.setFont(table_title_font, 12)
             table_title_y = table_start_y_dynamic + total_height + 0.4 * inch + 0.5 * inch + 0.17 * inch + 0.35 * inch - 0.35 * inch
-            pdf.drawString(table_title_x, table_title_y, "Table 1: Waste by composition")
+            pdf.drawString(table_title_x, table_title_y, _t("table_1_title", lang))
             
             # Table header
             table_header_start_y = table_title_y - 0.5 * inch - 0.17 * inch
@@ -784,10 +942,10 @@ def _draw_full_disclosure_page(pdf: canvas.Canvas, data: dict) -> None:
             pdf.setFont(card_font, 9)
             table_header_y = table_header_start_y + 0.16 * inch
             pdf.drawString(table_title_x, table_header_y, "#")
-            pdf.drawString(table_title_x + 0.4 * inch, table_header_y, "Waste Composition")
-            pdf.drawString(table_title_x + 5 * inch, table_header_y, "Generated (T)")
-            pdf.drawString(table_title_x + 6.9 * inch, table_header_y, "Diverted (T)")
-            pdf.drawString(table_title_x + 8.8 * inch, table_header_y, "Directed (T)")
+            pdf.drawString(table_title_x + 0.4 * inch, table_header_y, _t("waste_composition", lang))
+            pdf.drawString(table_title_x + 5 * inch, table_header_y, _t("generated_t", lang))
+            pdf.drawString(table_title_x + 6.9 * inch, table_header_y, _t("diverted_t", lang))
+            pdf.drawString(table_title_x + 8.8 * inch, table_header_y, _t("directed_t", lang))
             
             # Draw remaining category
             _draw_table_rows(
@@ -819,7 +977,7 @@ def _draw_full_disclosure_page(pdf: canvas.Canvas, data: dict) -> None:
         pdf.setFillColor(dark_green)
         pdf.setFont(table_title_font, 12)
         table_title_y = table_height + table_start_y - 0.35 * inch
-        table_title = "Table 1: Waste by composition"
+        table_title = _t("table_1_title", lang)
         pdf.drawString(table_title_x, table_title_y, table_title)
         
         table_header_start_y = table_title_y - 0.5 * inch - 0.17 * inch
@@ -829,17 +987,17 @@ def _draw_full_disclosure_page(pdf: canvas.Canvas, data: dict) -> None:
         pdf.setFont(card_font, 9)
         table_header_y = table_header_start_y + 0.16 * inch
         pdf.drawString(table_title_x, table_header_y, "#")
-        pdf.drawString(table_title_x + 0.4 * inch, table_header_y, "Waste Composition")
-        pdf.drawString(table_title_x + 5 * inch, table_header_y, "Generated (T)")
-        pdf.drawString(table_title_x + 6.9 * inch, table_header_y, "Diverted (T)")
-        pdf.drawString(table_title_x + 8.8 * inch, table_header_y, "Directed (T)")
+        pdf.drawString(table_title_x + 0.4 * inch, table_header_y, _t("waste_composition", lang))
+        pdf.drawString(table_title_x + 5 * inch, table_header_y, _t("generated_t", lang))
+        pdf.drawString(table_title_x + 6.9 * inch, table_header_y, _t("diverted_t", lang))
+        pdf.drawString(table_title_x + 8.8 * inch, table_header_y, _t("directed_t", lang))
         
         _draw_table_rows(
             pdf, first_page_categories, start_row_num=1, row_start_y_pos=table_header_start_y,
             row_height=row_height, margin_points=margin_points, width_points=width_points,
             table_title_x=table_title_x, dark_green=dark_green, light_green=light_green,
             card_font=card_font, table_header_font=table_header_font, totals=None,
-            is_last_page=False, is_first_row_on_page=False
+            is_last_page=False, is_first_row_on_page=False, lang=lang
         )
         
         # Remaining categories
@@ -869,7 +1027,7 @@ def _draw_full_disclosure_page(pdf: canvas.Canvas, data: dict) -> None:
             pdf.showPage()
             
             # Draw page header on new page
-            _draw_page_header(pdf, year, width_points, height_points, margin_points)
+            _draw_page_header(pdf, year, width_points, height_points, margin_points, lang=lang)
             
             # Draw table container on new page with dynamic height
             pdf.setFillColor(colors.HexColor("#ffffff"))
@@ -888,7 +1046,7 @@ def _draw_full_disclosure_page(pdf: canvas.Canvas, data: dict) -> None:
                 row_height=row_height, margin_points=margin_points, width_points=width_points,
                 table_title_x=table_title_x, dark_green=dark_green, light_green=light_green,
                 card_font=card_font, table_header_font=table_header_font, totals=totals if is_last_chunk else None,
-                is_last_page=is_last_chunk, is_first_row_on_page=True
+                is_last_page=is_last_chunk, is_first_row_on_page=True, lang=lang
             )
             
             page_num += 1
@@ -896,20 +1054,20 @@ def _draw_full_disclosure_page(pdf: canvas.Canvas, data: dict) -> None:
     # Draw diverted data table on a new page
     diverted_data = report_data.get("diverted_data", {})
     if diverted_data:
-        _draw_diverted_data_table(pdf, diverted_data, year, width_points, height_points, margin_points)
-    
+        _draw_diverted_data_table(pdf, diverted_data, year, width_points, height_points, margin_points, lang=lang)
+
     # Draw directed data table on a new page
     directed_data = report_data.get("directed_data", {})
     if directed_data:
-        _draw_directed_data_table(pdf, directed_data, year, width_points, height_points, margin_points)
-    
+        _draw_directed_data_table(pdf, directed_data, year, width_points, height_points, margin_points, lang=lang)
+
     # Draw spill data table on a new page
     spill_data = report_data.get("spill_data", {})
     if spill_data:
-        _draw_spill_data_table(pdf, spill_data, year, width_points, height_points, margin_points)
+        _draw_spill_data_table(pdf, spill_data, year, width_points, height_points, margin_points, lang=lang)
 
 
-def _draw_diverted_data_table(pdf: canvas.Canvas, diverted_data: dict, year: str, width_points: float, height_points: float, margin_points: float) -> None:
+def _draw_diverted_data_table(pdf: canvas.Canvas, diverted_data: dict, year: str, width_points: float, height_points: float, margin_points: float, lang: str = "en") -> None:
     """Draw the diverted data table on a new page with pagination"""
     # Fonts
     table_title_font = _get_font_name("IBMPlexSansThai-Bold", "Helvetica-Bold")
@@ -933,7 +1091,7 @@ def _draw_diverted_data_table(pdf: canvas.Canvas, diverted_data: dict, year: str
     data_row_num = 1
     
     if hazardous_data:
-        all_rows.append({"type": "header", "label": "Hazardous"})
+        all_rows.append({"type": "header", "label": _t("hazardous", lang)})
         hazardous_totals = {"onsite": 0.0, "offsite": 0.0, "total": 0.0}
         for method in methods:
             method_data = hazardous_data.get(method, {})
@@ -951,12 +1109,12 @@ def _draw_diverted_data_table(pdf: canvas.Canvas, diverted_data: dict, year: str
         # Add total row for hazardous
         all_rows.append({
             "type": "total",
-            "label": "Total",
+            "label": _t("total", lang),
             "data": hazardous_totals
         })
     
     if non_hazardous_data:
-        all_rows.append({"type": "header", "label": "Non-Hazardous"})
+        all_rows.append({"type": "header", "label": _t("non_hazardous", lang)})
         non_hazardous_totals = {"onsite": 0.0, "offsite": 0.0, "total": 0.0}
         for method in methods:
             method_data = non_hazardous_data.get(method, {})
@@ -974,7 +1132,7 @@ def _draw_diverted_data_table(pdf: canvas.Canvas, diverted_data: dict, year: str
         # Add total row for non-hazardous
         all_rows.append({
             "type": "total",
-            "label": "Total",
+            "label": _t("total", lang),
             "data": non_hazardous_totals
         })
     
@@ -1095,7 +1253,7 @@ def _draw_diverted_data_table(pdf: canvas.Canvas, diverted_data: dict, year: str
                 text_y = row_y - (row_height / 2) - 3
                 
                 pdf.drawString(table_title_x, text_y, str(row["num"]))
-                pdf.drawString(table_title_x + 0.4 * inch, text_y, row["method"])
+                pdf.drawString(table_title_x + 0.4 * inch, text_y, _t_method(row["method"], lang))
                 # Convert kg to tons for all weight values
                 pdf.drawString(table_title_x + 5 * inch, text_y, _kg_to_tons_formatted(row['data'].get('onsite', 0.0), use_comma=True))
                 pdf.drawString(table_title_x + 6.9 * inch, text_y, _kg_to_tons_formatted(row['data'].get('offsite', 0.0), use_comma=True))
@@ -1106,7 +1264,7 @@ def _draw_diverted_data_table(pdf: canvas.Canvas, diverted_data: dict, year: str
         # All rows fit on first page
         _footer(pdf, width_points)
         pdf.showPage()
-        _draw_page_header(pdf, year, width_points, height_points, margin_points)
+        _draw_page_header(pdf, year, width_points, height_points, margin_points, lang=lang)
         
         # Calculate dynamic table height
         total_height = sum(
@@ -1126,7 +1284,7 @@ def _draw_diverted_data_table(pdf: canvas.Canvas, diverted_data: dict, year: str
         pdf.setFillColor(dark_green)
         pdf.setFont(table_title_font, 12)
         table_title_y = table_start_y_dynamic + total_height + 0.4 * inch + 0.5 * inch + 0.17 * inch + 0.35 * inch - 0.35 * inch
-        pdf.drawString(table_title_x, table_title_y, "Table 2: Diverted from Disposal")
+        pdf.drawString(table_title_x, table_title_y, _t("table_2_title", lang))
         
         # Table header
         table_header_start_y = table_title_y - 0.5 * inch - 0.17 * inch
@@ -1136,10 +1294,10 @@ def _draw_diverted_data_table(pdf: canvas.Canvas, diverted_data: dict, year: str
         pdf.setFont(card_font, 9)
         table_header_y = table_header_start_y + 0.16 * inch
         pdf.drawString(table_title_x, table_header_y, "#")
-        pdf.drawString(table_title_x + 0.4 * inch, table_header_y, "Method")
-        pdf.drawString(table_title_x + 5 * inch, table_header_y, "Onsite (T)")
-        pdf.drawString(table_title_x + 6.9 * inch, table_header_y, "Offsite (T)")
-        pdf.drawString(table_title_x + 8.8 * inch, table_header_y, "Total (T)")
+        pdf.drawString(table_title_x + 0.4 * inch, table_header_y, _t("method", lang))
+        pdf.drawString(table_title_x + 5 * inch, table_header_y, _t("onsite_t", lang))
+        pdf.drawString(table_title_x + 6.9 * inch, table_header_y, _t("offsite_t", lang))
+        pdf.drawString(table_title_x + 8.8 * inch, table_header_y, _t("total_t", lang))
         
         # Draw rows
         top_start_y = table_header_start_y
@@ -1152,7 +1310,7 @@ def _draw_diverted_data_table(pdf: canvas.Canvas, diverted_data: dict, year: str
         # First page
         _footer(pdf, width_points)
         pdf.showPage()
-        _draw_page_header(pdf, year, width_points, height_points, margin_points)
+        _draw_page_header(pdf, year, width_points, height_points, margin_points, lang=lang)
         
         # Calculate dynamic table height for first page
         total_height = sum(
@@ -1172,7 +1330,7 @@ def _draw_diverted_data_table(pdf: canvas.Canvas, diverted_data: dict, year: str
         pdf.setFillColor(dark_green)
         pdf.setFont(table_title_font, 12)
         table_title_y = table_start_y_dynamic + total_height + 0.4 * inch + 0.5 * inch + 0.17 * inch + 0.35 * inch - 0.35 * inch
-        pdf.drawString(table_title_x, table_title_y, "Table 2: Diverted from Disposal")
+        pdf.drawString(table_title_x, table_title_y, _t("table_2_title", lang))
         
         # Table header
         table_header_start_y = table_title_y - 0.5 * inch - 0.17 * inch
@@ -1182,10 +1340,10 @@ def _draw_diverted_data_table(pdf: canvas.Canvas, diverted_data: dict, year: str
         pdf.setFont(card_font, 9)
         table_header_y = table_header_start_y + 0.16 * inch
         pdf.drawString(table_title_x, table_header_y, "#")
-        pdf.drawString(table_title_x + 0.4 * inch, table_header_y, "Method")
-        pdf.drawString(table_title_x + 5 * inch, table_header_y, "Onsite (T)")
-        pdf.drawString(table_title_x + 6.9 * inch, table_header_y, "Offsite (T)")
-        pdf.drawString(table_title_x + 8.8 * inch, table_header_y, "Total (T)")
+        pdf.drawString(table_title_x + 0.4 * inch, table_header_y, _t("method", lang))
+        pdf.drawString(table_title_x + 5 * inch, table_header_y, _t("onsite_t", lang))
+        pdf.drawString(table_title_x + 6.9 * inch, table_header_y, _t("offsite_t", lang))
+        pdf.drawString(table_title_x + 8.8 * inch, table_header_y, _t("total_t", lang))
         
         # Draw first page rows
         top_start_y = table_header_start_y
@@ -1208,7 +1366,7 @@ def _draw_diverted_data_table(pdf: canvas.Canvas, diverted_data: dict, year: str
             # Create new page
             _footer(pdf, width_points)
             pdf.showPage()
-            _draw_page_header(pdf, year, width_points, height_points, margin_points)
+            _draw_page_header(pdf, year, width_points, height_points, margin_points, lang=lang)
             
             # Draw table container
             pdf.setFillColor(colors.HexColor("#ffffff"))
@@ -1221,7 +1379,7 @@ def _draw_diverted_data_table(pdf: canvas.Canvas, diverted_data: dict, year: str
             draw_diverted_rows(chunk, top_start_y, is_first_row_on_page=True, is_last_page=is_last_chunk)
 
 
-def _draw_directed_data_table(pdf: canvas.Canvas, directed_data: dict, year: str, width_points: float, height_points: float, margin_points: float) -> None:
+def _draw_directed_data_table(pdf: canvas.Canvas, directed_data: dict, year: str, width_points: float, height_points: float, margin_points: float, lang: str = "en") -> None:
     """Draw the directed data table on a new page with pagination"""
     # Fonts
     table_title_font = _get_font_name("IBMPlexSansThai-Bold", "Helvetica-Bold")
@@ -1245,7 +1403,7 @@ def _draw_directed_data_table(pdf: canvas.Canvas, directed_data: dict, year: str
     data_row_num = 1
     
     if hazardous_data:
-        all_rows.append({"type": "header", "label": "Hazardous"})
+        all_rows.append({"type": "header", "label": _t("hazardous", lang)})
         hazardous_totals = {"onsite": 0.0, "offsite": 0.0, "total": 0.0}
         for method in methods:
             method_data = hazardous_data.get(method, {})
@@ -1263,12 +1421,12 @@ def _draw_directed_data_table(pdf: canvas.Canvas, directed_data: dict, year: str
         # Add total row for hazardous
         all_rows.append({
             "type": "total",
-            "label": "Total",
+            "label": _t("total", lang),
             "data": hazardous_totals
         })
     
     if non_hazardous_data:
-        all_rows.append({"type": "header", "label": "Non-Hazardous"})
+        all_rows.append({"type": "header", "label": _t("non_hazardous", lang)})
         non_hazardous_totals = {"onsite": 0.0, "offsite": 0.0, "total": 0.0}
         for method in methods:
             method_data = non_hazardous_data.get(method, {})
@@ -1286,7 +1444,7 @@ def _draw_directed_data_table(pdf: canvas.Canvas, directed_data: dict, year: str
         # Add total row for non-hazardous
         all_rows.append({
             "type": "total",
-            "label": "Total",
+            "label": _t("total", lang),
             "data": non_hazardous_totals
         })
     
@@ -1407,7 +1565,7 @@ def _draw_directed_data_table(pdf: canvas.Canvas, directed_data: dict, year: str
                 text_y = row_y - (row_height / 2) - 3
                 
                 pdf.drawString(table_title_x, text_y, str(row["num"]))
-                pdf.drawString(table_title_x + 0.4 * inch, text_y, row["method"])
+                pdf.drawString(table_title_x + 0.4 * inch, text_y, _t_method(row["method"], lang))
                 # Convert kg to tons for all weight values
                 pdf.drawString(table_title_x + 5 * inch, text_y, _kg_to_tons_formatted(row['data'].get('onsite', 0.0), use_comma=True))
                 pdf.drawString(table_title_x + 6.9 * inch, text_y, _kg_to_tons_formatted(row['data'].get('offsite', 0.0), use_comma=True))
@@ -1418,7 +1576,7 @@ def _draw_directed_data_table(pdf: canvas.Canvas, directed_data: dict, year: str
         # All rows fit on first page
         _footer(pdf, width_points)
         pdf.showPage()
-        _draw_page_header(pdf, year, width_points, height_points, margin_points)
+        _draw_page_header(pdf, year, width_points, height_points, margin_points, lang=lang)
         
         # Calculate dynamic table height
         total_height = sum(
@@ -1438,7 +1596,7 @@ def _draw_directed_data_table(pdf: canvas.Canvas, directed_data: dict, year: str
         pdf.setFillColor(dark_green)
         pdf.setFont(table_title_font, 12)
         table_title_y = table_start_y_dynamic + total_height + 0.4 * inch + 0.5 * inch + 0.17 * inch + 0.35 * inch - 0.35 * inch
-        pdf.drawString(table_title_x, table_title_y, "Table 3: Waste Directed from Disposal")
+        pdf.drawString(table_title_x, table_title_y, _t("table_3_title", lang))
         
         # Table header
         table_header_start_y = table_title_y - 0.5 * inch - 0.17 * inch
@@ -1448,10 +1606,10 @@ def _draw_directed_data_table(pdf: canvas.Canvas, directed_data: dict, year: str
         pdf.setFont(card_font, 9)
         table_header_y = table_header_start_y + 0.16 * inch
         pdf.drawString(table_title_x, table_header_y, "#")
-        pdf.drawString(table_title_x + 0.4 * inch, table_header_y, "Method")
-        pdf.drawString(table_title_x + 5 * inch, table_header_y, "Onsite (T)")
-        pdf.drawString(table_title_x + 6.9 * inch, table_header_y, "Offsite (T)")
-        pdf.drawString(table_title_x + 8.8 * inch, table_header_y, "Total (T)")
+        pdf.drawString(table_title_x + 0.4 * inch, table_header_y, _t("method", lang))
+        pdf.drawString(table_title_x + 5 * inch, table_header_y, _t("onsite_t", lang))
+        pdf.drawString(table_title_x + 6.9 * inch, table_header_y, _t("offsite_t", lang))
+        pdf.drawString(table_title_x + 8.8 * inch, table_header_y, _t("total_t", lang))
         
         # Draw rows
         top_start_y = table_header_start_y
@@ -1464,7 +1622,7 @@ def _draw_directed_data_table(pdf: canvas.Canvas, directed_data: dict, year: str
         # First page
         _footer(pdf, width_points)
         pdf.showPage()
-        _draw_page_header(pdf, year, width_points, height_points, margin_points)
+        _draw_page_header(pdf, year, width_points, height_points, margin_points, lang=lang)
         
         # Calculate dynamic table height for first page
         total_height = sum(
@@ -1484,7 +1642,7 @@ def _draw_directed_data_table(pdf: canvas.Canvas, directed_data: dict, year: str
         pdf.setFillColor(dark_green)
         pdf.setFont(table_title_font, 12)
         table_title_y = table_start_y_dynamic + total_height + 0.4 * inch + 0.5 * inch + 0.17 * inch + 0.35 * inch - 0.35 * inch
-        pdf.drawString(table_title_x, table_title_y, "Table 3: Waste Directed from Disposal")
+        pdf.drawString(table_title_x, table_title_y, _t("table_3_title", lang))
         
         # Table header
         table_header_start_y = table_title_y - 0.5 * inch - 0.17 * inch
@@ -1494,10 +1652,10 @@ def _draw_directed_data_table(pdf: canvas.Canvas, directed_data: dict, year: str
         pdf.setFont(card_font, 9)
         table_header_y = table_header_start_y + 0.16 * inch
         pdf.drawString(table_title_x, table_header_y, "#")
-        pdf.drawString(table_title_x + 0.4 * inch, table_header_y, "Method")
-        pdf.drawString(table_title_x + 5 * inch, table_header_y, "Onsite (T)")
-        pdf.drawString(table_title_x + 6.9 * inch, table_header_y, "Offsite (T)")
-        pdf.drawString(table_title_x + 8.8 * inch, table_header_y, "Total (T)")
+        pdf.drawString(table_title_x + 0.4 * inch, table_header_y, _t("method", lang))
+        pdf.drawString(table_title_x + 5 * inch, table_header_y, _t("onsite_t", lang))
+        pdf.drawString(table_title_x + 6.9 * inch, table_header_y, _t("offsite_t", lang))
+        pdf.drawString(table_title_x + 8.8 * inch, table_header_y, _t("total_t", lang))
         
         # Draw first page rows
         top_start_y = table_header_start_y
@@ -1520,7 +1678,7 @@ def _draw_directed_data_table(pdf: canvas.Canvas, directed_data: dict, year: str
             # Create new page
             _footer(pdf, width_points)
             pdf.showPage()
-            _draw_page_header(pdf, year, width_points, height_points, margin_points)
+            _draw_page_header(pdf, year, width_points, height_points, margin_points, lang=lang)
             
             # Draw table container
             pdf.setFillColor(colors.HexColor("#ffffff"))
@@ -1533,7 +1691,7 @@ def _draw_directed_data_table(pdf: canvas.Canvas, directed_data: dict, year: str
             draw_directed_rows(chunk, top_start_y, is_first_row_on_page=True, is_last_page=is_last_chunk)
 
 
-def _draw_spill_data_table(pdf: canvas.Canvas, spill_data: dict, year: str, width_points: float, height_points: float, margin_points: float) -> None:
+def _draw_spill_data_table(pdf: canvas.Canvas, spill_data: dict, year: str, width_points: float, height_points: float, margin_points: float, lang: str = "en") -> None:
     """Draw the spill data table on a new page with pagination"""
     # Fonts
     table_title_font = _get_font_name("IBMPlexSansThai-Bold", "Helvetica-Bold")
@@ -1591,8 +1749,8 @@ def _draw_spill_data_table(pdf: canvas.Canvas, spill_data: dict, year: str, widt
             text_y = row_y - (row_height / 2) - 3
             
             pdf.drawString(table_title_x, text_y, str(row_num))
-            pdf.drawString(table_title_x + 0.4 * inch, text_y, record.get("spill_type", ""))
-            pdf.drawString(table_title_x + 2.5 * inch, text_y, record.get("surface_type", ""))
+            pdf.drawString(table_title_x + 0.4 * inch, text_y, _translate_spill_type(record.get("spill_type", ""), lang))
+            pdf.drawString(table_title_x + 2.5 * inch, text_y, _translate_surface_type(record.get("surface_type", ""), lang))
             pdf.drawString(table_title_x + 4.5 * inch, text_y, record.get("location", ""))
             pdf.drawString(table_title_x + 6.5 * inch, text_y, f"{record.get('volume', 0.0):,.3f}")
             pdf.drawString(table_title_x + 8.5 * inch, text_y, f"{record.get('cleanup_cost', 0.0):,.3f}")
@@ -1622,7 +1780,7 @@ def _draw_spill_data_table(pdf: canvas.Canvas, spill_data: dict, year: str, widt
             text_y = total_row_y - (row_height / 2) - 3
             
             pdf.drawString(table_title_x, text_y, "")  # Empty number column
-            pdf.drawString(table_title_x + 0.4 * inch, text_y, "Total")
+            pdf.drawString(table_title_x + 0.4 * inch, text_y, _t("total", lang))
             pdf.drawString(table_title_x + 2.5 * inch, text_y, "")  # Empty surface type
             pdf.drawString(table_title_x + 4.5 * inch, text_y, "")  # Empty location
             pdf.drawString(table_title_x + 6.5 * inch, text_y, f"{totals.get('total_volume', 0.0):,.3f}")
@@ -1633,7 +1791,7 @@ def _draw_spill_data_table(pdf: canvas.Canvas, spill_data: dict, year: str, widt
         # All rows fit on first page
         _footer(pdf, width_points)
         pdf.showPage()
-        _draw_page_header(pdf, year, width_points, height_points, margin_points)
+        _draw_page_header(pdf, year, width_points, height_points, margin_points, lang=lang)
         
         # Calculate dynamic table height
         total_height = len(records) * row_height
@@ -1652,7 +1810,7 @@ def _draw_spill_data_table(pdf: canvas.Canvas, spill_data: dict, year: str, widt
         pdf.setFillColor(dark_green)
         pdf.setFont(table_title_font, 12)
         table_title_y = table_start_y_dynamic + total_height + 0.4 * inch + 0.5 * inch + 0.17 * inch + 0.35 * inch - 0.35 * inch
-        pdf.drawString(table_title_x, table_title_y, "Table 4: Significant Spills")
+        pdf.drawString(table_title_x, table_title_y, _t("table_4_title", lang))
         
         # Table header
         table_header_start_y = table_title_y - 0.5 * inch - 0.17 * inch
@@ -1662,11 +1820,11 @@ def _draw_spill_data_table(pdf: canvas.Canvas, spill_data: dict, year: str, widt
         pdf.setFont(card_font, 9)
         table_header_y = table_header_start_y + 0.16 * inch
         pdf.drawString(table_title_x, table_header_y, "#")
-        pdf.drawString(table_title_x + 0.4 * inch, table_header_y, "Material Type")
-        pdf.drawString(table_title_x + 2.5 * inch, table_header_y, "Surface Type")
-        pdf.drawString(table_title_x + 4.5 * inch, table_header_y, "Location")
-        pdf.drawString(table_title_x + 6.5 * inch, table_header_y, "Volume (Liters)")
-        pdf.drawString(table_title_x + 8.5 * inch, table_header_y, "Cleanup Cost (THB)")
+        pdf.drawString(table_title_x + 0.4 * inch, table_header_y, _t("material_type", lang))
+        pdf.drawString(table_title_x + 2.5 * inch, table_header_y, _t("surface_type", lang))
+        pdf.drawString(table_title_x + 4.5 * inch, table_header_y, _t("location", lang))
+        pdf.drawString(table_title_x + 6.5 * inch, table_header_y, _t("volume_liters", lang))
+        pdf.drawString(table_title_x + 8.5 * inch, table_header_y, _t("cleanup_cost_thb", lang))
         
         # Draw rows
         top_start_y = table_header_start_y
@@ -1679,7 +1837,7 @@ def _draw_spill_data_table(pdf: canvas.Canvas, spill_data: dict, year: str, widt
         # First page
         _footer(pdf, width_points)
         pdf.showPage()
-        _draw_page_header(pdf, year, width_points, height_points, margin_points)
+        _draw_page_header(pdf, year, width_points, height_points, margin_points, lang=lang)
         
         # Calculate dynamic table height for first page
         total_height = len(first_page_records) * row_height - 26
@@ -1695,7 +1853,7 @@ def _draw_spill_data_table(pdf: canvas.Canvas, spill_data: dict, year: str, widt
         pdf.setFillColor(dark_green)
         pdf.setFont(table_title_font, 12)
         table_title_y = table_start_y_dynamic + total_height + 0.4 * inch + 0.5 * inch + 0.17 * inch + 0.35 * inch - 0.35 * inch
-        pdf.drawString(table_title_x, table_title_y, "Table 4: Significant Spills")
+        pdf.drawString(table_title_x, table_title_y, _t("table_4_title", lang))
         
         # Table header
         table_header_start_y = table_title_y - 0.5 * inch - 0.17 * inch
@@ -1705,11 +1863,11 @@ def _draw_spill_data_table(pdf: canvas.Canvas, spill_data: dict, year: str, widt
         pdf.setFont(card_font, 9)
         table_header_y = table_header_start_y + 0.16 * inch
         pdf.drawString(table_title_x, table_header_y, "#")
-        pdf.drawString(table_title_x + 0.4 * inch, table_header_y, "Material Type")
-        pdf.drawString(table_title_x + 2.5 * inch, table_header_y, "Surface Type")
-        pdf.drawString(table_title_x + 4.5 * inch, table_header_y, "Location")
-        pdf.drawString(table_title_x + 6.5 * inch, table_header_y, "Volume (Liters)")
-        pdf.drawString(table_title_x + 8.5 * inch, table_header_y, "Cleanup Cost (THB)")
+        pdf.drawString(table_title_x + 0.4 * inch, table_header_y, _t("material_type", lang))
+        pdf.drawString(table_title_x + 2.5 * inch, table_header_y, _t("surface_type", lang))
+        pdf.drawString(table_title_x + 4.5 * inch, table_header_y, _t("location", lang))
+        pdf.drawString(table_title_x + 6.5 * inch, table_header_y, _t("volume_liters", lang))
+        pdf.drawString(table_title_x + 8.5 * inch, table_header_y, _t("cleanup_cost_thb", lang))
         
         # Draw first page rows
         top_start_y = table_header_start_y
@@ -1730,7 +1888,7 @@ def _draw_spill_data_table(pdf: canvas.Canvas, spill_data: dict, year: str, widt
             # Create new page
             _footer(pdf, width_points)
             pdf.showPage()
-            _draw_page_header(pdf, year, width_points, height_points, margin_points)
+            _draw_page_header(pdf, year, width_points, height_points, margin_points, lang=lang)
             
             # Draw table container
             pdf.setFillColor(colors.HexColor("#ffffff"))
