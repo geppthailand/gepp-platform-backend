@@ -491,7 +491,7 @@ def _collect_disposal_methods(transports: list, group_weight: float = 0, lang: s
         })
     if total_pending_pct > 0:
         results.append({
-            "method_name": "กำลังรอการจัดการ",
+            "method_name": _TR.get(lang, _TR['th']).get('pending', 'กำลังรอการจัดการ'),
             "material_name": "",
             "destination_name": "",
             "percentage_of_group": total_pending_pct,
