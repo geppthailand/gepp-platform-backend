@@ -61,6 +61,16 @@ _GRI_TRANSLATIONS = {
         "method_municipality_receive": "Municipality receive",
         "method_incineration_without_energy": "Incineration without energy",
         "method_incineration_with_energy": "Incineration with energy",
+        # Spill material types
+        "spill_oil_spills": "Oil Spills",
+        "spill_fuel_spills": "Fuel Spills",
+        "spill_spills_of_wastes": "Spills of Wastes",
+        "spill_spills_of_chemicals": "Spills of Chemicals",
+        # Surface types
+        "surface_soil": "Soil surfaces",
+        "surface_water": "Water surfaces",
+        "surface_concrete": "Concrete surfaces",
+        "surface_asphalt": "Asphalt surfaces",
     },
     "th": {
         "gri_report": "รายงาน GRI",
@@ -105,6 +115,16 @@ _GRI_TRANSLATIONS = {
         "method_municipality_receive": "เทศบาลรับไป",
         "method_incineration_without_energy": "เผาโดยไม่ผลิตพลังงาน",
         "method_incineration_with_energy": "เผาโดยผลิตพลังงาน",
+        # Spill material types
+        "spill_oil_spills": "น้ำมันรั่วไหล",
+        "spill_fuel_spills": "เชื้อเพลิงรั่วไหล",
+        "spill_spills_of_wastes": "ของเสียรั่วไหล",
+        "spill_spills_of_chemicals": "สารเคมีรั่วไหล",
+        # Surface types
+        "surface_soil": "พื้นดิน",
+        "surface_water": "พื้นน้ำ",
+        "surface_concrete": "พื้นคอนกรีต",
+        "surface_asphalt": "พื้นยางมะตอย",
     },
 }
 
@@ -114,6 +134,27 @@ def _t(key: str, lang: str) -> str:
     return _GRI_TRANSLATIONS.get(lang, _GRI_TRANSLATIONS["en"]).get(
         key, _GRI_TRANSLATIONS["en"].get(key, key)
     )
+
+_SPILL_TYPE_MAP = {
+    "Oil Spills": "spill_oil_spills",
+    "Fuel Spills": "spill_fuel_spills",
+    "Spills of Wastes": "spill_spills_of_wastes",
+    "Spills of Chemicals": "spill_spills_of_chemicals",
+}
+_SURFACE_TYPE_MAP = {
+    "Soil surfaces": "surface_soil",
+    "Water surfaces": "surface_water",
+    "Concrete surfaces": "surface_concrete",
+    "Asphalt surfaces": "surface_asphalt",
+}
+
+def _translate_spill_type(value: str, lang: str) -> str:
+    key = _SPILL_TYPE_MAP.get(value)
+    return _t(key, lang) if key else value
+
+def _translate_surface_type(value: str, lang: str) -> str:
+    key = _SURFACE_TYPE_MAP.get(value)
+    return _t(key, lang) if key else value
 
 
 _METHOD_KEY_MAP = {
@@ -1708,8 +1749,8 @@ def _draw_spill_data_table(pdf: canvas.Canvas, spill_data: dict, year: str, widt
             text_y = row_y - (row_height / 2) - 3
             
             pdf.drawString(table_title_x, text_y, str(row_num))
-            pdf.drawString(table_title_x + 0.4 * inch, text_y, record.get("spill_type", ""))
-            pdf.drawString(table_title_x + 2.5 * inch, text_y, record.get("surface_type", ""))
+            pdf.drawString(table_title_x + 0.4 * inch, text_y, _translate_spill_type(record.get("spill_type", ""), lang))
+            pdf.drawString(table_title_x + 2.5 * inch, text_y, _translate_surface_type(record.get("surface_type", ""), lang))
             pdf.drawString(table_title_x + 4.5 * inch, text_y, record.get("location", ""))
             pdf.drawString(table_title_x + 6.5 * inch, text_y, f"{record.get('volume', 0.0):,.3f}")
             pdf.drawString(table_title_x + 8.5 * inch, text_y, f"{record.get('cleanup_cost', 0.0):,.3f}")
