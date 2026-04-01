@@ -187,7 +187,7 @@ def handle_get_locations_by_membership(user_service: UserService, query_params: 
         if origin_ids:
             locations_orm = db_session.query(UserLocation).filter(
                 UserLocation.id.in_(origin_ids),
-                UserLocation.is_active == True
+                UserLocation.deleted_date.is_(None)
             ).all()
             origin_to_loc = {loc.id: loc for loc in locations_orm}
             for loc in locations_orm:
