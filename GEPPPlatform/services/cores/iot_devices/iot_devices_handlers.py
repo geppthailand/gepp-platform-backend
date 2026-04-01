@@ -158,9 +158,9 @@ def handle_get_locations_by_membership(user_service: UserService, query_params: 
             if material.category:
                 material_obj['category'] = {
                     'id': material.category.id,
-                    'name_en': material.category.name_en,
-                    'name_th': material.category.name_th,
-                    'code': material.category.code,
+                    'name_en': material.category.name_en or '',
+                    'name_th': material.category.name_th or '',
+                    'code': material.category.code or '',
                 }
             else:
                 material_obj['category'] = None
@@ -169,10 +169,10 @@ def handle_get_locations_by_membership(user_service: UserService, query_params: 
             if material.main_material:
                 material_obj['main_material'] = {
                     'id': material.main_material.id,
-                    'name_en': material.main_material.name_en,
-                    'name_th': material.main_material.name_th,
-                    'name_local': material.main_material.name_local,
-                    'code': material.main_material.code,
+                    'name_en': material.main_material.name_en or '',
+                    'name_th': material.main_material.name_th or '',
+                    'name_local': material.main_material.name_local or '',
+                    'code': material.main_material.code or '',
                 }
             else:
                 material_obj['main_material'] = None
@@ -218,8 +218,10 @@ def handle_get_locations_by_membership(user_service: UserService, query_params: 
         # Build locations_list with tags and tenants (id, name, members)
         locations_list = []
         for origin_id in ordered_ids:
-            location_path = location_paths.get(origin_id, '')
             loc_orm = origin_to_loc.get(origin_id)
+            if not loc_orm:
+                continue
+            location_path = location_paths.get(origin_id) or ''
             tags_list = []
             tenants_list = []
             if loc_orm:
@@ -247,7 +249,7 @@ def handle_get_locations_by_membership(user_service: UserService, query_params: 
                         })
             locations_list.append({
                 'origin_id': origin_id,
-                'display_name': (loc_orm.display_name if loc_orm else None),
+                'display_name': (loc_orm.display_name if loc_orm and loc_orm.display_name else ''),
                 'path': location_path,
                 'tags': tags_list,
                 'tenants': tenants_list
