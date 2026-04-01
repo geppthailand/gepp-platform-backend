@@ -105,6 +105,24 @@ _TR = {
     },
 }
 
+_DISPOSAL_METHOD_TH = {
+    "Recycle": "รีไซเคิล",
+    "Recycling (Own)": "รีไซเคิล (ด้วยตนเอง)",
+    "Preparation for reuse": "เตรียมเพื่อนำกลับมาใช้ใหม่",
+    "Other recover operation": "การนำกลับคืนอื่นๆ",
+    "Composted by municipality": "หมักปุ๋ยโดยเทศบาล",
+    "Municipality receive": "เทศบาลรับ",
+    "Incineration without energy": "เผาทำลายโดยไม่ผลิตพลังงาน",
+    "Incineration with energy": "เผาทำลายโดยผลิตพลังงาน",
+    "Composted": "หมักปุ๋ย",
+    "Landfill": "ฝังกลบ",
+}
+
+def _translate_method(method: str, lang: str) -> str:
+    if lang == 'th' and method in _DISPOSAL_METHOD_TH:
+        return _DISPOSAL_METHOD_TH[method]
+    return method
+
 def _t(key: str, data: dict) -> str:
     lang = (data or {}).get('language', 'th') or 'th'
     return _TR.get(lang, _TR['th']).get(key, _TR['th'].get(key, key))
@@ -296,15 +314,6 @@ def _rows_that_fit_in_box_var(box_height: float, row_heights: list) -> int:
     return len(row_heights)
 
 
-def _rows_that_fit_in_box(box_height: float) -> int:
-    """Max number of rows that fit in the diagram box (uniform height fallback)."""
-    available = box_height - 2 * _FLOW_INNER_PAD
-    if available <= 0:
-        return 1
-    n = int((available + _FLOW_ROW_GAP) / (_FLOW_ROW_H + _FLOW_ROW_GAP))
-    return max(1, n)
-
-
 def _build_flow_chart_pages(groups: list, n_rows: int, rows_per_page: int, row_heights: list = None, page_available: float = None) -> list:
     """
     Split flow chart rows across pages using variable row heights when available.
@@ -462,7 +471,8 @@ def _collect_disposal_methods(transports: list, group_weight: float = 0, lang: s
                             "pct": 0.0, "weight": 0.0,
                             "material": _mat_label(t),
                             "destination": _loc_label(t, "destination"),
-                            "method": method,
+                            "method": _translate_method(method, lang),
+                            "method_en": method,
                         }
                     combo_data[key]["pct"] += pct
                     combo_data[key]["weight"] += w
@@ -483,6 +493,7 @@ def _collect_disposal_methods(transports: list, group_weight: float = 0, lang: s
     for d in combo_data.values():
         results.append({
             "method_name": d["method"],
+            "method_name_en": d["method_en"],
             "material_name": d["material"],
             "destination_name": d["destination"],
             "percentage_of_group": round(d["pct"], 2),
@@ -880,6 +891,7 @@ def _draw_flow_chart(
                     cursor_y = m_y - method_gap_v
 
                     meth_name = _safe(dm.get("method_name", "-"))
+                    meth_name_en = dm.get("method_name_en") or meth_name
                     mat_name = _safe(dm.get("material_name", ""))
                     dest_name = _safe(dm.get("destination_name", ""))
                     pct = dm.get("percentage_of_group", 0)
@@ -891,12 +903,12 @@ def _draw_flow_chart(
                         node_accent = pending_border
                         node_title_color = pending_text
                         node_pill_bg = pending_pill_bg
-                    elif meth_name in _DIRECTED_METHODS:
+                    elif meth_name_en in _DIRECTED_METHODS:
                         node_border = colors.HexColor("#eb7170")
                         node_accent = colors.HexColor("#eb7170")
                         node_title_color = colors.HexColor("#eb7170")
                         node_pill_bg = colors.HexColor("#eb7170")
-                    elif meth_name in _DIVERTED_METHODS:
+                    elif meth_name_en in _DIVERTED_METHODS:
                         node_border = colors.HexColor("#c6dcf9")
                         node_accent = colors.HexColor("#c6dcf9")
                         node_title_color = colors.HexColor("#7ba3d4")
@@ -1125,7 +1137,7 @@ def _flatten_hierarchy_for_table(hierarchy_data: list, data: dict = None) -> lis
                         "weight": t.get("weight") or 0,
                         "origin": o_name, "destination": d_name,
                         "delivered_by": delivered,
-                        "disposal_method": t.get("disposal_method") or "-",
+                        "disposal_method": _translate_method(t.get("disposal_method") or "", _lang) or "-",
                         "status_key": _transport_status_key(t) if is_leaf else "",
                     })
                     if not is_leaf:
