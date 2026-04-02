@@ -10,6 +10,7 @@ from GEPPPlatform.services.cores.transactions.transaction_handlers import handle
 from GEPPPlatform.services.auth.auth_handlers import AuthHandlers
 from GEPPPlatform.services.cores.transactions.transaction_service import TransactionService
 from GEPPPlatform.services.cores.users.user_service import UserService
+from GEPPPlatform.services.cores.users.user_handlers import handle_get_location_allowed_materials
 from GEPPPlatform.models.users.user_location import UserLocation
 from GEPPPlatform.models.users.user_related import UserLocationTag, UserTenant
 from GEPPPlatform.models.subscriptions.organizations import OrganizationSetup
@@ -164,7 +165,7 @@ def handle_get_locations_by_membership(user_service: UserService, query_params: 
                 }
             else:
                 material_obj['category'] = None
-            
+
             # Add main_material as object
             if material.main_material:
                 material_obj['main_material'] = {
@@ -361,9 +362,80 @@ def handle_iot_devices_routes(event: Dict[str, Any], data: Dict[str, Any], **com
                     'id': user.id,
                     'email': user.email or '',
                     'displayName': user.display_name or '',
-                    'organizationId': user.organization_id or 0
+                    'organization_id': user.organization_id or 0
                 }
             }
+        if '/api/iot-devices/locations/' in path and path.endswith('/allowed-materials') and method == 'POST':
+            # GET /api/iot-devices/locations/{location_id}/allowed-materials
+            if not current_user or not current_user.get('user_id'):
+                raise UnauthorizedException('User token is required')
+            location_id = path.split('/locations/')[1].split('/')[0]
+            organization_id = current_user.get('organization_id')
+            if not organization_id:
+                raise ValidationException('User is not associated with an organization')
+            # Verify user is a member of the requested location (including descendants)
+            user_service = UserService(db_session)
+            member_locations = user_service.get_locations_by_member(
+                member_user_id=current_user['user_id'],
+                organization_id=organization_id
+            )
+            member_origin_ids: Set[int] = {
+                int(loc.get('origin_id'))
+                for loc in member_locations
+                if loc.get('origin_id') is not None
+            }
+            # Expand to include descendants via org setup tree
+            setup = (
+                db_session.query(OrganizationSetup)
+                .filter(
+                    OrganizationSetup.organization_id == organization_id,
+                    OrganizationSetup.is_active == True,
+                    OrganizationSetup.deleted_date.is_(None),
+                )
+                .order_by(OrganizationSetup.created_date.desc())
+                .first()
+            )
+            if setup and setup.root_nodes:
+                roots = setup.root_nodes
+                if isinstance(roots, dict):
+                    roots = [roots]
+                if isinstance(roots, list):
+                    def _to_int(v) -> Optional[int]:
+                        if v is None:
+                            return None
+                        if isinstance(v, int):
+                            return v
+                        if isinstance(v, str) and v.isdigit():
+                            return int(v)
+                        return None
+
+                    def _collect_all(node: Dict[str, Any], ids: Set[int]) -> None:
+                        nid = _to_int(node.get('nodeId'))
+                        if nid is not None:
+                            ids.add(nid)
+                        for ch in (node.get('children') or []):
+                            if isinstance(ch, dict):
+                                _collect_all(ch, ids)
+
+                    def _walk(nodes: List[Dict[str, Any]], seed: Set[int], out: Set[int]) -> None:
+                        for node in nodes:
+                            if not isinstance(node, dict):
+                                continue
+                            nid = _to_int(node.get('nodeId'))
+                            children = node.get('children') or []
+                            if nid is not None and nid in seed:
+                                _collect_all(node, out)
+                            elif isinstance(children, list) and children:
+                                _walk([ch for ch in children if isinstance(ch, dict)], seed, out)
+
+                    expanded: Set[int] = set(member_origin_ids)
+                    _walk([n for n in roots if isinstance(n, dict)], member_origin_ids, expanded)
+                    member_origin_ids = expanded
+
+            if int(location_id) not in member_origin_ids:
+                raise UnauthorizedException('User is not a member of this location')
+            return handle_get_location_allowed_materials(db_session, location_id, organization_id)
+
         # Unknown route under /api/iot-devices
         raise NotFoundException('Endpoint not found')
 

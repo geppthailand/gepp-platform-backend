@@ -1395,20 +1395,32 @@ def handle_get_location_allowed_materials(
                     'material_id': row[2],
                 })
 
+        # Only return categories and main_materials referenced by the fetched materials
+        used_category_ids = {m.category_id for m in materials_list if m.category_id}
+        used_main_material_ids = {m.main_material_id for m in materials_list if m.main_material_id}
+
         categories = db_session.query(MaterialCategory).filter(
-            and_(MaterialCategory.is_active == True, MaterialCategory.deleted_date.is_(None))
-        ).order_by(MaterialCategory.name_th).all()
+            and_(
+                MaterialCategory.is_active == True,
+                MaterialCategory.deleted_date.is_(None),
+                MaterialCategory.id.in_(used_category_ids) if used_category_ids else False
+            )
+        ).order_by(MaterialCategory.name_th).all() if used_category_ids else []
 
         main_materials = db_session.query(MainMaterial).filter(
-            and_(MainMaterial.is_active == True, MainMaterial.deleted_date.is_(None))
-        ).order_by(MainMaterial.display_order).all()
+            and_(
+                MainMaterial.is_active == True,
+                MainMaterial.deleted_date.is_(None),
+                MainMaterial.id.in_(used_main_material_ids) if used_main_material_ids else False
+            )
+        ).order_by(MainMaterial.display_order).all() if used_main_material_ids else []
 
         return {
             'materials': [{
-                'id': m.id, 'name_th': m.name_th, 'name_en': m.name_en,
-                'unit_name_th': m.unit_name_th, 'unit_name_en': m.unit_name_en,
-                'color': m.color, 'category_id': m.category_id,
-                'main_material_id': m.main_material_id,
+                'id': m.id, 'name_th': m.name_th or '', 'name_en': m.name_en or '',
+                'unit_name_th': m.unit_name_th or '', 'unit_name_en': m.unit_name_en or '',
+                'category_id': m.category_id or 0,
+                'main_material_id': m.main_material_id or 0,
                 'images': material_images_map.get(m.id, []),
             } for m in materials_list],
             'categories': [{
