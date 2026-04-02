@@ -737,6 +737,23 @@ class AuthHandlers:
                     Subscription.status == 'active',
                     Subscription.is_active == True
                 ).first()
+
+                # Auto-assign free plan if no active subscription exists
+                if not active_sub:
+                    free_plan = session.query(SubscriptionPlan).filter(
+                        SubscriptionPlan.name == 'free',
+                        SubscriptionPlan.is_active == True
+                    ).first()
+                    if free_plan:
+                        active_sub = Subscription(
+                            organization_id=user.organization_id,
+                            plan_id=free_plan.id,
+                            status='active',
+                        )
+                        session.add(active_sub)
+                        session.flush()
+                        active_sub.plan = free_plan
+
                 if active_sub and active_sub.plan and active_sub.plan.permission_ids:
                     perm_rows = session.query(SystemPermission.code).filter(
                         SystemPermission.id.in_(active_sub.plan.permission_ids),

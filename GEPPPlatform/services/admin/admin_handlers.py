@@ -120,6 +120,7 @@ class AdminHandlers:
     def get_resource(self, resource: str, resource_id: int) -> Dict[str, Any]:
         handler_map = {
             'organizations': self.admin_service.get_organization,
+            'users': self.admin_service.get_user,
             'subscription-plans': self.admin_service.get_subscription_plan,
             'system-permissions': self.admin_service.get_system_permission,
             'iot-devices': self.admin_service.get_iot_device,
@@ -146,6 +147,7 @@ class AdminHandlers:
     def update_resource(self, resource: str, resource_id: int, data: dict) -> Dict[str, Any]:
         handler_map = {
             'organizations': self.admin_service.update_organization,
+            'users': self.admin_service.change_user_password,
             'subscription-plans': self.admin_service.update_subscription_plan,
             'subscriptions': self.admin_service.update_subscription,
             'system-permissions': self.admin_service.update_system_permission,
