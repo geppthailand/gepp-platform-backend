@@ -1421,6 +1421,7 @@ def handle_get_location_allowed_materials(
                 'unit_name_th': m.unit_name_th or '', 'unit_name_en': m.unit_name_en or '',
                 'category_id': m.category_id or 0,
                 'main_material_id': m.main_material_id or 0,
+                'unit_weight': float(m.unit_weight) if m.unit_weight is not None else 1.0,
                 'images': material_images_map.get(m.id, []),
             } for m in materials_list],
             'categories': [{
