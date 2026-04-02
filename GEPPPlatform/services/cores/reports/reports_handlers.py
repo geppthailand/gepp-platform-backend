@@ -270,9 +270,25 @@ def _fetch_main_material_names(db_session, material_ids: set) -> Dict[int, str]:
         rows = db_session.query(
             MainMaterial.id, MainMaterial.name_en, MainMaterial.name_th
         ).filter(MainMaterial.id.in_(material_ids)).all()
-        
+
         return {
             mm_id: (name_en or name_th or f"Material {mm_id}")
+            for mm_id, name_en, name_th in rows
+        }
+    except Exception:
+        return {}
+
+
+def _fetch_main_material_names_bilingual(db_session, material_ids: set) -> Dict[int, Dict[str, str]]:
+    """Fetch main material names (both TH and EN) from database"""
+    if not material_ids:
+        return {}
+    try:
+        rows = db_session.query(
+            MainMaterial.id, MainMaterial.name_en, MainMaterial.name_th
+        ).filter(MainMaterial.id.in_(material_ids)).all()
+        return {
+            mm_id: {"name_en": name_en or f"Material {mm_id}", "name_th": name_th or name_en or f"Material {mm_id}"}
             for mm_id, name_en, name_th in rows
         }
     except Exception:
@@ -320,6 +336,22 @@ def _fetch_category_names(db_session, category_ids: set) -> Dict[int, str]:
         ).filter(MaterialCategory.id.in_(category_ids)).all()
         return {
             cid: (name_en or name_th or f"Category {cid}")
+            for cid, name_en, name_th in rows
+        }
+    except Exception:
+        return {}
+
+
+def _fetch_category_names_bilingual(db_session, category_ids: set) -> Dict[int, Dict[str, str]]:
+    """Fetch material category names (both TH and EN) from database"""
+    if not category_ids:
+        return {}
+    try:
+        rows = db_session.query(
+            MaterialCategory.id, MaterialCategory.name_en, MaterialCategory.name_th
+        ).filter(MaterialCategory.id.in_(category_ids)).all()
+        return {
+            cid: {"name_en": name_en or f"Category {cid}", "name_th": name_th or name_en or f"Category {cid}"}
             for cid, name_en, name_th in rows
         }
     except Exception:
@@ -638,6 +670,8 @@ def _handle_materials_report(
                     sub_material_agg_map[mat_id_int] = {
                         'material_id': mat_id_int,
                         'material_name': mat_name_en or mat_name_th,
+                        'material_name_en': mat_name_en,
+                        'material_name_th': mat_name_th,
                         'main_material_id': main_id_int,
                         'total_waste': 0.0,
                         'ghg_reduction': 0.0,
@@ -645,14 +679,16 @@ def _handle_materials_report(
                 sub_material_agg_map[mat_id_int]['total_waste'] += weight
                 sub_material_agg_map[mat_id_int]['ghg_reduction'] += ghg
 
-    # Fetch main material names
-    name_map = _fetch_main_material_names(reports_service.db, set(main_material_agg_map.keys()))
+    # Fetch main material names (bilingual)
+    name_map = _fetch_main_material_names_bilingual(reports_service.db, set(main_material_agg_map.keys()))
 
     # Build proportions for main materials
     proportions = [
         {
             'main_material_id': mid,
-            'main_material_name': name_map.get(mid),
+            'main_material_name': (name_map.get(mid) or {}).get('name_en') or (name_map.get(mid) or {}).get('name_th'),
+            'main_material_name_en': (name_map.get(mid) or {}).get('name_en'),
+            'main_material_name_th': (name_map.get(mid) or {}).get('name_th'),
             'total_waste': agg['total_waste'],
             'ghg_reduction': agg['ghg_reduction'],
             'proportion_percent': (agg['total_waste'] / total_waste_main * 100) if total_waste_main > 0 else 0.0,
@@ -675,13 +711,15 @@ def _handle_materials_report(
     grouped_by_main: Dict[str, list] = {}
     for item in sub_proportions:
         main_id = item.get('main_material_id')
-        main_name = name_map.get(main_id) if main_id is not None else None
-        key_name = main_name or f"Material {main_id}" if main_id is not None else "Unknown"
+        main_names = name_map.get(main_id) if main_id is not None else None
+        key_name = (main_names or {}).get('name_en') or (main_names or {}).get('name_th') or (f"Material {main_id}" if main_id is not None else "Unknown")
         if key_name not in grouped_by_main:
             grouped_by_main[key_name] = []
         grouped_by_main[key_name].append({
             'material_id': item.get('material_id'),
             'material_name': item.get('material_name'),
+            'material_name_en': item.get('material_name_en'),
+            'material_name_th': item.get('material_name_th'),
             'total_waste': item.get('total_waste'),
             'ghg_reduction': item.get('ghg_reduction'),
             'proportion_percent': item.get('proportion_percent'),
@@ -879,13 +917,16 @@ def _handle_diversion_report(
 
     # --- Fetch main material names ---
     main_material_names = _fetch_main_material_names(reports_service.db, material_ids_set)
+    main_material_names_bilingual = _fetch_main_material_names_bilingual(reports_service.db, material_ids_set)
 
     # --- Sankey ---
-    sankey_data = [["From", "To", "Weight"]]
+    sankey_data = [["From", "From_TH", "To", "Weight"]]
     for (mm_id_key, method), w in sankey_map.items():
-        from_name = main_material_names.get(mm_id_key, f"Material {mm_id_key}")
+        names = main_material_names_bilingual.get(mm_id_key, {"name_en": f"Material {mm_id_key}", "name_th": f"Material {mm_id_key}"})
+        from_name_en = names["name_en"]
+        from_name_th = names["name_th"]
         to_name = method or "Unknown Disposal"
-        sankey_data.append([from_name, to_name, w])
+        sankey_data.append([from_name_en, from_name_th, to_name, w])
 
     # --- Material table ---
     month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
@@ -897,9 +938,12 @@ def _handle_diversion_report(
             if m in entry["monthly_data"]
         ]
         status = "Processing" if entry["has_incomplete"] else "Completed"
+        names = main_material_names_bilingual.get(mid, {"name_en": f"Material {mid}", "name_th": f"Material {mid}"})
         material_table.append({
             "key": mid,
-            "materials": main_material_names.get(mid, f"Material {mid}"),
+            "materials": names["name_en"],
+            "materials_th": names["name_th"],
+            "materials_en": names["name_en"],
             "data": monthly_data,
             "status": status,
             "destination": list(entry["destinations"]),
@@ -917,7 +961,12 @@ def _handle_diversion_report(
 
     def build_main_children(mm_ids: set) -> list:
         return [
-            {"id": mid, "name": main_material_names.get(mid, f"Material {mid}")}
+            {
+                "id": mid,
+                "name": main_material_names.get(mid, f"Material {mid}"),
+                "name_en": main_material_names_bilingual.get(mid, {}).get("name_en", f"Material {mid}"),
+                "name_th": main_material_names_bilingual.get(mid, {}).get("name_th", f"Material {mid}"),
+            }
             for mid in sorted(mm_ids)
         ]
 
@@ -1877,6 +1926,8 @@ def _handle_comparison_report(
             results.append({
                 'id': rid,
                 'condition_name': (r.get('condition_name') or '').strip(),
+                'condition_name_en': (r.get('condition_name_en') or '').strip(),
+                'condition_name_th': (r.get('condition_name_th') or '').strip(),
                 'criterior': criterior,
                 'matched': bool(matched),
                 'urgency_score': round(float(urgency_score), 2),
@@ -2050,7 +2101,8 @@ def handle_reports_routes(event: Dict[str, Any], **common_params) -> Dict[str, A
 
         elif path == '/api/reports/export/pdf':
             filters = _build_filters_from_query_params(query_params, timezone_name=tz_name)
-            return _handle_export_pdf_report(reports_service, organization_id, filters, current_user)
+            language = query_params.get('language', 'en') if query_params else 'en'
+            return _handle_export_pdf_report(reports_service, organization_id, filters, current_user, language=language)
     
     except ValidationException as e:
         raise APIException(str(e), status_code=400, error_code="VALIDATION_ERROR")
@@ -2089,7 +2141,8 @@ def _handle_export_pdf_report(
     reports_service: ReportsService,
     organization_id: int,
     filters: Dict[str, Any],
-    current_user: Dict[str, Any]
+    current_user: Dict[str, Any],
+    language: str = 'en'
 ) -> Dict[str, Any]:
     """
     Aggregate data from all report handlers into a single structure
@@ -2161,6 +2214,39 @@ def _handle_export_pdf_report(
     overview = _handle_overview_report(reports_service, organization_id, filters, current_user)
     performance = _handle_performance_report(reports_service, organization_id, filters, current_user)
     materials = _handle_materials_report(reports_service, organization_id, filters, current_user)
+
+    # Translate overview data based on language
+    if language == 'th':
+        _stat_title_map = {
+            'Total Recyclables': 'วัสดุรีไซเคิลทั้งหมด',
+            'Number of Trees': 'จำนวนต้นไม้',
+            'Plastic Saved': 'พลาสติกที่ประหยัดได้',
+        }
+        for stat in (overview.get('overall_charts', {}) or {}).get('chart_stat_data', []):
+            stat['title'] = _stat_title_map.get(stat.get('title'), stat.get('title'))
+
+        # Build category name translation map (EN -> TH) for reuse
+        wtp = overview.get('waste_type_proportions', [])
+        cat_ids = {item.get('category_id') for item in wtp if item.get('category_id')} if wtp else set()
+        # Also collect category IDs from performance metrics
+        from GEPPPlatform.models.cores.references import MaterialCategory as _MC
+        _all_cats = {}
+        try:
+            _cat_rows = reports_service.db.query(_MC.name_en, _MC.name_th).all()
+            _all_cats = {r.name_en: (r.name_th or r.name_en) for r in _cat_rows if r.name_en}
+        except Exception:
+            pass
+
+        # Translate waste_type_proportions category names
+        if wtp:
+            for item in wtp:
+                en_name = item.get('category_name', '')
+                if en_name in _all_cats:
+                    item['category_name'] = _all_cats[en_name]
+
+        # Note: performance metrics keys are kept in English because the PDF
+        # code looks up specific keys like "General Waste", "Recyclable Waste".
+        # Translation of metric labels happens at display time in pdf_export.py.
     
     # Get diversion and comparison data if not already set with error
     if diversion is None:
@@ -2177,6 +2263,8 @@ def _handle_export_pdf_report(
             comparison = {'error': 'Please select valid date range. The date range must be within a single year and not exceed 365 days'}
 
     # 2) Format display dates like "01 Jan 2025" in client timezone
+    _TH_MONTHS_SHORT = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.']
+
     def _fmt_display_date_tz(iso_str: Optional[str], tz_name: Optional[str]) -> str:
         dt = _parse_datetime(iso_str)
         if not dt:
@@ -2186,6 +2274,10 @@ def _handle_export_pdf_report(
             tz = ZoneInfo(tz_name or current_user.get('timezone') or 'Asia/Bangkok')
             # Convert to client timezone for display
             local_dt = dt.astimezone(tz)
+            if language == 'th':
+                th_month = _TH_MONTHS_SHORT[local_dt.month - 1]
+                be_year = local_dt.year + 543
+                return f"{local_dt.day:02d} {th_month} {be_year}"
             return local_dt.strftime("%d %b %Y")
         except Exception:
             return dt.isoformat()
@@ -2201,7 +2293,11 @@ def _handle_export_pdf_report(
             if user_id:
                 row = reports_service.db.query(UserLocation).get(int(user_id))
                 if row:
-                    for key in ('display_name', 'name_en', 'name_th', 'username', 'email'):
+                    if language == 'th':
+                        name_keys = ('display_name', 'name_th', 'name_en', 'username', 'email')
+                    else:
+                        name_keys = ('display_name', 'name_en', 'name_th', 'username', 'email')
+                    for key in name_keys:
                         val = getattr(row, key, None)
                         if isinstance(val, str) and val.strip():
                             return val.strip()
@@ -2253,9 +2349,10 @@ def _handle_export_pdf_report(
     # 4) Resolve location names from origin_ids filter; fallback to "all"
     _current_user_id = (current_user or {}).get('user_id') or (current_user or {}).get('id')
     def _resolve_locations_from_filters(_filters: Dict[str, Any]) -> list[str] | str:
+        _all_text = 'ทั้งหมด' if language == 'th' else 'all'
         origin_ids = _filters.get('origin_ids') or []
         if not origin_ids:
-            return "all"
+            return _all_text
         try:
             origins_result = reports_service.get_origin_by_organization(organization_id=organization_id, current_user_id=_current_user_id)
             name_map = {}
@@ -2266,9 +2363,9 @@ def _handle_export_pdf_report(
                     name_map[oid] = name
             names = [name_map.get(oid, f"Location {oid}") for oid in origin_ids]
             names = [n for n in names if n]
-            return names or "all"
+            return names or _all_text
         except Exception:
-            return "all"
+            return _all_text
 
     location_disp = _resolve_locations_from_filters(filters or {})
 
@@ -2278,9 +2375,27 @@ def _handle_export_pdf_report(
         'porportions': (materials.get('main_material') or {}).get('porportions', []),
         'total_waste': (materials.get('main_material') or {}).get('total_waste', 0.0),
     }
+    raw_grouped = (materials.get('sub_material') or {}).get('porportions_grouped', {})
+    # Translate grouped keys (main material names) when language is Thai
+    if language == 'th' and raw_grouped:
+        main_mat_ids = set()
+        for props in (materials.get('main_material') or {}).get('porportions', []):
+            mid = props.get('main_material_id')
+            if mid is not None:
+                main_mat_ids.add(mid)
+        mm_bilingual = _fetch_main_material_names_bilingual(reports_service.db, main_mat_ids)
+        # Build EN->TH map from bilingual data
+        _en_to_th = {}
+        for mid, names in mm_bilingual.items():
+            _en_to_th[names.get('name_en', '')] = names.get('name_th') or names.get('name_en', '')
+        translated_grouped = {}
+        for en_key, items in raw_grouped.items():
+            th_key = _en_to_th.get(en_key, en_key)
+            translated_grouped[th_key] = items
+        raw_grouped = translated_grouped
     sub_materials_data = {
         'porportions': (materials.get('sub_material') or {}).get('porportions', []),
-        'porportions_grouped': (materials.get('sub_material') or {}).get('porportions_grouped', {}),
+        'porportions_grouped': raw_grouped,
         'total_waste': (materials.get('sub_material') or {}).get('total_waste', 0.0),
     }
 
@@ -2351,14 +2466,200 @@ def _handle_export_pdf_report(
             'material_table': []
         }
     else:
+        # Convert 4-column sankey [from_en, from_th, to, weight] to 3-column [from, to, weight]
+        # based on language, for Lambda compatibility
+        raw_sankey = diversion.get('sankey_data', [])
+        if raw_sankey and len(raw_sankey) > 0 and len(raw_sankey[0]) >= 4:
+            localized_sankey = [["From", "To", "Weight"]]
+            for row in raw_sankey[1:] if raw_sankey[0][0] == "From" else raw_sankey:
+                from_name = row[1] if language == 'th' else row[0]
+                localized_sankey.append([from_name, row[2], row[3]])
+        else:
+            localized_sankey = raw_sankey
+
+        # Localize material_table material names, status, and destination based on language
+        raw_material_table = diversion.get('material_table', [])
+        _status_map_th = {'Processing': 'กำลังดำเนินการ', 'Completed': 'เสร็จสิ้น'}
+        _method_map_th = {
+            'recycle': 'รีไซเคิล',
+            'recycling own': 'รีไซเคิลเอง',
+            'recycling (own)': 'รีไซเคิลเอง',
+            'preparation for reuse': 'เตรียมเพื่อนำกลับมาใช้ใหม่',
+            'other recover operation': 'การกู้คืนอื่นๆ',
+            'composted by municipality': 'หมักปุ๋ยโดยเทศบาล',
+            'municipality receive': 'เทศบาลรับ',
+            'incineration without energy': 'เผาโดยไม่ผลิตพลังงาน',
+            'incineration with energy': 'เผาเพื่อผลิตพลังงาน',
+        }
+        def _translate_method(m):
+            if not m:
+                return m
+            return _method_map_th.get(m.lower().strip(), m)
+
+        for mt_row in raw_material_table:
+            lang_key = 'materials_th' if language == 'th' else 'materials_en'
+            if mt_row.get(lang_key):
+                mt_row['materials'] = mt_row[lang_key]
+            if language == 'th':
+                mt_row['status'] = _status_map_th.get(mt_row.get('status', ''), mt_row.get('status', ''))
+                mt_row['destination'] = [_translate_method(d) for d in mt_row.get('destination', [])]
+
+        # Also translate sankey "To" column (disposal methods)
+        if language == 'th' and localized_sankey:
+            for row in localized_sankey[1:] if localized_sankey[0][0] == "From" else localized_sankey:
+                row[1] = _translate_method(row[1])
+
         diversion_data = {
             'card_data': diversion.get('card_data', {}),
-            'sankey_data': diversion.get('sankey_data', []),
-            'material_table': diversion.get('material_table', []),
+            'sankey_data': localized_sankey,
+            'material_table': raw_material_table,
             'materials_data': diversion.get('materials_data', []),
         }
 
+    # Pre-compute translated labels so the Lambda can use them directly
+    _LABELS = {
+        'en': {
+            'location': 'Location',
+            'date': 'Date',
+            'kg': 'kg',
+            'copyright': 'Copyright © 2018–2023 GEPP Sa-Ard Co., Ltd. ALL RIGHTS RESERVED',
+            'gepp_report': 'GEPP REPORT',
+            'subtitle': 'Data-Driven Transformation',
+            'overview': 'Overview',
+            'total_transactions': 'Total Transactions',
+            'total_approved': 'Total Approved',
+            'key_indicators': 'Key Indicators',
+            'total_waste_kg': 'Total Waste (kg)',
+            'recycling_rate_pct': 'Recycling rate (%)',
+            'ghg_reduction_kgco2e': 'GHG Reduction (kgCO2e)',
+            'top_recyclables': 'Top Recyclables',
+            'overall': 'Overall',
+            'category_proportion': 'Category proportion',
+            'general_waste': 'General Waste',
+            'materials_summary': 'Materials Summary',
+            'category': 'Category',
+            'weight_kg': 'Weight (kg.)',
+            'proportion_pct': 'Proportion (%)',
+            'performance': 'Performance',
+            'recycling_rate': 'Recycling Rate',
+            'total_waste': 'Total Waste',
+            'all_building': 'All Building',
+            'no_data': 'No data',
+            'total_buildings': 'Total Buildings',
+            'all_types_of_waste': 'All Types of Waste',
+            'detailed_performance_metrics': 'Detailed Performance Metrics',
+            'building_name': 'Building Name',
+            'general_kg': 'General (kg)',
+            'total_recyclable_incl': 'Total Recyclable incl. Recycled Organic Waste (kg)',
+            'recycling_rate_pct_header': 'Recycling Rate (%)',
+            'status': 'Status',
+            'status_normal': 'Normal',
+            'status_need_imprv': 'Need Imprv',
+            'comparison': 'Comparison',
+            'risks': 'Risks',
+            'opportunities': 'Opportunities',
+            'quick_wins': 'Quick Wins',
+            'last_year': 'Last Year',
+            'current_year': 'Current Year',
+            'waste_to_energy': 'Waste To Energy',
+            'quantity_comparison': 'Quantity Comparison',
+            'total': 'Total',
+            'main_materials': 'Main Materials',
+            'top_materials_by_qty': 'Top Materials by Quantity (Kg.)',
+            'materials_proportion': 'Materials Proportion',
+            'main_material': 'Main Material',
+            'percentage_pct': 'Percentage (%)',
+            'sub_materials': 'Sub Materials',
+            'sub_material': 'Sub Material',
+            'waste_diversion': 'Waste Diversion',
+            'total_origins': 'Total Origins',
+            'complete_transfers': 'Complete Transfers',
+            'processing_transfers': 'Processing Transfers',
+            'completed_rate': 'Completed Rate',
+            'materials': 'Materials',
+            'destination': 'Destination',
+            'period_details': 'Period Details',
+            'period': 'Period',
+            'months_short': ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
+        },
+        'th': {
+            'location': 'สถานที่',
+            'date': 'วันที่',
+            'kg': 'กก.',
+            'copyright': 'ลิขสิทธิ์ © 2018–2023 บริษัท เก็บ สะอาด จำกัด สงวนลิขสิทธิ์',
+            'gepp_report': 'รายงาน GEPP',
+            'subtitle': 'การเปลี่ยนแปลงที่ขับเคลื่อนด้วยข้อมูล',
+            'overview': 'ภาพรวม',
+            'total_transactions': 'รายการทั้งหมด',
+            'total_approved': 'รายการที่อนุมัติ',
+            'key_indicators': 'ตัวชี้วัดสำคัญ',
+            'total_waste_kg': 'ขยะทั้งหมด (กก.)',
+            'recycling_rate_pct': 'อัตราการรีไซเคิล (%)',
+            'ghg_reduction_kgco2e': 'ลดก๊าซเรือนกระจก (กก.)',
+            'top_recyclables': 'วัสดุรีไซเคิลยอดนิยม',
+            'overall': 'ภาพรวม',
+            'category_proportion': 'สัดส่วนตามประเภท',
+            'general_waste': 'ขยะทั่วไป',
+            'materials_summary': 'สรุปวัสดุ',
+            'category': 'ประเภท',
+            'weight_kg': 'น้ำหนัก (กก.)',
+            'proportion_pct': 'สัดส่วน (%)',
+            'performance': 'ประสิทธิภาพ',
+            'recycling_rate': 'อัตราการรีไซเคิล',
+            'total_waste': 'ขยะทั้งหมด',
+            'all_building': 'ทุกอาคาร',
+            'no_data': 'ไม่มีข้อมูล',
+            'total_buildings': 'จำนวนอาคารทั้งหมด',
+            'all_types_of_waste': 'ขยะทุกประเภท',
+            'detailed_performance_metrics': 'ตัวชี้วัดประสิทธิภาพโดยละเอียด',
+            'building_name': 'ชื่ออาคาร',
+            'general_kg': 'ขยะทั่วไป (กก.)',
+            'total_recyclable_incl': 'วัสดุรีไซเคิลทั้งหมด รวมขยะอินทรีย์ (กก.)',
+            'recycling_rate_pct_header': 'อัตราการรีไซเคิล (%)',
+            'status': 'สถานะ',
+            'status_normal': 'ปกติ',
+            'status_need_imprv': 'ต้องปรับปรุง',
+            'comparison': 'การเปรียบเทียบ',
+            'risks': 'ความเสี่ยง',
+            'opportunities': 'โอกาส',
+            'quick_wins': 'ผลลัพธ์เร็ว',
+            'last_year': 'ปีที่แล้ว',
+            'current_year': 'ปีปัจจุบัน',
+            'waste_to_energy': 'ขยะเพื่อพลังงาน',
+            'quantity_comparison': 'การเปรียบเทียบปริมาณ',
+            'total': 'รวม',
+            'main_materials': 'วัสดุหลัก',
+            'top_materials_by_qty': 'วัสดุยอดนิยมตามปริมาณ (กก.)',
+            'materials_proportion': 'สัดส่วนวัสดุ',
+            'main_material': 'วัสดุหลัก',
+            'percentage_pct': 'เปอร์เซ็นต์ (%)',
+            'sub_materials': 'วัสดุย่อย',
+            'sub_material': 'วัสดุย่อย',
+            'waste_diversion': 'การจัดการของเสีย',
+            'total_origins': 'จำนวนต้นทาง',
+            'complete_transfers': 'การโอนที่เสร็จสิ้น',
+            'processing_transfers': 'การโอนที่กำลังดำเนินการ',
+            'completed_rate': 'อัตราเสร็จสิ้น',
+            'materials': 'วัสดุ',
+            'destination': 'ปลายทาง',
+            'period_details': 'รายละเอียดช่วงเวลา',
+            'period': 'ช่วงเวลา',
+            'months_short': ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'],
+        },
+    }
+    labels = _LABELS.get(language, _LABELS['en'])
+    # Add category name translation map for comparison chart
+    if language == 'th':
+        # Strip " Waste" suffix for display, map to Thai name (also stripped)
+        _cat_display = {}
+        for en_name, th_name in _all_cats.items():
+            _cat_display[en_name] = th_name.replace(' Waste', '') if th_name else en_name.replace(' Waste', '')
+        labels['_category_map'] = _cat_display
+
     data: Dict[str, Any] = {
+        # Language and pre-translated labels
+        'language': language,
+        'labels': labels,
         # Header data
         'users': user_display,
         'profile_img': profile_img_view_url,
