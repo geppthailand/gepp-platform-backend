@@ -9,6 +9,7 @@ from .organization_setup import EsgOrganizationSetup
 from .platform_binding import EsgExternalPlatformBinding
 from .data_hierarchy import EsgDataCategory, EsgDataSubcategory, EsgDatapoint
 from .data_extraction import EsgOrganizationDataExtraction
+from .data_entries import EsgDataEntry
 
 __all__ = [
     'EsgOrganizationSettings',
@@ -18,4 +19,5 @@ __all__ = [
     'EsgExternalPlatformBinding',
     'EsgDataCategory', 'EsgDataSubcategory', 'EsgDatapoint',
     'EsgOrganizationDataExtraction',
+    'EsgDataEntry',
 ]

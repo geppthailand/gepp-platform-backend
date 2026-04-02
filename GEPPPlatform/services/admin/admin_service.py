@@ -311,6 +311,78 @@ class AdminService:
             'pageSize': page_size,
         }
 
+    def get_user(self, user_id: int) -> Dict[str, Any]:
+        ul = (
+            self.db_session.query(UserLocation)
+            .filter(UserLocation.id == user_id, UserLocation.is_user == True)
+            .first()
+        )
+        if not ul:
+            raise NotFoundException(f'User {user_id} not found')
+
+        owner_email = None
+        org_name = None
+        if ul.organization_id:
+            org = self.db_session.query(Organization).options(
+                joinedload(Organization.owner),
+                joinedload(Organization.organization_info),
+            ).filter(Organization.id == ul.organization_id).first()
+            if org:
+                if org.owner:
+                    owner_email = org.owner.email
+                if org.organization_info:
+                    org_name = org.organization_info.company_name
+
+        return {
+            'id': ul.id,
+            'firstName': ul.first_name,
+            'lastName': ul.last_name,
+            'email': ul.email,
+            'phone': ul.phone,
+            'displayName': ul.display_name,
+            'username': ul.username,
+            'organizationId': ul.organization_id,
+            'organizationName': org_name,
+            'ownerEmail': owner_email,
+            'platform': ul.platform.value if ul.platform else None,
+            'platformRole': ul.platform_role,
+            'companyName': ul.company_name,
+            'companyPhone': ul.company_phone,
+            'companyEmail': ul.company_email,
+            'taxId': ul.tax_id,
+            'address': ul.address,
+            'postalCode': ul.postal_code,
+            'businessType': ul.business_type,
+            'businessIndustry': ul.business_industry,
+            'isUser': ul.is_user,
+            'isLocation': ul.is_location,
+            'isActive': ul.is_active,
+            'isEmailActive': ul.is_email_active,
+            'note': ul.note,
+            'createdDate': ul.created_date.isoformat() if ul.created_date else None,
+            'updatedDate': ul.updated_date.isoformat() if ul.updated_date else None,
+        }
+
+    def change_user_password(self, user_id: int, data: dict) -> Dict[str, Any]:
+        new_password = data.get('password', '').strip()
+        if not new_password:
+            raise BadRequestException('Password is required')
+        if len(new_password) < 6:
+            raise BadRequestException('Password must be at least 6 characters')
+
+        user = (
+            self.db_session.query(UserLocation)
+            .filter(UserLocation.id == user_id, UserLocation.is_user == True)
+            .first()
+        )
+        if not user:
+            raise NotFoundException(f'User {user_id} not found')
+
+        hashed = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+        user.password = hashed
+        self.db_session.flush()
+        return {'id': user.id, 'message': 'Password changed successfully'}
+
     # ── Locations (all organizations) ──────────────────────────────────
 
     def list_all_locations(self, query_params: dict) -> Dict[str, Any]:
