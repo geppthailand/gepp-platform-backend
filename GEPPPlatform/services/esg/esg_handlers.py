@@ -10,6 +10,11 @@ from .esg_service import EsgService
 from .esg_document_service import EsgDocumentService
 from .esg_ideas_service import EsgIdeasService
 from .esg_line_service import EsgLineService
+from .esg_data_entry_service import EsgDataEntryService
+from .esg_export_service import EsgExportService
+from .esg_dashboard_service import EsgDashboardService
+from .esg_carbon_service import EsgCarbonService
+from .esg_notification_service import EsgNotificationService
 from ...exceptions import (
     APIException, UnauthorizedException, NotFoundException,
     BadRequestException, ValidationException
@@ -36,6 +41,16 @@ def handle_esg_routes(event: Dict[str, Any], data: Dict[str, Any], **params) -> 
     current_user_org_id = current_user.get('organization_id')
 
     try:
+        # ===== DASHBOARD =====
+        if path == '/api/dashboard/summary' and method == 'GET':
+            dash = EsgDashboardService(db_session)
+            return dash.get_summary(current_user_org_id)
+
+        elif path == '/api/dashboard/charts' and method == 'GET':
+            dash = EsgDashboardService(db_session)
+            year = int(query_params.get('year', 0)) or None
+            return dash.get_charts(current_user_org_id, year)
+
         # ===== SETTINGS =====
         if path == '/api/esg/settings' and method == 'GET':
             return esg_service.get_settings(current_user_org_id)
@@ -82,6 +97,87 @@ def handle_esg_routes(event: Dict[str, Any], data: Dict[str, Any], **params) -> 
             if not data:
                 raise BadRequestException('Request body is required')
             return esg_service.update_platform_binding(binding_id, current_user_org_id, data)
+
+        # ===== DATA ENTRIES =====
+        elif path == '/api/esg/data-entries' and method == 'POST':
+            if not data:
+                raise BadRequestException('Request body is required')
+            entry_service = EsgDataEntryService(db_session)
+            return entry_service.create_entry(current_user_org_id, int(current_user_id), data)
+
+        elif path == '/api/esg/data-entries' and method == 'GET':
+            entry_service = EsgDataEntryService(db_session)
+            return entry_service.list_entries(
+                organization_id=current_user_org_id,
+                page=int(query_params.get('page', 1)),
+                size=min(int(query_params.get('size', 10)), 100),
+            )
+
+        elif '/api/esg/data-entries/' in path and method == 'GET':
+            entry_id = _extract_id_from_path(path, 'data-entries')
+            entry_service = EsgDataEntryService(db_session)
+            result = entry_service.get_entry(entry_id, current_user_org_id)
+            if not result:
+                raise NotFoundException('Data entry not found')
+            return result
+
+        elif '/api/esg/data-entries/' in path and method == 'PUT':
+            entry_id = _extract_id_from_path(path, 'data-entries')
+            if not data:
+                raise BadRequestException('Request body is required')
+            entry_service = EsgDataEntryService(db_session)
+            result = entry_service.update_entry(entry_id, current_user_org_id, data)
+            if not result:
+                raise NotFoundException('Data entry not found')
+            return result
+
+        elif '/api/esg/data-entries/' in path and method == 'DELETE':
+            entry_id = _extract_id_from_path(path, 'data-entries')
+            entry_service = EsgDataEntryService(db_session)
+            deleted = entry_service.delete_entry(entry_id, current_user_org_id)
+            if not deleted:
+                raise NotFoundException('Data entry not found')
+            return {'success': True, 'message': 'Entry deleted'}
+
+        # ===== UPLOAD URL =====
+        elif path == '/api/esg/upload-url' and method == 'POST':
+            if not data or not data.get('file_name'):
+                raise BadRequestException('file_name is required')
+            return _handle_upload_url(data, current_user_id, current_user_org_id, db_session)
+
+        # ===== VERIFY =====
+        elif '/api/esg/data-entries/' in path and '/verify' in path and method == 'POST':
+            entry_id = _extract_id_from_path(path, 'data-entries')
+            entry_service = EsgDataEntryService(db_session)
+            result = entry_service.verify_entry(entry_id, current_user_org_id)
+            if not result:
+                raise NotFoundException('Data entry not found')
+            return result
+
+        # ===== EXPORT =====
+        elif path == '/api/esg/export' and method == 'POST':
+            fmt = (data or {}).get('format', 'xlsx')
+            export_service = EsgExportService(db_session)
+            if fmt == 'pdf':
+                return export_service.export_to_pdf(current_user_org_id)
+            return export_service.export_to_excel(current_user_org_id)
+
+        # ===== EMISSION FACTORS =====
+        elif path == '/api/esg/emission-factors' and method == 'GET':
+            carbon_svc = EsgCarbonService(db_session)
+            return carbon_svc.list_factors(query_params.get('category'))
+
+        # ===== NOTIFICATION (cron) =====
+        elif path == '/api/esg/notifications/send-reminders' and method == 'POST':
+            notif = EsgNotificationService(db_session)
+            return notif.send_monthly_reminders()
+
+        # ===== LINE WEBHOOK (public, no JWT) =====
+        elif path == '/api/esg/line/webhook' and method == 'POST':
+            raw_body = event.get('body', '')
+            signature = (event.get('headers', {}) or {}).get('x-line-signature', '')
+            line_service = EsgLineService(db_session)
+            return line_service.handle_webhook(raw_body, signature)
 
         # ===== DATA HIERARCHY =====
         elif path == '/api/esg/categories' and method == 'GET':
@@ -183,6 +279,39 @@ def handle_esg_routes(event: Dict[str, Any], data: Dict[str, Any], **params) -> 
     except Exception as e:
         logger.error(f"ESG route error: {str(e)}", exc_info=True)
         return {'success': False, 'message': f'Internal server error: {str(e)}', 'error_code': 'INTERNAL_ERROR'}
+
+
+def _handle_upload_url(data, current_user_id, current_user_org_id, db_session):
+    """Generate a single pre-signed S3 upload URL for data entry evidence"""
+    import boto3
+    import uuid
+    import os
+    from datetime import datetime
+
+    file_name = data['file_name']
+    content_type = data.get('content_type', 'application/octet-stream')
+
+    s3 = boto3.client('s3')
+    bucket = os.environ.get('S3_BUCKET', 'gepp-platform-files')
+    ext = file_name.rsplit('.', 1)[-1] if '.' in file_name else 'bin'
+    file_key = f'esg/uploads/{current_user_org_id}/{datetime.utcnow().strftime("%Y%m%d")}/{uuid.uuid4().hex[:12]}.{ext}'
+
+    upload_url = s3.generate_presigned_url(
+        'put_object',
+        Params={
+            'Bucket': bucket,
+            'Key': file_key,
+            'ContentType': content_type,
+        },
+        ExpiresIn=3600,
+    )
+
+    return {
+        'success': True,
+        'upload_url': upload_url,
+        'file_key': file_key,
+        'expires_in': 3600,
+    }
 
 
 def _handle_presigned_urls(data, current_user_id, current_user_org_id, db_session):
