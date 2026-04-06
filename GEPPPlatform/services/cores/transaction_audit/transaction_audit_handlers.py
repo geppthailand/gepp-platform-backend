@@ -1419,8 +1419,18 @@ def handle_get_audit_report(
         search = query_params.get('search')
         date_from = query_params.get('date_from')
         date_to = query_params.get('date_to')
-        district = query_params.get('district')
         status = query_params.get('status')
+
+        # New multi-select filters: location_ids, tag_ids, tenant_ids (comma-separated)
+        location_ids_raw = query_params.get('location_ids')
+        location_ids = [int(x) for x in location_ids_raw.split(',') if x.strip()] if location_ids_raw else None
+        tag_ids_raw = query_params.get('tag_ids')
+        filter_tag_ids = [int(x) for x in tag_ids_raw.split(',') if x.strip()] if tag_ids_raw else None
+        tenant_ids_raw = query_params.get('tenant_ids')
+        filter_tenant_ids = [int(x) for x in tenant_ids_raw.split(',') if x.strip()] if tenant_ids_raw else None
+
+        # Legacy district filter (used when location_ids is not provided)
+        district = query_params.get('district')
 
         # Ensure page is at least 1
         if page < 1:
@@ -1443,9 +1453,50 @@ def handle_get_audit_report(
                 record_date_filter = and_(record_date_filter, TransactionRecord.transaction_date <= date_to_dt)
             query = query.filter(exists().where(record_date_filter))
 
-        # District (origin) filtering - supports composite "origin_id|tag_id|tenant_id"
-        # Skip filtering if district is '' or 'all'
-        if district and district != 'all':
+        # Location filtering: location_ids + descendants (union), tag/tenant intersect
+        if location_ids:
+            org_setup_filter = db_session.query(OrganizationSetup).filter(
+                and_(
+                    OrganizationSetup.organization_id == organization_id,
+                    OrganizationSetup.is_active == True
+                )
+            ).first()
+            if not org_setup_filter:
+                org_setup_filter = db_session.query(OrganizationSetup).filter(
+                    OrganizationSetup.organization_id == organization_id
+                ).order_by(OrganizationSetup.created_date.desc()).first()
+
+            all_origin_ids = set(location_ids)
+            if org_setup_filter and org_setup_filter.root_nodes:
+                def collect_descendants(nodes, collecting=False):
+                    ids = set()
+                    for node in nodes if isinstance(nodes, list) else []:
+                        node_id = node.get('nodeId')
+                        if node_id is not None:
+                            node_id = int(node_id) if isinstance(node_id, str) else node_id
+                        children = node.get('children', [])
+                        if collecting:
+                            if node_id is not None:
+                                ids.add(node_id)
+                            ids.update(collect_descendants(children, True))
+                        elif node_id in all_origin_ids:
+                            ids.update(collect_descendants(children, True))
+                        else:
+                            ids.update(collect_descendants(children, False))
+                    return ids
+
+                descendant_ids = collect_descendants(org_setup_filter.root_nodes)
+                all_origin_ids.update(descendant_ids)
+
+            query = query.filter(Transaction.origin_id.in_(list(all_origin_ids)))
+
+        if filter_tag_ids:
+            query = query.filter(Transaction.location_tag_id.in_(filter_tag_ids))
+        if filter_tenant_ids:
+            query = query.filter(Transaction.tenant_id.in_(filter_tenant_ids))
+
+        # Legacy district filtering (when location_ids is not provided)
+        if not location_ids and district and district != 'all':
             if '|' in district:
                 try:
                     parts = district.split('|')
@@ -1454,9 +1505,9 @@ def handle_get_audit_report(
                     tenant_id_int = int(parts[2]) if len(parts) > 2 and parts[2] else None
                     if origin_id_int is not None:
                         query = query.filter(Transaction.origin_id == origin_id_int)
-                    if tag_id_int is not None:
+                    if tag_id_int is not None and not filter_tag_ids:
                         query = query.filter(Transaction.location_tag_id == tag_id_int)
-                    if tenant_id_int is not None:
+                    if tenant_id_int is not None and not filter_tenant_ids:
                         query = query.filter(Transaction.tenant_id == tenant_id_int)
                 except (ValueError, TypeError):
                     query = query.filter(Transaction.id == -1)
@@ -1534,8 +1585,19 @@ def handle_get_audit_report(
             if tenant_id is not None:
                 tenants_by_origin[origin_id].add(tenant_id)
 
-        districts = []
-        origin_options = []  # Composite options: location, location·tag, location·tenant, location·tag·tenant
+        # Build location hierarchy, tags, and tenants for filter_options
+        location_filter = {
+            'branch_level_name': None,
+            'building_level_name': None,
+            'floor_level_name': None,
+            'room_level_name': None,
+            'branches': [],
+            'buildings': [],
+            'floors': [],
+            'rooms': []
+        }
+        tags_filter = []
+        tenants_filter = []
 
         if origin_ids:
             # Fetch origin location records
@@ -1543,24 +1605,26 @@ def handle_get_audit_report(
                 UserLocation.id.in_(origin_ids)
             ).all()
 
-            # Build location paths for these origins (similar to _build_location_paths in user_service.py)
-            # Query for active organization setup first, then fallback to latest
+            # Get org setup for tree structure and level names
             org_setup = db_session.query(OrganizationSetup).filter(
                 and_(
                     OrganizationSetup.organization_id == organization_id,
                     OrganizationSetup.is_active == True
                 )
             ).first()
-            
-            # If no active setup found, get the latest version
             if not org_setup:
                 org_setup = db_session.query(OrganizationSetup).filter(
                     OrganizationSetup.organization_id == organization_id
                 ).order_by(OrganizationSetup.created_date.desc()).first()
 
-            location_paths = {}
+            if org_setup:
+                location_filter['branch_level_name'] = org_setup.branch_level_name or 'Branch'
+                location_filter['building_level_name'] = org_setup.building_level_name or 'Building'
+                location_filter['floor_level_name'] = org_setup.floor_level_name or 'Floor'
+                location_filter['room_level_name'] = org_setup.room_level_name or 'Room'
+
             if org_setup and org_setup.root_nodes:
-                # Fetch ALL locations in the organization to get their names
+                # Fetch ALL locations in the organization for name lookup
                 all_locations = db_session.query(UserLocation).filter(
                     and_(
                         UserLocation.organization_id == organization_id,
@@ -1568,196 +1632,145 @@ def handle_get_audit_report(
                         UserLocation.deleted_date.is_(None)
                     )
                 ).all()
-
-                # Create name lookup map
                 location_names = {
                     loc.id: loc.display_name or loc.name_en or loc.name_th or f"Location {loc.id}"
                     for loc in all_locations
                 }
 
-                # Build parent map from tree structure
-                # key: nodeId, value: parentId
-                parent_map = {}
+                # Build parent_map, level_map, children_map from tree structure
+                parent_map = {}        # nodeId -> parentId
+                level_map = {}         # nodeId -> level (0=branch, 1=building, 2=floor, 3=room)
+                tree_children_map = {} # nodeId -> list of child nodeIds
 
-                def build_parent_map(nodes, parent_id=None):
-                    """Recursively build parent map from tree structure"""
+                def build_tree_maps(nodes, parent_id=None, level=0):
+                    """Recursively build parent, level, and children maps from tree structure"""
                     for node in nodes:
                         node_id = node.get('nodeId')
                         if node_id is not None:
                             node_id = int(node_id) if isinstance(node_id, str) else node_id
                             if parent_id is not None:
                                 parent_map[node_id] = parent_id
-                            # Process children
+                            level_map[node_id] = level
+                            tree_children_map[node_id] = []
+                            if parent_id is not None and parent_id in tree_children_map:
+                                tree_children_map[parent_id].append(node_id)
                             children = node.get('children', [])
                             if children:
-                                build_parent_map(children, node_id)
+                                build_tree_maps(children, node_id, level + 1)
 
-                # Build the parent map from root_nodes
                 root_nodes = org_setup.root_nodes
                 if isinstance(root_nodes, list):
-                    build_parent_map(root_nodes, None)
-                
-                # Also build a set of all nodeIds in the tree for quick lookup
-                all_node_ids_in_tree = set()
-                def collect_all_node_ids(nodes):
-                    """Collect all nodeIds from the tree"""
-                    for node in nodes:
-                        node_id = node.get('nodeId')
-                        if node_id is not None:
-                            node_id = int(node_id) if isinstance(node_id, str) else node_id
-                            all_node_ids_in_tree.add(node_id)
-                        children = node.get('children', [])
-                        if children:
-                            collect_all_node_ids(children)
-                
-                if isinstance(root_nodes, list):
-                    collect_all_node_ids(root_nodes)
-                
-                logger.info(f"Built parent_map with {len(parent_map)} entries for organization {organization_id}")
-                logger.info(f"Total nodeIds in tree: {len(all_node_ids_in_tree)}")
-                logger.info(f"Origin location IDs: {[loc.id for loc in origin_locations]}")
-                logger.info(f"Origin IDs in tree: {[loc.id for loc in origin_locations if loc.id in all_node_ids_in_tree]}")
+                    build_tree_maps(root_nodes, None)
 
-                def get_ancestors(loc_id, visited=None):
-                    """Get list of ancestor names from root to parent (not including current node)"""
+                logger.info(f"Built tree maps with {len(level_map)} nodes for organization {organization_id}")
+
+                # Collect all needed location IDs: origin_ids from transactions + their ancestors.
+                # If the lowest level (e.g. room) is in transactions, include its parent floor, building, branch.
+                # If an upper level (e.g. branch) is in transactions, do NOT include its descendants.
+                needed_ids = set()
+                for oid in origin_ids:
+                    oid_int = int(oid)
+                    if oid_int in level_map:
+                        needed_ids.add(oid_int)
+                        # Walk up ancestors
+                        current = oid_int
+                        while current in parent_map:
+                            needed_ids.add(parent_map[current])
+                            current = parent_map[current]
+                    else:
+                        logger.warning(f"Origin location {oid} is not in organization tree structure")
+
+                # Build ancestor path for a location (comma-separated ancestor names from root)
+                def get_ancestor_path(loc_id, visited=None):
                     if visited is None:
                         visited = set()
-
-                    # Prevent infinite loops
                     if loc_id in visited:
                         return []
                     visited.add(loc_id)
-
-                    parent_id = parent_map.get(loc_id)
-                    if parent_id is None:
-                        # This is a root node or not in tree, return empty (no ancestors)
+                    pid = parent_map.get(loc_id)
+                    if pid is None:
                         return []
+                    return get_ancestor_path(pid, visited) + [location_names.get(pid, f"Location {pid}")]
 
-                    # Get parent's ancestors recursively, then add parent
-                    parent_ancestors = get_ancestors(parent_id, visited)
-                    parent_name = location_names.get(parent_id, f"Location {parent_id}")
-                    return parent_ancestors + [parent_name]
+                # Group locations by level (0=branch, 1=building, 2=floor, 3=room)
+                level_groups = {0: [], 1: [], 2: [], 3: []}
+                for loc_id in needed_ids:
+                    level = level_map.get(loc_id)
+                    if level is not None and level in level_groups:
+                        # Only include children that are also in the result set
+                        children_in_result = [
+                            cid for cid in tree_children_map.get(loc_id, [])
+                            if cid in needed_ids
+                        ]
+                        ancestors = get_ancestor_path(loc_id)
+                        level_groups[level].append({
+                            'id': loc_id,
+                            'name': location_names.get(loc_id, f"Location {loc_id}"),
+                            'parent_id': parent_map.get(loc_id),
+                            'children_ids': children_in_result,
+                            'path': ', '.join(ancestors) if ancestors else ''
+                        })
 
-                # Build paths only for the origin locations
-                for loc in origin_locations:
-                    loc_id = int(loc.id)  # Ensure it's an integer
-                    
-                    # Check if location is in the tree
-                    if loc_id not in all_node_ids_in_tree:
-                        logger.warning(f"Location {loc_id} ({loc.display_name or loc.name_en or loc.name_th}) is not in organization tree structure")
-                        location_paths[loc_id] = ''
-                        continue
-                    
-                    ancestors = get_ancestors(loc_id)
+                for level in level_groups:
+                    level_groups[level].sort(key=lambda x: x['name'])
 
-                    if ancestors:
-                        location_paths[loc_id] = ', '.join(ancestors)
-                        logger.info(f"Built path for location {loc_id} ({loc.display_name or loc.name_en or loc.name_th}): {location_paths[loc_id]}")
-                    else:
-                        # Root node - no ancestors to show
-                        location_paths[loc_id] = ''
-                        logger.info(f"Location {loc_id} ({loc.display_name or loc.name_en or loc.name_th}) is a root node - no path")
+                location_filter['branches'] = level_groups[0]
+                location_filter['buildings'] = level_groups[1]
+                location_filter['floors'] = level_groups[2]
+                location_filter['rooms'] = level_groups[3]
             else:
                 logger.warning(f"No organization setup or root_nodes found for organization {organization_id}")
+                # No tree structure - put all origins as branches
+                for loc in origin_locations:
+                    location_filter['branches'].append({
+                        'id': loc.id,
+                        'name': loc.display_name or loc.name_en or loc.name_th or str(loc.id),
+                        'parent_id': None,
+                        'children_ids': [],
+                        'path': ''
+                    })
 
-            # Build districts list with paths (legacy/origin-only)
-            districts = []
-            origin_name_by_id = {}
-            for loc in origin_locations:
-                loc_id = int(loc.id)
-                path = location_paths.get(loc_id, '')
-                name = loc.name_en or loc.name_th or loc.display_name or str(loc.id)
-                origin_name_by_id[loc_id] = name
-                districts.append({
-                    'id': str(loc.id),
-                    'name': name,
-                    'path': path
-                })
-
-            # Load tag and tenant names for composite filter labels
-            tag_name_by_id = {}
+            # Build tags filter (separate obj with location_ids indicator)
             if tag_ids:
-                tags = db_session.query(UserLocationTag).filter(
+                tags_db = db_session.query(UserLocationTag).filter(
                     and_(
                         UserLocationTag.id.in_(tag_ids),
                         UserLocationTag.deleted_date.is_(None)
                     )
                 ).all()
-                tag_name_by_id = {t.id: (t.name or f"Tag {t.id}") for t in tags}
+                for t in tags_db:
+                    tag_entry = {
+                        'id': t.id,
+                        'name': t.name or f"Tag {t.id}",
+                        'location_ids': [oid for oid in origin_ids if t.id in tags_by_origin.get(oid, set())]
+                    }
+                    # Include time span if the tag has it
+                    if t.start_date is not None or t.end_date is not None:
+                        tag_entry['start_date'] = t.start_date.isoformat() if t.start_date else None
+                        tag_entry['end_date'] = t.end_date.isoformat() if t.end_date else None
+                    tags_filter.append(tag_entry)
+                tags_filter.sort(key=lambda x: x['name'])
 
-            tenant_name_by_id = {}
+            # Build tenants filter (separate obj with location_ids indicator)
             if tenant_ids:
-                tenants = db_session.query(UserTenant).filter(
+                tenants_db = db_session.query(UserTenant).filter(
                     and_(
                         UserTenant.id.in_(tenant_ids),
                         UserTenant.deleted_date.is_(None)
                     )
                 ).all()
-                tenant_name_by_id = {t.id: (t.name or f"Tenant {t.id}") for t in tenants}
-
-            # Build options: only the most specific (leaf) level per origin.
-            # - If origin has BOTH tags AND tenants: only location·tag·tenant (no location-only, location·tag, location·tenant).
-            # - If origin has only tags: location-only + each location·tag.
-            # - If origin has only tenants: location-only + each location·tenant.
-            # - If origin has neither: location-only only.
-            combos_set = {(r[0], r[1], r[2]) for r in combos_result}
-            seen_option_ids = set()
-            for origin_id in origin_ids:
-                origin_name = origin_name_by_id.get(origin_id, f"Location {origin_id}")
-                path = location_paths.get(int(origin_id), '') if origin_id else ''
-                origin_tag_ids = list(tags_by_origin.get(origin_id, []))
-                origin_tenant_ids = list(tenants_by_origin.get(origin_id, []))
-                has_tags = bool(origin_tag_ids)
-                has_tenants = bool(origin_tenant_ids)
-
-                if has_tags and has_tenants:
-                    # Only leaf options: location·tag·tenant (where combo exists in data)
-                    for tag_id in origin_tag_ids:
-                        for tenant_id in origin_tenant_ids:
-                            if (origin_id, tag_id, tenant_id) in combos_set:
-                                tname = tag_name_by_id.get(tag_id)
-                                tnt = tenant_name_by_id.get(tenant_id)
-                                if tname and tnt:
-                                    oid = f"{origin_id}|{tag_id}|{tenant_id}"
-                                    if oid not in seen_option_ids:
-                                        seen_option_ids.add(oid)
-                                        origin_options.append({
-                                            'id': oid,
-                                            'name': f"{origin_name} · {tname} · {tnt}",
-                                            'path': path
-                                        })
-                elif has_tags:
-                    # Location only + each location·tag
-                    oid = f"{origin_id}||"
-                    if oid not in seen_option_ids:
-                        seen_option_ids.add(oid)
-                        origin_options.append({'id': oid, 'name': origin_name, 'path': path})
-                    for tag_id in origin_tag_ids:
-                        tname = tag_name_by_id.get(tag_id)
-                        if tname:
-                            oid = f"{origin_id}|{tag_id}|"
-                            if oid not in seen_option_ids:
-                                seen_option_ids.add(oid)
-                                origin_options.append({'id': oid, 'name': f"{origin_name} · {tname}", 'path': path})
-                elif has_tenants:
-                    # Location only + each location·tenant
-                    oid = f"{origin_id}||"
-                    if oid not in seen_option_ids:
-                        seen_option_ids.add(oid)
-                        origin_options.append({'id': oid, 'name': origin_name, 'path': path})
-                    for tenant_id in origin_tenant_ids:
-                        tname = tenant_name_by_id.get(tenant_id)
-                        if tname:
-                            oid = f"{origin_id}||{tenant_id}"
-                            if oid not in seen_option_ids:
-                                seen_option_ids.add(oid)
-                                origin_options.append({'id': oid, 'name': f"{origin_name} · {tname}", 'path': path})
-                else:
-                    # No tags, no tenants: location only
-                    oid = f"{origin_id}||"
-                    if oid not in seen_option_ids:
-                        seen_option_ids.add(oid)
-                        origin_options.append({'id': oid, 'name': origin_name, 'path': path})
+                for t in tenants_db:
+                    tenant_entry = {
+                        'id': t.id,
+                        'name': t.name or f"Tenant {t.id}",
+                        'location_ids': [oid for oid in origin_ids if t.id in tenants_by_origin.get(oid, set())]
+                    }
+                    # Include time span if the tenant has it
+                    if t.start_date is not None or t.end_date is not None:
+                        tenant_entry['start_date'] = t.start_date.isoformat() if t.start_date else None
+                        tenant_entry['end_date'] = t.end_date.isoformat() if t.end_date else None
+                    tenants_filter.append(tenant_entry)
+                tenants_filter.sort(key=lambda x: x['name'])
 
         # Status options
         statuses = [
@@ -1794,11 +1807,10 @@ def handle_get_audit_report(
                 for m in materials
             ]
 
-        # Sort composite options by name (building 1, building 1 · tag, building 2, ...)
-        origin_options_sorted = sorted(origin_options, key=lambda x: x['name'])
-
         filter_options = {
-            'districts': origin_options_sorted,
+            'location': location_filter,
+            'tags': tags_filter,
+            'tenants': tenants_filter,
             'statuses': statuses,
             'materials': materials_options
         }
@@ -1829,6 +1841,9 @@ def handle_get_audit_report(
                 'search': search,
                 'date_from': date_from,
                 'date_to': date_to,
+                'location_ids': location_ids,
+                'tag_ids': filter_tag_ids,
+                'tenant_ids': filter_tenant_ids,
                 'district': district,
                 'status': status
             },

@@ -342,11 +342,20 @@ def handle_list_transactions(
         date_from = query_params.get('date_from')
         date_to = query_params.get('date_to')
         material_id = int(query_params['material_id']) if query_params.get('material_id') else None
+
+        # New multi-select filters: location_ids, tag_ids, tenant_ids (comma-separated)
+        location_ids_raw = query_params.get('location_ids')
+        location_ids = [int(x) for x in location_ids_raw.split(',') if x.strip()] if location_ids_raw else None
+        tag_ids_raw = query_params.get('tag_ids')
+        filter_tag_ids = [int(x) for x in tag_ids_raw.split(',') if x.strip()] if tag_ids_raw else None
+        tenant_ids_raw = query_params.get('tenant_ids')
+        filter_tenant_ids = [int(x) for x in tenant_ids_raw.split(',') if x.strip()] if tenant_ids_raw else None
+
+        # Legacy district/sub_district filters (used when location_ids is not provided)
         district_raw = query_params.get('district')
         district = None
         if district_raw:
             if '|' in str(district_raw):
-                # Composite "origin_id|tag_id|tenant_id" (e.g. "2202||" or "2507|46|1")
                 parts = str(district_raw).split('|')
                 if origin_id is None:
                     origin_id = int(parts[0]) if parts[0] else None
@@ -375,7 +384,10 @@ def handle_list_transactions(
             location_tag_id=location_tag_id,
             tenant_id=tenant_id,
             material_id=material_id,
-            current_user_id=current_user_id
+            current_user_id=current_user_id,
+            location_ids=location_ids,
+            filter_tag_ids=filter_tag_ids,
+            filter_tenant_ids=filter_tenant_ids
         )
 
         if result['success']:
