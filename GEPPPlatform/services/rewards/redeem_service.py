@@ -39,7 +39,16 @@ class RedeemService:
         if not items:
             raise BadRequestException("At least one item is required")
 
-        # 1. Calculate available points for user in this campaign
+        # 1. Lock the user's point rows for this campaign to prevent concurrent overdraw,
+        #    then calculate balance. FOR UPDATE cannot be used with aggregate functions,
+        #    so we lock first, then SUM separately.
+        self.db.query(RewardPointTransaction.id).filter(
+            RewardPointTransaction.reward_user_id == reward_user_id,
+            RewardPointTransaction.organization_id == organization_id,
+            RewardPointTransaction.reward_campaign_id == campaign_id,
+            RewardPointTransaction.deleted_date.is_(None),
+        ).with_for_update().all()
+
         available_points = (
             self.db.query(func.coalesce(func.sum(RewardPointTransaction.points), 0))
             .filter(
@@ -81,12 +90,16 @@ class RedeemService:
             item_cost = Decimal(str(points_cost)) * quantity
             total_cost += item_cost
 
-            # 2c. Check stock
+            # 2c. Check stock (campaign-specific + global)
+            from sqlalchemy import or_
             current_stock = (
                 self.db.query(func.coalesce(func.sum(RewardStock.values), 0))
                 .filter(
                     RewardStock.reward_catalog_id == catalog_id,
-                    RewardStock.reward_campaign_id == campaign_id,
+                    or_(
+                        RewardStock.reward_campaign_id == campaign_id,
+                        RewardStock.reward_campaign_id.is_(None),
+                    ),
                     RewardStock.deleted_date.is_(None),
                 )
                 .scalar()
@@ -162,6 +175,99 @@ class RedeemService:
             "success": True,
             "group_hash": group_hash,
             "redemptions": redemptions,
+        }
+
+    def cancel_redemption(self, reward_user_id: int, redemption_id: int) -> dict:
+        """Cancel an inprogress redemption and refund points."""
+        redemption = (
+            self.db.query(RewardRedemption)
+            .filter(
+                RewardRedemption.id == redemption_id,
+                RewardRedemption.reward_user_id == reward_user_id,
+                RewardRedemption.deleted_date.is_(None),
+            )
+            .first()
+        )
+        if not redemption:
+            raise NotFoundException("Redemption not found")
+        if redemption.status != "inprogress":
+            raise BadRequestException(f"Cannot cancel redemption with status '{redemption.status}'")
+
+        # 1. Set status to canceled
+        redemption.status = "canceled"
+        redemption.updated_date = datetime.now(timezone.utc)
+        self.db.flush()
+
+        # 2. Refund points (positive transaction)
+        refund_txn = RewardPointTransaction(
+            organization_id=redemption.organization_id,
+            reward_user_id=reward_user_id,
+            points=redemption.points_redeemed,
+            reward_campaign_id=redemption.reward_campaign_id,
+            claimed_date=datetime.now(timezone.utc),
+            reference_type="refund",
+        )
+        self.db.add(refund_txn)
+        self.db.flush()
+
+        return {
+            "success": True,
+            "refunded_points": redemption.points_redeemed,
+            "redemption_id": redemption.id,
+        }
+
+    def reject_redemption_by_hash(self, hash: str, note: str = None) -> dict:
+        """Staff rejects redemption(s) by hash or group_hash — cancel + refund points."""
+        # Try group_hash first
+        redemptions = (
+            self.db.query(RewardRedemption)
+            .filter(
+                RewardRedemption.redemption_group_hash == hash,
+                RewardRedemption.status == "inprogress",
+                RewardRedemption.deleted_date.is_(None),
+            )
+            .all()
+        )
+        if not redemptions:
+            # Fallback to single hash
+            single = (
+                self.db.query(RewardRedemption)
+                .filter(
+                    RewardRedemption.hash == hash,
+                    RewardRedemption.status == "inprogress",
+                    RewardRedemption.deleted_date.is_(None),
+                )
+                .first()
+            )
+            if not single:
+                raise NotFoundException("No inprogress redemption found for this QR")
+            redemptions = [single]
+
+        now = datetime.now(timezone.utc)
+        total_refunded = 0
+
+        for r in redemptions:
+            r.status = "canceled"
+            r.note = note or "Rejected by staff"
+            r.updated_date = now
+            self.db.flush()
+
+            refund_txn = RewardPointTransaction(
+                organization_id=r.organization_id,
+                reward_user_id=r.reward_user_id,
+                points=r.points_redeemed,
+                reward_campaign_id=r.reward_campaign_id,
+                claimed_date=now,
+                reference_type="refund",
+            )
+            self.db.add(refund_txn)
+            self.db.flush()
+            total_refunded += r.points_redeemed
+
+        return {
+            "success": True,
+            "canceled_count": len(redemptions),
+            "total_refunded_points": total_refunded,
         }
 
     def get_user_organizations(self, reward_user_id: int) -> list[dict]:
@@ -273,11 +379,16 @@ class RedeemService:
             if not catalog:
                 continue
 
+            # Stock = campaign-specific + global (campaign_id=NULL)
+            from sqlalchemy import or_
             stock_remaining = (
                 self.db.query(func.coalesce(func.sum(RewardStock.values), 0))
                 .filter(
                     RewardStock.reward_catalog_id == link.catalog_id,
-                    RewardStock.reward_campaign_id == campaign_id,
+                    or_(
+                        RewardStock.reward_campaign_id == campaign_id,
+                        RewardStock.reward_campaign_id.is_(None),
+                    ),
                     RewardStock.deleted_date.is_(None),
                 )
                 .scalar()

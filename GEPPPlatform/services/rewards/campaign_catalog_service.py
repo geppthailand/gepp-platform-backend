@@ -15,17 +15,23 @@ class CampaignCatalogService:
     def __init__(self, db: Session):
         self.db = db
 
+    @staticmethod
+    def _safe_iso(val):
+        if val is None:
+            return None
+        return val.isoformat() if hasattr(val, 'isoformat') else str(val)
+
     def _to_dict(self, item: RewardCampaignCatalog, catalog=None) -> dict:
         result = {
             "id": item.id,
             "campaign_id": item.campaign_id,
             "catalog_id": item.catalog_id,
             "points_cost": item.points_cost,
-            "start_date": item.start_date.isoformat() if item.start_date else None,
-            "end_date": item.end_date.isoformat() if item.end_date else None,
+            "start_date": self._safe_iso(item.start_date),
+            "end_date": self._safe_iso(item.end_date),
             "status": item.status,
-            "created_date": item.created_date.isoformat() if item.created_date else None,
-            "updated_date": item.updated_date.isoformat() if item.updated_date else None,
+            "created_date": self._safe_iso(item.created_date),
+            "updated_date": self._safe_iso(item.updated_date),
         }
         if catalog:
             result["catalog_name"] = catalog.name

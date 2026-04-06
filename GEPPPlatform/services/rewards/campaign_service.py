@@ -10,9 +10,24 @@ from ...models.rewards.management import RewardCampaign
 from ...exceptions import APIException, NotFoundException, BadRequestException
 
 
+def _parse_dt(value):
+    """Convert ISO-format string to datetime, pass through datetime objects."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return value
+
+
 class CampaignService:
     def __init__(self, db: Session):
         self.db = db
+
+    @staticmethod
+    def _safe_iso(val):
+        if val is None:
+            return None
+        return val.isoformat() if hasattr(val, 'isoformat') else str(val)
 
     def _to_dict(self, item: RewardCampaign) -> dict:
         return {
@@ -21,13 +36,13 @@ class CampaignService:
             "name": item.name,
             "description": item.description,
             "image_id": item.image_id,
-            "start_date": item.start_date.isoformat() if item.start_date else None,
-            "end_date": item.end_date.isoformat() if item.end_date else None,
+            "start_date": self._safe_iso(item.start_date),
+            "end_date": self._safe_iso(item.end_date),
             "status": item.status,
             "points_per_transaction_limit": item.points_per_transaction_limit,
             "points_per_day_limit": item.points_per_day_limit,
-            "created_date": item.created_date.isoformat() if item.created_date else None,
-            "updated_date": item.updated_date.isoformat() if item.updated_date else None,
+            "created_date": self._safe_iso(item.created_date),
+            "updated_date": self._safe_iso(item.updated_date),
         }
 
     def list(self, organization_id: int) -> list[dict]:
@@ -55,8 +70,8 @@ class CampaignService:
             name=data["name"],
             description=data.get("description"),
             image_id=data.get("image_id"),
-            start_date=data["start_date"],
-            end_date=data.get("end_date"),
+            start_date=_parse_dt(data["start_date"]),
+            end_date=_parse_dt(data.get("end_date")),
             status=data.get("status", "active"),
             points_per_transaction_limit=data.get("points_per_transaction_limit"),
             points_per_day_limit=data.get("points_per_day_limit"),
@@ -79,9 +94,11 @@ class CampaignService:
         if not item:
             raise NotFoundException("Campaign not found")
 
+        date_fields = ("start_date", "end_date")
         for field in ("name", "description", "image_id", "start_date", "end_date", "status", "points_per_transaction_limit", "points_per_day_limit"):
             if field in data:
-                setattr(item, field, data[field])
+                value = _parse_dt(data[field]) if field in date_fields else data[field]
+                setattr(item, field, value)
 
         self.db.flush()
         return self._to_dict(item)

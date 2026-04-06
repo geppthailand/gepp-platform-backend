@@ -181,7 +181,7 @@ def handle_reward_routes(event: Dict[str, Any], data: Dict[str, Any], **params) 
 
         if path == "/api/rewards/stocks" and method == "POST":
             svc = StockService(db_session)
-            return svc.deposit_or_withdraw(data)
+            return svc.deposit_or_withdraw(data, organization_id=current_org_id)
 
         # --- Members ---
         if path == "/api/rewards/members" and method == "GET":
@@ -231,11 +231,25 @@ def handle_reward_routes(event: Dict[str, Any], data: Dict[str, Any], **params) 
 
         # ============================================================
         # PUBLIC / LIFF ENDPOINTS
+        # All user-facing endpoints resolve reward_user_id server-side
+        # from X-Line-User-Id header — never trust client-provided ID.
         # ============================================================
+
+        headers = event.get("headers", {})
+        line_user_id = headers.get("x-line-user-id") or headers.get("X-Line-User-Id")
+
+        def _resolve_user() -> int:
+            pub_svc = PublicRewardService(db_session)
+            return pub_svc.resolve_user_by_line_id(line_user_id)
+
+        def _resolve_staff(organization_id: int) -> int:
+            """Resolve the caller's staff org_user.id — ignores client-provided staff_org_user_id."""
+            pub_svc = PublicRewardService(db_session)
+            return pub_svc.resolve_staff_by_line_id(line_user_id, organization_id)
 
         if path == "/api/rewards/public/invite/verify" and method == "POST":
             svc = InviteService(db_session)
-            return svc.verify_invite(data.get("hash"), data.get("reward_user_id"))
+            return svc.verify_invite(data.get("hash"), _resolve_user())
 
         if path == "/api/rewards/public/register" and method == "POST":
             svc = PublicRewardService(db_session)
@@ -243,18 +257,25 @@ def handle_reward_routes(event: Dict[str, Any], data: Dict[str, Any], **params) 
 
         if path == "/api/rewards/public/profile" and method == "GET":
             svc = PublicRewardService(db_session)
-            reward_user_id = query_params.get("reward_user_id")
+            reward_user_id = _resolve_user()
             org_id = query_params.get("organization_id")
-            return svc.get_profile(int(reward_user_id), int(org_id) if org_id else None)
+            return svc.get_profile(reward_user_id, int(org_id) if org_id else None)
+
+        if path == "/api/rewards/public/memberships" and method == "GET":
+            svc = PublicRewardService(db_session)
+            return svc.get_memberships(_resolve_user())
 
         if path == "/api/rewards/public/verify-staff" and method == "POST":
             svc = PublicRewardService(db_session)
-            return svc.verify_staff(data.get("reward_user_id"), data.get("droppoint_hash"))
+            return svc.verify_staff(_resolve_user(), data.get("droppoint_hash"))
 
         if path == "/api/rewards/public/claim" and method == "POST":
+            # Resolve caller's staff identity from header — ignore client-provided staff_org_user_id
+            pub_svc = PublicRewardService(db_session)
+            verified_staff_id = pub_svc.resolve_staff_for_campaign(line_user_id, data.get("campaign_id"))
             svc = ClaimService(db_session)
             return svc.claim_points(
-                staff_org_user_id=data.get("staff_org_user_id"),
+                staff_org_user_id=verified_staff_id,
                 reward_user_id=data.get("reward_user_id"),
                 campaign_id=data.get("campaign_id"),
                 items=data.get("items", []),
@@ -274,28 +295,31 @@ def handle_reward_routes(event: Dict[str, Any], data: Dict[str, Any], **params) 
 
         if path == "/api/rewards/public/redeem/orgs" and method == "GET":
             svc = RedeemService(db_session)
-            reward_user_id = query_params.get("reward_user_id")
-            return svc.get_user_organizations(int(reward_user_id))
+            return svc.get_user_organizations(_resolve_user())
 
         if path == "/api/rewards/public/redeem/campaigns" and method == "GET":
             svc = RedeemService(db_session)
-            reward_user_id = query_params.get("reward_user_id")
             org_id = query_params.get("organization_id")
-            return svc.get_user_campaigns_for_redeem(int(reward_user_id), int(org_id))
+            return svc.get_user_campaigns_for_redeem(_resolve_user(), int(org_id))
 
         if path == "/api/rewards/public/redeem/catalog" and method == "GET":
             svc = RedeemService(db_session)
             campaign_id = query_params.get("campaign_id")
-            reward_user_id = query_params.get("reward_user_id")
-            return svc.get_campaign_catalog_for_redeem(int(campaign_id), int(reward_user_id))
+            return svc.get_campaign_catalog_for_redeem(int(campaign_id), _resolve_user())
 
         if path == "/api/rewards/public/redeem" and method == "POST":
             svc = RedeemService(db_session)
             return svc.submit_redemption(
-                reward_user_id=data.get("reward_user_id"),
+                reward_user_id=_resolve_user(),
                 organization_id=data.get("organization_id"),
                 campaign_id=data.get("campaign_id"),
                 items=data.get("items", []),
+            )
+
+        if path == "/api/rewards/public/redemption-lookup" and method == "GET":
+            svc = ConfirmService(db_session)
+            return svc.lookup_redemption(
+                hash=query_params.get("hash", ""),
             )
 
         if path == "/api/rewards/public/confirm-redeem" and method == "POST":
@@ -306,10 +330,24 @@ def handle_reward_routes(event: Dict[str, Any], data: Dict[str, Any], **params) 
                 staff_org_user_id=data.get("staff_org_user_id"),
             )
 
+        if path == "/api/rewards/public/reject-redemption" and method == "POST":
+            svc = RedeemService(db_session)
+            return svc.reject_redemption_by_hash(
+                hash=data.get("hash", ""),
+                note=data.get("note"),
+            )
+
+        if path == "/api/rewards/public/cancel-redemption" and method == "POST":
+            svc = RedeemService(db_session)
+            return svc.cancel_redemption(
+                reward_user_id=_resolve_user(),
+                redemption_id=data.get("redemption_id"),
+            )
+
         if path == "/api/rewards/public/point-history" and method == "GET":
             svc = HistoryService(db_session)
             return svc.point_history(
-                reward_user_id=int(query_params.get("reward_user_id")),
+                reward_user_id=_resolve_user(),
                 organization_id=int(query_params["organization_id"]) if query_params.get("organization_id") else None,
                 campaign_id=int(query_params["campaign_id"]) if query_params.get("campaign_id") else None,
                 page=int(query_params.get("page", 1)),
@@ -319,7 +357,7 @@ def handle_reward_routes(event: Dict[str, Any], data: Dict[str, Any], **params) 
         if path == "/api/rewards/public/redemption-history" and method == "GET":
             svc = HistoryService(db_session)
             return svc.redemption_history(
-                reward_user_id=int(query_params.get("reward_user_id")),
+                reward_user_id=_resolve_user(),
                 organization_id=int(query_params["organization_id"]) if query_params.get("organization_id") else None,
                 campaign_id=int(query_params["campaign_id"]) if query_params.get("campaign_id") else None,
                 page=int(query_params.get("page", 1)),
@@ -327,30 +365,33 @@ def handle_reward_routes(event: Dict[str, Any], data: Dict[str, Any], **params) 
             )
 
         if path == "/api/rewards/public/staff/claim-history" and method == "GET":
+            org_id = int(query_params.get("organization_id"))
             svc = HistoryService(db_session)
             return svc.staff_claim_history(
-                staff_org_user_id=int(query_params.get("staff_org_user_id")),
-                organization_id=int(query_params.get("organization_id")),
+                staff_org_user_id=_resolve_staff(org_id),
+                organization_id=org_id,
                 campaign_id=int(query_params["campaign_id"]) if query_params.get("campaign_id") else None,
                 page=int(query_params.get("page", 1)),
                 per_page=int(query_params.get("per_page", 20)),
             )
 
         if path == "/api/rewards/public/staff/redemption-history" and method == "GET":
+            org_id = int(query_params.get("organization_id"))
             svc = HistoryService(db_session)
             return svc.staff_redemption_history(
-                staff_org_user_id=int(query_params.get("staff_org_user_id")),
-                organization_id=int(query_params.get("organization_id")),
+                staff_org_user_id=_resolve_staff(org_id),
+                organization_id=org_id,
                 campaign_id=int(query_params["campaign_id"]) if query_params.get("campaign_id") else None,
                 page=int(query_params.get("page", 1)),
                 per_page=int(query_params.get("per_page", 20)),
             )
 
         if path == "/api/rewards/public/staff/daily-stats" and method == "GET":
+            org_id = int(query_params.get("organization_id"))
             svc = HistoryService(db_session)
             return svc.get_staff_daily_stats(
-                staff_org_user_id=int(query_params.get("staff_org_user_id")),
-                organization_id=int(query_params.get("organization_id")),
+                staff_org_user_id=_resolve_staff(org_id),
+                organization_id=org_id,
             )
 
         # No matching route

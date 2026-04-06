@@ -85,7 +85,7 @@ class StockService:
         items = query.order_by(RewardStock.created_date.desc()).all()
         return [self._stock_to_dict(i) for i in items]
 
-    def deposit_or_withdraw(self, data: dict) -> dict:
+    def deposit_or_withdraw(self, data: dict, organization_id: int = None) -> dict:
         """Create a stock ledger entry. Positive values = deposit, negative = withdraw."""
         catalog_id = data.get("reward_catalog_id")
         values = data.get("values")
@@ -93,13 +93,14 @@ class StockService:
         if catalog_id is None or values is None:
             raise BadRequestException("reward_catalog_id and values are required")
 
-        catalog = (
-            self.db.query(RewardCatalog)
-            .filter(RewardCatalog.id == catalog_id, RewardCatalog.deleted_date.is_(None))
-            .first()
+        query = self.db.query(RewardCatalog).filter(
+            RewardCatalog.id == catalog_id, RewardCatalog.deleted_date.is_(None)
         )
+        if organization_id is not None:
+            query = query.filter(RewardCatalog.organization_id == organization_id)
+        catalog = query.first()
         if not catalog:
-            raise NotFoundException("Catalog item not found")
+            raise NotFoundException("Catalog item not found or not in your organization")
 
         # For withdrawals, verify sufficient stock
         if values < 0:
