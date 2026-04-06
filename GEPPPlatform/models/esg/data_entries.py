@@ -2,17 +2,17 @@
 ESG Data Entry Model - Data submissions via LINE Chat or LIFF
 """
 
-import enum
-from sqlalchemy import Column, BigInteger, String, Text, Numeric, Date, ForeignKey, Enum
+from sqlalchemy import Column, BigInteger, String, Text, Numeric, Date, ForeignKey
 from GEPPPlatform.models.base import Base, BaseModel
 
 
-class EntrySource(enum.Enum):
+# Status/source values stored as plain VARCHAR (matches SQL migration)
+class EntrySource:
     LINE_CHAT = 'LINE_CHAT'
     LIFF_MANUAL = 'LIFF_MANUAL'
 
 
-class EntryStatus(enum.Enum):
+class EntryStatus:
     PENDING_VERIFY = 'PENDING_VERIFY'
     VERIFIED = 'VERIFIED'
 
@@ -22,7 +22,7 @@ class EsgDataEntry(Base, BaseModel):
     __tablename__ = 'esg_data_entries'
 
     organization_id = Column(BigInteger, ForeignKey('organizations.id'), nullable=False, index=True)
-    user_id = Column(BigInteger, ForeignKey('users.id'), nullable=False, index=True)
+    user_id = Column(BigInteger, ForeignKey('user_locations.id'), nullable=True, index=True)
     line_user_id = Column(String(100), nullable=True, index=True)
     category_id = Column(BigInteger, ForeignKey('esg_data_category.id'), nullable=True)
     subcategory_id = Column(BigInteger, ForeignKey('esg_data_subcategory.id'), nullable=True)
@@ -38,8 +38,8 @@ class EsgDataEntry(Base, BaseModel):
     file_name = Column(String(255), nullable=True)
     evidence_image_url = Column(String(500), nullable=True)
     scope_tag = Column(String(50), nullable=True)
-    entry_source = Column(Enum(EntrySource), nullable=False, default=EntrySource.LIFF_MANUAL)
-    status = Column(Enum(EntryStatus), nullable=False, default=EntryStatus.PENDING_VERIFY)
+    entry_source = Column(String(20), nullable=False, default=EntrySource.LIFF_MANUAL)
+    status = Column(String(20), nullable=False, default=EntryStatus.PENDING_VERIFY)
 
     def to_dict(self):
         return {
@@ -61,8 +61,8 @@ class EsgDataEntry(Base, BaseModel):
             'file_name': self.file_name,
             'evidence_image_url': self.evidence_image_url,
             'scope_tag': self.scope_tag,
-            'entry_source': self.entry_source.value if self.entry_source else None,
-            'status': self.status.value if self.status else None,
+            'entry_source': self.entry_source,
+            'status': self.status,
             'is_active': self.is_active,
             'created_date': str(self.created_date) if self.created_date else None,
             'updated_date': str(self.updated_date) if self.updated_date else None,

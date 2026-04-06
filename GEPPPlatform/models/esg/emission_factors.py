@@ -8,7 +8,7 @@ from GEPPPlatform.models.base import Base, BaseModel
 
 class EmissionFactor(Base, BaseModel):
     """Lookup table mapping activity categories to CO2e conversion factors"""
-    __tablename__ = 'emission_factors'
+    __tablename__ = 'esg_emission_factors'
 
     category = Column(String(100), nullable=False, index=True)
     subcategory = Column(String(100), nullable=True)

@@ -15,6 +15,7 @@ from .esg_export_service import EsgExportService
 from .esg_dashboard_service import EsgDashboardService
 from .esg_carbon_service import EsgCarbonService
 from .esg_notification_service import EsgNotificationService
+from .liff_auth_service import LiffAuthService
 from ...exceptions import (
     APIException, UnauthorizedException, NotFoundException,
     BadRequestException, ValidationException
@@ -41,8 +42,116 @@ def handle_esg_routes(event: Dict[str, Any], data: Dict[str, Any], **params) -> 
     current_user_org_id = current_user.get('organization_id')
 
     try:
-        # ===== DASHBOARD =====
-        if path == '/api/dashboard/summary' and method == 'GET':
+        # ===== LIFF APIs (/api/esg/liff/*) =====
+        if path == '/api/esg/liff/summary' and method == 'GET':
+            dash = EsgDashboardService(db_session)
+            return dash.get_summary(current_user_org_id)
+
+        elif path == '/api/esg/liff/charts' and method == 'GET':
+            dash = EsgDashboardService(db_session)
+            year = int(query_params.get('year', 0)) or None
+            return dash.get_charts(current_user_org_id, year)
+
+        elif path == '/api/esg/liff/entries' and method == 'GET':
+            entry_service = EsgDataEntryService(db_session)
+            return entry_service.list_entries(
+                organization_id=current_user_org_id,
+                page=int(query_params.get('page', 1)),
+                size=min(int(query_params.get('size', 10)), 100),
+                status=query_params.get('status'),
+            )
+
+        elif path == '/api/esg/liff/entries' and method == 'POST':
+            if not data:
+                raise BadRequestException('Request body is required')
+            entry_service = EsgDataEntryService(db_session)
+            return entry_service.create_entry(current_user_org_id, int(current_user_id), data)
+
+        elif '/api/esg/liff/entries/' in path and '/verify' in path and method == 'POST':
+            entry_id = _extract_id_from_path(path, 'entries')
+            entry_service = EsgDataEntryService(db_session)
+            result = entry_service.verify_entry(entry_id, current_user_org_id)
+            if not result:
+                raise NotFoundException('Data entry not found')
+            return result
+
+        elif '/api/esg/liff/entries/' in path and method == 'PUT':
+            entry_id = _extract_id_from_path(path, 'entries')
+            if not data:
+                raise BadRequestException('Request body is required')
+            entry_service = EsgDataEntryService(db_session)
+            result = entry_service.update_entry(entry_id, current_user_org_id, data)
+            if not result:
+                raise NotFoundException('Data entry not found')
+            return result
+
+        elif '/api/esg/liff/entries/' in path and method == 'DELETE':
+            entry_id = _extract_id_from_path(path, 'entries')
+            entry_service = EsgDataEntryService(db_session)
+            deleted = entry_service.delete_entry(entry_id, current_user_org_id)
+            if not deleted:
+                raise NotFoundException('Data entry not found')
+            return {'success': True, 'message': 'Entry deleted'}
+
+        elif path == '/api/esg/liff/categories' and method == 'GET':
+            return esg_service.list_categories(query_params.get('pillar'))
+
+        elif path == '/api/esg/liff/subcategories' and method == 'GET':
+            category_id = query_params.get('category_id')
+            return esg_service.list_subcategories(
+                category_id=int(category_id) if category_id else None,
+                pillar=query_params.get('pillar'),
+            )
+
+        elif path == '/api/esg/liff/settings' and method == 'GET':
+            return esg_service.get_settings(current_user_org_id)
+
+        elif path == '/api/esg/liff/export' and method == 'POST':
+            fmt = (data or {}).get('format', 'xlsx')
+            export_service = EsgExportService(db_session)
+            if fmt == 'pdf':
+                return export_service.export_to_pdf(current_user_org_id)
+            return export_service.export_to_excel(current_user_org_id)
+
+        elif path == '/api/esg/liff/upload-url' and method == 'POST':
+            if not data or not data.get('file_name'):
+                raise BadRequestException('file_name is required')
+            return _handle_upload_url(data, current_user_id, current_user_org_id, db_session)
+
+        # ===== LIFF INVITATION =====
+        elif path == '/api/esg/liff/invitation/accept' and method == 'POST':
+            if not data or not data.get('invitation_token') or not data.get('access_token'):
+                raise BadRequestException('invitation_token and access_token are required')
+            liff_svc = LiffAuthService(db_session)
+            try:
+                return liff_svc.accept_invitation(data['invitation_token'], data['access_token'])
+            except ValueError as ve:
+                raise BadRequestException(str(ve))
+
+        # ===== ESG INVITATION MANAGEMENT (desktop) =====
+        elif path == '/api/esg/invitations' and method == 'POST':
+            liff_svc = LiffAuthService(db_session)
+            return liff_svc.generate_invitation(current_user_org_id, int(current_user_id))
+
+        elif path == '/api/esg/invitations' and method == 'GET':
+            liff_svc = LiffAuthService(db_session)
+            return liff_svc.list_invitations(current_user_org_id)
+
+        # ===== LINE MEMBER MANAGEMENT (desktop) =====
+        elif path == '/api/esg/line-members' and method == 'GET':
+            liff_svc = LiffAuthService(db_session)
+            return liff_svc.list_line_members(current_user_org_id)
+
+        elif '/api/esg/line-members/' in path and method == 'DELETE':
+            member_id = _extract_id_from_path(path, 'line-members')
+            liff_svc = LiffAuthService(db_session)
+            try:
+                return liff_svc.remove_line_member(current_user_org_id, member_id)
+            except ValueError as ve:
+                raise NotFoundException(str(ve))
+
+        # ===== LEGACY DASHBOARD (keep for backward compat) =====
+        elif path == '/api/dashboard/summary' and method == 'GET':
             dash = EsgDashboardService(db_session)
             return dash.get_summary(current_user_org_id)
 
@@ -290,11 +399,14 @@ def _handle_upload_url(data, current_user_id, current_user_org_id, db_session):
 
     file_name = data['file_name']
     content_type = data.get('content_type', 'application/octet-stream')
+    line_user_id = data.get('line_user_id', 'web')
 
     s3 = boto3.client('s3')
-    bucket = os.environ.get('S3_BUCKET', 'gepp-platform-files')
+    bucket = os.environ.get('S3_BUCKET_NAME', 'prod-gepp-platform-assets')
     ext = file_name.rsplit('.', 1)[-1] if '.' in file_name else 'bin'
-    file_key = f'esg/uploads/{current_user_org_id}/{datetime.utcnow().strftime("%Y%m%d")}/{uuid.uuid4().hex[:12]}.{ext}'
+    date_str = datetime.utcnow().strftime('%Y%m%d')
+    hash_id = uuid.uuid4().hex[:12]
+    file_key = f'esg/org/{current_user_org_id}/LINE/{line_user_id}/{date_str}_{hash_id}.{ext}'
 
     upload_url = s3.generate_presigned_url(
         'put_object',

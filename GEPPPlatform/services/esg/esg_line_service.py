@@ -248,7 +248,8 @@ class EsgLineService:
                 self._send_text_reply(org.line_channel_token, line_msg.line_reply_token, 'ดาวน์โหลดรูปไม่สำเร็จ ลองใหม่อีกครั้ง')
                 return {'status': 'error'}
 
-            s3_url = self._upload_s3(image_data, org.organization_id, message_id, 'image/jpeg')
+            s3_url = self._upload_s3(image_data, org.organization_id, message_id, 'image/jpeg',
+                                     line_user_id=line_msg.line_user_id)
 
             # AI classification + OCR
             doc_svc = EsgDocumentService(self.db)
@@ -320,7 +321,8 @@ class EsgLineService:
             if not file_data:
                 return {'status': 'error'}
 
-            s3_url = self._upload_s3(file_data, org.organization_id, message_id, content_type)
+            s3_url = self._upload_s3(file_data, org.organization_id, message_id, content_type,
+                                     line_user_id=line_msg.line_user_id)
 
             doc_svc = EsgDocumentService(self.db)
             result = doc_svc.upload_and_classify(
@@ -471,12 +473,19 @@ class EsgLineService:
             logger.error(f"Download failed: {e}")
             return None
 
-    def _upload_s3(self, data: bytes, org_id: int, msg_id: str, ct: str = 'image/jpeg') -> str:
+    def _upload_s3(self, data: bytes, org_id: int, msg_id: str, ct: str = 'image/jpeg',
+                   line_user_id: str = None) -> str:
         import boto3
+        import uuid
         s3 = boto3.client('s3')
-        bucket = os.environ.get('S3_BUCKET', 'gepp-platform-files')
-        ext = {'image/jpeg': 'jpg', 'image/png': 'png', 'application/pdf': 'pdf'}.get(ct, 'bin')
-        key = f'esg/documents/{org_id}/line/{datetime.utcnow().strftime("%Y%m%d")}/{msg_id}.{ext}'
+        bucket = os.environ.get('S3_BUCKET_NAME', 'prod-gepp-platform-assets')
+        ext = {'image/jpeg': 'jpg', 'image/png': 'png', 'application/pdf': 'pdf',
+               'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+               'application/vnd.ms-excel': 'xls', 'text/csv': 'csv'}.get(ct, 'bin')
+        date_str = datetime.utcnow().strftime('%Y%m%d')
+        hash_id = uuid.uuid4().hex[:12]
+        line_id = line_user_id or 'unknown'
+        key = f'esg/org/{org_id}/LINE/{line_id}/{date_str}_{hash_id}.{ext}'
         s3.put_object(Bucket=bucket, Key=key, Body=data, ContentType=ct)
         return f's3://{bucket}/{key}'
 

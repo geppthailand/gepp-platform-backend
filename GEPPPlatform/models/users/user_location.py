@@ -47,6 +47,7 @@ class UserLocation(Base, BaseModel):
     facebook_id = Column(String(255))
     apple_id = Column(String(255))
     google_id_gmail = Column(String(255))
+    line_user_id = Column(String(255), unique=True, index=True)  # LINE LIFF user ID
     
     # Platform and permissions
     platform = Column(Enum(PlatformEnum), nullable=False, default=PlatformEnum.NA)

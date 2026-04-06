@@ -26,6 +26,9 @@ class Organization(Base, BaseModel):
     # Custom API Configuration
     api_path = Column(String(100), unique=True, nullable=True)  # Unique path for /api/userapi/{api_path}/
 
+    # LIFF onboarding code
+    joining_code = Column(String(20), unique=True, nullable=True, index=True)
+
     # Organization structure limits
     max_org_structure_nodes = Column(Integer, nullable=False, default=50)
 
