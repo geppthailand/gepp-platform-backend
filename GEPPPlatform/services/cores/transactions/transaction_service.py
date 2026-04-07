@@ -1584,7 +1584,10 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
         location_tag_id: Optional[int] = None,
         tenant_id: Optional[int] = None,
         material_id: Optional[int] = None,
-        current_user_id: Optional[int] = None
+        current_user_id: Optional[int] = None,
+        location_ids: Optional[list] = None,
+        filter_tag_ids: Optional[list] = None,
+        filter_tenant_ids: Optional[list] = None
     ) -> Dict[str, Any]:
         """
         List transactions with filtering and pagination
@@ -1607,6 +1610,9 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
             location_tag_id: Filter by location tag (when using composite origin filter)
             tenant_id: Filter by tenant (when using composite origin filter)
             material_id: Filter by material (transactions that have at least one record with this material_id)
+            location_ids: List of location IDs - gets transactions from these locations + their descendants (union)
+            filter_tag_ids: List of tag IDs - intersect with location results
+            filter_tenant_ids: List of tenant IDs - intersect with location results
 
         Returns:
             Dict with success status, transactions list, and pagination info
@@ -1648,9 +1654,56 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                         query = query.filter(Transaction.origin_id.is_(None))
                     else:
                         query = query.filter(Transaction.origin_id.in_(list(assigned_ids)))
-            if location_tag_id is not None:
+            # New multi-select location filter: location_ids + descendants (union)
+            if location_ids:
+                # Get org tree to find descendants
+                org_setup = self.db.query(OrganizationSetup).filter(
+                    and_(
+                        OrganizationSetup.organization_id == organization_id,
+                        OrganizationSetup.is_active == True
+                    )
+                ).first()
+                if not org_setup:
+                    org_setup = self.db.query(OrganizationSetup).filter(
+                        OrganizationSetup.organization_id == organization_id
+                    ).order_by(OrganizationSetup.created_date.desc()).first()
+
+                all_origin_ids = set(location_ids)
+                if org_setup and org_setup.root_nodes:
+                    def collect_descendants(nodes, collecting=False):
+                        """Collect all descendant nodeIds when collecting=True"""
+                        ids = set()
+                        for node in nodes if isinstance(nodes, list) else []:
+                            node_id = node.get('nodeId')
+                            if node_id is not None:
+                                node_id = int(node_id) if isinstance(node_id, str) else node_id
+                            children = node.get('children', [])
+                            if collecting:
+                                if node_id is not None:
+                                    ids.add(node_id)
+                                ids.update(collect_descendants(children, True))
+                            elif node_id in all_origin_ids:
+                                # Found a target node, collect all its descendants
+                                ids.update(collect_descendants(children, True))
+                            else:
+                                ids.update(collect_descendants(children, False))
+                        return ids
+
+                    descendant_ids = collect_descendants(org_setup.root_nodes)
+                    all_origin_ids.update(descendant_ids)
+
+                query = query.filter(Transaction.origin_id.in_(list(all_origin_ids)))
+
+            # New multi-select tag/tenant filters (intersect with location results)
+            if filter_tag_ids:
+                query = query.filter(Transaction.location_tag_id.in_(filter_tag_ids))
+            if filter_tenant_ids:
+                query = query.filter(Transaction.tenant_id.in_(filter_tenant_ids))
+
+            # Legacy single tag/tenant filters (used when new multi-select filters are not provided)
+            if location_tag_id is not None and not filter_tag_ids:
                 query = query.filter(Transaction.location_tag_id == location_tag_id)
-            if tenant_id is not None:
+            if tenant_id is not None and not filter_tenant_ids:
                 query = query.filter(Transaction.tenant_id == tenant_id)
             if destination_id:
                 # Filter by destination_id in the destination_ids array

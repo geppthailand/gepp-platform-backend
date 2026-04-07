@@ -115,6 +115,17 @@ def _build_filters_from_query_params(query_params: Dict[str, Any], timezone_name
             except (ValueError, TypeError):
                 pass
     
+    # Handle new multi-select location filters: location_ids, tag_ids, tenant_ids (comma-separated)
+    location_ids_raw = query_params.get('location_ids')
+    if location_ids_raw:
+        filters['location_ids'] = [int(x) for x in location_ids_raw.split(',') if x.strip()]
+    tag_ids_raw = query_params.get('tag_ids')
+    if tag_ids_raw:
+        filters['filter_tag_ids'] = [int(x) for x in tag_ids_raw.split(',') if x.strip()]
+    tenant_ids_raw = query_params.get('tenant_ids')
+    if tenant_ids_raw:
+        filters['filter_tenant_ids'] = [int(x) for x in tenant_ids_raw.split(',') if x.strip()]
+
     # Handle date filters (preserve provided times; apply local day bounds for date-only)
     date_from_input = query_params.get('date_from') or query_params.get('datefrom')
     if date_from_input:
@@ -2069,8 +2080,12 @@ def handle_reports_routes(event: Dict[str, Any], **common_params) -> Dict[str, A
         
         elif path == '/api/reports/filter/origins':
             filters = _build_filters_from_query_params(query_params, timezone_name=tz_name)
-            # Remove origin filters - only use material filters for origins endpoint
+            # Remove origin/location filters - only use material filters for origins endpoint
             filters.pop('origin_ids', None)
+            filters.pop('location_ids', None)
+            filters.pop('filter_tag_ids', None)
+            filters.pop('filter_tenant_ids', None)
+            filters.pop('origin_combos', None)
             # Do not apply default YTD for filter endpoints; only use dates if explicitly provided
             has_date = any(k in query_params for k in ('date_from', 'date_to', 'datefrom', 'dateto'))
             if not has_date:
