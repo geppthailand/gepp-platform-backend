@@ -44,21 +44,19 @@ def compute_recycling_rate(
     - group_completion: {group_id: completion_rate_0_to_1}
 
     Returns: (recyclable_weight, recyclable_ghg, total_weight, all_fully_traced)
-    - all_fully_traced: True if all records that HAVE a traceability_group_id
-      are fully completed (completion == 1.0). Records without a group are ignored
-      for this check.
+    - all_fully_traced: True only if EVERY record has a traceability_group_id
+      with completion == 1.0. False if any record lacks a group or has incomplete tracing.
     """
     total_weight = 0.0
     recyclable_weight = 0.0
     recyclable_ghg = 0.0
+    has_untraced = False
     has_incomplete = False
-    has_any_group = False
 
     for weight, calc_ghg, cat_id, group_id in record_weights:
         total_weight += weight
 
         if group_id is not None and group_id in group_leaf_data:
-            has_any_group = True
             completion = group_completion.get(group_id, 0.0)
             if completion < 1.0:
                 has_incomplete = True
@@ -87,13 +85,13 @@ def compute_recycling_rate(
             recyclable_weight += recyclable_from_traced + recyclable_from_untraced
             recyclable_ghg += ghg_from_traced + ghg_from_untraced
         else:
-            # No traceability group yet → fallback to category method
+            # Tier 3: no traceability → old category method
+            has_untraced = True
             if cat_id in _RECYCLABLE_CATEGORIES:
                 recyclable_weight += weight
                 recyclable_ghg += weight * calc_ghg
 
-    # Only check completion for records that have groups; no groups at all = True
-    all_fully_traced = (not has_incomplete) if has_any_group else True
+    all_fully_traced = not has_untraced and not has_incomplete
     return recyclable_weight, recyclable_ghg, total_weight, all_fully_traced
 
 
