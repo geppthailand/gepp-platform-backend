@@ -277,20 +277,45 @@ def main(event, context):
                         })
                     }
 
+            elif path == '/api/esg/liff/invitation/accept' and http_method == 'POST':
+                # Public: Accept invitation (no JWT required — user doesn't have one yet)
+                from GEPPPlatform.services.esg.liff_auth_service import LiffAuthService
+
+                with get_session() as session:
+                    liff_svc = LiffAuthService(session)
+                    try:
+                        accept_result = liff_svc.accept_invitation(
+                            invitation_token=body.get('invitation_token', ''),
+                            line_access_token=body.get('access_token', ''),
+                        )
+                        results = {"success": True, "data": accept_result}
+                    except ValueError as ve:
+                        results = {"success": False, "message": str(ve), "error_code": "BAD_REQUEST"}
+
             elif path == '/api/esg/line/webhook' and http_method == 'POST':
                 # Public ESG LINE webhook (no JWT required, signature verified internally)
                 from GEPPPlatform.services.esg.esg_line_service import EsgLineService
 
                 signature = event.get('headers', {}).get('x-line-signature', '')
                 raw_body = event.get('body', '{}')
+                logger.info("----------- LINE WEBHOOK RECEIVED -----------")
+                logger.info(f"[LINE-WEBHOOK] body_len={len(raw_body or '')}")
+                logger.info(f"[LINE-WEBHOOK] signature={signature[:30] if signature else 'NONE'}")
+                logger.info(f"[LINE-WEBHOOK] raw_body={raw_body[:500] if raw_body else 'EMPTY'}")
+                logger.info("----------------------------------------------")
 
-                with get_session() as session:
-                    line_service = EsgLineService(session)
-                    webhook_result = line_service.handle_webhook(raw_body, signature)
-                    results = {
-                        "success": True,
-                        "data": webhook_result
-                    }
+                try:
+                    with get_session() as session:
+                        line_service = EsgLineService(session)
+                        webhook_result = line_service.handle_webhook(raw_body, signature)
+                        results = {
+                            "success": True,
+                            "data": webhook_result
+                        }
+                        logger.info(f"[LINE-WEBHOOK] Result: {json.dumps(webhook_result, default=str)[:500]}")
+                except Exception as webhook_err:
+                    logger.error(f"[LINE-WEBHOOK] Error: {webhook_err}", exc_info=True)
+                    results = {"success": False, "message": str(webhook_err)}
 
             elif "/api/input-channel/" in path:
                 # Public input channel access (no authorization required)

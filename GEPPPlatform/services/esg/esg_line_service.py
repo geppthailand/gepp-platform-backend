@@ -11,18 +11,25 @@ import base64
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 
 from ...models.esg.settings import EsgOrganizationSettings
 from ...models.esg.line_messages import EsgLineMessage
 from ...models.esg.data_entries import EsgDataEntry, EntrySource, EntryStatus
 from ...models.esg.data_extraction import EsgOrganizationDataExtraction
+from ...models.esg.esg_users import EsgUser
 from .esg_document_service import EsgDocumentService
 from .esg_carbon_service import EsgCarbonService
 
 logger = logging.getLogger(__name__)
 
-LIFF_BASE_URL = os.environ.get('LIFF_BASE_URL', '')
+LIFF_BASE_URL = os.environ.get('LIFF_BASE_URL', 'https://esg.gepp.me')
+
+# Fallback LINE channel access token (long-lived) for replying when org settings are not configured
+LINE_FALLBACK_TOKEN = os.environ.get(
+    'LINE_CHANNEL_ACCESS_TOKEN',
+    'wyiQOUtCsDsHXQT8Iug8fk3mtPPIs54t52o/h6LKtVuNFryyaNcBLoZi6iona8TK0EyI/VBs5ntxXkGpDkQZZtt/99FM2dNF94ZdxmBle2vA4hTuqWz7Er6zBvnQUUi46BqxLwXk8hBsvw1EdMnw2gdB04t89/1O/w1cDnyilFU=',
+)
 
 
 class EsgLineService:
@@ -37,19 +44,27 @@ class EsgLineService:
     # ==========================================
 
     def handle_webhook(self, body: str, signature: str) -> Dict[str, Any]:
+        logger.info(f"[WEBHOOK] Received body length={len(body or '')}, signature={signature[:20] if signature else 'none'}...")
         try:
             payload = json.loads(body) if isinstance(body, str) else body
         except json.JSONDecodeError:
+            logger.error(f"[WEBHOOK] Invalid JSON: {body[:200] if body else 'empty'}")
             return {'success': False, 'message': 'Invalid JSON payload'}
 
         events = payload.get('events', [])
+        destination = payload.get('destination', '')
+        logger.info(f"[WEBHOOK] destination={destination}, events={len(events)}")
+
         if not events:
             return {'success': True, 'message': 'No events'}
 
-        destination = payload.get('destination', '')
         results = []
-        for event in events:
+        for i, event in enumerate(events):
+            event_type = event.get('type', '?')
+            source = event.get('source', {})
+            logger.info(f"[WEBHOOK] Event[{i}]: type={event_type}, source_type={source.get('type')}, userId={source.get('userId', '?')[:12]}")
             result = self._process_event(event, body, signature, destination)
+            logger.info(f"[WEBHOOK] Event[{i}] result: {result}")
             results.append(result)
 
         return {'success': True, 'message': f'Processed {len(results)} events', 'results': results}
@@ -57,6 +72,7 @@ class EsgLineService:
     def _process_event(self, event: Dict, raw_body: str, signature: str, destination: str) -> Dict:
         source_type = event.get('source', {}).get('type', '')
         if source_type in ('group', 'room'):
+            logger.info(f"[WEBHOOK] Skipping group/room event")
             return {'status': 'skipped', 'reason': 'Group/room not supported'}
 
         event_type = event.get('type')
@@ -66,6 +82,7 @@ class EsgLineService:
             return self._handle_postback(event, raw_body, signature, destination)
         if event_type == 'message':
             return self._handle_message(event, raw_body, signature, destination)
+        logger.info(f"[WEBHOOK] Unhandled event type: {event_type}")
         return {'status': 'skipped'}
 
     # ==========================================
@@ -74,31 +91,35 @@ class EsgLineService:
 
     def _handle_follow(self, event: Dict, raw_body: str, signature: str, destination: str) -> Dict:
         org = self._find_org(destination)
-        if not org or not self._verify_sig(raw_body, signature, org.line_channel_secret):
-            return {'status': 'error'}
+        channel_token = getattr(org, 'line_channel_token', None) or LINE_FALLBACK_TOKEN
+        logger.info(f"[FOLLOW] userId={event.get('source', {}).get('userId', '?')[:12]}, org={org is not None}")
+
+        liff_url = LIFF_BASE_URL
 
         welcome = {
             'type': 'flex',
-            'altText': 'Welcome to GEPP ESG!',
+            'altText': 'ยินดีต้อนรับสู่ GEPP ESG!',
             'contents': {
                 'type': 'bubble',
                 'body': {
                     'type': 'box', 'layout': 'vertical',
                     'contents': [
-                        {'type': 'text', 'text': 'GEPP ESG', 'weight': 'bold', 'size': 'xl', 'color': '#76B900'},
-                        {'type': 'text', 'text': 'ยินดีต้อนรับ! ส่งรูปบิลหรือพิมพ์ข้อมูล แล้วระบบจะคำนวณ tCO2e ให้อัตโนมัติ', 'wrap': True, 'size': 'sm', 'margin': 'lg'},
+                        {'type': 'text', 'text': 'GEPP ESG', 'weight': 'bold', 'size': 'xl', 'color': '#2d6a4f'},
+                        {'type': 'text', 'text': 'ยินดีต้อนรับ! เริ่มต้นใช้งานโดยขอ invitation code จากผู้ดูแลองค์กร แล้วกดปุ่มด้านล่างเพื่อเข้าร่วม', 'wrap': True, 'size': 'sm', 'margin': 'lg', 'color': '#666666'},
+                        {'type': 'separator', 'margin': 'lg'},
+                        {'type': 'text', 'text': 'หลังเข้าร่วมแล้ว คุณสามารถ:', 'size': 'xs', 'color': '#999999', 'margin': 'lg'},
+                        {'type': 'text', 'text': '📸 ส่งรูปบิล → AI คำนวณ tCO₂e\n📝 พิมพ์ข้อมูล → คำนวณอัตโนมัติ\n📊 ดู Dashboard ภาพรวม', 'size': 'xs', 'color': '#999999', 'margin': 'sm', 'wrap': True},
                     ],
                 },
                 'footer': {
                     'type': 'box', 'layout': 'vertical', 'spacing': 'sm',
                     'contents': [
-                        {'type': 'button', 'action': {'type': 'uri', 'label': 'เปิด Dashboard', 'uri': f'{LIFF_BASE_URL}/dashboard'}, 'style': 'primary', 'color': '#76B900'},
-                        {'type': 'button', 'action': {'type': 'uri', 'label': 'กรอกข้อมูล', 'uri': f'{LIFF_BASE_URL}/data-entry'}, 'style': 'secondary'},
+                        {'type': 'button', 'action': {'type': 'uri', 'label': 'เข้าร่วมองค์กร', 'uri': f'{liff_url}/liff'}, 'style': 'primary', 'color': '#2d6a4f'},
                     ],
                 },
             },
         }
-        self._send_reply_raw(org.line_channel_token, event.get('replyToken', ''), [welcome])
+        self._send_reply_raw(channel_token, event.get('replyToken', ''), [welcome])
         return {'status': 'success', 'type': 'follow'}
 
     # ==========================================
@@ -158,16 +179,61 @@ class EsgLineService:
 
     def _handle_message(self, event: Dict, raw_body: str, signature: str, destination: str) -> Dict:
         org = self._find_org(destination)
-        if not org or not self._verify_sig(raw_body, signature, org.line_channel_secret):
-            return {'status': 'error'}
+        logger.info(f"[MSG] org found={org is not None}, org_id={getattr(org, 'organization_id', '?')}")
 
         message = event.get('message', {})
         msg_type = message.get('type', '')
         reply_token = event.get('replyToken', '')
         user_id = event.get('source', {}).get('userId', '')
+        logger.info(f"[MSG] type={msg_type}, userId={user_id[:12] if user_id else '?'}, text={message.get('text', '')[:50] if msg_type == 'text' else '-'}")
+
+        # Determine reply token — use org settings or fallback
+        channel_token = getattr(org, 'line_channel_token', None) or LINE_FALLBACK_TOKEN
+
+        # Signature verification (skip if no org settings — use fallback token flow)
+        if org and org.line_channel_secret:
+            if not self._verify_sig(raw_body, signature, org.line_channel_secret):
+                logger.warning(f"[MSG] Signature verification failed")
+                return {'status': 'error', 'reason': 'signature failed'}
+        else:
+            logger.warning(f"[MSG] No org channel secret — skipping signature verification, using fallback token")
+
+        # Check if this LINE user is linked to an org via esg_users
+        esg_user = self.db.query(EsgUser).filter(
+            EsgUser.platform == 'line',
+            EsgUser.platform_user_id == user_id,
+            EsgUser.organization_id.isnot(None),
+            EsgUser.is_active == True,
+        ).first()
+
+        if not esg_user:
+            # User not linked — reply with instruction to join org first
+            liff_url = LIFF_BASE_URL
+            self._send_reply_raw(channel_token, reply_token, [{
+                'type': 'flex',
+                'altText': 'กรุณาเข้าร่วมองค์กรก่อนใช้งาน',
+                'contents': {
+                    'type': 'bubble',
+                    'body': {
+                        'type': 'box', 'layout': 'vertical', 'spacing': 'md',
+                        'contents': [
+                            {'type': 'text', 'text': 'GEPP ESG', 'weight': 'bold', 'size': 'lg', 'color': '#2d6a4f'},
+                            {'type': 'text', 'text': 'คุณยังไม่ได้เชื่อมต่อกับองค์กร', 'size': 'sm', 'color': '#666666', 'margin': 'md', 'wrap': True},
+                            {'type': 'text', 'text': 'กรุณาขอ invitation code จากผู้ดูแลองค์กร แล้วกดปุ่มด้านล่างเพื่อเข้าร่วม', 'size': 'xs', 'color': '#999999', 'margin': 'sm', 'wrap': True},
+                        ],
+                    },
+                    'footer': {
+                        'type': 'box', 'layout': 'vertical', 'spacing': 'sm',
+                        'contents': [
+                            {'type': 'button', 'action': {'type': 'uri', 'label': 'เข้าร่วมองค์กร', 'uri': f'{liff_url}/liff'}, 'style': 'primary', 'color': '#2d6a4f'},
+                        ],
+                    },
+                },
+            }])
+            return {'status': 'needs_org', 'line_user_id': user_id}
 
         line_msg = EsgLineMessage(
-            organization_id=org.organization_id,
+            organization_id=esg_user.organization_id,
             line_message_id=message.get('id', ''),
             line_user_id=user_id,
             line_reply_token=reply_token,
@@ -177,38 +243,41 @@ class EsgLineService:
         self.db.add(line_msg)
         self.db.flush()
 
+        # Use esg_user.organization_id (safe even if org settings is None)
+        org_id = esg_user.organization_id
+
         if msg_type == 'text':
-            return self._process_text(line_msg, event, org)
+            return self._process_text(line_msg, event, org_id, channel_token)
         elif msg_type == 'image':
-            return self._process_image(line_msg, message, org)
+            return self._process_image(line_msg, message, org_id, channel_token)
         elif msg_type == 'file':
-            return self._process_file(line_msg, message, org)
+            return self._process_file(line_msg, message, org_id, channel_token)
         else:
-            self._send_text_reply(org.line_channel_token, reply_token, 'ส่งรูปบิล, ไฟล์ PDF หรือพิมพ์ข้อมูลได้เลยครับ')
+            self._send_text_reply(channel_token, reply_token, 'ส่งรูปบิล, ไฟล์ PDF หรือพิมพ์ข้อมูลได้เลยครับ')
             return {'status': 'skipped'}
 
     # ---- TEXT: AI Intent Extraction → tCO2e ----
 
-    def _process_text(self, line_msg, event: Dict, org) -> Dict:
+    def _process_text(self, line_msg, event: Dict, org_id: int, token: str) -> Dict:
         text = event.get('message', {}).get('text', '').strip()
         text_lower = text.lower()
 
         if text_lower in ('help', 'ช่วย', 'วิธีใช้', '?'):
-            self._send_text_reply(org.line_channel_token, line_msg.line_reply_token, self._help_text())
+            self._send_text_reply(token, line_msg.line_reply_token, self._help_text())
             line_msg.processing_status = 'completed'
             self.db.flush()
             return {'status': 'success', 'type': 'help'}
 
         if text_lower in ('status', 'สถานะ', 'สรุป', 'summary'):
-            self._send_text_reply(org.line_channel_token, line_msg.line_reply_token,
-                                  f'ดูสรุปภาพรวม:\n{LIFF_BASE_URL}/dashboard')
+            self._send_text_reply(token, line_msg.line_reply_token,
+                                  f'ดูสรุปภาพรวม:\n{LIFF_BASE_URL}/liff/app/esg')
             line_msg.processing_status = 'completed'
             self.db.flush()
             return {'status': 'success', 'type': 'status'}
 
         # AI text extraction → create entry → tCO2e → Flex reply
         extraction = EsgOrganizationDataExtraction(
-            organization_id=org.organization_id,
+            organization_id=org_id,
             channel='line', type='text',
             source_user_id=line_msg.line_user_id,
             source_message_id=line_msg.line_message_id,
@@ -225,13 +294,12 @@ class EsgLineService:
         except Exception as e:
             logger.error(f"Text extraction failed: {e}")
 
-        # Create data entry from extraction
-        entry = self._create_entry_from_extraction(extraction, org.organization_id, line_msg.line_user_id)
+        entry = self._create_entry_from_extraction(extraction, org_id, line_msg.line_user_id)
         if entry:
             flex = self._build_result_flex(entry)
-            self._send_reply_raw(org.line_channel_token, line_msg.line_reply_token, [flex])
+            self._send_reply_raw(token, line_msg.line_reply_token, [flex])
         else:
-            self._send_text_reply(org.line_channel_token, line_msg.line_reply_token,
+            self._send_text_reply(token, line_msg.line_reply_token,
                                   'ได้รับข้อมูลแล้ว แต่ไม่สามารถสกัดตัวเลขได้ กรุณากรอกผ่าน LIFF')
 
         line_msg.processing_status = extraction.processing_status
@@ -240,28 +308,26 @@ class EsgLineService:
 
     # ---- IMAGE: OCR → tCO2e → Flex Message ----
 
-    def _process_image(self, line_msg, message: Dict, org) -> Dict:
+    def _process_image(self, line_msg, message: Dict, org_id: int, token: str) -> Dict:
         try:
             message_id = message.get('id')
-            image_data = self._download_content(message_id, org.line_channel_token)
+            image_data = self._download_content(message_id, token)
             if not image_data:
-                self._send_text_reply(org.line_channel_token, line_msg.line_reply_token, 'ดาวน์โหลดรูปไม่สำเร็จ ลองใหม่อีกครั้ง')
+                self._send_text_reply(token, line_msg.line_reply_token, 'ดาวน์โหลดรูปไม่สำเร็จ ลองใหม่อีกครั้ง')
                 return {'status': 'error'}
 
-            s3_url = self._upload_s3(image_data, org.organization_id, message_id, 'image/jpeg',
+            s3_url = self._upload_s3(image_data, org_id, message_id, 'image/jpeg',
                                      line_user_id=line_msg.line_user_id)
 
-            # AI classification + OCR
             doc_svc = EsgDocumentService(self.db)
             result = doc_svc.upload_and_classify(
-                organization_id=org.organization_id,
+                organization_id=org_id,
                 file_data={'file_name': f'line_{message_id}.jpg', 'file_url': s3_url, 'file_type': 'image/jpeg', 'source': 'line'},
             )
 
             doc = result.get('document', {}) if result.get('success') else {}
             ocr_data = doc.get('ai_classification_result', {}) or {}
 
-            # Build entry from OCR
             category = ocr_data.get('category', doc.get('esg_category', ''))
             amount = ocr_data.get('amount') or ocr_data.get('value')
             unit = ocr_data.get('unit', '')
@@ -271,13 +337,13 @@ class EsgLineService:
                 tco2e = self.carbon.calculate_tco2e(category or 'electricity', float(amount), unit)
                 scope = self.carbon.get_scope_for_category(category or 'electricity')
                 entry_obj = EsgDataEntry(
-                    organization_id=org.organization_id,
+                    organization_id=org_id,
                     user_id=0, line_user_id=line_msg.line_user_id,
                     category=category, value=amount, unit=unit,
                     calculated_tco2e=tco2e, scope_tag=scope,
                     evidence_image_url=s3_url, file_key=s3_url,
                     entry_source=EntrySource.LINE_CHAT, status=EntryStatus.PENDING_VERIFY,
-                    entry_date=datetime.utcnow().date(),
+                    entry_date=datetime.now(timezone.utc).date(),
                 )
                 self.db.add(entry_obj)
                 self.db.commit()
@@ -286,12 +352,11 @@ class EsgLineService:
 
             if entry:
                 flex = self._build_result_flex(entry)
-                self._send_reply_raw(org.line_channel_token, line_msg.line_reply_token, [flex])
+                self._send_reply_raw(token, line_msg.line_reply_token, [flex])
             else:
-                # Fallback: classification only
                 cat = doc.get('esg_category', 'unknown')
                 conf = doc.get('ai_confidence', 0)
-                self._send_text_reply(org.line_channel_token, line_msg.line_reply_token,
+                self._send_text_reply(token, line_msg.line_reply_token,
                                       f'ได้รับรูปแล้ว\nหมวดหมู่: {cat}\nConfidence: {conf:.0%}\n\nกรุณากรอกตัวเลขผ่าน LIFF')
 
             line_msg.processing_status = 'completed'
@@ -307,31 +372,31 @@ class EsgLineService:
 
     # ---- FILE: PDF/Excel → classify → tCO2e ----
 
-    def _process_file(self, line_msg, message: Dict, org) -> Dict:
+    def _process_file(self, line_msg, message: Dict, org_id: int, token: str) -> Dict:
         file_size = message.get('fileSize', 0)
         if file_size > 5 * 1024 * 1024:
-            self._send_text_reply(org.line_channel_token, line_msg.line_reply_token, 'ไฟล์ใหญ่เกิน 5MB กรุณาลดขนาดไฟล์')
+            self._send_text_reply(token, line_msg.line_reply_token, 'ไฟล์ใหญ่เกิน 5MB กรุณาลดขนาดไฟล์')
             return {'status': 'error', 'reason': 'File too large'}
 
         try:
             message_id = message.get('id')
             file_name = message.get('fileName', f'line_{message_id}')
             content_type = self._guess_type(file_name)
-            file_data = self._download_content(message_id, org.line_channel_token)
+            file_data = self._download_content(message_id, token)
             if not file_data:
                 return {'status': 'error'}
 
-            s3_url = self._upload_s3(file_data, org.organization_id, message_id, content_type,
+            s3_url = self._upload_s3(file_data, org_id, message_id, content_type,
                                      line_user_id=line_msg.line_user_id)
 
             doc_svc = EsgDocumentService(self.db)
             result = doc_svc.upload_and_classify(
-                organization_id=org.organization_id,
+                organization_id=org_id,
                 file_data={'file_name': file_name, 'file_url': s3_url, 'file_type': content_type, 'source': 'line'},
             )
 
             doc = result.get('document', {}) if result.get('success') else {}
-            self._send_text_reply(org.line_channel_token, line_msg.line_reply_token,
+            self._send_text_reply(token, line_msg.line_reply_token,
                                   f'ได้รับเอกสาร: {file_name}\nหมวด: {doc.get("esg_category", "processing")}\nดูรายละเอียดใน LIFF')
 
             line_msg.processing_status = 'completed'

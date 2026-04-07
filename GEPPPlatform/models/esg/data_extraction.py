@@ -59,8 +59,8 @@ class EsgOrganizationDataExtraction(Base, BaseModel):
             'refs': self.refs or {},
             'processing_status': self.processing_status,
             'error_message': self.error_message,
-            'processed_at': self.processed_at.isoformat() if self.processed_at else None,
+            'processed_at': str(self.processed_at) if self.processed_at else None,
             'is_active': self.is_active,
-            'created_date': self.created_date.isoformat() if self.created_date else None,
-            'updated_date': self.updated_date.isoformat() if self.updated_date else None,
+            'created_date': str(self.created_date) if self.created_date else None,
+            'updated_date': str(self.updated_date) if self.updated_date else None,
         }

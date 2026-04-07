@@ -140,13 +140,13 @@ def handle_esg_routes(event: Dict[str, Any], data: Dict[str, Any], **params) -> 
         # ===== LINE MEMBER MANAGEMENT (desktop) =====
         elif path == '/api/esg/line-members' and method == 'GET':
             liff_svc = LiffAuthService(db_session)
-            return liff_svc.list_line_members(current_user_org_id)
+            return liff_svc.list_members(current_user_org_id)
 
         elif '/api/esg/line-members/' in path and method == 'DELETE':
             member_id = _extract_id_from_path(path, 'line-members')
             liff_svc = LiffAuthService(db_session)
             try:
-                return liff_svc.remove_line_member(current_user_org_id, member_id)
+                return liff_svc.remove_member(current_user_org_id, member_id)
             except ValueError as ve:
                 raise NotFoundException(str(ve))
 

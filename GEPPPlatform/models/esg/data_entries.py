@@ -22,7 +22,7 @@ class EsgDataEntry(Base, BaseModel):
     __tablename__ = 'esg_data_entries'
 
     organization_id = Column(BigInteger, ForeignKey('organizations.id'), nullable=False, index=True)
-    user_id = Column(BigInteger, ForeignKey('user_locations.id'), nullable=True, index=True)
+    user_id = Column(BigInteger, ForeignKey('esg_users.id'), nullable=True, index=True)
     line_user_id = Column(String(100), nullable=True, index=True)
     category_id = Column(BigInteger, ForeignKey('esg_data_category.id'), nullable=True)
     subcategory_id = Column(BigInteger, ForeignKey('esg_data_subcategory.id'), nullable=True)

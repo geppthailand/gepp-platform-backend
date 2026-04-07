@@ -11,6 +11,8 @@ from .data_hierarchy import EsgDataCategory, EsgDataSubcategory, EsgDatapoint
 from .data_extraction import EsgOrganizationDataExtraction
 from .data_entries import EsgDataEntry, EntrySource, EntryStatus
 from .emission_factors import EmissionFactor
+from .esg_users import EsgUser
+from .esg_external_invitation_links import EsgExternalInvitationLink
 
 __all__ = [
     'EsgOrganizationSettings',
@@ -22,4 +24,6 @@ __all__ = [
     'EsgOrganizationDataExtraction',
     'EsgDataEntry', 'EntrySource', 'EntryStatus',
     'EmissionFactor',
+    'EsgUser',
+    'EsgExternalInvitationLink',
 ]
