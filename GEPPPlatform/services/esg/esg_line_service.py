@@ -128,20 +128,23 @@ class EsgLineService:
 
     def _handle_postback(self, event: Dict, raw_body: str, signature: str, destination: str) -> Dict:
         org = self._find_org(destination)
-        if not org or not self._verify_sig(raw_body, signature, org.line_channel_secret):
-            return {'status': 'error'}
+        channel_token = getattr(org, 'line_channel_token', None) or LINE_FALLBACK_TOKEN
 
         postback_data = event.get('postback', {}).get('data', '')
         reply_token = event.get('replyToken', '')
         params = dict(p.split('=', 1) for p in postback_data.split('&') if '=' in p)
         action = params.get('action', '')
+        logger.info(f"[POSTBACK] action={action}, params={params}")
 
         if action == 'confirm' and params.get('entry_id'):
             return self._confirm_entry(int(params['entry_id']), org, reply_token)
 
+        if action == 'confirm_all' and params.get('extraction_id'):
+            return self._confirm_all_entries(int(params['extraction_id']), channel_token, reply_token)
+
         if action == 'edit' and params.get('entry_id'):
-            edit_url = f'{LIFF_BASE_URL}/data-entry?edit={params["entry_id"]}'
-            self._send_text_reply(org.line_channel_token, reply_token, f'แก้ไขข้อมูล:\n{edit_url}')
+            edit_url = f'{LIFF_BASE_URL}/liff/app/entry?edit={params["entry_id"]}'
+            self._send_text_reply(channel_token, reply_token, f'แก้ไขข้อมูล:\n{edit_url}')
             return {'status': 'success', 'type': 'edit_redirect'}
 
         uri_actions = {
@@ -170,8 +173,32 @@ class EsgLineService:
 
         entry.status = EntryStatus.VERIFIED
         self.db.commit()
-        self._send_text_reply(org.line_channel_token, reply_token, f'ยืนยันแล้ว! {entry.category} {entry.value} {entry.unit} = {entry.calculated_tco2e or "-"} tCO2e')
+        token = getattr(org, 'line_channel_token', None) or LINE_FALLBACK_TOKEN
+        self._send_text_reply(token, reply_token, f'ยืนยันแล้ว! {entry.category} {entry.value} {entry.unit} = {entry.calculated_tco2e or "-"} tCO2e')
         return {'status': 'success', 'type': 'confirmed', 'entry_id': entry_id}
+
+    def _confirm_all_entries(self, extraction_id: int, token: str, reply_token: str) -> Dict:
+        """Confirm all entries from an extraction at once."""
+        extraction = self.db.query(EsgOrganizationDataExtraction).filter(
+            EsgOrganizationDataExtraction.id == extraction_id,
+        ).first()
+        if not extraction:
+            self._send_text_reply(token, reply_token, 'ไม่พบข้อมูลนี้')
+            return {'status': 'error'}
+
+        entry_ids = (extraction.extractions or {}).get('entry_ids', [])
+        if not entry_ids:
+            self._send_text_reply(token, reply_token, 'ไม่พบรายการที่จะยืนยัน')
+            return {'status': 'error'}
+
+        count = self.db.query(EsgDataEntry).filter(
+            EsgDataEntry.id.in_(entry_ids),
+            EsgDataEntry.is_active == True,
+        ).update({EsgDataEntry.status: EntryStatus.VERIFIED}, synchronize_session='fetch')
+        self.db.commit()
+
+        self._send_text_reply(token, reply_token, f'✅ ยืนยันแล้ว {count} รายการ')
+        return {'status': 'success', 'type': 'confirm_all', 'count': count}
 
     # ==========================================
     # MESSAGE HANDLING
@@ -311,61 +338,71 @@ class EsgLineService:
     def _process_image(self, line_msg, message: Dict, org_id: int, token: str) -> Dict:
         try:
             message_id = message.get('id')
+            logger.info(f"----------- IMAGE PROCESSING START -----------")
+            logger.info(f"[IMG] msg_id={message_id}, org_id={org_id}, user={line_msg.line_user_id[:12] if line_msg.line_user_id else '?'}")
+
             image_data = self._download_content(message_id, token)
             if not image_data:
+                logger.error(f"[IMG] Failed to download image from LINE")
                 self._send_text_reply(token, line_msg.line_reply_token, 'ดาวน์โหลดรูปไม่สำเร็จ ลองใหม่อีกครั้ง')
                 return {'status': 'error'}
+            logger.info(f"[IMG] Downloaded {len(image_data)} bytes")
 
             s3_url = self._upload_s3(image_data, org_id, message_id, 'image/jpeg',
                                      line_user_id=line_msg.line_user_id)
+            logger.info(f"[IMG] Uploaded to S3: {s3_url[:80]}")
 
-            doc_svc = EsgDocumentService(self.db)
-            result = doc_svc.upload_and_classify(
-                organization_id=org_id,
-                file_data={'file_name': f'line_{message_id}.jpg', 'file_url': s3_url, 'file_type': 'image/jpeg', 'source': 'line'},
+            # Use Gemini vision pipeline for full extraction
+            logger.info(f"[IMG] Starting Gemini extraction...")
+            from .esg_image_extraction_service import EsgImageExtractionService
+            extraction_svc = EsgImageExtractionService(self.db)
+            result = extraction_svc.extract_from_image(
+                s3_url=s3_url,
+                org_id=org_id,
+                line_user_id=line_msg.line_user_id,
+                message_id=line_msg.line_message_id,
             )
+            logger.info(f"[IMG] Extraction result: success={result.get('success')}, matches={result.get('match_count', 0)}, entries={len(result.get('entries', []))}")
 
-            doc = result.get('document', {}) if result.get('success') else {}
-            ocr_data = doc.get('ai_classification_result', {}) or {}
-
-            category = ocr_data.get('category', doc.get('esg_category', ''))
-            amount = ocr_data.get('amount') or ocr_data.get('value')
-            unit = ocr_data.get('unit', '')
-
-            entry = None
-            if amount and unit:
-                tco2e = self.carbon.calculate_tco2e(category or 'electricity', float(amount), unit)
-                scope = self.carbon.get_scope_for_category(category or 'electricity')
-                entry_obj = EsgDataEntry(
-                    organization_id=org_id,
-                    user_id=0, line_user_id=line_msg.line_user_id,
-                    category=category, value=amount, unit=unit,
-                    calculated_tco2e=tco2e, scope_tag=scope,
-                    evidence_image_url=s3_url, file_key=s3_url,
-                    entry_source=EntrySource.LINE_CHAT, status=EntryStatus.PENDING_VERIFY,
-                    entry_date=datetime.now(timezone.utc).date(),
+            if result.get('success') and result.get('entries'):
+                logger.info(f"[IMG] Building Flex card for {len(result['entries'])} entries, {len(result.get('records', []))} records...")
+                flex = extraction_svc.build_result_flex_card(
+                    entries=result['entries'],
+                    refs=result.get('refs', {}),
+                    extraction_id=result['extraction_id'],
+                    document_summary=result.get('document_summary', ''),
+                    records=result.get('records', []),
                 )
-                self.db.add(entry_obj)
-                self.db.commit()
-                self.db.refresh(entry_obj)
-                entry = entry_obj.to_dict()
-
-            if entry:
-                flex = self._build_result_flex(entry)
+                logger.info(f"[IMG] Flex card built, sending reply...")
                 self._send_reply_raw(token, line_msg.line_reply_token, [flex])
+                logger.info(f"[IMG] Reply sent!")
             else:
-                cat = doc.get('esg_category', 'unknown')
-                conf = doc.get('ai_confidence', 0)
+                err_msg = result.get('message', 'กรุณาถ่ายใหม่ให้ชัดขึ้น')
+                logger.info(f"[IMG] No entries, sending error: {err_msg}")
                 self._send_text_reply(token, line_msg.line_reply_token,
-                                      f'ได้รับรูปแล้ว\nหมวดหมู่: {cat}\nConfidence: {conf:.0%}\n\nกรุณากรอกตัวเลขผ่าน LIFF')
+                                      f"ไม่สามารถอ่านข้อมูลจากรูปได้\n{err_msg}")
 
             line_msg.processing_status = 'completed'
-            line_msg.document_id = doc.get('id')
             self.db.flush()
-            return {'status': 'success', 'type': 'image', 'entry_id': entry.get('id') if entry else None}
+            logger.info(f"----------- IMAGE PROCESSING DONE -----------")
+            return {
+                'status': 'success', 'type': 'image',
+                'extraction_id': result.get('extraction_id'),
+                'entry_count': result.get('match_count', 0),
+            }
 
         except Exception as e:
-            logger.error(f"Image processing error: {e}")
+            import traceback
+            tb = traceback.format_exc()
+            logger.error(f"----------- IMAGE PROCESSING ERROR -----------")
+            logger.error(f"[IMG] Exception: {type(e).__name__}: {e}")
+            logger.error(f"[IMG] Traceback:\n{tb}")
+            logger.error(f"-----------------------------------------------")
+            try:
+                self._send_text_reply(token, line_msg.line_reply_token,
+                                      'เกิดข้อผิดพลาดในการประมวลผลรูป กรุณาลองใหม่')
+            except Exception:
+                pass
             line_msg.processing_status = 'failed'
             self.db.flush()
             return {'status': 'error', 'reason': str(e)}

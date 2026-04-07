@@ -118,6 +118,12 @@ def handle_esg_routes(event: Dict[str, Any], data: Dict[str, Any], **params) -> 
                 raise BadRequestException('file_name is required')
             return _handle_upload_url(data, current_user_id, current_user_org_id, db_session)
 
+        # ===== PRESIGNED VIEW URL =====
+        elif path == '/api/esg/presigned-view' and method == 'POST':
+            if not data or not data.get('s3_url'):
+                raise BadRequestException('s3_url is required')
+            return _handle_presigned_view(data['s3_url'])
+
         # ===== LIFF INVITATION =====
         elif path == '/api/esg/liff/invitation/accept' and method == 'POST':
             if not data or not data.get('invitation_token') or not data.get('access_token'):
@@ -388,6 +394,15 @@ def handle_esg_routes(event: Dict[str, Any], data: Dict[str, Any], **params) -> 
     except Exception as e:
         logger.error(f"ESG route error: {str(e)}", exc_info=True)
         return {'success': False, 'message': f'Internal server error: {str(e)}', 'error_code': 'INTERNAL_ERROR'}
+
+
+def _handle_presigned_view(s3_url: str):
+    """Generate a presigned GET URL for viewing an S3 file."""
+    from ...prompts.esg_classify.clients.llm_client import _get_s3_presigned_url
+    if not s3_url.startswith('s3://'):
+        raise BadRequestException('Invalid S3 URL format')
+    presigned = _get_s3_presigned_url(s3_url, expiration=3600)
+    return {'success': True, 'url': presigned, 'expires_in': 3600}
 
 
 def _handle_upload_url(data, current_user_id, current_user_org_id, db_session):
