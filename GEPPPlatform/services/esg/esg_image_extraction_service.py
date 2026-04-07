@@ -15,6 +15,7 @@ from ...models.esg.data_hierarchy import EsgDataCategory, EsgDataSubcategory, Es
 from ...models.esg.data_extraction import EsgOrganizationDataExtraction
 from ...models.esg.data_entries import EsgDataEntry, EntrySource, EntryStatus
 from .esg_carbon_service import EsgCarbonService
+from .extraction_schema import from_legacy_records, flatten_for_entries, SCHEMA_VERSION
 
 logger = logging.getLogger(__name__)
 
@@ -112,13 +113,19 @@ class EsgImageExtractionService:
                 'method': 'single_shot_records',
                 'raw_response': raw_content[:2000],
                 'entry_ids': entry_ids,
-                'additional_info': additional_info,
-                'totals': totals,
                 's3_url': s3_url,
-                'document_summary': parsed.get('document_summary', ''),
             }
-            extraction.datapoint_matches = clean_records
-            extraction.refs = refs
+            extraction.datapoint_matches = clean_records  # legacy
+            extraction.refs = refs                         # legacy
+
+            # Build compact structured_data (ver=2)
+            extraction.structured_data = from_legacy_records(
+                records=validated_records,
+                refs=refs,
+                totals=totals,
+                additional_info=additional_info,
+                summary=parsed.get('document_summary', ''),
+            )
             extraction.processing_status = 'completed'
             extraction.processed_at = datetime.now(timezone.utc)
             self.db.commit()
@@ -213,10 +220,13 @@ ESG Data Hierarchy:
 
 Instructions:
 1. Examine the image carefully (receipt, invoice, bill, report, manifest, certificate, etc.)
-2. Extract ALL data that matches datapoints in the hierarchy
+2. Extract ALL data that matches datapoints in the hierarchy — map EVERY column/field in the document to the closest matching datapoint
 3. One document can have MULTIPLE categories, subcategories, and datapoints
 4. IMPORTANT: When data appears as a TABLE or LIST of similar items (e.g. multiple assets, multiple transactions), group related fields into RECORDS. Each record represents one row/item.
 5. Convert values to the units specified in the datapoint definition when possible
+6. FINANCIAL DATA: Extract ALL monetary values (rates, unit prices, total costs, amounts) as separate datapoint entries. Include the currency code (e.g. "USD", "THB") in the tags array.
+7. EMISSION DATA: Extract emission factors (e.g. tCO2e per unit) and calculated emissions (e.g. total tCO2e per line) as separate datapoint entries — do NOT combine them into a single value.
+8. CROSS-TABLE EXTRACTION: When a document has multiple tables (e.g. Table 1 = invoice details, Table 2 = GHG data), correlate rows across tables by matching identifiers (line numbers, product references) and merge all fields into a single record per item.
 
 Respond in JSON format ONLY:
 {{
@@ -234,7 +244,7 @@ Respond in JSON format ONLY:
                     "value": <value - numeric or text>,
                     "unit": "<unit>",
                     "confidence": <0.0-1.0>,
-                    "tags": ["<metadata tag>", "<e.g. Fuel volume consumed>", "<Transmission losses>"]
+                    "tags": ["<metadata tag>", "<currency code if monetary, e.g. USD>", "<description of what value represents>"]
                 }}
             ]
         }}
@@ -263,9 +273,11 @@ Respond in JSON format ONLY:
 }}
 
 Rules:
-- Group related fields into RECORDS (e.g. one asset = one record with fields: type, value, date, supplier)
+- Group related fields into RECORDS (e.g. one asset = one record with ALL its fields: type, quantity, rate, cost, emission factor, emissions, etc.)
 - Each record belongs to one category/subcategory
-- For each field, add relevant "tags" — metadata descriptors like "Fuel volume consumed", "Grid electricity", "Transmission & distribution losses" etc. that describe what the number represents
+- For each field, add relevant "tags" — metadata descriptors that describe what the number represents. For monetary values, ALWAYS include the currency code (e.g. "USD", "THB") as the first tag.
+- Extract EVERY column from EVERY table in the document — do not skip columns just because they seem secondary. Financial data (rates, costs, totals) and emission data (factors, calculated emissions) are equally important.
+- When a document has multiple tables about the same items, merge data from all tables into unified records.
 - additional_info: Extract ANY useful information from the document that doesn't fit into datapoints — methodology descriptions, footnotes, assumptions, certification info, reporting boundaries, data sources, etc.
 - Totals are summary numbers found at the bottom of tables
 - Minimum confidence: 0.3
@@ -422,6 +434,22 @@ Rules:
                 except Exception:
                     pass
 
+                # Build metadata from LLM response context
+                tags = f.get('tags', []) or []
+                entry_metadata = {
+                    'record_label': rec_label,
+                    'confidence': f.get('confidence', 0),
+                    'tags': tags,
+                }
+
+                # Detect currency from tags (e.g. ["USD", "rate per MT"])
+                currency = None
+                currency_codes = {'USD', 'THB', 'EUR', 'GBP', 'JPY', 'CNY', 'SGD', 'HKD', 'AUD', 'KRW'}
+                for tag in tags:
+                    if isinstance(tag, str) and tag.upper() in currency_codes:
+                        currency = tag.upper()
+                        break
+
                 entry = EsgDataEntry(
                     organization_id=org_id,
                     line_user_id=line_user_id,
@@ -433,6 +461,8 @@ Rules:
                     unit=unit,
                     calculated_tco2e=tco2e,
                     scope_tag=scope_tag,
+                    extra_data=entry_metadata,
+                    currency=currency,
                     evidence_image_url=s3_url,
                     file_key=s3_url,
                     entry_source=EntrySource.LINE_CHAT,
@@ -440,10 +470,10 @@ Rules:
                     entry_date=doc_date or datetime.now(timezone.utc).date(),
                     notes=notes_text,
                 )
-            self.db.add(entry)
-            self.db.flush()
-            entries.append(entry.to_dict())
-            entry_ids.append(entry.id)
+                self.db.add(entry)
+                self.db.flush()
+                entries.append(entry.to_dict())
+                entry_ids.append(entry.id)
 
         self.db.commit()
         return entries, entry_ids

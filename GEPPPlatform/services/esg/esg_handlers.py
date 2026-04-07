@@ -294,6 +294,10 @@ def handle_esg_routes(event: Dict[str, Any], data: Dict[str, Any], **params) -> 
             line_service = EsgLineService(db_session)
             return line_service.handle_webhook(raw_body, signature)
 
+        # ===== DATA WAREHOUSE =====
+        elif path == '/api/esg/data-warehouse/hierarchy' and method == 'GET':
+            return esg_service.get_data_warehouse_hierarchy(current_user_org_id)
+
         # ===== DATA HIERARCHY =====
         elif path == '/api/esg/categories' and method == 'GET':
             return esg_service.list_categories(query_params.get('pillar'))

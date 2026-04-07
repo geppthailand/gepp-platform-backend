@@ -3,6 +3,7 @@ ESG Data Entry Model - Data submissions via LINE Chat or LIFF
 """
 
 from sqlalchemy import Column, BigInteger, String, Text, Numeric, Date, ForeignKey
+from sqlalchemy.dialects.postgresql import JSONB
 from GEPPPlatform.models.base import Base, BaseModel
 
 
@@ -38,6 +39,8 @@ class EsgDataEntry(Base, BaseModel):
     file_name = Column(String(255), nullable=True)
     evidence_image_url = Column(String(500), nullable=True)
     scope_tag = Column(String(50), nullable=True)
+    extra_data = Column('metadata', JSONB, default=dict)
+    currency = Column(String(10), nullable=True)
     entry_source = Column(String(20), nullable=False, default=EntrySource.LIFF_MANUAL)
     status = Column(String(20), nullable=False, default=EntryStatus.PENDING_VERIFY)
 
@@ -61,6 +64,8 @@ class EsgDataEntry(Base, BaseModel):
             'file_name': self.file_name,
             'evidence_image_url': self.evidence_image_url,
             'scope_tag': self.scope_tag,
+            'metadata': self.extra_data or {},
+            'currency': self.currency,
             'entry_source': self.entry_source,
             'status': self.status,
             'is_active': self.is_active,

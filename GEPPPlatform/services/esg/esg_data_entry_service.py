@@ -59,6 +59,8 @@ class EsgDataEntryService:
             file_name=data.get('file_name'),
             evidence_image_url=data.get('evidence_image_url'),
             scope_tag=scope_tag,
+            extra_data=data.get('metadata', {}),
+            currency=data.get('currency'),
             entry_source=source_enum,
             status=EntryStatus.PENDING_VERIFY,
         )

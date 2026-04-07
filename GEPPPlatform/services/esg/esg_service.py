@@ -15,6 +15,7 @@ from ...models.esg.organization_setup import EsgOrganizationSetup
 from ...models.esg.platform_binding import EsgExternalPlatformBinding
 from ...models.esg.data_hierarchy import EsgDataCategory, EsgDataSubcategory, EsgDatapoint
 from ...models.esg.data_extraction import EsgOrganizationDataExtraction
+from ...models.esg.data_entries import EsgDataEntry
 
 logger = logging.getLogger(__name__)
 
@@ -470,3 +471,175 @@ class EsgService:
                 positioning['category_scores'][cat['name']] = cat.get('score', 0)
 
         return {'success': True, 'positioning': positioning}
+
+    def get_data_warehouse_hierarchy(self, organization_id: int) -> Dict[str, Any]:
+        """Full ESG hierarchy with entry counts and completeness for Data Warehouse page."""
+
+        # 1. Load hierarchy (3 queries)
+        categories = self.db.query(EsgDataCategory).filter(
+            EsgDataCategory.is_active == True,
+        ).order_by(EsgDataCategory.pillar, EsgDataCategory.sort_order).all()
+
+        subcategories = self.db.query(EsgDataSubcategory).filter(
+            EsgDataSubcategory.is_active == True,
+        ).order_by(EsgDataSubcategory.sort_order).all()
+
+        datapoints = self.db.query(EsgDatapoint).filter(
+            EsgDatapoint.is_active == True,
+        ).order_by(EsgDatapoint.sort_order).all()
+
+        # 2. Entry counts per datapoint (1 query)
+        entry_counts_raw = (
+            self.db.query(
+                EsgDataEntry.datapoint_id,
+                func.count(EsgDataEntry.id),
+                func.max(EsgDataEntry.value),
+                func.max(EsgDataEntry.unit),
+                func.sum(EsgDataEntry.calculated_tco2e),
+            )
+            .filter(
+                EsgDataEntry.organization_id == organization_id,
+                EsgDataEntry.is_active == True,
+                EsgDataEntry.datapoint_id.isnot(None),
+            )
+            .group_by(EsgDataEntry.datapoint_id)
+            .all()
+        )
+
+        entry_data = {}
+        for dp_id, cnt, latest_val, latest_unit, total_tco2e in entry_counts_raw:
+            entry_data[dp_id] = {
+                'count': cnt,
+                'latest_value': float(latest_val) if latest_val is not None else None,
+                'latest_unit': latest_unit,
+                'total_tco2e': float(total_tco2e) if total_tco2e else None,
+            }
+
+        # Total entries (including unlinked)
+        total_entries = self.db.query(func.count(EsgDataEntry.id)).filter(
+            EsgDataEntry.organization_id == organization_id,
+            EsgDataEntry.is_active == True,
+        ).scalar() or 0
+
+        # 3. Build maps
+        sub_by_cat = {}
+        for s in subcategories:
+            sub_by_cat.setdefault(s.esg_data_category_id, []).append(s)
+
+        dp_by_sub = {}
+        for d in datapoints:
+            dp_by_sub.setdefault(d.esg_data_subcategory_id, []).append(d)
+
+        # 4. Assemble nested hierarchy
+        pillar_names = {'E': ('Environment', 'สิ่งแวดล้อม'), 'S': ('Social', 'สังคม'), 'G': ('Governance', 'บรรษัทภิบาล')}
+        pillar_map = {}
+
+        for cat in categories:
+            p = cat.pillar
+            if p not in pillar_map:
+                pillar_map[p] = {
+                    'pillar': p,
+                    'name': pillar_names.get(p, (p, p))[0],
+                    'name_th': pillar_names.get(p, (p, p))[1],
+                    'categories': [],
+                    '_dp_total': 0, '_dp_filled': 0, '_entries': 0,
+                }
+
+            cat_subs = sub_by_cat.get(cat.id, [])
+            cat_dp_total = 0
+            cat_dp_filled = 0
+            cat_entries = 0
+            sub_list = []
+
+            for sc in cat_subs:
+                sc_dps = dp_by_sub.get(sc.id, [])
+                sc_dp_total = len(sc_dps)
+                sc_dp_filled = 0
+                sc_entries = 0
+                dp_list = []
+
+                for dp in sc_dps:
+                    ed = entry_data.get(dp.id, {})
+                    ec = ed.get('count', 0)
+                    has = ec > 0
+                    if has:
+                        sc_dp_filled += 1
+                    sc_entries += ec
+
+                    dp_list.append({
+                        'id': dp.id,
+                        'name': dp.name,
+                        'name_th': dp.name_th,
+                        'description': dp.description,
+                        'unit': dp.unit,
+                        'data_type': dp.data_type or 'numeric',
+                        'entry_count': ec,
+                        'latest_value': ed.get('latest_value'),
+                        'latest_tco2e': ed.get('total_tco2e'),
+                        'has_data': has,
+                    })
+
+                pct = round(sc_dp_filled / sc_dp_total * 100, 1) if sc_dp_total > 0 else 0
+                sub_list.append({
+                    'id': sc.id,
+                    'name': sc.name,
+                    'name_th': sc.name_th,
+                    'datapoint_count': sc_dp_total,
+                    'filled_datapoints': sc_dp_filled,
+                    'entry_count': sc_entries,
+                    'completeness_pct': pct,
+                    'datapoints': dp_list,
+                })
+
+                cat_dp_total += sc_dp_total
+                cat_dp_filled += sc_dp_filled
+                cat_entries += sc_entries
+
+            cat_pct = round(cat_dp_filled / cat_dp_total * 100, 1) if cat_dp_total > 0 else 0
+            pillar_map[p]['categories'].append({
+                'id': cat.id,
+                'name': cat.name,
+                'name_th': cat.name_th,
+                'subcategory_count': len(cat_subs),
+                'datapoint_count': cat_dp_total,
+                'filled_datapoints': cat_dp_filled,
+                'entry_count': cat_entries,
+                'completeness_pct': cat_pct,
+                'subcategories': sub_list,
+            })
+
+            pillar_map[p]['_dp_total'] += cat_dp_total
+            pillar_map[p]['_dp_filled'] += cat_dp_filled
+            pillar_map[p]['_entries'] += cat_entries
+
+        # 5. Finalize pillars
+        pillars = []
+        grand_dp = 0
+        grand_filled = 0
+        for pk in ['E', 'S', 'G']:
+            if pk in pillar_map:
+                pm = pillar_map[pk]
+                dt = pm.pop('_dp_total')
+                df = pm.pop('_dp_filled')
+                ec = pm.pop('_entries')
+                pm['category_count'] = len(pm['categories'])
+                pm['datapoint_count'] = dt
+                pm['filled_datapoints'] = df
+                pm['entry_count'] = ec
+                pm['completeness_pct'] = round(df / dt * 100, 1) if dt > 0 else 0
+                pillars.append(pm)
+                grand_dp += dt
+                grand_filled += df
+
+        return {
+            'success': True,
+            'pillars': pillars,
+            'totals': {
+                'categories': len(categories),
+                'subcategories': len(subcategories),
+                'datapoints': len(datapoints),
+                'filled_datapoints': grand_filled,
+                'entries': total_entries,
+                'completeness_pct': round(grand_filled / grand_dp * 100, 1) if grand_dp > 0 else 0,
+            },
+        }

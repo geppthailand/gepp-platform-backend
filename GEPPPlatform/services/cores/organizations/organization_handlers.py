@@ -29,9 +29,9 @@ def organization_routes(event: Dict[str, Any], context: Any, **params) -> Dict[s
 
     # CORS headers
     headers = {
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+        # 'Access-Control-Allow-Origin': '*',
+        # 'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+        # 'Access-Control-Allow-Headers': 'Content-Type, Authorization',
         'Content-Type': 'application/json'
     }
 

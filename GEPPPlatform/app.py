@@ -71,10 +71,16 @@ def main(event, context):
             path = raw_path
 
         # Handle CORS preflight
+        # Note: If API Gateway has CORS configured, it handles OPTIONS automatically
+        # and never forwards to Lambda. If OPTIONS reaches here, API Gateway CORS is
+        # not configured — so we handle it in Lambda.
         if http_method == "OPTIONS":
             return {
                 "statusCode": 200,
                 "headers": {
+                    "Access-Control-Allow-Origin": "*",
+                    "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+                    "Access-Control-Allow-Headers": "Content-Type, Authorization",
                     "Content-Type": "application/json",
                 },
                 "body": json.dumps({"message": "CORS preflight"})
@@ -96,6 +102,9 @@ def main(event, context):
                 return {
                     "statusCode": 400,
                     "headers": {
+                        "Access-Control-Allow-Origin": "*",
+                        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+                        "Access-Control-Allow-Headers": "Content-Type, Authorization",
                         "Content-Type": "application/json",
                     },
                     "body": json.dumps({"error": "Invalid JSON in request body"})
@@ -103,11 +112,11 @@ def main(event, context):
         
         results = {}
 
-        # CORS headers
+        # CORS headers — included on all responses so browser accepts them
         headers = {
-            # 'Access-Control-Allow-Origin': '*',
-            # 'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-            # 'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type, Authorization',
             'Content-Type': 'application/json'
         }
 
@@ -1111,6 +1120,9 @@ def main(event, context):
         return {
             "statusCode": 401,
             "headers": {
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type, Authorization",
                 "Content-Type": "application/json",
             },
             "body": json.dumps({
@@ -1118,12 +1130,15 @@ def main(event, context):
                 "message": str(auth_error)
             })
         }
-        
+
     except Exception as e:
         import traceback
         return {
             "statusCode": 500,
             "headers": {
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type, Authorization",
                 "Content-Type": "application/json",
             },
             "body": json.dumps({
