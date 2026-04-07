@@ -643,3 +643,221 @@ class EsgService:
                 'completeness_pct': round(grand_filled / grand_dp * 100, 1) if grand_dp > 0 else 0,
             },
         }
+
+    def get_datapoint_records(self, organization_id: int, datapoint_id: int) -> Dict[str, Any]:
+        """
+        Get entries for a datapoint, structured as:
+          documents[] → instances[] → attrs[]
+        Each document = one evidence source (invoice image, uploaded file, manual).
+        Each instance = one row/line item within that document.
+        Each attr = one datapoint value within that instance.
+        """
+        dp = self.db.query(EsgDatapoint).filter(
+            EsgDatapoint.id == datapoint_id, EsgDatapoint.is_active == True,
+        ).first()
+        if not dp:
+            return {'success': False, 'message': 'Datapoint not found'}
+
+        subcat = self.db.query(EsgDataSubcategory).filter(
+            EsgDataSubcategory.id == dp.esg_data_subcategory_id,
+        ).first()
+
+        # 1. Get all entries for this datapoint
+        entries = (
+            self.db.query(EsgDataEntry)
+            .filter(
+                EsgDataEntry.organization_id == organization_id,
+                EsgDataEntry.datapoint_id == datapoint_id,
+                EsgDataEntry.is_active == True,
+            )
+            .order_by(EsgDataEntry.entry_date.desc(), EsgDataEntry.created_date.desc())
+            .all()
+        )
+        if not entries:
+            return {
+                'success': True, 'datapoint': dp.to_dict(),
+                'subcategory': subcat.to_dict() if subcat else None,
+                'document_count': 0, 'documents': [],
+            }
+
+        # 2. Collect evidence keys and find matching extraction records
+        evidence_keys = list(set(
+            e.evidence_image_url or e.file_key
+            for e in entries if (e.evidence_image_url or e.file_key)
+        ))
+
+        # Lookup extraction records by raw_content (= s3 url)
+        extraction_map = {}  # evidence_key -> extraction
+        if evidence_keys:
+            extractions = (
+                self.db.query(EsgOrganizationDataExtraction)
+                .filter(
+                    EsgOrganizationDataExtraction.organization_id == organization_id,
+                    EsgOrganizationDataExtraction.raw_content.in_(evidence_keys),
+                )
+                .all()
+            )
+            for ext in extractions:
+                extraction_map[ext.raw_content] = ext
+
+        # 3. Get ALL sibling entries (same subcategory + same evidence sources)
+        all_siblings = []
+        if evidence_keys:
+            all_siblings = (
+                self.db.query(EsgDataEntry)
+                .filter(
+                    EsgDataEntry.organization_id == organization_id,
+                    EsgDataEntry.is_active == True,
+                    EsgDataEntry.subcategory_id == dp.esg_data_subcategory_id,
+                    EsgDataEntry.evidence_image_url.in_(evidence_keys),
+                )
+                .all()
+            )
+
+        # Add manual entries (no evidence)
+        manual_entries = [e for e in entries if not e.evidence_image_url and not e.file_key]
+
+        # 4. Datapoint name lookup
+        all_dp_ids = list(set(
+            [s.datapoint_id for s in all_siblings if s.datapoint_id] +
+            [datapoint_id] +
+            [e.datapoint_id for e in manual_entries if e.datapoint_id]
+        ))
+        dp_names = {}
+        if all_dp_ids:
+            dps_q = self.db.query(EsgDatapoint).filter(EsgDatapoint.id.in_(all_dp_ids)).all()
+            dp_names = {d.id: {'name': d.name, 'name_th': d.name_th, 'unit': d.unit, 'data_type': d.data_type} for d in dps_q}
+
+        # 5. Helper: extract record_label from entry
+        def _get_label(entry):
+            extra = entry.extra_data or {}
+            if extra.get('record_label'):
+                return extra['record_label']
+            if entry.notes and '[' in entry.notes and ']' in entry.notes:
+                return entry.notes.split('[')[1].split(']')[0]
+            return ''
+
+        # 6. Helper: build attr dict
+        def _build_attr(s):
+            dp_info = dp_names.get(s.datapoint_id, {})
+            return {
+                'entry_id': s.id,
+                'datapoint_id': s.datapoint_id,
+                'datapoint_name': dp_info.get('name', ''),
+                'datapoint_name_th': dp_info.get('name_th', ''),
+                'value': float(s.value) if s.value else None,
+                'unit': s.unit,
+                'data_type': dp_info.get('data_type', 'numeric'),
+                'is_current': s.datapoint_id == datapoint_id,
+                'tco2e': float(s.calculated_tco2e) if s.calculated_tco2e else None,
+            }
+
+        # 7. Group: evidence_key → label → [entries]
+        #    Level 1: document (evidence_key)
+        #    Level 2: instance (record_label within document)
+        doc_instance_map = {}  # evidence_key -> {label -> [entries]}
+        for s in all_siblings:
+            ev_key = s.evidence_image_url or s.file_key
+            label = _get_label(s)
+            doc_instance_map.setdefault(ev_key, {}).setdefault(label, []).append(s)
+
+        # 8. Build documents → instances → attrs
+        documents = []
+
+        # Process evidence-based documents
+        target_evidence_keys = list(set(
+            e.evidence_image_url or e.file_key for e in entries
+            if (e.evidence_image_url or e.file_key)
+        ))
+
+        for ev_key in target_evidence_keys:
+            if ev_key not in doc_instance_map:
+                continue
+
+            ext = extraction_map.get(ev_key)
+            refs = (ext.refs or {}) if ext else {}
+            dm = {}
+            if ext and ext.structured_data:
+                dm = ext.structured_data.get('dm', {})
+
+            doc_info = {
+                'extraction_id': ext.id if ext else None,
+                'evidence_url': ev_key,
+                'vendor': refs.get('vendor') or dm.get('vnd', ''),
+                'reference': refs.get('reference_number') or dm.get('ref', ''),
+                'document_date': refs.get('document_date') or dm.get('dt', ''),
+                'source': 'LINE_CHAT' if ext else 'upload',
+                'processed_at': str(ext.processed_at) if ext and ext.processed_at else None,
+                'instances': [],
+            }
+
+            label_groups = doc_instance_map[ev_key]
+            for label, siblings in label_groups.items():
+                # Only include instances that contain our target datapoint
+                has_target = any(s.datapoint_id == datapoint_id for s in siblings)
+                if not has_target:
+                    continue
+
+                # Deduplicate: one attr per datapoint_id
+                seen_dp = set()
+                attrs = []
+                target_entry = None
+                for s in sorted(siblings, key=lambda x: x.datapoint_id or 0):
+                    if s.datapoint_id in seen_dp:
+                        continue
+                    seen_dp.add(s.datapoint_id)
+                    attrs.append(_build_attr(s))
+                    if s.datapoint_id == datapoint_id:
+                        target_entry = s
+
+                if not target_entry:
+                    continue
+
+                doc_info['instances'].append({
+                    'label': label,
+                    'entry_date': str(target_entry.entry_date) if target_entry.entry_date else None,
+                    'status': target_entry.status,
+                    'this_value': float(target_entry.value) if target_entry.value else None,
+                    'this_unit': target_entry.unit,
+                    'attrs': attrs,
+                })
+
+            if doc_info['instances']:
+                documents.append(doc_info)
+
+        # Process manual entries (no evidence) — each is its own document+instance
+        for entry in manual_entries:
+            documents.append({
+                'extraction_id': None,
+                'evidence_url': None,
+                'vendor': '',
+                'reference': '',
+                'document_date': str(entry.entry_date) if entry.entry_date else '',
+                'source': 'LIFF_MANUAL',
+                'processed_at': None,
+                'instances': [{
+                    'label': _get_label(entry) or 'Manual entry',
+                    'entry_date': str(entry.entry_date) if entry.entry_date else None,
+                    'status': entry.status,
+                    'this_value': float(entry.value) if entry.value else None,
+                    'this_unit': entry.unit,
+                    'attrs': [_build_attr(entry)],
+                }],
+            })
+
+        # Sort documents by date desc
+        documents.sort(key=lambda d: d.get('document_date') or '', reverse=True)
+
+        return {
+            'success': True,
+            'datapoint': {
+                'id': dp.id, 'name': dp.name, 'name_th': dp.name_th,
+                'description': dp.description, 'unit': dp.unit, 'data_type': dp.data_type,
+            },
+            'subcategory': {
+                'id': subcat.id, 'name': subcat.name, 'name_th': subcat.name_th,
+            } if subcat else None,
+            'document_count': len(documents),
+            'instance_count': sum(len(d['instances']) for d in documents),
+            'documents': documents,
+        }

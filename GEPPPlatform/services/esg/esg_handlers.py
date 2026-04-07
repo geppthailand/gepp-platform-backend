@@ -298,6 +298,11 @@ def handle_esg_routes(event: Dict[str, Any], data: Dict[str, Any], **params) -> 
         elif path == '/api/esg/data-warehouse/hierarchy' and method == 'GET':
             return esg_service.get_data_warehouse_hierarchy(current_user_org_id)
 
+        elif '/api/esg/data-warehouse/datapoint/' in path and '/records' in path and method == 'GET':
+            # GET /api/esg/data-warehouse/datapoint/{id}/records
+            dp_id = int(path.split('/datapoint/')[1].split('/records')[0])
+            return esg_service.get_datapoint_records(current_user_org_id, dp_id)
+
         # ===== DATA HIERARCHY =====
         elif path == '/api/esg/categories' and method == 'GET':
             return esg_service.list_categories(query_params.get('pillar'))
