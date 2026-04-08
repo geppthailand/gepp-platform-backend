@@ -342,6 +342,9 @@ def handle_list_transactions(
         date_from = query_params.get('date_from')
         date_to = query_params.get('date_to')
         material_id = int(query_params['material_id']) if query_params.get('material_id') else None
+        # New multi-select material filter: material_ids (comma-separated)
+        material_ids_raw = query_params.get('material_ids')
+        material_ids = [int(x) for x in material_ids_raw.split(',') if x.strip()] if material_ids_raw else None
 
         # New multi-select filters: location_ids, tag_ids, tenant_ids (comma-separated)
         location_ids_raw = query_params.get('location_ids')
@@ -387,7 +390,8 @@ def handle_list_transactions(
             current_user_id=current_user_id,
             location_ids=location_ids,
             filter_tag_ids=filter_tag_ids,
-            filter_tenant_ids=filter_tenant_ids
+            filter_tenant_ids=filter_tenant_ids,
+            material_ids=material_ids
         )
 
         if result['success']:
