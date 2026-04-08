@@ -43,7 +43,14 @@ def handle_esg_routes(event: Dict[str, Any], data: Dict[str, Any], **params) -> 
 
     try:
         # ===== LIFF APIs (/api/esg/liff/*) =====
-        if path == '/api/esg/liff/summary' and method == 'GET':
+        if path == '/api/esg/liff/report' and method == 'GET':
+            from .esg_report_service import EsgReportService
+            report_svc = EsgReportService(db_session)
+            year = int(query_params.get('year', 0)) or None
+            view = query_params.get('view', 'executive')
+            return report_svc.get_report(current_user_org_id, year=year, view=view)
+
+        elif path == '/api/esg/liff/summary' and method == 'GET':
             dash = EsgDashboardService(db_session)
             return dash.get_summary(current_user_org_id)
 
