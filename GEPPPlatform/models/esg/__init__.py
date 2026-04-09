@@ -13,6 +13,16 @@ from .data_entries import EsgDataEntry, EntrySource, EntryStatus
 from .emission_factors import EmissionFactor
 from .esg_users import EsgUser
 from .esg_external_invitation_links import EsgExternalInvitationLink
+from .suppliers import EsgSupplier, SupplierTier, SupplierStatus
+from .supplier_magic_links import EsgSupplierMagicLink
+from .supplier_submissions import EsgSupplierSubmission, SubmissionStatus
+from .supplier_chasers import EsgSupplierChaser
+from .scope3_categories import EsgScope3Category
+from .scope3_entries import EsgScope3Entry
+from .cbam import EsgCbamProduct, EsgCbamReport
+from .macc import EsgMaccInitiative
+from .condition_rules import EsgConditionRule
+from .xbrl import EsgXbrlTag, EsgXbrlReportValue
 
 __all__ = [
     'EsgOrganizationSettings',
@@ -26,4 +36,14 @@ __all__ = [
     'EmissionFactor',
     'EsgUser',
     'EsgExternalInvitationLink',
+    'EsgSupplier', 'SupplierTier', 'SupplierStatus',
+    'EsgSupplierMagicLink',
+    'EsgSupplierSubmission', 'SubmissionStatus',
+    'EsgSupplierChaser',
+    'EsgScope3Category',
+    'EsgScope3Entry',
+    'EsgCbamProduct', 'EsgCbamReport',
+    'EsgMaccInitiative',
+    'EsgConditionRule',
+    'EsgXbrlTag', 'EsgXbrlReportValue',
 ]
