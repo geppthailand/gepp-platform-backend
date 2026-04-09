@@ -1587,7 +1587,8 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
         current_user_id: Optional[int] = None,
         location_ids: Optional[list] = None,
         filter_tag_ids: Optional[list] = None,
-        filter_tenant_ids: Optional[list] = None
+        filter_tenant_ids: Optional[list] = None,
+        material_ids: Optional[list] = None
     ) -> Dict[str, Any]:
         """
         List transactions with filtering and pagination
@@ -1709,8 +1710,18 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                 # Filter by destination_id in the destination_ids array
                 query = query.filter(Transaction.destination_ids.any(destination_id))
 
-            # Material filter - transactions that have at least one record with this material_id
-            if material_id is not None:
+            # Material filter - multi-select material_ids takes precedence over single material_id
+            if material_ids:
+                query = query.filter(
+                    exists().where(
+                        and_(
+                            TransactionRecord.created_transaction_id == Transaction.id,
+                            TransactionRecord.is_active == True,
+                            TransactionRecord.material_id.in_(material_ids)
+                        )
+                    )
+                )
+            elif material_id is not None:
                 query = query.filter(
                     exists().where(
                         and_(
