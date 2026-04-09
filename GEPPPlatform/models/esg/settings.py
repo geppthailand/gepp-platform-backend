@@ -44,6 +44,6 @@ class EsgOrganizationSettings(Base, BaseModel):
             'line_webhook_url': self.line_webhook_url,
             'line_rich_menu_id': self.line_rich_menu_id,
             'is_active': self.is_active,
-            'created_date': self.created_date.isoformat() if self.created_date else None,
-            'updated_date': self.updated_date.isoformat() if self.updated_date else None,
+            'created_date': str(self.created_date) if self.created_date else None,
+            'updated_date': str(self.updated_date) if self.updated_date else None,
         }

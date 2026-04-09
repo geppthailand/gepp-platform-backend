@@ -1,5 +1,5 @@
 """
-ESG Export Service - Generate Excel exports of collected data (UC 4.1)
+ESG Export Service — Generate Excel and PDF exports of collected data
 """
 
 import io
@@ -11,10 +11,6 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
 from GEPPPlatform.models.esg.data_entries import EsgDataEntry
-from GEPPPlatform.models.esg.data_hierarchy import (
-    EsgDataCategory as DataCategory,
-    EsgDataSubcategory,
-)
 
 
 class EsgExportService:
@@ -25,11 +21,19 @@ class EsgExportService:
         self.s3_client = boto3.client('s3')
 
     def export_to_excel(self, organization_id: int) -> dict:
-        """
-        Query all data entries for the organization, generate an .xlsx file,
-        upload to S3, and return a temporary download link.
-        """
-        entries = (
+        """Generate .xlsx and return download link."""
+        entries = self._query_entries(organization_id)
+        wb = self._create_excel_workbook(entries)
+        return self._upload_workbook(wb, organization_id, 'xlsx')
+
+    def export_to_pdf(self, organization_id: int) -> dict:
+        """Generate PDF report and return download link."""
+        entries = self._query_entries(organization_id)
+        pdf_bytes = self._create_pdf(entries, organization_id)
+        return self._upload_bytes(pdf_bytes, organization_id, 'pdf', 'application/pdf')
+
+    def _query_entries(self, organization_id: int) -> list:
+        return (
             self.session.query(EsgDataEntry)
             .filter(
                 EsgDataEntry.organization_id == organization_id,
@@ -39,26 +43,112 @@ class EsgExportService:
             .all()
         )
 
-        wb = self._create_workbook(entries)
+    def _create_excel_workbook(self, entries: list) -> Workbook:
+        wb = Workbook()
+        ws = wb.active
+        ws.title = 'ESG Data'
 
-        # Write to buffer
+        header_font = Font(bold=True, color='FFFFFF', size=11)
+        header_fill = PatternFill(start_color='76B900', end_color='76B900', fill_type='solid')
+        thin_border = Border(
+            left=Side(style='thin'), right=Side(style='thin'),
+            top=Side(style='thin'), bottom=Side(style='thin'),
+        )
+
+        headers = ['#', 'Source', 'Category', 'Value', 'Unit', 'tCO2e', 'Date', 'Scope', 'Status', 'Evidence', 'Notes']
+        for col_idx, header in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=col_idx, value=header)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = Alignment(horizontal='center')
+            cell.border = thin_border
+
+        for row_idx, entry in enumerate(entries, 2):
+            ws.cell(row=row_idx, column=1, value=row_idx - 1)
+            ws.cell(row=row_idx, column=2, value=entry.entry_source.value if entry.entry_source else '')
+            ws.cell(row=row_idx, column=3, value=entry.category or str(entry.category_id or ''))
+            ws.cell(row=row_idx, column=4, value=float(entry.value) if entry.value else 0)
+            ws.cell(row=row_idx, column=5, value=entry.unit or '')
+            ws.cell(row=row_idx, column=6, value=float(entry.calculated_tco2e) if entry.calculated_tco2e else '')
+            ws.cell(row=row_idx, column=7, value=str(entry.entry_date) if entry.entry_date else '')
+            ws.cell(row=row_idx, column=8, value=entry.scope_tag or '')
+            ws.cell(row=row_idx, column=9, value=entry.status.value if entry.status else '')
+            ws.cell(row=row_idx, column=10, value=entry.file_name or '')
+            ws.cell(row=row_idx, column=11, value=entry.notes or '')
+
+        for col in ws.columns:
+            max_len = max(len(str(cell.value or '')) for cell in col)
+            ws.column_dimensions[col[0].column_letter].width = min(max_len + 4, 40)
+
+        return wb
+
+    def _create_pdf(self, entries: list, organization_id: int) -> bytes:
+        """Generate a simple PDF report using reportlab."""
+        from reportlab.lib.pagesizes import A4, landscape
+        from reportlab.lib import colors as rl_colors
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+        from reportlab.lib.styles import getSampleStyleSheet
+
+        buffer = io.BytesIO()
+        doc = SimpleDocTemplate(buffer, pagesize=landscape(A4))
+        styles = getSampleStyleSheet()
+        elements = []
+
+        elements.append(Paragraph('GEPP ESG Data Report', styles['Title']))
+        elements.append(Paragraph(f'Organization ID: {organization_id} | Generated: {datetime.utcnow().strftime("%Y-%m-%d %H:%M")}', styles['Normal']))
+        elements.append(Spacer(1, 20))
+
+        # Summary
+        total_tco2e = sum(float(e.calculated_tco2e or 0) for e in entries)
+        elements.append(Paragraph(f'Total tCO2e: {total_tco2e:.4f}', styles['Heading2']))
+        elements.append(Paragraph(f'Total Entries: {len(entries)}', styles['Normal']))
+        elements.append(Spacer(1, 20))
+
+        # Table
+        data = [['#', 'Source', 'Category', 'Value', 'Unit', 'tCO2e', 'Date', 'Scope', 'Status']]
+        for i, entry in enumerate(entries[:100], 1):
+            data.append([
+                str(i),
+                entry.entry_source.value if entry.entry_source else '',
+                entry.category or '',
+                f'{float(entry.value):.2f}' if entry.value else '',
+                entry.unit or '',
+                f'{float(entry.calculated_tco2e):.4f}' if entry.calculated_tco2e else '-',
+                str(entry.entry_date) if entry.entry_date else '',
+                entry.scope_tag or '',
+                entry.status.value if entry.status else '',
+            ])
+
+        table = Table(data, repeatRows=1)
+        table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), rl_colors.HexColor('#76B900')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), rl_colors.white),
+            ('FONTSIZE', (0, 0), (-1, -1), 8),
+            ('GRID', (0, 0), (-1, -1), 0.5, rl_colors.grey),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [rl_colors.white, rl_colors.HexColor('#F5F5F5')]),
+        ]))
+        elements.append(table)
+
+        doc.build(elements)
+        return buffer.getvalue()
+
+    def _upload_workbook(self, wb: Workbook, organization_id: int, ext: str) -> dict:
         buffer = io.BytesIO()
         wb.save(buffer)
         buffer.seek(0)
+        content_type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        return self._upload_bytes(buffer.getvalue(), organization_id, ext, content_type)
 
-        # Upload to S3
+    def _upload_bytes(self, data: bytes, organization_id: int, ext: str, content_type: str) -> dict:
         timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
-        file_key = f'exports/org_{organization_id}/esg_data_{timestamp}_{uuid.uuid4().hex[:8]}.xlsx'
-        file_name = f'esg_data_{timestamp}.xlsx'
+        file_key = f'exports/org_{organization_id}/esg_report_{timestamp}_{uuid.uuid4().hex[:8]}.{ext}'
+        file_name = f'esg_report_{timestamp}.{ext}'
 
         self.s3_client.put_object(
-            Bucket=self.s3_bucket,
-            Key=file_key,
-            Body=buffer.getvalue(),
-            ContentType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            Bucket=self.s3_bucket, Key=file_key,
+            Body=data, ContentType=content_type,
         )
 
-        # Generate presigned download URL (expires in 1 hour)
         download_url = self.s3_client.generate_presigned_url(
             'get_object',
             Params={'Bucket': self.s3_bucket, 'Key': file_key},
@@ -66,51 +156,9 @@ class EsgExportService:
         )
 
         return {
+            'success': True,
             'download_url': download_url,
             'file_name': file_name,
+            'format': ext,
             'expires_in': 3600,
         }
-
-    def _create_workbook(self, entries: list) -> Workbook:
-        """Create a formatted Excel workbook from data entries."""
-        wb = Workbook()
-        ws = wb.active
-        ws.title = 'ESG Data'
-
-        # Header style
-        header_font = Font(bold=True, color='FFFFFF', size=11)
-        header_fill = PatternFill(start_color='76B900', end_color='76B900', fill_type='solid')
-        header_alignment = Alignment(horizontal='center', vertical='center')
-        thin_border = Border(
-            left=Side(style='thin'),
-            right=Side(style='thin'),
-            top=Side(style='thin'),
-            bottom=Side(style='thin'),
-        )
-
-        headers = ['#', 'Category', 'Subcategory', 'Value', 'Unit', 'Date', 'Scope', 'Notes', 'Evidence']
-        for col_idx, header in enumerate(headers, 1):
-            cell = ws.cell(row=1, column=col_idx, value=header)
-            cell.font = header_font
-            cell.fill = header_fill
-            cell.alignment = header_alignment
-            cell.border = thin_border
-
-        # Data rows
-        for row_idx, entry in enumerate(entries, 2):
-            ws.cell(row=row_idx, column=1, value=row_idx - 1)
-            ws.cell(row=row_idx, column=2, value=str(entry.category_id))
-            ws.cell(row=row_idx, column=3, value=str(entry.subcategory_id))
-            ws.cell(row=row_idx, column=4, value=float(entry.value) if entry.value else 0)
-            ws.cell(row=row_idx, column=5, value=entry.unit or '')
-            ws.cell(row=row_idx, column=6, value=str(entry.entry_date) if entry.entry_date else '')
-            ws.cell(row=row_idx, column=7, value=entry.scope_tag or '')
-            ws.cell(row=row_idx, column=8, value=entry.notes or '')
-            ws.cell(row=row_idx, column=9, value=entry.file_name or '')
-
-        # Auto-width columns
-        for col in ws.columns:
-            max_length = max(len(str(cell.value or '')) for cell in col)
-            ws.column_dimensions[col[0].column_letter].width = min(max_length + 4, 40)
-
-        return wb

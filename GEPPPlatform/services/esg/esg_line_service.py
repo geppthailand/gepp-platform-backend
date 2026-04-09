@@ -1,9 +1,9 @@
 """
-ESG LINE Service — LINE webhook handler for group-based ESG data collection
-Supports both group messages and 1:1 messages (backward compatible)
+ESG LINE Service — 1:1 Private Chat: Quick Capture & Notification
+Features: Smart OCR, Flex Messages, Confirm/Edit postbacks, tCO2e calculation
 """
 
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 from sqlalchemy.orm import Session
 import hashlib
 import hmac
@@ -11,672 +11,602 @@ import base64
 import json
 import logging
 import os
-import secrets
-import string
-from datetime import datetime
+from datetime import datetime, timezone
 
 from ...models.esg.settings import EsgOrganizationSettings
 from ...models.esg.line_messages import EsgLineMessage
-from ...models.esg.platform_binding import EsgExternalPlatformBinding
+from ...models.esg.data_entries import EsgDataEntry, EntrySource, EntryStatus
 from ...models.esg.data_extraction import EsgOrganizationDataExtraction
+from ...models.esg.esg_users import EsgUser
 from .esg_document_service import EsgDocumentService
+from .esg_carbon_service import EsgCarbonService
 
 logger = logging.getLogger(__name__)
 
+LIFF_BASE_URL = os.environ.get('LIFF_BASE_URL', 'https://esg.gepp.me')
+
+# Fallback LINE channel access token (long-lived) for replying when org settings are not configured
+LINE_FALLBACK_TOKEN = os.environ.get(
+    'LINE_CHANNEL_ACCESS_TOKEN',
+    'wyiQOUtCsDsHXQT8Iug8fk3mtPPIs54t52o/h6LKtVuNFryyaNcBLoZi6iona8TK0EyI/VBs5ntxXkGpDkQZZtt/99FM2dNF94ZdxmBle2vA4hTuqWz7Er6zBvnQUUi46BqxLwXk8hBsvw1EdMnw2gdB04t89/1O/w1cDnyilFU=',
+)
+
 
 class EsgLineService:
-    """Handles LINE webhook events for ESG data collection from groups and 1:1"""
+    """LINE webhook handler for 1:1 private chat — Quick Capture & Notification"""
 
     def __init__(self, db: Session):
         self.db = db
+        self.carbon = EsgCarbonService(db)
+
+    # ==========================================
+    # WEBHOOK ENTRY POINT
+    # ==========================================
 
     def handle_webhook(self, body: str, signature: str) -> Dict[str, Any]:
-        """Process LINE webhook events"""
+        logger.info(f"[WEBHOOK] Received body length={len(body or '')}, signature={signature[:20] if signature else 'none'}...")
         try:
             payload = json.loads(body) if isinstance(body, str) else body
         except json.JSONDecodeError:
+            logger.error(f"[WEBHOOK] Invalid JSON: {body[:200] if body else 'empty'}")
             return {'success': False, 'message': 'Invalid JSON payload'}
 
         events = payload.get('events', [])
-        if not events:
-            return {'success': True, 'message': 'No events to process'}
-
         destination = payload.get('destination', '')
+        logger.info(f"[WEBHOOK] destination={destination}, events={len(events)}")
+
+        if not events:
+            return {'success': True, 'message': 'No events'}
 
         results = []
-        for event in events:
+        for i, event in enumerate(events):
+            event_type = event.get('type', '?')
+            source = event.get('source', {})
+            logger.info(f"[WEBHOOK] Event[{i}]: type={event_type}, source_type={source.get('type')}, userId={source.get('userId', '?')[:12]}")
             result = self._process_event(event, body, signature, destination)
+            logger.info(f"[WEBHOOK] Event[{i}] result: {result}")
             results.append(result)
 
-        return {
-            'success': True,
-            'message': f'Processed {len(results)} events',
-            'results': results
-        }
+        return {'success': True, 'message': f'Processed {len(results)} events', 'results': results}
 
-    def _process_event(self, event: Dict[str, Any], raw_body: str, signature: str, destination: str) -> Dict[str, Any]:
-        """Process a single LINE event - handles both group and 1:1"""
+    def _process_event(self, event: Dict, raw_body: str, signature: str, destination: str) -> Dict:
+        source_type = event.get('source', {}).get('type', '')
+        if source_type in ('group', 'room'):
+            logger.info(f"[WEBHOOK] Skipping group/room event")
+            return {'status': 'skipped', 'reason': 'Group/room not supported'}
+
         event_type = event.get('type')
-        source = event.get('source', {})
-        source_type = source.get('type', '')
-
-        # Handle bot join event (invited to group)
-        if event_type == 'join' and source_type == 'group':
-            return self._handle_group_join(event, raw_body, signature, destination)
-
-        # Handle messages
-        if event_type != 'message':
-            return {'status': 'skipped', 'reason': f'Event type {event_type} not supported'}
-
-        # Route based on source type
-        if source_type == 'group':
-            return self._process_group_message(event, raw_body, signature, destination)
-        else:
-            # 1:1 message (backward compatible)
-            return self._process_direct_message(event, raw_body, signature, destination)
+        if event_type == 'follow':
+            return self._handle_follow(event, raw_body, signature, destination)
+        if event_type == 'postback':
+            return self._handle_postback(event, raw_body, signature, destination)
+        if event_type == 'message':
+            return self._handle_message(event, raw_body, signature, destination)
+        logger.info(f"[WEBHOOK] Unhandled event type: {event_type}")
+        return {'status': 'skipped'}
 
     # ==========================================
-    # GROUP HANDLING
+    # FOLLOW EVENT
     # ==========================================
 
-    def _handle_group_join(self, event: Dict[str, Any], raw_body: str, signature: str, destination: str) -> Dict[str, Any]:
-        """Handle bot being invited to a LINE group"""
-        source = event.get('source', {})
-        group_id = source.get('groupId', '')
+    def _handle_follow(self, event: Dict, raw_body: str, signature: str, destination: str) -> Dict:
+        org = self._find_org(destination)
+        channel_token = getattr(org, 'line_channel_token', None) or LINE_FALLBACK_TOKEN
+        logger.info(f"[FOLLOW] userId={event.get('source', {}).get('userId', '?')[:12]}, org={org is not None}")
+
+        liff_url = LIFF_BASE_URL
+
+        welcome = {
+            'type': 'flex',
+            'altText': 'ยินดีต้อนรับสู่ GEPP ESG!',
+            'contents': {
+                'type': 'bubble',
+                'body': {
+                    'type': 'box', 'layout': 'vertical',
+                    'contents': [
+                        {'type': 'text', 'text': 'GEPP ESG', 'weight': 'bold', 'size': 'xl', 'color': '#2d6a4f'},
+                        {'type': 'text', 'text': 'ยินดีต้อนรับ! เริ่มต้นใช้งานโดยขอ invitation code จากผู้ดูแลองค์กร แล้วกดปุ่มด้านล่างเพื่อเข้าร่วม', 'wrap': True, 'size': 'sm', 'margin': 'lg', 'color': '#666666'},
+                        {'type': 'separator', 'margin': 'lg'},
+                        {'type': 'text', 'text': 'หลังเข้าร่วมแล้ว คุณสามารถ:', 'size': 'xs', 'color': '#999999', 'margin': 'lg'},
+                        {'type': 'text', 'text': '📸 ส่งรูปบิล → AI คำนวณ tCO₂e\n📝 พิมพ์ข้อมูล → คำนวณอัตโนมัติ\n📊 ดู Dashboard ภาพรวม', 'size': 'xs', 'color': '#999999', 'margin': 'sm', 'wrap': True},
+                    ],
+                },
+                'footer': {
+                    'type': 'box', 'layout': 'vertical', 'spacing': 'sm',
+                    'contents': [
+                        {'type': 'button', 'action': {'type': 'uri', 'label': 'เข้าร่วมองค์กร', 'uri': f'{liff_url}/liff'}, 'style': 'primary', 'color': '#2d6a4f'},
+                    ],
+                },
+            },
+        }
+        self._send_reply_raw(channel_token, event.get('replyToken', ''), [welcome])
+        return {'status': 'success', 'type': 'follow'}
+
+    # ==========================================
+    # POSTBACK (Rich Menu + Confirm/Edit buttons)
+    # ==========================================
+
+    def _handle_postback(self, event: Dict, raw_body: str, signature: str, destination: str) -> Dict:
+        org = self._find_org(destination)
+        channel_token = getattr(org, 'line_channel_token', None) or LINE_FALLBACK_TOKEN
+
+        postback_data = event.get('postback', {}).get('data', '')
         reply_token = event.get('replyToken', '')
+        params = dict(p.split('=', 1) for p in postback_data.split('&') if '=' in p)
+        action = params.get('action', '')
+        logger.info(f"[POSTBACK] action={action}, params={params}")
 
-        if not group_id:
-            return {'status': 'error', 'reason': 'No group ID in join event'}
+        if action == 'confirm' and params.get('entry_id'):
+            return self._confirm_entry(int(params['entry_id']), org, reply_token)
 
-        # Find binding by destination (LINE bot user ID / channel)
-        binding = self._find_binding_by_destination(destination)
-        if not binding:
-            logger.warning(f"No binding found for destination: {destination}")
-            return {'status': 'error', 'reason': 'No platform binding found'}
+        if action == 'confirm_all' and params.get('extraction_id'):
+            return self._confirm_all_entries(int(params['extraction_id']), channel_token, reply_token)
 
-        # Verify signature
-        channel_secret = (binding.auth_json or {}).get('channel_secret', '')
-        if not self._verify_signature(raw_body, signature, channel_secret):
-            return {'status': 'error', 'reason': 'Signature verification failed'}
+        if action == 'edit' and params.get('entry_id'):
+            edit_url = f'{LIFF_BASE_URL}/liff/app/entry?edit={params["entry_id"]}'
+            self._send_text_reply(channel_token, reply_token, f'แก้ไขข้อมูล:\n{edit_url}')
+            return {'status': 'success', 'type': 'edit_redirect'}
 
-        # Generate pairing code
-        pairing_code = self._generate_pairing_code()
+        uri_actions = {
+            'data_entry': f'{LIFF_BASE_URL}/data-entry',
+            'history': f'{LIFF_BASE_URL}/history',
+            'export': f'{LIFF_BASE_URL}/history',
+            'dashboard': f'{LIFF_BASE_URL}/dashboard',
+        }
+        if action in uri_actions:
+            self._send_text_reply(org.line_channel_token, reply_token, f'เปิดหน้า:\n{uri_actions[action]}')
+            return {'status': 'success', 'type': f'postback_{action}'}
 
-        # Get group name from LINE API
-        channel_token = (binding.auth_json or {}).get('channel_token', '')
-        group_name = self._get_group_name(group_id, channel_token) or f'Group {group_id[:8]}'
+        if action == 'help':
+            self._send_text_reply(org.line_channel_token, reply_token, self._help_text())
+            return {'status': 'success', 'type': 'help'}
 
-        # Store pending group in authorized_groups
-        groups = list(binding.authorized_groups or [])
+        return {'status': 'skipped'}
 
-        # Check if already exists
-        existing = next((g for g in groups if g.get('group_id') == group_id), None)
-        if existing:
-            existing['pairing_code'] = pairing_code
-            existing['status'] = 'pending'
-            existing['group_name'] = group_name
-        else:
-            groups.append({
-                'group_id': group_id,
-                'group_name': group_name,
-                'pairing_code': pairing_code,
-                'status': 'pending',
-                'joined_at': datetime.utcnow().isoformat(),
-            })
+    def _confirm_entry(self, entry_id: int, org, reply_token: str) -> Dict:
+        entry = self.db.query(EsgDataEntry).filter(
+            EsgDataEntry.id == entry_id, EsgDataEntry.is_active == True,
+        ).first()
+        if not entry:
+            self._send_text_reply(org.line_channel_token, reply_token, 'ไม่พบข้อมูลนี้')
+            return {'status': 'error', 'reason': 'Entry not found'}
 
-        binding.authorized_groups = groups
-        self.db.flush()
+        entry.status = EntryStatus.VERIFIED
+        self.db.commit()
+        token = getattr(org, 'line_channel_token', None) or LINE_FALLBACK_TOKEN
+        self._send_text_reply(token, reply_token, f'ยืนยันแล้ว! {entry.category} {entry.value} {entry.unit} = {entry.calculated_tco2e or "-"} tCO2e')
+        return {'status': 'success', 'type': 'confirmed', 'entry_id': entry_id}
 
-        # Send pairing code to group
-        reply_msg = (
-            f'GEPP ESG Bot\n\n'
-            f'Pairing Code: {pairing_code}\n\n'
-            f'Please enter this code in GEPP ESG Settings to connect this group to your organization.'
-        )
-        self._send_reply(channel_token, reply_token, reply_msg)
+    def _confirm_all_entries(self, extraction_id: int, token: str, reply_token: str) -> Dict:
+        """Confirm all entries from an extraction at once."""
+        extraction = self.db.query(EsgOrganizationDataExtraction).filter(
+            EsgOrganizationDataExtraction.id == extraction_id,
+        ).first()
+        if not extraction:
+            self._send_text_reply(token, reply_token, 'ไม่พบข้อมูลนี้')
+            return {'status': 'error'}
 
-        return {'status': 'success', 'type': 'group_join', 'group_id': group_id, 'pairing_code': pairing_code}
+        entry_ids = (extraction.extractions or {}).get('entry_ids', [])
+        if not entry_ids:
+            self._send_text_reply(token, reply_token, 'ไม่พบรายการที่จะยืนยัน')
+            return {'status': 'error'}
 
-    def _process_group_message(self, event: Dict[str, Any], raw_body: str, signature: str, destination: str) -> Dict[str, Any]:
-        """Process a message from a LINE group"""
-        source = event.get('source', {})
-        group_id = source.get('groupId', '')
-        user_id = source.get('userId', '')
+        count = self.db.query(EsgDataEntry).filter(
+            EsgDataEntry.id.in_(entry_ids),
+            EsgDataEntry.is_active == True,
+        ).update({EsgDataEntry.status: EntryStatus.VERIFIED}, synchronize_session='fetch')
+        self.db.commit()
+
+        self._send_text_reply(token, reply_token, f'✅ ยืนยันแล้ว {count} รายการ')
+        return {'status': 'success', 'type': 'confirm_all', 'count': count}
+
+    # ==========================================
+    # MESSAGE HANDLING
+    # ==========================================
+
+    def _handle_message(self, event: Dict, raw_body: str, signature: str, destination: str) -> Dict:
+        org = self._find_org(destination)
+        logger.info(f"[MSG] org found={org is not None}, org_id={getattr(org, 'organization_id', '?')}")
+
         message = event.get('message', {})
-        message_type = message.get('type', '')
+        msg_type = message.get('type', '')
         reply_token = event.get('replyToken', '')
+        user_id = event.get('source', {}).get('userId', '')
+        logger.info(f"[MSG] type={msg_type}, userId={user_id[:12] if user_id else '?'}, text={message.get('text', '')[:50] if msg_type == 'text' else '-'}")
 
-        # Find binding with this group paired
-        binding = self._find_binding_by_group(group_id)
-        if not binding:
-            return {'status': 'skipped', 'reason': 'Group not paired'}
+        # Determine reply token — use org settings or fallback
+        channel_token = getattr(org, 'line_channel_token', None) or LINE_FALLBACK_TOKEN
 
-        # Verify signature
-        channel_secret = (binding.auth_json or {}).get('channel_secret', '')
-        if not self._verify_signature(raw_body, signature, channel_secret):
-            return {'status': 'error', 'reason': 'Signature verification failed'}
+        # Signature verification (skip if no org settings — use fallback token flow)
+        if org and org.line_channel_secret:
+            if not self._verify_sig(raw_body, signature, org.line_channel_secret):
+                logger.warning(f"[MSG] Signature verification failed")
+                return {'status': 'error', 'reason': 'signature failed'}
+        else:
+            logger.warning(f"[MSG] No org channel secret — skipping signature verification, using fallback token")
 
-        channel_token = (binding.auth_json or {}).get('channel_token', '')
+        # Check if this LINE user is linked to an org via esg_users
+        esg_user = self.db.query(EsgUser).filter(
+            EsgUser.platform == 'line',
+            EsgUser.platform_user_id == user_id,
+            EsgUser.organization_id.isnot(None),
+            EsgUser.is_active == True,
+        ).first()
 
-        # Get group name from binding
-        group_name = ''
-        for g in (binding.authorized_groups or []):
-            if g.get('group_id') == group_id:
-                group_name = g.get('group_name', '')
-                break
+        if not esg_user:
+            # User not linked — reply with instruction to join org first
+            liff_url = LIFF_BASE_URL
+            self._send_reply_raw(channel_token, reply_token, [{
+                'type': 'flex',
+                'altText': 'กรุณาเข้าร่วมองค์กรก่อนใช้งาน',
+                'contents': {
+                    'type': 'bubble',
+                    'body': {
+                        'type': 'box', 'layout': 'vertical', 'spacing': 'md',
+                        'contents': [
+                            {'type': 'text', 'text': 'GEPP ESG', 'weight': 'bold', 'size': 'lg', 'color': '#2d6a4f'},
+                            {'type': 'text', 'text': 'คุณยังไม่ได้เชื่อมต่อกับองค์กร', 'size': 'sm', 'color': '#666666', 'margin': 'md', 'wrap': True},
+                            {'type': 'text', 'text': 'กรุณาขอ invitation code จากผู้ดูแลองค์กร แล้วกดปุ่มด้านล่างเพื่อเข้าร่วม', 'size': 'xs', 'color': '#999999', 'margin': 'sm', 'wrap': True},
+                        ],
+                    },
+                    'footer': {
+                        'type': 'box', 'layout': 'vertical', 'spacing': 'sm',
+                        'contents': [
+                            {'type': 'button', 'action': {'type': 'uri', 'label': 'เข้าร่วมองค์กร', 'uri': f'{liff_url}/liff'}, 'style': 'primary', 'color': '#2d6a4f'},
+                        ],
+                    },
+                },
+            }])
+            return {'status': 'needs_org', 'line_user_id': user_id}
 
-        # Create LINE message record
         line_msg = EsgLineMessage(
-            organization_id=binding.organization_id,
+            organization_id=esg_user.organization_id,
             line_message_id=message.get('id', ''),
             line_user_id=user_id,
             line_reply_token=reply_token,
-            message_type=message_type,
+            message_type=msg_type,
             processing_status='received',
         )
         self.db.add(line_msg)
         self.db.flush()
 
-        # Determine input type
-        input_type = self._map_message_type(message_type)
+        # Use esg_user.organization_id (safe even if org settings is None)
+        org_id = esg_user.organization_id
 
-        # Create extraction record
+        if msg_type == 'text':
+            return self._process_text(line_msg, event, org_id, channel_token)
+        elif msg_type == 'image':
+            return self._process_image(line_msg, message, org_id, channel_token)
+        elif msg_type == 'file':
+            return self._process_file(line_msg, message, org_id, channel_token)
+        else:
+            self._send_text_reply(channel_token, reply_token, 'ส่งรูปบิล, ไฟล์ PDF หรือพิมพ์ข้อมูลได้เลยครับ')
+            return {'status': 'skipped'}
+
+    # ---- TEXT: AI Intent Extraction → tCO2e ----
+
+    def _process_text(self, line_msg, event: Dict, org_id: int, token: str) -> Dict:
+        text = event.get('message', {}).get('text', '').strip()
+        text_lower = text.lower()
+
+        if text_lower in ('help', 'ช่วย', 'วิธีใช้', '?'):
+            self._send_text_reply(token, line_msg.line_reply_token, self._help_text())
+            line_msg.processing_status = 'completed'
+            self.db.flush()
+            return {'status': 'success', 'type': 'help'}
+
+        if text_lower in ('status', 'สถานะ', 'สรุป', 'summary'):
+            self._send_text_reply(token, line_msg.line_reply_token,
+                                  f'ดูสรุปภาพรวม:\n{LIFF_BASE_URL}/liff/app/esg')
+            line_msg.processing_status = 'completed'
+            self.db.flush()
+            return {'status': 'success', 'type': 'status'}
+
+        # AI text extraction → create entry → tCO2e → Flex reply
         extraction = EsgOrganizationDataExtraction(
-            organization_id=binding.organization_id,
-            channel='line',
-            type=input_type,
-            source_group_id=group_id,
-            source_group_name=group_name,
-            source_user_id=user_id,
-            source_message_id=message.get('id', ''),
-            processing_status='pending',
+            organization_id=org_id,
+            channel='line', type='text',
+            source_user_id=line_msg.line_user_id,
+            source_message_id=line_msg.line_message_id,
+            raw_content=text, processing_status='pending',
         )
-
-        if message_type == 'text':
-            extraction.raw_content = message.get('text', '')
-        elif message_type in ('image', 'file'):
-            try:
-                file_record = self._download_and_store(message, binding, group_id)
-                if file_record:
-                    extraction.file_id = file_record.get('id')
-            except Exception as e:
-                logger.error(f"Failed to download/store file: {e}")
-                extraction.processing_status = 'failed'
-                extraction.error_message = str(e)
-
         self.db.add(extraction)
         self.db.flush()
 
-        # Trigger cascade extraction
-        if extraction.processing_status != 'failed':
-            try:
-                from .esg_extraction_service import EsgExtractionService
-                extract_svc = EsgExtractionService(self.db)
-                extract_svc.process_extraction(extraction.id)
-            except Exception as e:
-                logger.error(f"Cascade extraction failed: {e}")
-                extraction.processing_status = 'failed'
-                extraction.error_message = str(e)
-                self.db.flush()
+        try:
+            from .esg_extraction_service import EsgExtractionService
+            svc = EsgExtractionService(self.db)
+            svc.process_extraction(extraction.id)
+            self.db.refresh(extraction)
+        except Exception as e:
+            logger.error(f"Text extraction failed: {e}")
 
-        # Only reply if bot is @mentioned
-        is_mentioned = self._is_bot_mentioned(event, binding)
-        if is_mentioned and extraction.processing_status == 'completed':
-            reply = self._format_extraction_reply(extraction)
-            self._send_reply(channel_token, reply_token, reply)
-            line_msg.reply_sent = True
-            line_msg.reply_message = reply
+        entry = self._create_entry_from_extraction(extraction, org_id, line_msg.line_user_id)
+        if entry:
+            flex = self._build_result_flex(entry)
+            self._send_reply_raw(token, line_msg.line_reply_token, [flex])
+        else:
+            self._send_text_reply(token, line_msg.line_reply_token,
+                                  'ได้รับข้อมูลแล้ว แต่ไม่สามารถสกัดตัวเลขได้ กรุณากรอกผ่าน LIFF')
 
         line_msg.processing_status = extraction.processing_status
-        line_msg.document_id = extraction.file_id
         self.db.flush()
+        return {'status': 'success', 'type': 'text_extraction', 'entry_id': entry['id'] if entry else None}
 
-        return {'status': 'success', 'extraction_id': extraction.id}
+    # ---- IMAGE: OCR → tCO2e → Flex Message ----
 
-    # ==========================================
-    # 1:1 MESSAGE HANDLING (backward compatible)
-    # ==========================================
+    def _process_image(self, line_msg, message: Dict, org_id: int, token: str) -> Dict:
+        try:
+            message_id = message.get('id')
+            logger.info(f"----------- IMAGE PROCESSING START -----------")
+            logger.info(f"[IMG] msg_id={message_id}, org_id={org_id}, user={line_msg.line_user_id[:12] if line_msg.line_user_id else '?'}")
 
-    def _process_direct_message(self, event: Dict[str, Any], raw_body: str, signature: str, destination: str) -> Dict[str, Any]:
-        """Handle direct 1:1 messages (backward compatible)"""
-        message = event.get('message', {})
-        message_type = message.get('type')
-        reply_token = event.get('replyToken')
-        source = event.get('source', {})
-        user_id = source.get('userId', '')
+            image_data = self._download_content(message_id, token)
+            if not image_data:
+                logger.error(f"[IMG] Failed to download image from LINE")
+                self._send_text_reply(token, line_msg.line_reply_token, 'ดาวน์โหลดรูปไม่สำเร็จ ลองใหม่อีกครั้ง')
+                return {'status': 'error'}
+            logger.info(f"[IMG] Downloaded {len(image_data)} bytes")
 
-        # Find organization by LINE channel
-        org_settings = self._find_org_by_line(destination, user_id)
-        if not org_settings:
-            logger.warning(f"No organization found for LINE destination: {destination}")
-            return {'status': 'error', 'reason': 'Organization not found'}
+            s3_url = self._upload_s3(image_data, org_id, message_id, 'image/jpeg',
+                                     line_user_id=line_msg.line_user_id)
+            logger.info(f"[IMG] Uploaded to S3: {s3_url[:80]}")
 
-        # Verify signature
-        if not self._verify_signature(raw_body, signature, org_settings.line_channel_secret):
-            return {'status': 'error', 'reason': 'Signature verification failed'}
+            # Use Gemini vision pipeline for full extraction
+            logger.info(f"[IMG] Starting Gemini extraction...")
+            from .esg_image_extraction_service import EsgImageExtractionService
+            extraction_svc = EsgImageExtractionService(self.db)
+            result = extraction_svc.extract_from_image(
+                s3_url=s3_url,
+                org_id=org_id,
+                line_user_id=line_msg.line_user_id,
+                message_id=line_msg.line_message_id,
+            )
+            logger.info(f"[IMG] Extraction result: success={result.get('success')}, matches={result.get('match_count', 0)}, entries={len(result.get('entries', []))}")
 
-        # Create LINE message record
-        line_msg = EsgLineMessage(
-            organization_id=org_settings.organization_id,
-            line_message_id=message.get('id', ''),
-            line_user_id=user_id,
-            line_reply_token=reply_token,
-            message_type=message_type,
-            processing_status='received',
-        )
-        self.db.add(line_msg)
-        self.db.flush()
+            if result.get('success') and result.get('entries'):
+                logger.info(f"[IMG] Building Flex card for {len(result['entries'])} entries, {len(result.get('records', []))} records...")
+                flex = extraction_svc.build_result_flex_card(
+                    entries=result['entries'],
+                    refs=result.get('refs', {}),
+                    extraction_id=result['extraction_id'],
+                    document_summary=result.get('document_summary', ''),
+                    records=result.get('records', []),
+                )
+                logger.info(f"[IMG] Flex card built, sending reply...")
+                self._send_reply_raw(token, line_msg.line_reply_token, [flex])
+                logger.info(f"[IMG] Reply sent!")
+            else:
+                err_msg = result.get('message', 'กรุณาถ่ายใหม่ให้ชัดขึ้น')
+                logger.info(f"[IMG] No entries, sending error: {err_msg}")
+                self._send_text_reply(token, line_msg.line_reply_token,
+                                      f"ไม่สามารถอ่านข้อมูลจากรูปได้\n{err_msg}")
 
-        if message_type == 'image':
-            return self._process_image_message(line_msg, org_settings, message)
-        elif message_type == 'text':
-            return self._process_text_message(line_msg, event, org_settings)
-        else:
             line_msg.processing_status = 'completed'
             self.db.flush()
-            return {'status': 'skipped', 'reason': f'Message type {message_type} not supported'}
-
-    def _process_image_message(self, line_msg: EsgLineMessage, org_settings: EsgOrganizationSettings, message: Dict) -> Dict[str, Any]:
-        """Download image from LINE, upload to S3, trigger classification"""
-        try:
-            line_msg.processing_status = 'downloading'
-            self.db.flush()
-
-            message_id = message.get('id')
-            image_data = self._download_line_content(message_id, org_settings.line_channel_token)
-
-            if not image_data:
-                line_msg.processing_status = 'failed'
-                line_msg.error_message = 'Failed to download image from LINE'
-                self.db.flush()
-                return {'status': 'error', 'reason': 'Failed to download image'}
-
-            line_msg.processing_status = 'processing'
-            self.db.flush()
-
-            s3_url = self._upload_to_s3(image_data, org_settings.organization_id, message_id)
-
-            doc_service = EsgDocumentService(self.db)
-            result = doc_service.upload_and_classify(
-                organization_id=org_settings.organization_id,
-                file_data={
-                    'file_name': f'line_{message_id}.jpg',
-                    'file_url': s3_url,
-                    'file_type': 'image/jpeg',
-                    'source': 'line',
-                },
-            )
-
-            if result.get('success'):
-                doc = result['document']
-                line_msg.document_id = doc.get('id')
-                line_msg.processing_status = 'completed'
-
-                self._send_reply(
-                    org_settings.line_channel_token,
-                    line_msg.line_reply_token,
-                    self._format_classification_reply(doc)
-                )
-                line_msg.reply_sent = True
-                line_msg.reply_message = 'Classification result sent'
-            else:
-                line_msg.processing_status = 'failed'
-                line_msg.error_message = result.get('message', 'Classification failed')
-
-            self.db.flush()
-            return {'status': 'success', 'document_id': line_msg.document_id}
+            logger.info(f"----------- IMAGE PROCESSING DONE -----------")
+            return {
+                'status': 'success', 'type': 'image',
+                'extraction_id': result.get('extraction_id'),
+                'entry_count': result.get('match_count', 0),
+            }
 
         except Exception as e:
-            logger.error(f"Error processing LINE image: {str(e)}")
+            import traceback
+            tb = traceback.format_exc()
+            logger.error(f"----------- IMAGE PROCESSING ERROR -----------")
+            logger.error(f"[IMG] Exception: {type(e).__name__}: {e}")
+            logger.error(f"[IMG] Traceback:\n{tb}")
+            logger.error(f"-----------------------------------------------")
+            try:
+                self._send_text_reply(token, line_msg.line_reply_token,
+                                      'เกิดข้อผิดพลาดในการประมวลผลรูป กรุณาลองใหม่')
+            except Exception:
+                pass
             line_msg.processing_status = 'failed'
-            line_msg.error_message = str(e)
             self.db.flush()
             return {'status': 'error', 'reason': str(e)}
 
-    def _process_text_message(self, line_msg: EsgLineMessage, event: Dict, org_settings: EsgOrganizationSettings) -> Dict[str, Any]:
-        """Handle text messages (help, status queries)"""
-        text = event.get('message', {}).get('text', '').strip().lower()
+    # ---- FILE: PDF/Excel → classify → tCO2e ----
 
-        if text in ('help', 'ช่วย', 'วิธีใช้'):
-            reply = (
-                'GEPP ESG Document Upload\n\n'
-                'Send document photos (weighbridge tickets, invoices, reports) to:\n'
-                '- AI classifies ESG category\n'
-                '- Extract waste data + calculate CO2e\n\n'
-                'Supported: Environment, Social, Governance documents'
+    def _process_file(self, line_msg, message: Dict, org_id: int, token: str) -> Dict:
+        file_size = message.get('fileSize', 0)
+        if file_size > 5 * 1024 * 1024:
+            self._send_text_reply(token, line_msg.line_reply_token, 'ไฟล์ใหญ่เกิน 5MB กรุณาลดขนาดไฟล์')
+            return {'status': 'error', 'reason': 'File too large'}
+
+        try:
+            message_id = message.get('id')
+            file_name = message.get('fileName', f'line_{message_id}')
+            content_type = self._guess_type(file_name)
+            file_data = self._download_content(message_id, token)
+            if not file_data:
+                return {'status': 'error'}
+
+            s3_url = self._upload_s3(file_data, org_id, message_id, content_type,
+                                     line_user_id=line_msg.line_user_id)
+
+            doc_svc = EsgDocumentService(self.db)
+            result = doc_svc.upload_and_classify(
+                organization_id=org_id,
+                file_data={'file_name': file_name, 'file_url': s3_url, 'file_type': content_type, 'source': 'line'},
             )
-        else:
-            reply = 'Please send ESG document photos for AI classification and data extraction.\nType "help" for instructions.'
 
-        self._send_reply(org_settings.line_channel_token, line_msg.line_reply_token, reply)
-        line_msg.processing_status = 'completed'
-        line_msg.reply_sent = True
-        line_msg.reply_message = reply
-        self.db.flush()
+            doc = result.get('document', {}) if result.get('success') else {}
+            self._send_text_reply(token, line_msg.line_reply_token,
+                                  f'ได้รับเอกสาร: {file_name}\nหมวด: {doc.get("esg_category", "processing")}\nดูรายละเอียดใน LIFF')
 
-        return {'status': 'success', 'type': 'text_reply'}
-
-    # ==========================================
-    # LOOKUP METHODS
-    # ==========================================
-
-    def _find_binding_by_group(self, group_id: str) -> Optional[EsgExternalPlatformBinding]:
-        """Find platform binding that has this group paired in authorized_groups"""
-        bindings = self.db.query(EsgExternalPlatformBinding).filter(
-            EsgExternalPlatformBinding.channel == 'line',
-            EsgExternalPlatformBinding.is_active == True
-        ).all()
-
-        for binding in bindings:
-            groups = binding.authorized_groups or []
-            for g in groups:
-                if g.get('group_id') == group_id and g.get('status') == 'paired':
-                    return binding
-        return None
-
-    def _find_binding_by_destination(self, destination: str) -> Optional[EsgExternalPlatformBinding]:
-        """Find platform binding by LINE destination (bot user ID or channel_id)"""
-        bindings = self.db.query(EsgExternalPlatformBinding).filter(
-            EsgExternalPlatformBinding.channel == 'line',
-            EsgExternalPlatformBinding.is_active == True
-        ).all()
-
-        for binding in bindings:
-            auth = binding.auth_json or {}
-            if auth.get('channel_id') == destination or auth.get('bot_user_id') == destination:
-                return binding
-
-        # Fallback: return first active LINE binding
-        if bindings:
-            return bindings[0]
-        return None
-
-    def _find_org_by_line(self, destination: str, user_id: str) -> Optional[EsgOrganizationSettings]:
-        """Find organization settings by LINE channel destination (backward compatible)"""
-        settings = self.db.query(EsgOrganizationSettings).filter(
-            EsgOrganizationSettings.line_channel_id == destination,
-            EsgOrganizationSettings.is_active == True
-        ).first()
-
-        if not settings:
-            settings = self.db.query(EsgOrganizationSettings).filter(
-                EsgOrganizationSettings.line_channel_id.isnot(None),
-                EsgOrganizationSettings.line_channel_secret.isnot(None),
-                EsgOrganizationSettings.is_active == True
-            ).first()
-
-        return settings
-
-    # ==========================================
-    # PAIRING
-    # ==========================================
-
-    def pair_group_by_code(self, organization_id: int, pairing_code: str) -> Dict[str, Any]:
-        """Pair a LINE group with an organization using a pairing code"""
-        binding = self.db.query(EsgExternalPlatformBinding).filter(
-            EsgExternalPlatformBinding.organization_id == organization_id,
-            EsgExternalPlatformBinding.channel == 'line',
-            EsgExternalPlatformBinding.is_active == True
-        ).first()
-
-        if not binding:
-            return {'success': False, 'message': 'No LINE platform binding found for this organization'}
-
-        groups = list(binding.authorized_groups or [])
-        matched = None
-        for g in groups:
-            if g.get('pairing_code') == pairing_code and g.get('status') == 'pending':
-                matched = g
-                break
-
-        if not matched:
-            # Search across all bindings (code might be from a different org's binding)
-            all_bindings = self.db.query(EsgExternalPlatformBinding).filter(
-                EsgExternalPlatformBinding.channel == 'line',
-                EsgExternalPlatformBinding.is_active == True
-            ).all()
-
-            for b in all_bindings:
-                for g in (b.authorized_groups or []):
-                    if g.get('pairing_code') == pairing_code and g.get('status') == 'pending':
-                        matched = g
-                        binding = b
-                        groups = list(b.authorized_groups or [])
-                        break
-                if matched:
-                    break
-
-        if not matched:
-            return {'success': False, 'message': 'Invalid or expired pairing code'}
-
-        # Update the group to paired status
-        matched['status'] = 'paired'
-        matched['paired_at'] = datetime.utcnow().isoformat()
-        matched.pop('pairing_code', None)
-
-        # If binding belongs to different org, move the group entry
-        if binding.organization_id != organization_id:
-            # Remove from current binding
-            groups = [g for g in groups if g.get('group_id') != matched['group_id']]
-            binding.authorized_groups = groups
+            line_msg.processing_status = 'completed'
+            line_msg.document_id = doc.get('id')
             self.db.flush()
+            return {'status': 'success', 'type': 'file'}
 
-            # Add to org's binding
-            org_binding = self.db.query(EsgExternalPlatformBinding).filter(
-                EsgExternalPlatformBinding.organization_id == organization_id,
-                EsgExternalPlatformBinding.channel == 'line',
-                EsgExternalPlatformBinding.is_active == True
-            ).first()
-
-            if not org_binding:
-                return {'success': False, 'message': 'No LINE binding for target organization'}
-
-            org_groups = list(org_binding.authorized_groups or [])
-            org_groups.append(matched)
-            org_binding.authorized_groups = org_groups
-        else:
-            binding.authorized_groups = groups
-
-        self.db.flush()
-
-        return {
-            'success': True,
-            'message': f'Group "{matched.get("group_name", "")}" paired successfully',
-            'group': matched,
-        }
-
-    # ==========================================
-    # HELPER METHODS
-    # ==========================================
-
-    def _generate_pairing_code(self, length: int = 6) -> str:
-        """Generate a random alphanumeric pairing code"""
-        chars = string.ascii_uppercase + string.digits
-        return ''.join(secrets.choice(chars) for _ in range(length))
-
-    def _map_message_type(self, line_type: str) -> str:
-        """Map LINE message type to extraction type"""
-        mapping = {
-            'text': 'text',
-            'image': 'image',
-            'file': 'pdf',
-            'video': 'none',
-            'audio': 'none',
-            'sticker': 'none',
-            'location': 'none',
-        }
-        return mapping.get(line_type, 'none')
-
-    def _is_bot_mentioned(self, event: Dict[str, Any], binding: EsgExternalPlatformBinding) -> bool:
-        """Check if the bot is @mentioned in the message"""
-        message = event.get('message', {})
-        mention = message.get('mention', {})
-        mentionees = mention.get('mentionees', [])
-
-        bot_user_id = (binding.auth_json or {}).get('bot_user_id', '')
-
-        for m in mentionees:
-            if m.get('type') == 'user' and m.get('userId') == bot_user_id:
-                return True
-
-        # Also check if text contains @GEPP or similar trigger words
-        text = message.get('text', '').lower()
-        if any(trigger in text for trigger in ['@gepp', '@esg', 'สรุป', 'summary']):
-            return True
-
-        return False
-
-    def _get_group_name(self, group_id: str, channel_token: str) -> Optional[str]:
-        """Get LINE group name via API"""
-        try:
-            import urllib.request
-            url = f'https://api.line.me/v2/bot/group/{group_id}/summary'
-            req = urllib.request.Request(url, headers={
-                'Authorization': f'Bearer {channel_token}'
-            })
-            with urllib.request.urlopen(req) as response:
-                data = json.loads(response.read().decode('utf-8'))
-                return data.get('groupName', '')
         except Exception as e:
-            logger.error(f"Failed to get group name: {e}")
-            return None
+            logger.error(f"File processing error: {e}")
+            return {'status': 'error'}
 
-    def _download_and_store(self, message: Dict, binding: EsgExternalPlatformBinding, group_id: str) -> Optional[Dict]:
-        """Download content from LINE and upload to S3, return file info"""
-        message_id = message.get('id', '')
-        channel_token = (binding.auth_json or {}).get('channel_token', '')
+    # ==========================================
+    # FLEX MESSAGE BUILDER
+    # ==========================================
 
-        content = self._download_line_content(message_id, channel_token)
-        if not content:
-            return None
-
-        s3_url = self._upload_to_s3(content, binding.organization_id, message_id)
+    def _build_result_flex(self, entry: dict) -> dict:
+        """Build Flex Message with tCO2e result + ยืนยัน/แก้ไข buttons."""
+        tco2e = entry.get('calculated_tco2e')
+        tco2e_text = f'{tco2e:.4f} tCO2e' if tco2e else 'ไม่สามารถคำนวณได้'
+        category = entry.get('category', 'Unknown')
+        value = entry.get('value', 0)
+        unit = entry.get('unit', '')
+        entry_id = entry.get('id', 0)
 
         return {
-            'id': None,
-            's3_url': s3_url,
-            'file_name': f'line_{message_id}.jpg',
+            'type': 'flex',
+            'altText': f'ESG: {category} {value} {unit} = {tco2e_text}',
+            'contents': {
+                'type': 'bubble',
+                'header': {
+                    'type': 'box', 'layout': 'vertical',
+                    'backgroundColor': '#76B900',
+                    'contents': [
+                        {'type': 'text', 'text': 'ESG Data Captured', 'color': '#FFFFFF', 'weight': 'bold', 'size': 'lg'},
+                    ],
+                },
+                'body': {
+                    'type': 'box', 'layout': 'vertical', 'spacing': 'md',
+                    'contents': [
+                        {'type': 'box', 'layout': 'horizontal', 'contents': [
+                            {'type': 'text', 'text': 'หมวดหมู่', 'size': 'sm', 'color': '#888888', 'flex': 2},
+                            {'type': 'text', 'text': str(category), 'size': 'sm', 'weight': 'bold', 'flex': 3},
+                        ]},
+                        {'type': 'box', 'layout': 'horizontal', 'contents': [
+                            {'type': 'text', 'text': 'ปริมาณ', 'size': 'sm', 'color': '#888888', 'flex': 2},
+                            {'type': 'text', 'text': f'{value} {unit}', 'size': 'sm', 'weight': 'bold', 'flex': 3},
+                        ]},
+                        {'type': 'separator'},
+                        {'type': 'box', 'layout': 'horizontal', 'contents': [
+                            {'type': 'text', 'text': 'คาร์บอน', 'size': 'md', 'color': '#76B900', 'weight': 'bold', 'flex': 2},
+                            {'type': 'text', 'text': tco2e_text, 'size': 'md', 'weight': 'bold', 'flex': 3},
+                        ]},
+                        {'type': 'text', 'text': f'Scope: {entry.get("scope_tag", "-")}', 'size': 'xs', 'color': '#888888'},
+                    ],
+                },
+                'footer': {
+                    'type': 'box', 'layout': 'horizontal', 'spacing': 'md',
+                    'contents': [
+                        {'type': 'button', 'action': {'type': 'postback', 'label': 'ยืนยัน', 'data': f'action=confirm&entry_id={entry_id}'}, 'style': 'primary', 'color': '#76B900'},
+                        {'type': 'button', 'action': {'type': 'postback', 'label': 'แก้ไขใน LIFF', 'data': f'action=edit&entry_id={entry_id}'}, 'style': 'secondary'},
+                    ],
+                },
+            },
         }
 
-    def _format_extraction_reply(self, extraction: EsgOrganizationDataExtraction) -> str:
-        """Format extraction result as LINE reply"""
+    # ==========================================
+    # HELPERS
+    # ==========================================
+
+    def _create_entry_from_extraction(self, extraction, org_id: int, line_user_id: str) -> dict | None:
         matches = extraction.datapoint_matches or []
-        extractions = extraction.extractions or {}
-
-        category = extractions.get('category_match', {}).get('name', 'Unknown')
-        subcategory = extractions.get('subcategory_match', {}).get('name', '')
-
-        lines = [f'ESG Data Extracted\n']
-        if category:
-            lines.append(f'Category: {category}')
-        if subcategory:
-            lines.append(f'Subcategory: {subcategory}')
-
-        if matches:
-            lines.append(f'\nDatapoints matched: {len(matches)}')
-            for m in matches[:5]:
-                value = m.get('value', '')
-                unit = m.get('unit', '')
-                lines.append(f'  - {value} {unit}')
-
-        return '\n'.join(lines)
-
-    def _verify_signature(self, body: str, signature: str, channel_secret: str) -> bool:
-        """Verify LINE webhook signature using HMAC-SHA256"""
-        if not channel_secret or not signature:
-            return False
-        try:
-            body_bytes = body.encode('utf-8') if isinstance(body, str) else body
-            hash_value = hmac.new(
-                channel_secret.encode('utf-8'),
-                body_bytes,
-                hashlib.sha256
-            ).digest()
-            computed_signature = base64.b64encode(hash_value).decode('utf-8')
-            return hmac.compare_digest(computed_signature, signature)
-        except Exception as e:
-            logger.error(f"Signature verification error: {str(e)}")
-            return False
-
-    def _download_line_content(self, message_id: str, channel_token: str) -> Optional[bytes]:
-        """Download content from LINE Content API"""
-        try:
-            import urllib.request
-            url = f'https://api-data.line.me/v2/bot/message/{message_id}/content'
-            req = urllib.request.Request(url, headers={
-                'Authorization': f'Bearer {channel_token}'
-            })
-            with urllib.request.urlopen(req) as response:
-                return response.read()
-        except Exception as e:
-            logger.error(f"Failed to download LINE content: {str(e)}")
+        extr = extraction.extractions or {}
+        if not matches:
             return None
 
-    def _upload_to_s3(self, file_data: bytes, organization_id: int, message_id: str) -> str:
-        """Upload file to S3 and return URL"""
+        first = matches[0]
+        value = first.get('value')
+        unit = first.get('unit', '')
+        if not value:
+            return None
+
+        cat_name = extr.get('category_match', {}).get('name', '')
+        tco2e = self.carbon.calculate_tco2e(cat_name or 'unknown', float(value), unit) if value and unit else None
+        scope = self.carbon.get_scope_for_category(cat_name) if cat_name else None
+
+        entry = EsgDataEntry(
+            organization_id=org_id, user_id=0, line_user_id=line_user_id,
+            category=cat_name, value=value, unit=unit,
+            calculated_tco2e=tco2e, scope_tag=scope,
+            entry_source=EntrySource.LINE_CHAT, status=EntryStatus.PENDING_VERIFY,
+            entry_date=datetime.utcnow().date(),
+        )
+        self.db.add(entry)
+        self.db.commit()
+        self.db.refresh(entry)
+        return entry.to_dict()
+
+    def _help_text(self) -> str:
+        return (
+            'GEPP ESG - วิธีใช้\n\n'
+            '1. ถ่ายรูปบิล/ใบเสร็จ → AI อ่านค่าและคำนวณ tCO2e\n'
+            '2. พิมพ์ข้อความ เช่น "ค่าไฟ 5000 kWh" → คำนวณอัตโนมัติ\n'
+            '3. ส่งไฟล์ PDF/Excel → ระบบจัดหมวดหมู่ให้\n\n'
+            'คำสั่ง: "help", "status", "สรุป"'
+        )
+
+    def _find_org(self, destination: str):
+        s = self.db.query(EsgOrganizationSettings).filter(
+            EsgOrganizationSettings.line_channel_id == destination,
+            EsgOrganizationSettings.is_active == True,
+        ).first()
+        if not s:
+            s = self.db.query(EsgOrganizationSettings).filter(
+                EsgOrganizationSettings.line_channel_id.isnot(None),
+                EsgOrganizationSettings.is_active == True,
+            ).first()
+        return s
+
+    def _verify_sig(self, body: str, signature: str, secret: str) -> bool:
+        if not secret or not signature:
+            return False
         try:
-            import boto3
+            b = body.encode('utf-8') if isinstance(body, str) else body
+            h = hmac.new(secret.encode('utf-8'), b, hashlib.sha256).digest()
+            return hmac.compare_digest(base64.b64encode(h).decode('utf-8'), signature)
+        except Exception:
+            return False
 
-            s3 = boto3.client('s3')
-            bucket = os.environ.get('S3_BUCKET', 'gepp-platform-files')
-            key = f'esg/documents/{organization_id}/line/{datetime.utcnow().strftime("%Y%m%d")}/{message_id}.jpg'
-
-            s3.put_object(
-                Bucket=bucket,
-                Key=key,
-                Body=file_data,
-                ContentType='image/jpeg'
+    def _download_content(self, msg_id: str, token: str):
+        try:
+            import urllib.request
+            req = urllib.request.Request(
+                f'https://api-data.line.me/v2/bot/message/{msg_id}/content',
+                headers={'Authorization': f'Bearer {token}'},
             )
-
-            return f's3://{bucket}/{key}'
+            with urllib.request.urlopen(req, timeout=30) as r:
+                return r.read()
         except Exception as e:
-            logger.error(f"S3 upload failed: {str(e)}")
-            raise
+            logger.error(f"Download failed: {e}")
+            return None
 
-    def _send_reply(self, channel_token: str, reply_token: str, message: str):
-        """Send reply message via LINE Messaging API"""
-        if not channel_token or not reply_token:
+    def _upload_s3(self, data: bytes, org_id: int, msg_id: str, ct: str = 'image/jpeg',
+                   line_user_id: str = None) -> str:
+        import boto3
+        import uuid
+        s3 = boto3.client('s3')
+        bucket = os.environ.get('S3_BUCKET_NAME', 'prod-gepp-platform-assets')
+        ext = {'image/jpeg': 'jpg', 'image/png': 'png', 'application/pdf': 'pdf',
+               'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+               'application/vnd.ms-excel': 'xls', 'text/csv': 'csv'}.get(ct, 'bin')
+        date_str = datetime.utcnow().strftime('%Y%m%d')
+        hash_id = uuid.uuid4().hex[:12]
+        line_id = line_user_id or 'unknown'
+        key = f'esg/org/{org_id}/LINE/{line_id}/{date_str}_{hash_id}.{ext}'
+        s3.put_object(Bucket=bucket, Key=key, Body=data, ContentType=ct)
+        return f's3://{bucket}/{key}'
+
+    def _guess_type(self, name: str) -> str:
+        ext = name.rsplit('.', 1)[-1].lower() if '.' in name else ''
+        return {'pdf': 'application/pdf', 'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                'xls': 'application/vnd.ms-excel', 'csv': 'text/csv', 'jpg': 'image/jpeg', 'png': 'image/png'}.get(ext, 'application/octet-stream')
+
+    def _send_text_reply(self, token: str, reply_token: str, text: str):
+        self._send_reply_raw(token, reply_token, [{'type': 'text', 'text': text[:5000]}])
+
+    def _send_reply_raw(self, token: str, reply_token: str, messages: list):
+        if not token or not reply_token:
             return
         try:
             import urllib.request
-            url = 'https://api.line.me/v2/bot/message/reply'
-            data = json.dumps({
-                'replyToken': reply_token,
-                'messages': [{'type': 'text', 'text': message}]
-            }).encode('utf-8')
-            req = urllib.request.Request(url, data=data, headers={
-                'Content-Type': 'application/json',
-                'Authorization': f'Bearer {channel_token}'
-            })
-            urllib.request.urlopen(req)
+            data = json.dumps({'replyToken': reply_token, 'messages': messages}).encode('utf-8')
+            req = urllib.request.Request('https://api.line.me/v2/bot/message/reply', data=data,
+                                        headers={'Content-Type': 'application/json', 'Authorization': f'Bearer {token}'})
+            urllib.request.urlopen(req, timeout=10)
         except Exception as e:
-            logger.error(f"Failed to send LINE reply: {str(e)}")
-
-    def _format_classification_reply(self, doc: Dict[str, Any]) -> str:
-        """Format AI classification result as LINE reply message"""
-        category = doc.get('esg_category', 'unknown')
-        subcategory = doc.get('esg_subcategory', '')
-        doc_type = doc.get('document_type', '')
-        confidence = doc.get('ai_confidence', 0)
-        vendor = doc.get('vendor_name', '')
-        summary = doc.get('summary', '')
-
-        category_emoji = {'environment': 'E', 'social': 'S', 'governance': 'G'}.get(category, '?')
-
-        lines = [
-            f'[{category_emoji}] ESG Document Classified',
-            f'',
-            f'Category: {category.title()}',
-        ]
-        if subcategory:
-            lines.append(f'Subcategory: {subcategory}')
-        if doc_type:
-            lines.append(f'Type: {doc_type}')
-        if vendor:
-            lines.append(f'Vendor: {vendor}')
-        if confidence:
-            lines.append(f'Confidence: {confidence:.0%}')
-        if summary:
-            lines.append(f'\n{summary[:100]}')
-
-        return '\n'.join(lines)
+            logger.error(f"Reply failed: {e}")

@@ -35,6 +35,6 @@ class EsgExternalPlatformBinding(Base, BaseModel):
             'auth_json': auth,
             'authorized_groups': self.authorized_groups or [],
             'is_active': self.is_active,
-            'created_date': self.created_date.isoformat() if self.created_date else None,
-            'updated_date': self.updated_date.isoformat() if self.updated_date else None,
+            'created_date': str(self.created_date) if self.created_date else None,
+            'updated_date': str(self.updated_date) if self.updated_date else None,
         }

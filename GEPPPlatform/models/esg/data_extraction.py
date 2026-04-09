@@ -31,11 +31,15 @@ class EsgOrganizationDataExtraction(Base, BaseModel):
     # LLM Extraction Results
     extractions = Column(JSONB, default=dict)
 
-    # Datapoint Matches
+    # Datapoint Matches (legacy — kept for backward compat)
     datapoint_matches = Column(JSONB, default=list)
 
-    # Reference tracking
+    # Reference tracking (legacy — kept for backward compat)
     refs = Column(JSONB, default=dict)
+
+    # New compact structured extraction (ver=2)
+    # Schema: {rows:[{lbl,cat,sub,attrs:[{dp,v,u,c,t,cur,tags}],atm}],tots,dm,add,ver}
+    structured_data = Column(JSONB, default=dict)
 
     # Processing
     processing_status = Column(String(30), default='pending')
@@ -57,10 +61,11 @@ class EsgOrganizationDataExtraction(Base, BaseModel):
             'extractions': self.extractions or {},
             'datapoint_matches': self.datapoint_matches or [],
             'refs': self.refs or {},
+            'structured_data': self.structured_data or {},
             'processing_status': self.processing_status,
             'error_message': self.error_message,
-            'processed_at': self.processed_at.isoformat() if self.processed_at else None,
+            'processed_at': str(self.processed_at) if self.processed_at else None,
             'is_active': self.is_active,
-            'created_date': self.created_date.isoformat() if self.created_date else None,
-            'updated_date': self.updated_date.isoformat() if self.updated_date else None,
+            'created_date': str(self.created_date) if self.created_date else None,
+            'updated_date': str(self.updated_date) if self.updated_date else None,
         }

@@ -41,5 +41,5 @@ class EsgLineMessage(Base, BaseModel):
             'reply_sent': self.reply_sent,
             'reply_message': self.reply_message,
             'is_active': self.is_active,
-            'created_date': self.created_date.isoformat() if self.created_date else None,
+            'created_date': str(self.created_date) if self.created_date else None,
         }

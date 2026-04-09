@@ -2,6 +2,8 @@
 Auth module for handling authentication and authorization routes
 """
 
+import os
+
 from .auth_handlers import AuthHandlers
 from ...exceptions import (
     APIException,
@@ -30,6 +32,16 @@ def handle_auth_routes(path: str, data: dict, **commonParams):
             return auth_handler.register(data, **commonParams)
         elif internal_path == "/login":
             return auth_handler.login(data, **commonParams)
+        elif internal_path == "/liff":
+            # LINE LIFF login — exchange LINE access token for JWT
+            from GEPPPlatform.services.esg.liff_auth_service import LiffAuthService
+            if not data or not data.get('access_token'):
+                raise BadRequestException('LINE access_token is required')
+            liff_svc = LiffAuthService(db_session)
+            try:
+                return liff_svc.login_with_line(data['access_token'])
+            except ValueError as ve:
+                raise UnauthorizedException(str(ve))
         elif internal_path == "/integration":
             return auth_handler.integration_login(data, **commonParams)
         elif internal_path == "/integration/secret":
@@ -65,6 +77,32 @@ def handle_auth_routes(path: str, data: dict, **commonParams):
             return auth_handler.update_profile(data, **commonParams)
         elif internal_path == "/password":
             return auth_handler.change_password(data, **commonParams)
+        elif internal_path == "/link-company":
+            # Link authenticated user to an organization via joining code (LIFF onboarding)
+            # Auth routes skip global JWT middleware, so we parse the token manually here.
+            import jwt as _jwt
+            from GEPPPlatform.services.esg.liff_auth_service import LiffAuthService
+            if not data or not data.get('joining_code'):
+                raise BadRequestException('joining_code is required')
+            headers = commonParams.get('headers', {}) or {}
+            auth_header = headers.get('authorization') or headers.get('Authorization', '')
+            token = auth_header.replace('Bearer ', '').strip() if auth_header else ''
+            if not token:
+                raise UnauthorizedException('Authentication required')
+            try:
+                secret = os.environ.get('JWT_SECRET', os.environ.get('JWT_SECRET_KEY', 'your-secret-key'))
+                algo = os.environ.get('JWT_ALGORITHM', 'HS256')
+                payload = _jwt.decode(token, secret, algorithms=[algo])
+                user_id = payload.get('user_id')
+                if not user_id:
+                    raise UnauthorizedException('Invalid token')
+            except _jwt.InvalidTokenError:
+                raise UnauthorizedException('Invalid or expired token')
+            liff_svc = LiffAuthService(db_session)
+            try:
+                return liff_svc.link_company(int(user_id), data['joining_code'])
+            except ValueError as ve:
+                raise BadRequestException(str(ve))
         else:
             raise NotFoundException(f"PUT endpoint not found: {internal_path}")
     
