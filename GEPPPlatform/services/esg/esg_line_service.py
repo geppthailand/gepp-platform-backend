@@ -43,8 +43,11 @@ class EsgLineService:
     # WEBHOOK ENTRY POINT
     # ==========================================
 
-    def handle_webhook(self, body: str, signature: str) -> Dict[str, Any]:
+    def handle_webhook(self, body: str, signature: str, simulator_opts: Dict = None) -> Dict[str, Any]:
+        self._simulator_opts = simulator_opts or {}
         logger.info(f"[WEBHOOK] Received body length={len(body or '')}, signature={signature[:20] if signature else 'none'}...")
+        if self._simulator_opts:
+            logger.info(f"[WEBHOOK] SIMULATOR: org_id={self._simulator_opts.get('org_id')}")
         try:
             payload = json.loads(body) if isinstance(body, str) else body
         except json.JSONDecodeError:
@@ -233,6 +236,19 @@ class EsgLineService:
             EsgUser.is_active == True,
         ).first()
 
+        # Simulator bypass: auto-create a temporary user link if --org-id was provided
+        sim_org_id = getattr(self, '_simulator_opts', {}).get('org_id')
+        if not esg_user and sim_org_id:
+            logger.info(f"[MSG] SIMULATOR: Auto-linking user {user_id[:12]} to org {sim_org_id}")
+            esg_user = EsgUser(
+                organization_id=sim_org_id,
+                platform='line',
+                platform_user_id=user_id,
+                display_name=f'Simulator ({user_id[:12]})',
+            )
+            self.db.add(esg_user)
+            self.db.flush()
+
         if not esg_user:
             # User not linked — reply with instruction to join org first
             liff_url = LIFF_BASE_URL
@@ -272,6 +288,12 @@ class EsgLineService:
 
         # Use esg_user.organization_id (safe even if org settings is None)
         org_id = esg_user.organization_id
+
+        # Simulator support: forward base64 image data from event._simulator
+        simulator = event.get('_simulator', {})
+        if simulator.get('image_base64'):
+            message['_simulator_image_base64'] = simulator['image_base64']
+            logger.info(f"[MSG] Simulator image attached ({len(simulator['image_base64'])} chars)")
 
         if msg_type == 'text':
             return self._process_text(line_msg, event, org_id, channel_token)
@@ -341,7 +363,14 @@ class EsgLineService:
             logger.info(f"----------- IMAGE PROCESSING START -----------")
             logger.info(f"[IMG] msg_id={message_id}, org_id={org_id}, user={line_msg.line_user_id[:12] if line_msg.line_user_id else '?'}")
 
-            image_data = self._download_content(message_id, token)
+            # Simulator support: use base64 image from _simulator metadata instead of LINE CDN
+            simulator_data = message.get('_simulator_image_base64')
+            if simulator_data:
+                import base64 as b64mod
+                logger.info(f"[IMG] Using simulator image data ({len(simulator_data)} chars base64)")
+                image_data = b64mod.b64decode(simulator_data)
+            else:
+                image_data = self._download_content(message_id, token)
             if not image_data:
                 logger.error(f"[IMG] Failed to download image from LINE")
                 self._send_text_reply(token, line_msg.line_reply_token, 'ดาวน์โหลดรูปไม่สำเร็จ ลองใหม่อีกครั้ง')
@@ -382,14 +411,73 @@ class EsgLineService:
                 self._send_text_reply(token, line_msg.line_reply_token,
                                       f"ไม่สามารถอ่านข้อมูลจากรูปได้\n{err_msg}")
 
-            line_msg.processing_status = 'completed'
-            self.db.flush()
+            # Simulator dry-run: rollback DB changes, return full extraction data
+            sim_dry = getattr(self, '_simulator_opts', {}).get('dry_run', False)
+            if sim_dry:
+                logger.info(f"[IMG] SIMULATOR DRY-RUN: rolling back DB changes")
+                self.db.rollback()
+            else:
+                line_msg.processing_status = 'completed'
+                self.db.flush()
+
             logger.info(f"----------- IMAGE PROCESSING DONE -----------")
-            return {
+
+            # Build detailed response for simulator
+            is_simulator = bool(getattr(self, '_simulator_opts', {}))
+            response = {
                 'status': 'success', 'type': 'image',
                 'extraction_id': result.get('extraction_id'),
                 'entry_count': result.get('match_count', 0),
+                'dry_run': sim_dry,
             }
+            if is_simulator:
+                response['debug'] = {
+                    'document_summary': result.get('document_summary', ''),
+                    'refs': result.get('refs', {}),
+                    'llm_model': result.get('model', ''),
+                    'llm_tokens': result.get('usage', {}),
+                    'records': [],
+                    'entries': [],
+                }
+                # Include full record data
+                for rec in (result.get('records') or []):
+                    debug_rec = {
+                        'record_label': rec.get('record_label', ''),
+                        'category_id': rec.get('category_id'),
+                        'category_name': rec.get('category_name', ''),
+                        'subcategory_id': rec.get('subcategory_id'),
+                        'subcategory_name': rec.get('subcategory_name', ''),
+                        'fields': [],
+                    }
+                    for f in (rec.get('fields') or []):
+                        debug_rec['fields'].append({
+                            'datapoint_id': f.get('datapoint_id'),
+                            'datapoint_name': f.get('datapoint_name', ''),
+                            'value': f.get('value'),
+                            'unit': f.get('unit', ''),
+                            'confidence': f.get('confidence'),
+                            'tags': f.get('tags', []),
+                        })
+                    response['debug']['records'].append(debug_rec)
+                # Include entry summaries
+                for entry in (result.get('entries') or []):
+                    e = entry if isinstance(entry, dict) else {}
+                    response['debug']['entries'].append({
+                        'id': e.get('id'),
+                        'category': e.get('category', ''),
+                        'category_id': e.get('category_id'),
+                        'subcategory_id': e.get('subcategory_id'),
+                        'datapoint_id': e.get('datapoint_id'),
+                        'value': float(e.get('value', 0)) if e.get('value') is not None else None,
+                        'unit': e.get('unit', ''),
+                        'calculated_tco2e': float(e.get('calculated_tco2e', 0)) if e.get('calculated_tco2e') is not None else None,
+                        'scope_tag': e.get('scope_tag', ''),
+                        'currency': e.get('currency', ''),
+                        'confidence': (e.get('extra_data') or {}).get('confidence'),
+                        'record_label': (e.get('extra_data') or {}).get('record_label', ''),
+                    })
+
+            return response
 
         except Exception as e:
             import traceback
@@ -601,6 +689,18 @@ class EsgLineService:
 
     def _send_reply_raw(self, token: str, reply_token: str, messages: list):
         if not token or not reply_token:
+            return
+        # Simulator mode: log the reply instead of sending to LINE
+        if reply_token == '00000000000000000000000000000000' or reply_token.startswith('simulator'):
+            logger.info(f"[SIMULATOR] Would reply with {len(messages)} message(s)")
+            for i, msg in enumerate(messages):
+                msg_type = msg.get('type', '?')
+                if msg_type == 'text':
+                    logger.info(f"[SIMULATOR] Reply[{i}]: TEXT = {msg.get('text', '')[:200]}")
+                elif msg_type == 'flex':
+                    logger.info(f"[SIMULATOR] Reply[{i}]: FLEX alt={msg.get('altText', '')[:100]}")
+                else:
+                    logger.info(f"[SIMULATOR] Reply[{i}]: {msg_type}")
             return
         try:
             import urllib.request

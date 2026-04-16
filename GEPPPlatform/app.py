@@ -305,7 +305,9 @@ def main(event, context):
                 # Public ESG LINE webhook (no JWT required, signature verified internally)
                 from GEPPPlatform.services.esg.esg_line_service import EsgLineService
 
-                signature = event.get('headers', {}).get('x-line-signature', '')
+                _raw_h = event.get('headers', {}) or {}
+                _lc_h = {k.lower(): v for k, v in _raw_h.items()}
+                signature = _lc_h.get('x-line-signature', '')
                 raw_body = event.get('body', '{}')
                 logger.info("----------- LINE WEBHOOK RECEIVED -----------")
                 logger.info(f"[LINE-WEBHOOK] body_len={len(raw_body or '')}")
@@ -313,10 +315,20 @@ def main(event, context):
                 logger.info(f"[LINE-WEBHOOK] raw_body={raw_body[:500] if raw_body else 'EMPTY'}")
                 logger.info("----------------------------------------------")
 
+                # Pass simulator headers if present (case-insensitive lookup — Flask uses Title-Case)
+                raw_headers = event.get('headers', {})
+                h = {k.lower(): v for k, v in raw_headers.items()} if raw_headers else {}
+                simulator_opts = {}
+                if h.get('x-simulator') == 'true':
+                    simulator_opts['org_id'] = int(h.get('x-simulator-org-id', 0)) or None
+                    simulator_opts['user_id'] = h.get('x-simulator-user-id', '')
+                    simulator_opts['dry_run'] = h.get('x-simulator-dry-run') == 'true'
+                    logger.info(f"[LINE-WEBHOOK] SIMULATOR MODE: org_id={simulator_opts.get('org_id')}, dry_run={simulator_opts.get('dry_run')}, user_id={simulator_opts.get('user_id', '')[:20]}")
+
                 try:
                     with get_session() as session:
                         line_service = EsgLineService(session)
-                        webhook_result = line_service.handle_webhook(raw_body, signature)
+                        webhook_result = line_service.handle_webhook(raw_body, signature, simulator_opts=simulator_opts)
                         results = {
                             "success": True,
                             "data": webhook_result
