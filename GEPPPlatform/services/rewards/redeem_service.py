@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from sqlalchemy import func, distinct
+from sqlalchemy import func, distinct, or_
 from sqlalchemy.orm import Session
 
 from ...models.rewards.management import (
@@ -38,6 +38,21 @@ class RedeemService:
         """
         if not items:
             raise BadRequestException("At least one item is required")
+
+        # 0. Verify campaign is active AND not past end_date (ended = computed)
+        now = datetime.now(timezone.utc)
+        campaign = (
+            self.db.query(RewardCampaign)
+            .filter(
+                RewardCampaign.id == campaign_id,
+                RewardCampaign.status == "active",
+                or_(RewardCampaign.end_date.is_(None), RewardCampaign.end_date >= now),
+                RewardCampaign.deleted_date.is_(None),
+            )
+            .first()
+        )
+        if not campaign:
+            raise BadRequestException("Campaign not active, ended, or not found")
 
         # 1. Lock the user's point rows for this campaign to prevent concurrent overdraw,
         #    then calculate balance. FOR UPDATE cannot be used with aggregate functions,

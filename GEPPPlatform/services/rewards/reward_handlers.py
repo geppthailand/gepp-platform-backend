@@ -11,7 +11,9 @@ from .campaign_service import CampaignService
 from .campaign_claim_service import CampaignClaimService
 from .campaign_catalog_service import CampaignCatalogService
 from .campaign_droppoint_service import CampaignDroppointService
+from .campaign_target_service import CampaignTargetService
 from .catalog_service import CatalogService
+from .catalog_category_service import CatalogCategoryService
 from .stock_service import StockService
 from .member_service import MemberService
 from .droppoint_service import DroppointService
@@ -63,6 +65,32 @@ def handle_reward_routes(event: Dict[str, Any], data: Dict[str, Any], **params) 
             svc = OverviewService(db_session)
             return svc.get_stats(current_org_id)
 
+        if path == "/api/rewards/overview/alerts" and method == "GET":
+            svc = OverviewService(db_session)
+            return svc.get_alerts(current_org_id)
+
+        if path == "/api/rewards/overview/campaigns" and method == "GET":
+            svc = OverviewService(db_session)
+            return svc.get_campaign_details(current_org_id)
+
+        if path == "/api/rewards/overview/staff-today" and method == "GET":
+            svc = OverviewService(db_session)
+            return svc.get_staff_today(current_org_id)
+
+        if path == "/api/rewards/overview/trends" and method == "GET":
+            svc = OverviewService(db_session)
+            months = int(query_params.get("months", 6))
+            return svc.get_trends(current_org_id, months=months)
+
+        if path == "/api/rewards/overview/stock-matrix" and method == "GET":
+            svc = OverviewService(db_session)
+            return svc.get_stock_matrix(current_org_id)
+
+        if path == "/api/rewards/overview/top-members" and method == "GET":
+            svc = OverviewService(db_session)
+            limit = int(query_params.get("limit", 5))
+            return svc.get_top_members(current_org_id, limit=limit)
+
         # --- Activity Materials ---
         if path == "/api/rewards/activity-materials" and method == "GET":
             svc = ActivityMaterialService(db_session)
@@ -96,6 +124,91 @@ def handle_reward_routes(event: Dict[str, Any], data: Dict[str, Any], **params) 
 
         if path == "/api/rewards/campaigns" and method == "DELETE":
             svc = CampaignService(db_session)
+            item_id = data.get("id") or query_params.get("id")
+            return svc.delete(int(item_id))
+
+        # --- Campaign Lifecycle + Detail ---
+        if path == "/api/rewards/campaigns/detail" and method == "GET":
+            svc = CampaignService(db_session)
+            item_id = query_params.get("id")
+            return svc.get_detail(int(item_id), current_org_id)
+
+        if path == "/api/rewards/campaigns/publish" and method == "POST":
+            svc = CampaignService(db_session)
+            return svc.publish(int(data.get("id")))
+
+        if path == "/api/rewards/campaigns/pause" and method == "POST":
+            svc = CampaignService(db_session)
+            return svc.pause(int(data.get("id")))
+
+        if path == "/api/rewards/campaigns/resume" and method == "POST":
+            svc = CampaignService(db_session)
+            return svc.resume(int(data.get("id")))
+
+        if path == "/api/rewards/campaigns/archive" and method == "POST":
+            svc = CampaignService(db_session)
+            return svc.archive(int(data.get("id")))
+
+        if path == "/api/rewards/campaigns/duplicate" and method == "POST":
+            svc = CampaignService(db_session)
+            return svc.duplicate(int(data.get("id")), current_org_id)
+
+        if path == "/api/rewards/campaigns/transactions" and method == "GET":
+            svc = CampaignService(db_session)
+            return svc.list_transactions(
+                id=int(query_params.get("id")),
+                organization_id=current_org_id,
+                ref_type=query_params.get("type"),
+                date_from=query_params.get("from"),
+                date_to=query_params.get("to"),
+                search=query_params.get("search"),
+                page=int(query_params.get("page", 1)),
+                page_size=int(query_params.get("page_size", 20)),
+            )
+
+        if path == "/api/rewards/campaigns/members" and method == "GET":
+            svc = CampaignService(db_session)
+            return svc.list_members(
+                id=int(query_params.get("id")),
+                organization_id=current_org_id,
+                search=query_params.get("search"),
+                sort=query_params.get("sort", "points"),
+            )
+
+        if path == "/api/rewards/campaigns/weekly-trend" and method == "GET":
+            svc = CampaignService(db_session)
+            return svc.get_weekly_trend(
+                id=int(query_params.get("id")),
+                organization_id=current_org_id,
+                weeks=int(query_params.get("weeks", 8)),
+            )
+
+        # --- Campaign Targets ---
+        if path == "/api/rewards/campaign-targets/eligible-activity-materials" and method == "GET":
+            svc = CampaignTargetService(db_session)
+            campaign_id = query_params.get("campaign_id")
+            return svc.list_eligible_activity_materials(int(campaign_id))
+
+        if path == "/api/rewards/campaign-targets/eligible-main-materials" and method == "GET":
+            svc = CampaignTargetService(db_session)
+            campaign_id = query_params.get("campaign_id")
+            return svc.list_eligible_main_materials(int(campaign_id))
+
+        if path == "/api/rewards/campaign-targets" and method == "GET":
+            svc = CampaignTargetService(db_session)
+            campaign_id = query_params.get("campaign_id")
+            return svc.list(int(campaign_id))
+
+        if path == "/api/rewards/campaign-targets" and method == "POST":
+            svc = CampaignTargetService(db_session)
+            return svc.create(data)
+
+        if path == "/api/rewards/campaign-targets" and method == "PUT":
+            svc = CampaignTargetService(db_session)
+            return svc.update(int(data.get("id")), data)
+
+        if path == "/api/rewards/campaign-targets" and method == "DELETE":
+            svc = CampaignTargetService(db_session)
             item_id = data.get("id") or query_params.get("id")
             return svc.delete(int(item_id))
 
@@ -182,6 +295,71 @@ def handle_reward_routes(event: Dict[str, Any], data: Dict[str, Any], **params) 
         if path == "/api/rewards/stocks" and method == "POST":
             svc = StockService(db_session)
             return svc.deposit_or_withdraw(data, organization_id=current_org_id)
+
+        if path == "/api/rewards/stocks/assign" and method == "POST":
+            svc = StockService(db_session)
+            return svc.assign_to_campaign(data, organization_id=current_org_id)
+
+        # --- Catalog Categories ---
+        if path == "/api/rewards/catalog-categories" and method == "GET":
+            svc = CatalogCategoryService(db_session)
+            return svc.list(current_org_id)
+
+        if path == "/api/rewards/catalog-categories" and method == "POST":
+            svc = CatalogCategoryService(db_session)
+            return svc.create(current_org_id, data)
+
+        if path == "/api/rewards/catalog-categories" and method == "PUT":
+            svc = CatalogCategoryService(db_session)
+            return svc.update(int(data.get("id")), data)
+
+        if path == "/api/rewards/catalog-categories" and method == "DELETE":
+            svc = CatalogCategoryService(db_session)
+            item_id = data.get("id") or query_params.get("id")
+            return svc.delete(int(item_id))
+
+        # --- Catalog Archive (2-step: check → confirm) ---
+        if path == "/api/rewards/catalog/archive" and method == "POST":
+            svc = CatalogService(db_session)
+            return svc.archive_check(int(data.get("id")), current_org_id)
+
+        if path == "/api/rewards/catalog/archive/confirm" and method == "POST":
+            svc = CatalogService(db_session)
+            return svc.archive_confirm(
+                id=int(data.get("id")),
+                organization_id=current_org_id,
+                return_to_global=bool(data.get("return_to_global", False)),
+                admin_user_id=current_user_id,
+            )
+
+        # --- Inventory ---
+        if path == "/api/rewards/inventory/kpis" and method == "GET":
+            svc = StockService(db_session)
+            return svc.get_inventory_kpis(current_org_id)
+
+        if path == "/api/rewards/inventory/summary" and method == "GET":
+            svc = StockService(db_session)
+            include_archived = query_params.get("include_archived", "true").lower() == "true"
+            return svc.get_summary(current_org_id, include_archived=include_archived)
+
+        if path == "/api/rewards/inventory/deposit" and method == "POST":
+            svc = StockService(db_session)
+            return svc.deposit(data, organization_id=current_org_id, admin_user_id=current_user_id)
+
+        if path == "/api/rewards/inventory/transfer" and method == "POST":
+            svc = StockService(db_session)
+            return svc.transfer(data, organization_id=current_org_id, admin_user_id=current_user_id)
+
+        if path == "/api/rewards/inventory/ledger" and method == "GET":
+            svc = StockService(db_session)
+            return svc.list_ledger(current_org_id, dict(query_params))
+
+        if path == "/api/rewards/inventory/lots" and method == "GET":
+            svc = StockService(db_session)
+            catalog_id = query_params.get("catalog_id")
+            if not catalog_id:
+                raise BadRequestException("catalog_id is required")
+            return svc.compute_lots(int(catalog_id))
 
         # --- Members ---
         if path == "/api/rewards/members" and method == "GET":

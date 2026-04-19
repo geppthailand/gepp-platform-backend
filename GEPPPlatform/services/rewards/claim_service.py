@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from ...models.rewards.management import (
@@ -46,18 +46,20 @@ class ClaimService:
         items = [{"activity_material_id": int, "value": float}, ...]
         Also creates a real Transaction + TransactionRecords when material is linked.
         """
-        # 1. Verify campaign is active
+        # 1. Verify campaign is active AND not past end_date (ended = computed)
+        now = datetime.now(timezone.utc)
         campaign = (
             self.db.query(RewardCampaign)
             .filter(
                 RewardCampaign.id == campaign_id,
                 RewardCampaign.status == "active",
+                or_(RewardCampaign.end_date.is_(None), RewardCampaign.end_date >= now),
                 RewardCampaign.deleted_date.is_(None),
             )
             .first()
         )
         if not campaign:
-            raise NotFoundException("Campaign not found or not active")
+            raise NotFoundException("Campaign not found, not active, or has ended")
 
         # Verify droppoint is linked to campaign
         dp_link = (
