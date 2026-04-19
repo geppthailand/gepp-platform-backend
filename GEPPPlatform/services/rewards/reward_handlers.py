@@ -16,6 +16,7 @@ from .catalog_service import CatalogService
 from .catalog_category_service import CatalogCategoryService
 from .stock_service import StockService
 from .member_service import MemberService
+from .staff_service import StaffService
 from .droppoint_service import DroppointService
 from .overview_service import OverviewService
 from .claim_service import ClaimService
@@ -239,7 +240,11 @@ def handle_reward_routes(event: Dict[str, Any], data: Dict[str, Any], **params) 
 
         if path == "/api/rewards/campaign-catalog" and method == "POST":
             svc = CampaignCatalogService(db_session)
-            return svc.create(data)
+            return svc.create(
+                data,
+                organization_id=current_org_id,
+                admin_user_id=current_user_id,
+            )
 
         if path == "/api/rewards/campaign-catalog" and method == "PUT":
             svc = CampaignCatalogService(db_session)
@@ -364,20 +369,81 @@ def handle_reward_routes(event: Dict[str, Any], data: Dict[str, Any], **params) 
         # --- Members ---
         if path == "/api/rewards/members" and method == "GET":
             svc = MemberService(db_session)
-            return svc.list_members(current_org_id)
+            # Accept filter params (all optional)
+            filters = {
+                "role": query_params.get("role"),
+                "is_active": (
+                    True if query_params.get("is_active") == "true"
+                    else False if query_params.get("is_active") == "false"
+                    else None
+                ),
+                "search": query_params.get("search"),
+                "date_from": query_params.get("date_from"),
+                "date_to": query_params.get("date_to"),
+                "sort": query_params.get("sort"),
+                "page": int(query_params.get("page", 1)),
+                "page_size": int(query_params.get("page_size", 10)),
+            }
+            return svc.list_members(current_org_id, filters)
 
         if path == "/api/rewards/members/detail" and method == "GET":
             svc = MemberService(db_session)
             org_reward_user_id = query_params.get("id")
             return svc.get_detail(int(org_reward_user_id), current_org_id)
 
+        if path == "/api/rewards/members/timeline" and method == "GET":
+            svc = MemberService(db_session)
+            return svc.get_timeline(
+                int(query_params.get("id")),
+                current_org_id,
+                days=int(query_params.get("days", 30)),
+            )
+
         if path == "/api/rewards/members/role" and method == "PUT":
             svc = MemberService(db_session)
-            return svc.update_role(data.get("id"), data.get("role"))
+            return svc.update_role(data.get("id"), data.get("role"), current_org_id)
 
         if path == "/api/rewards/members/status" and method == "PUT":
             svc = MemberService(db_session)
-            return svc.toggle_active(data.get("id"))
+            return svc.toggle_active(data.get("id"), current_org_id)
+
+        if path == "/api/rewards/members/bulk-toggle-active" and method == "POST":
+            svc = MemberService(db_session)
+            return svc.bulk_toggle_active(
+                [int(i) for i in (data.get("ids") or [])],
+                bool(data.get("is_active")),
+                current_org_id,
+            )
+
+        if path == "/api/rewards/members/redemption/confirm" and method == "POST":
+            svc = MemberService(db_session)
+            return svc.admin_confirm_redemption(
+                int(data.get("redemption_id")),
+                current_org_id,
+                admin_user_id=current_user_id,
+            )
+
+        if path == "/api/rewards/members/redemption/cancel" and method == "POST":
+            svc = MemberService(db_session)
+            return svc.admin_cancel_redemption(
+                int(data.get("redemption_id")),
+                current_org_id,
+                admin_user_id=current_user_id,
+                note=data.get("note"),
+            )
+
+        # --- Staff ---
+        if path == "/api/rewards/staff/kpis" and method == "GET":
+            svc = StaffService(db_session)
+            return svc.get_kpis(current_org_id)
+
+        if path == "/api/rewards/staff/performance" and method == "GET":
+            svc = StaffService(db_session)
+            return svc.list_performance(current_org_id)
+
+        if path == "/api/rewards/staff/revoke" and method == "POST":
+            svc = StaffService(db_session)
+            return svc.revoke_staff(int(data.get("id")), current_org_id)
 
         # --- Droppoints ---
         if path == "/api/rewards/droppoints" and method == "GET":
@@ -405,7 +471,15 @@ def handle_reward_routes(event: Dict[str, Any], data: Dict[str, Any], **params) 
 
         if path == "/api/rewards/staff-invites" and method == "POST":
             svc = InviteService(db_session)
-            return svc.create_invite(current_org_id, current_user_id)
+            return svc.create_invite(
+                current_org_id,
+                current_user_id,
+                expiry_hours=data.get("expiry_hours"),
+            )
+
+        if path == "/api/rewards/staff-invites/revoke" and method == "POST":
+            svc = InviteService(db_session)
+            return svc.revoke_invite(int(data.get("id")), current_org_id)
 
         # ============================================================
         # PUBLIC / LIFF ENDPOINTS

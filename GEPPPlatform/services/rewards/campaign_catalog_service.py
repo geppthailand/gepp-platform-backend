@@ -4,12 +4,14 @@ Campaign Catalog Service - Links catalog items to campaigns with redeem rules
 
 from datetime import datetime, timezone
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ...models.rewards.management import RewardCampaignCatalog, RewardCampaign
-from ...models.rewards.catalog import RewardCatalog
+from ...models.rewards.catalog import RewardCatalog, RewardStock
 from ...exceptions import APIException, NotFoundException, BadRequestException
 from .campaign_service import assert_editable
+from .stock_service import StockService
 
 
 class CampaignCatalogService:
@@ -22,6 +24,19 @@ class CampaignCatalogService:
             return None
         return val.isoformat() if hasattr(val, 'isoformat') else str(val)
 
+    def _current_stock(self, campaign_id: int, catalog_id: int) -> int:
+        """Sum of RewardStock rows for this (campaign, catalog) pair."""
+        total = (
+            self.db.query(func.coalesce(func.sum(RewardStock.values), 0))
+            .filter(
+                RewardStock.reward_campaign_id == campaign_id,
+                RewardStock.reward_catalog_id == catalog_id,
+                RewardStock.deleted_date.is_(None),
+            )
+            .scalar()
+        )
+        return int(total or 0)
+
     def _to_dict(self, item: RewardCampaignCatalog, catalog=None) -> dict:
         result = {
             "id": item.id,
@@ -33,10 +48,13 @@ class CampaignCatalogService:
             "status": item.status,
             "created_date": self._safe_iso(item.created_date),
             "updated_date": self._safe_iso(item.updated_date),
+            "current_stock": self._current_stock(item.campaign_id, item.catalog_id),
         }
         if catalog:
             result["catalog_name"] = catalog.name
             result["catalog_thumbnail_id"] = catalog.thumbnail_id
+            result["catalog_unit"] = catalog.unit
+            result["min_threshold"] = catalog.min_threshold or 0
         return result
 
     def list(self, campaign_id: int) -> list[dict]:
@@ -56,14 +74,29 @@ class CampaignCatalogService:
         )
         return [self._to_dict(cc, cat) for cc, cat in rows]
 
-    def create(self, data: dict) -> dict:
-        """Create a new campaign catalog entry."""
+    def create(
+        self,
+        data: dict,
+        organization_id: int | None = None,
+        admin_user_id: int | None = None,
+    ) -> dict:
+        """Create a new campaign catalog entry.
+
+        If ``initial_quantity`` > 0 is provided, also transfer that quantity
+        from the Global pool into the campaign in the same transaction.
+        """
         if not data.get("campaign_id"):
             raise BadRequestException("Campaign ID is required")
         if not data.get("catalog_id"):
             raise BadRequestException("Catalog ID is required")
         if data.get("points_cost") is None:
             raise BadRequestException("Points cost is required")
+
+        initial_qty = int(data.get("initial_quantity") or 0)
+        if initial_qty < 0:
+            raise BadRequestException("initial_quantity must be non-negative")
+        if initial_qty > 0 and organization_id is None:
+            raise BadRequestException("organization_id is required when initial_quantity is set")
 
         item = RewardCampaignCatalog(
             campaign_id=data["campaign_id"],
@@ -75,6 +108,21 @@ class CampaignCatalogService:
         )
         self.db.add(item)
         self.db.flush()
+
+        # Optional: transfer from Global pool → this campaign (atomic with attach)
+        if initial_qty > 0:
+            stock_svc = StockService(self.db)
+            stock_svc.transfer(
+                {
+                    "reward_catalog_id": data["catalog_id"],
+                    "from": "global",
+                    "to": {"campaign_id": data["campaign_id"]},
+                    "quantity": initial_qty,
+                    "note": f"Initial allocation when adding to campaign #{data['campaign_id']}",
+                },
+                organization_id=organization_id,
+                admin_user_id=admin_user_id,
+            )
 
         row = (
             self.db.query(RewardCampaignCatalog, RewardCatalog)

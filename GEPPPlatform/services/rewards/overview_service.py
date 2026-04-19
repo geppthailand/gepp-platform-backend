@@ -201,18 +201,7 @@ class OverviewService:
         soon = now + timedelta(days=7)
         stale_cutoff = now - timedelta(days=3)
 
-        # Low-stock threshold from setup (default 10)
-        setup = (
-            self.db.query(RewardSetup)
-            .filter(
-                RewardSetup.organization_id == organization_id,
-                RewardSetup.deleted_date.is_(None),
-            )
-            .first()
-        )
-        threshold = setup.low_stock_threshold if setup and setup.low_stock_threshold else 10
-
-        # Low-stock items
+        # Low-stock items — use per-item min_threshold (0 = no alert for that item)
         stock_sum = (
             self.db.query(
                 RewardCatalog.id.label("catalog_id"),
@@ -229,9 +218,10 @@ class OverviewService:
             .filter(
                 RewardCatalog.organization_id == organization_id,
                 RewardCatalog.deleted_date.is_(None),
+                RewardCatalog.min_threshold > 0,
             )
-            .group_by(RewardCatalog.id, RewardCatalog.name)
-            .having(func.coalesce(func.sum(RewardStock.values), 0) < threshold)
+            .group_by(RewardCatalog.id, RewardCatalog.name, RewardCatalog.min_threshold)
+            .having(func.coalesce(func.sum(RewardStock.values), 0) < RewardCatalog.min_threshold)
             .all()
         )
         low_stock = [
@@ -713,18 +703,9 @@ class OverviewService:
     def get_stock_matrix(self, organization_id: int) -> list[dict]:
         """Return each catalog item with its total stock + breakdown per campaign.
         Used by Overview § 7 Stock Pivot Table.
-        """
-        # Low-stock threshold
-        setup = (
-            self.db.query(RewardSetup)
-            .filter(
-                RewardSetup.organization_id == organization_id,
-                RewardSetup.deleted_date.is_(None),
-            )
-            .first()
-        )
-        threshold = setup.low_stock_threshold if setup and setup.low_stock_threshold else 10
 
+        Low-stock flag uses per-item ``RewardCatalog.min_threshold`` (0 = no alert).
+        """
         # List all active campaigns in the org (for consistent column ordering)
         campaigns = (
             self.db.query(RewardCampaign)
@@ -788,13 +769,15 @@ class OverviewService:
                 .scalar() or 0
             )
 
+            min_thr = cat.min_threshold or 0
             result.append({
                 "catalog_id": cat.id,
                 "name": cat.name,
                 "unit": cat.unit,
                 "total": total,
                 "global_stock": global_stock,
-                "is_low_stock": total < threshold,
+                "is_low_stock": min_thr > 0 and total < min_thr,
+                "min_threshold": min_thr,
                 "by_campaign": by_campaign,
             })
 

@@ -52,6 +52,8 @@ class RewardSetupService:
             "receipt_template": setup.receipt_template,
             "hash": setup.hash,
             "welcome_message": setup.welcome_message,
+            "reward_budget_total": float(setup.reward_budget_total) if setup.reward_budget_total is not None else None,
+            "low_stock_threshold": setup.low_stock_threshold,
             "created_date": setup.created_date.isoformat() if setup.created_date else None,
             "updated_date": setup.updated_date.isoformat() if setup.updated_date else None,
         }
@@ -71,6 +73,7 @@ class RewardSetupService:
             "program_name", "program_name_local", "points_rounding_method",
             "timezone", "cost_per_point", "qr_code_size", "qr_error_correction",
             "receipt_template", "welcome_message",
+            "reward_budget_total", "low_stock_threshold",
         ]
 
         if setup:
