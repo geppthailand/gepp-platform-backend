@@ -652,7 +652,19 @@ def handle_get_user_details(
 ) -> Dict[str, Any]:
     """Handle GET /api/users/{user_id} - Get user details with can_delete flag"""
     try:
-        result = user_service.get_user_details(user_id)
+        include_sensitive = False
+        if current_user_id:
+            try:
+                uid_int = int(current_user_id)
+                org_id = int(current_user_organization_id) if current_user_organization_id else None
+                if uid_int == int(user_id):
+                    include_sensitive = True
+                elif org_id and user_service.is_admin_or_org_owner(uid_int, org_id):
+                    include_sensitive = True
+            except (TypeError, ValueError):
+                pass
+
+        result = user_service.get_user_details(user_id, include_sensitive=include_sensitive)
         if not result:
             raise NotFoundException('User not found')
 
