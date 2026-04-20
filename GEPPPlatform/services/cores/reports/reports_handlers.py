@@ -542,20 +542,22 @@ def _handle_overview_report(
     top_origin_ids = sorted(origin_waste_map.items(), key=lambda kv: kv[1], reverse=True)[:5]
     top_recyclables = []
     if top_origin_ids:
+        origin_names_map = {}
+        origin_path_map = {}
         try:
             origins_result = reports_service.get_origin_by_organization(organization_id=organization_id, current_user_id=current_user_id)
-            origin_names_map = {}
-            origin_path_map = {}
-            for o in origins_result.get('data', []):
-                oid = o.get('origin_id')
-                if oid is not None:
+            location_data = (origins_result.get('data') or {}).get('location') or {}
+            for level_key in ('branches', 'buildings', 'floors', 'rooms'):
+                for o in location_data.get(level_key, []) or []:
+                    oid = o.get('id')
+                    if oid is None:
+                        continue
                     if oid not in origin_names_map:
-                        origin_names_map[oid] = o.get('display_name') or o.get('name_en') or o.get('name_th') or o.get('name')
+                        origin_names_map[oid] = o.get('name')
                     if oid not in origin_path_map:
                         origin_path_map[oid] = o.get('path') or ''
         except Exception:
-            origin_names_map = {}
-            origin_path_map = {}
+            pass
         top_recyclables = [
             {'origin_id': oid, 'origin_name': origin_names_map.get(oid), 'path': origin_path_map.get(oid, ''), 'total_waste': w}
             for oid, w in top_origin_ids
