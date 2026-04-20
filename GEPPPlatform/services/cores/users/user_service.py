@@ -370,7 +370,7 @@ class UserService:
             'aggregations': aggregations
         }
 
-    def get_user_details(self, user_id: str) -> Optional[Dict[str, Any]]:
+    def get_user_details(self, user_id: str, include_sensitive: bool = False) -> Optional[Dict[str, Any]]:
         """
         Get comprehensive user details
         """
@@ -383,7 +383,7 @@ class UserService:
         permissions = self.permissions.get_user_permissions(user_id)
 
         return {
-            'user': self._serialize_user(user, include_sensitive=False),
+            'user': self._serialize_user(user, include_sensitive=include_sensitive),
             'activities': [self._serialize_activity(activity) for activity in activities],
             'permissions': permissions,
             'organization_tree': self._get_user_organization_tree(user),
