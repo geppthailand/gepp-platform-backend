@@ -34,6 +34,8 @@ from ...exceptions import (
 
 class AuthHandlers:
 
+    SYNC_SECRET = os.environ.get('SYNC_SECRET', 'gepp-v2v3-sync-secret-2026')
+
     def __init__(self, db_session: Session):
         self.db_session = db_session
         self.jwt_secret = os.environ.get('JWT_SECRET_KEY', 'your-secret-key-here')
@@ -135,6 +137,45 @@ class AuthHandlers:
         return {
             'auth_token': auth_token,
             'refresh_token': refresh_token
+        }
+
+    def sync_token(self, data: Dict[str, Any], **kwargs) -> Dict[str, Any]:
+        """
+        Generate a JWT token for v2→v3 sync operations.
+        Requires shared secret. Returns a token scoped to a specific org.
+
+        POST /api/auth/sync-token
+        Body: { "sync_secret": "...", "organization_id": 123 }
+        Returns: { "token": "...", "user_id": ..., "organization_id": ... }
+        """
+        sync_secret = data.get('sync_secret')
+        if sync_secret != self.SYNC_SECRET:
+            raise UnauthorizedException('Invalid sync secret')
+
+        organization_id = data.get('organization_id')
+        if not organization_id:
+            raise BadRequestException('organization_id is required')
+
+        session = self.db_session
+
+        # Find the org owner
+        org = session.query(Organization).filter_by(id=organization_id).first()
+        if not org:
+            raise NotFoundException(f'Organization {organization_id} not found')
+
+        owner = session.query(UserLocation).filter_by(
+            id=org.owner_id, is_user=True
+        ).first()
+        if not owner:
+            raise NotFoundException(f'Owner not found for org {organization_id}')
+
+        tokens = self.generate_jwt_tokens(owner.id, organization_id, owner.email or '')
+
+        return {
+            'success': True,
+            'token': tokens['auth_token'],
+            'user_id': owner.id,
+            'organization_id': organization_id,
         }
 
     def generate_device_tokens(self, device_id: int, device_name: str) -> Dict[str, str]:
