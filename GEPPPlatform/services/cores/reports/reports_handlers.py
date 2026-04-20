@@ -464,11 +464,18 @@ def _handle_overview_report(
         total_waste += weight
         ghg_reduction += record_ghg
 
-        # Monthly aggregation
+        # Monthly aggregation — bucket by the user's local timezone (Bangkok),
+        # not UTC. Without this, a tx stored as e.g. 2025-10-31 18:00 UTC
+        # (= 2025-11-01 01:00 Bangkok) lands in October here while the SQL
+        # date-range filter (converted to Bangkok) includes it in November,
+        # causing an Oct/Nov split on the chart.
         if tx_date:
             try:
                 dt = tx_date if isinstance(tx_date, datetime) else datetime.fromisoformat(str(tx_date))
-                y, m = dt.year, dt.month
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                dt_local = dt.astimezone(ZoneInfo('Asia/Bangkok'))
+                y, m = dt_local.year, dt_local.month
                 if y not in month_totals_by_year:
                     month_totals_by_year[y] = {}
                 month_totals_by_year[y][m] = month_totals_by_year[y].get(m, 0.0) + weight
@@ -1438,9 +1445,17 @@ def _handle_comparison_report(
         end_dt = _parse_datetime(end_iso)
         if not start_dt or not end_dt:
             return None
+        # Convert to Bangkok so labels reflect the user-visible range, not UTC.
+        bkk = ZoneInfo('Asia/Bangkok')
+        if start_dt.tzinfo is None:
+            start_dt = start_dt.replace(tzinfo=timezone.utc)
+        if end_dt.tzinfo is None:
+            end_dt = end_dt.replace(tzinfo=timezone.utc)
+        start_local = start_dt.astimezone(bkk)
+        end_local = end_dt.astimezone(bkk)
         labels = []
-        y, m = start_dt.year, start_dt.month
-        while (y < end_dt.year) or (y == end_dt.year and m <= end_dt.month):
+        y, m = start_local.year, start_local.month
+        while (y < end_local.year) or (y == end_local.year and m <= end_local.month):
             labels.append(datetime(2000, m, 1).strftime('%b'))
             m += 1
             if m > 12:
@@ -1483,6 +1498,13 @@ def _handle_comparison_report(
             if not dt:
                 continue
 
+            # Bucket by Bangkok month to match the SQL date-range filter
+            # (otherwise UTC month can split data across adjacent months).
+            if dt.tzinfo is None:
+                dt_local = dt.replace(tzinfo=timezone.utc).astimezone(ZoneInfo('Asia/Bangkok'))
+            else:
+                dt_local = dt.astimezone(ZoneInfo('Asia/Bangkok'))
+
             if cat_id is not None:
                 try:
                     cat_id_int = int(cat_id)
@@ -1490,7 +1512,7 @@ def _handle_comparison_report(
                     continue
                 category_ids.add(cat_id_int)
 
-                month_label = datetime(2000, dt.month, 1).strftime('%b')
+                month_label = datetime(2000, dt_local.month, 1).strftime('%b')
                 total_waste += weight
                 month_map[month_label] = month_map.get(month_label, 0.0) + weight
 
