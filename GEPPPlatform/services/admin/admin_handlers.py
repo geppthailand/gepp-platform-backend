@@ -17,6 +17,8 @@ from GEPPPlatform.exceptions import (
     BadRequestException,
 )
 from .admin_service import AdminService
+from . import crm as _crm  # noqa: F401  (sub-route dispatcher)
+from .crm import crm_handlers as crm
 
 
 class AdminHandlers:
@@ -111,6 +113,16 @@ class AdminHandlers:
             'system-permissions': self.admin_service.list_system_permissions,
             'iot-devices': self.admin_service.list_iot_devices,
             'iot-scales': self.admin_service.list_iot_scales,
+            # CRM / Marketing module
+            'crm-segments': lambda qp: crm.list_crm_segments(self.db_session, qp),
+            'crm-templates': lambda qp: crm.list_crm_templates(self.db_session, qp),
+            'crm-campaigns': lambda qp: crm.list_crm_campaigns(self.db_session, qp),
+            'crm-email-lists': lambda qp: crm.list_crm_email_lists(self.db_session, qp),
+            'crm-user-profiles': lambda qp: crm.list_crm_user_profiles(self.db_session, qp),
+            'crm-org-profiles': lambda qp: crm.list_crm_org_profiles(self.db_session, qp),
+            'crm-deliveries': lambda qp: crm.list_crm_deliveries(self.db_session, qp),
+            'crm-unsubscribes': lambda qp: crm.list_crm_unsubscribes(self.db_session, qp),
+            'crm-analytics': lambda qp: crm.list_crm_analytics(self.db_session, qp),
         }
         handler = handler_map.get(resource)
         if not handler:
@@ -125,6 +137,11 @@ class AdminHandlers:
             'system-permissions': self.admin_service.get_system_permission,
             'iot-devices': self.admin_service.get_iot_device,
             'iot-scales': self.admin_service.get_iot_scale,
+            # CRM / Marketing
+            'crm-segments': lambda rid: crm.get_crm_segment(self.db_session, rid),
+            'crm-templates': lambda rid: crm.get_crm_template(self.db_session, rid),
+            'crm-campaigns': lambda rid: crm.get_crm_campaign(self.db_session, rid),
+            'crm-email-lists': lambda rid: crm.get_crm_email_list(self.db_session, rid),
         }
         handler = handler_map.get(resource)
         if not handler:
@@ -138,6 +155,11 @@ class AdminHandlers:
             'system-permissions': self.admin_service.create_system_permission,
             'iot-devices': self.admin_service.create_iot_device,
             'iot-scales': self.admin_service.create_iot_scale,
+            # CRM / Marketing
+            'crm-segments': lambda d: crm.create_crm_segment(self.db_session, d),
+            'crm-templates': lambda d: crm.create_crm_template(self.db_session, d),
+            'crm-campaigns': lambda d: crm.create_crm_campaign(self.db_session, d),
+            'crm-email-lists': lambda d: crm.create_crm_email_list(self.db_session, d),
         }
         handler = handler_map.get(resource)
         if not handler:
@@ -153,6 +175,11 @@ class AdminHandlers:
             'system-permissions': self.admin_service.update_system_permission,
             'iot-devices': self.admin_service.update_iot_device,
             'iot-scales': self.admin_service.update_iot_scale,
+            # CRM / Marketing
+            'crm-segments': lambda rid, d: crm.update_crm_segment(self.db_session, rid, d),
+            'crm-templates': lambda rid, d: crm.update_crm_template(self.db_session, rid, d),
+            'crm-campaigns': lambda rid, d: crm.update_crm_campaign(self.db_session, rid, d),
+            'crm-email-lists': lambda rid, d: crm.update_crm_email_list(self.db_session, rid, d),
         }
         handler = handler_map.get(resource)
         if not handler:
@@ -166,6 +193,11 @@ class AdminHandlers:
             'system-permissions': self.admin_service.delete_system_permission,
             'iot-devices': self.admin_service.delete_iot_device,
             'iot-scales': self.admin_service.delete_iot_scale,
+            # CRM / Marketing
+            'crm-segments': lambda rid: crm.delete_crm_segment(self.db_session, rid),
+            'crm-templates': lambda rid: crm.delete_crm_template(self.db_session, rid),
+            'crm-campaigns': lambda rid: crm.delete_crm_campaign(self.db_session, rid),
+            'crm-email-lists': lambda rid: crm.delete_crm_email_list(self.db_session, rid),
         }
         handler = handler_map.get(resource)
         if not handler:

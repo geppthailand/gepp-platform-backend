@@ -163,6 +163,17 @@ def main(event, context):
                 # Health check endpoint (no authorization required)
                 results = {"status": "healthy", "timestamp": datetime.now().isoformat(), "method": http_method}
 
+            elif "/api/webhooks/mailchimp" in path and http_method == "POST":
+                # Mailchimp Transactional webhook (public, HMAC-signed)
+                from GEPPPlatform.services.webhooks.mailchimp_handler import handle_mailchimp_webhook
+                return handle_mailchimp_webhook(event, session)
+
+            elif "/api/crm/unsubscribe/" in path and http_method == "GET":
+                # Public unsubscribe landing page (token-signed)
+                from GEPPPlatform.services.public.crm_unsubscribe_handler import handle_unsubscribe
+                token = path.split('/api/crm/unsubscribe/')[1].split('/')[0].split('?')[0]
+                return handle_unsubscribe(token, session)
+
             elif "/api/userapi/documents/" in path:
                 # PUBLIC: Handle API documentation routes (no authentication required)
                 # Pattern: /api/userapi/documents/{service_path}
@@ -618,6 +629,17 @@ def main(event, context):
                             "success": True,
                             "data": admin_result
                         }
+                    elif "/api/crm/events" in path and http_method == "POST":
+                        # Authed client-side event ingest (user JWT)
+                        from GEPPPlatform.services.public.crm_client_events_handler import handle_client_event
+                        request_meta = {
+                            "session_id": (event.get("headers") or {}).get("x-session-id"),
+                            "ip_address": (event.get("requestContext", {}).get("http", {}) or {}).get("sourceIp"),
+                            "user_agent": (event.get("headers") or {}).get("user-agent"),
+                        }
+                        crm_evt_result = handle_client_event(body, current_user, request_meta, session)
+                        results = {"success": True, "data": crm_evt_result}
+
                     elif "/api/iot-devices" in path:
                         # Handle all IoT devices management routes
                         from GEPPPlatform.services.cores.iot_devices.iot_devices_handlers import handle_iot_devices_routes

@@ -30,11 +30,35 @@ def handle_admin_routes(path: str, data: dict, **commonParams):
     if method == "POST":
         if internal_path == "/login":
             return admin_handler.admin_login(data)
-        elif len(path_parts) == 1:
+
+        # CRM sub-paths without id: /crm-segments/preview, /crm-templates/render-preview, /crm-templates/generate-ai
+        if len(path_parts) == 2 and path_parts[0].startswith('crm-') and \
+           path_parts[1] in ('preview', 'render-preview', 'generate-ai'):
+            from .crm import handle_crm_admin_subroute
+            return handle_crm_admin_subroute(
+                resource=path_parts[0], resource_id=None, sub_path=path_parts[1],
+                method=method, db_session=db_session, data=data,
+                query_params=commonParams.get('query_params', {}),
+                current_user=commonParams.get('current_user', {}),
+            )
+
+        if len(path_parts) == 1:
             # POST /admin/{resource}
             resource = path_parts[0]
             return admin_handler.create_resource(resource, data)
-        elif len(path_parts) == 4 and path_parts[2] == "permissions" and path_parts[3] == "batch":
+
+        # CRM sub-paths with id: /crm-campaigns/{id}/{start|pause|resume|archive|test}
+        #                        /crm-segments/{id}/{evaluate|clone}
+        if len(path_parts) == 3 and path_parts[0].startswith('crm-'):
+            from .crm import handle_crm_admin_subroute
+            return handle_crm_admin_subroute(
+                resource=path_parts[0], resource_id=int(path_parts[1]), sub_path=path_parts[2],
+                method=method, db_session=db_session, data=data,
+                query_params=commonParams.get('query_params', {}),
+                current_user=commonParams.get('current_user', {}),
+            )
+
+        if len(path_parts) == 4 and path_parts[2] == "permissions" and path_parts[3] == "batch":
             # POST /admin/subscription-plans/{id}/permissions/batch
             resource_id = int(path_parts[1])
             return admin_handler.batch_permissions(resource_id, data)
@@ -54,18 +78,44 @@ def handle_admin_routes(path: str, data: dict, **commonParams):
             if resource == 'iot-devices':
                 return admin_handler.admin_service.get_iot_device_stats(query_params)
             raise NotFoundException(f"Stats not available for {resource}")
+
+        # CRM analytics sub-paths (no numeric id): /crm-analytics/overview, /crm-analytics/timeseries, /crm-analytics/funnel
+        if len(path_parts) >= 2 and path_parts[0] == 'crm-analytics':
+            from .crm import handle_crm_admin_subroute
+            sub_path = '/'.join(path_parts[1:])
+            return handle_crm_admin_subroute(
+                resource='crm-analytics', resource_id=None, sub_path=sub_path,
+                method=method, db_session=db_session, data={},
+                query_params=query_params, current_user=commonParams.get('current_user', {}),
+            )
+
         if len(path_parts) == 1:
             # GET /admin/{resource}
             resource = path_parts[0]
             return admin_handler.list_resource(resource, query_params)
         elif len(path_parts) == 2:
-            # GET /admin/{resource}/{id}
+            # GET /admin/{resource}/{id} — except 'fields' which is a crm sub-path
             resource = path_parts[0]
+            if resource.startswith('crm-') and path_parts[1] in ('fields',):
+                from .crm import handle_crm_admin_subroute
+                return handle_crm_admin_subroute(
+                    resource=resource, resource_id=None, sub_path=path_parts[1],
+                    method=method, db_session=db_session, data={},
+                    query_params=query_params, current_user=commonParams.get('current_user', {}),
+                )
             resource_id = int(path_parts[1])
             return admin_handler.get_resource(resource, resource_id)
         elif len(path_parts) == 3:
-            # GET /admin/organizations/{id}/users or /organizations/{id}/locations
             resource = path_parts[0]
+            # CRM sub-paths: /crm-{segments|templates|campaigns}/{id}/{action}
+            if resource.startswith('crm-'):
+                from .crm import handle_crm_admin_subroute
+                return handle_crm_admin_subroute(
+                    resource=resource, resource_id=int(path_parts[1]), sub_path=path_parts[2],
+                    method=method, db_session=db_session, data={},
+                    query_params=query_params, current_user=commonParams.get('current_user', {}),
+                )
+            # GET /admin/organizations/{id}/users or /organizations/{id}/locations
             resource_id = int(path_parts[1])
             sub_resource = path_parts[2]
             return admin_handler.list_sub_resource(resource, resource_id, sub_resource, query_params)

@@ -223,7 +223,8 @@ class ClaimService:
             )
             .first()
         )
-        if not existing_membership:
+        _is_new_member = not existing_membership
+        if _is_new_member:
             new_membership = OrganizationRewardUser(
                 reward_user_id=reward_user_id,
                 organization_id=campaign.organization_id,
@@ -231,6 +232,38 @@ class ClaimService:
             )
             self.db.add(new_membership)
             self.db.flush()
+
+        # ── CRM: emit reward_claimed + points_earned (+ campaign_joined on first claim) ──
+        try:
+            from GEPPPlatform.services.admin.crm.crm_service import emit_event
+            _props = {
+                'campaign_id': campaign_id,
+                'transaction_id': transaction.id,
+                'total_points': float(total_points),
+                'total_weight_kg': float(total_weight),
+            }
+            emit_event(
+                self.db, event_type='reward_claimed', event_category='reward',
+                organization_id=campaign.organization_id,
+                user_location_id=staff_org_user_id,
+                properties=_props, event_source='server', commit=False,
+            )
+            emit_event(
+                self.db, event_type='points_earned', event_category='reward',
+                organization_id=campaign.organization_id,
+                user_location_id=staff_org_user_id,
+                properties=_props, event_source='server', commit=False,
+            )
+            if _is_new_member:
+                emit_event(
+                    self.db, event_type='campaign_joined', event_category='reward',
+                    organization_id=campaign.organization_id,
+                    user_location_id=staff_org_user_id,
+                    properties={'campaign_id': campaign_id}, event_source='server', commit=False,
+                )
+        except Exception as _exc:
+            import logging as _log
+            _log.getLogger(__name__).warning("CRM emit_event non-fatal (claim): %s", _exc)
 
         return {
             "success": True,

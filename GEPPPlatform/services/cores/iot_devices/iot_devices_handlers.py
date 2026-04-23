@@ -19,6 +19,28 @@ from GEPPPlatform.models.cores.iot_devices import IoTDevice
 
 from ....exceptions import APIException, UnauthorizedException, ValidationException, NotFoundException
 
+import logging as _iot_log
+
+_iot_logger = _iot_log.getLogger(__name__)
+
+
+def _emit_iot_event(db_session, event_type: str, organization_id=None, user_id=None, properties: dict = None):
+    """Fire-and-forget CRM event emission for IoT events.  Never raises."""
+    try:
+        from GEPPPlatform.services.admin.crm.crm_service import emit_event
+        emit_event(
+            db_session,
+            event_type=event_type,
+            event_category='iot',
+            organization_id=organization_id,
+            user_location_id=user_id,
+            properties=properties or {},
+            event_source='device',
+            commit=False,
+        )
+    except Exception as _exc:
+        _iot_logger.warning("CRM emit_event non-fatal (iot): %s", _exc)
+
 
 def handle_get_locations_by_membership(user_service: UserService, query_params: Dict[str, Any], current_user: Dict[str, Any], db_session) -> Dict[str, Any]:
     """Handle POST /api/iot-devices/my-memberships - Get locations where current user is in members list (default role=dataInput)"""
@@ -320,12 +342,25 @@ def handle_iot_devices_routes(event: Dict[str, Any], data: Dict[str, Any], **com
             transaction_service = TransactionService(db_session)
             current_user_id = current_user.get('user_id')
             current_user_organization_id = current_user.get('organization_id')
-            return handle_create_transaction(
+            result = handle_create_transaction(
                 transaction_service,
                 data,
                 current_user_id,
                 current_user_organization_id
             )
+            # ── CRM: emit scale_reading_received ──
+            _emit_iot_event(
+                db_session,
+                event_type='scale_reading_received',
+                organization_id=current_user_organization_id,
+                user_id=current_user_id,
+                properties={
+                    'device_id': current_device.get('device_id'),
+                    'transaction_id': result.get('transaction_id') if isinstance(result, dict) else None,
+                    'origin_id': data.get('origin_id') if isinstance(data, dict) else None,
+                },
+            )
+            return result
         if path == '/api/iot-devices/qr-login':
             auth_handler = AuthHandlers(db_session)
             return auth_handler.login_iot_user(data, **common_params)
