@@ -73,9 +73,13 @@ class ActivityMaterialService:
         if not item:
             raise NotFoundException("Activity material not found")
 
-        for field in ("name", "description", "image_id"):
+        for field in ("name", "description", "type", "material_id", "image_id"):
             if field in data:
                 setattr(item, field, data[field])
+
+        # Clear material_id if type changed to activity
+        if data.get("type") == "activity":
+            item.material_id = None
 
         self.db.flush()
         return self._to_dict(item)

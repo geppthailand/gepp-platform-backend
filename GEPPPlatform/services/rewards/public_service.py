@@ -21,6 +21,53 @@ class PublicRewardService:
     def __init__(self, db: Session):
         self.db = db
 
+    def resolve_user_by_line_id(self, line_user_id: str) -> int:
+        """Resolve reward_user_id from line_user_id. Raises 401 if not found."""
+        if not line_user_id:
+            raise UnauthorizedException("X-Line-User-Id header is required")
+        user = (
+            self.db.query(RewardUser)
+            .filter(
+                RewardUser.line_user_id == line_user_id,
+                RewardUser.deleted_date.is_(None),
+            )
+            .first()
+        )
+        if not user:
+            raise UnauthorizedException("Unknown LINE user")
+        return user.id
+
+    def resolve_staff_by_line_id(self, line_user_id: str, organization_id: int) -> int:
+        """Resolve org_reward_user.id for a staff member from line_user_id + org.
+        Raises 401 if not a staff member of the given org."""
+        reward_user_id = self.resolve_user_by_line_id(line_user_id)
+        org_user = (
+            self.db.query(OrganizationRewardUser)
+            .filter(
+                OrganizationRewardUser.reward_user_id == reward_user_id,
+                OrganizationRewardUser.organization_id == organization_id,
+                OrganizationRewardUser.role == "staff",
+                OrganizationRewardUser.is_active == True,
+                OrganizationRewardUser.deleted_date.is_(None),
+            )
+            .first()
+        )
+        if not org_user:
+            raise UnauthorizedException("Caller is not a staff member of this organization")
+        return org_user.id
+
+    def resolve_staff_for_campaign(self, line_user_id: str, campaign_id: int) -> int:
+        """Resolve org_reward_user.id for a staff member from line_user_id + campaign.
+        Derives organization_id from the campaign."""
+        campaign = (
+            self.db.query(RewardCampaign)
+            .filter(RewardCampaign.id == campaign_id, RewardCampaign.deleted_date.is_(None))
+            .first()
+        )
+        if not campaign:
+            raise NotFoundException("Campaign not found")
+        return self.resolve_staff_by_line_id(line_user_id, campaign.organization_id)
+
     def register_user(self, line_data: dict) -> dict:
         """Register or update a reward user from LINE profile data."""
         line_user_id = line_data.get("line_user_id")
@@ -145,6 +192,32 @@ class PublicRewardService:
             ]
 
         return profile
+
+    def get_memberships(self, reward_user_id: int) -> list[dict]:
+        """Get all organization memberships for a user (from organization_reward_users)."""
+        from ...models.subscriptions.organizations import Organization
+
+        rows = (
+            self.db.query(OrganizationRewardUser)
+            .filter(
+                OrganizationRewardUser.reward_user_id == reward_user_id,
+                OrganizationRewardUser.is_active == True,
+                OrganizationRewardUser.deleted_date.is_(None),
+            )
+            .all()
+        )
+
+        result = []
+        for oru in rows:
+            org = self.db.query(Organization).filter(Organization.id == oru.organization_id).first()
+            result.append({
+                "id": oru.id,
+                "organization_id": oru.organization_id,
+                "organization_name": org.name if org else None,
+                "role": oru.role,
+                "is_active": oru.is_active,
+            })
+        return result
 
     def verify_staff(self, reward_user_id: int, droppoint_hash: str) -> dict:
         """Verify a user is staff. Tries campaign-droppoint hash first (returns campaign context),

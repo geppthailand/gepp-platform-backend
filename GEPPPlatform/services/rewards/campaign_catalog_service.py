@@ -4,16 +4,38 @@ Campaign Catalog Service - Links catalog items to campaigns with redeem rules
 
 from datetime import datetime, timezone
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from ...models.rewards.management import RewardCampaignCatalog
-from ...models.rewards.catalog import RewardCatalog
+from ...models.rewards.management import RewardCampaignCatalog, RewardCampaign
+from ...models.rewards.catalog import RewardCatalog, RewardStock
 from ...exceptions import APIException, NotFoundException, BadRequestException
+from .campaign_service import assert_editable
+from .stock_service import StockService
 
 
 class CampaignCatalogService:
     def __init__(self, db: Session):
         self.db = db
+
+    @staticmethod
+    def _safe_iso(val):
+        if val is None:
+            return None
+        return val.isoformat() if hasattr(val, 'isoformat') else str(val)
+
+    def _current_stock(self, campaign_id: int, catalog_id: int) -> int:
+        """Sum of RewardStock rows for this (campaign, catalog) pair."""
+        total = (
+            self.db.query(func.coalesce(func.sum(RewardStock.values), 0))
+            .filter(
+                RewardStock.reward_campaign_id == campaign_id,
+                RewardStock.reward_catalog_id == catalog_id,
+                RewardStock.deleted_date.is_(None),
+            )
+            .scalar()
+        )
+        return int(total or 0)
 
     def _to_dict(self, item: RewardCampaignCatalog, catalog=None) -> dict:
         result = {
@@ -21,15 +43,18 @@ class CampaignCatalogService:
             "campaign_id": item.campaign_id,
             "catalog_id": item.catalog_id,
             "points_cost": item.points_cost,
-            "start_date": item.start_date.isoformat() if item.start_date else None,
-            "end_date": item.end_date.isoformat() if item.end_date else None,
+            "start_date": self._safe_iso(item.start_date),
+            "end_date": self._safe_iso(item.end_date),
             "status": item.status,
-            "created_date": item.created_date.isoformat() if item.created_date else None,
-            "updated_date": item.updated_date.isoformat() if item.updated_date else None,
+            "created_date": self._safe_iso(item.created_date),
+            "updated_date": self._safe_iso(item.updated_date),
+            "current_stock": self._current_stock(item.campaign_id, item.catalog_id),
         }
         if catalog:
             result["catalog_name"] = catalog.name
             result["catalog_thumbnail_id"] = catalog.thumbnail_id
+            result["catalog_unit"] = catalog.unit
+            result["min_threshold"] = catalog.min_threshold or 0
         return result
 
     def list(self, campaign_id: int) -> list[dict]:
@@ -49,14 +74,29 @@ class CampaignCatalogService:
         )
         return [self._to_dict(cc, cat) for cc, cat in rows]
 
-    def create(self, data: dict) -> dict:
-        """Create a new campaign catalog entry."""
+    def create(
+        self,
+        data: dict,
+        organization_id: int | None = None,
+        admin_user_id: int | None = None,
+    ) -> dict:
+        """Create a new campaign catalog entry.
+
+        If ``initial_quantity`` > 0 is provided, also transfer that quantity
+        from the Global pool into the campaign in the same transaction.
+        """
         if not data.get("campaign_id"):
             raise BadRequestException("Campaign ID is required")
         if not data.get("catalog_id"):
             raise BadRequestException("Catalog ID is required")
         if data.get("points_cost") is None:
             raise BadRequestException("Points cost is required")
+
+        initial_qty = int(data.get("initial_quantity") or 0)
+        if initial_qty < 0:
+            raise BadRequestException("initial_quantity must be non-negative")
+        if initial_qty > 0 and organization_id is None:
+            raise BadRequestException("organization_id is required when initial_quantity is set")
 
         item = RewardCampaignCatalog(
             campaign_id=data["campaign_id"],
@@ -68,6 +108,21 @@ class CampaignCatalogService:
         )
         self.db.add(item)
         self.db.flush()
+
+        # Optional: transfer from Global pool → this campaign (atomic with attach)
+        if initial_qty > 0:
+            stock_svc = StockService(self.db)
+            stock_svc.transfer(
+                {
+                    "reward_catalog_id": data["catalog_id"],
+                    "from": "global",
+                    "to": {"campaign_id": data["campaign_id"]},
+                    "quantity": initial_qty,
+                    "note": f"Initial allocation when adding to campaign #{data['campaign_id']}",
+                },
+                organization_id=organization_id,
+                admin_user_id=admin_user_id,
+            )
 
         row = (
             self.db.query(RewardCampaignCatalog, RewardCatalog)
@@ -93,6 +148,13 @@ class CampaignCatalogService:
         if not item:
             raise NotFoundException("Campaign catalog entry not found")
 
+        # points_cost change is a BREAKING edit — reject if campaign is active
+        points_changed = "points_cost" in data and int(data["points_cost"]) != int(item.points_cost or 0)
+        if points_changed:
+            campaign = self.db.query(RewardCampaign).filter(RewardCampaign.id == item.campaign_id).first()
+            if campaign:
+                assert_editable(campaign, breaking=True)
+
         for field in ("points_cost", "start_date", "end_date", "status"):
             if field in data:
                 setattr(item, field, data[field])
@@ -111,7 +173,7 @@ class CampaignCatalogService:
         return self._to_dict(row[0], row[1]) if row else self._to_dict(item)
 
     def delete(self, id: int) -> dict:
-        """Soft delete a campaign catalog entry."""
+        """Soft delete a campaign catalog entry. Breaking: reject if campaign is active."""
         item = (
             self.db.query(RewardCampaignCatalog)
             .filter(
@@ -122,6 +184,10 @@ class CampaignCatalogService:
         )
         if not item:
             raise NotFoundException("Campaign catalog entry not found")
+
+        campaign = self.db.query(RewardCampaign).filter(RewardCampaign.id == item.campaign_id).first()
+        if campaign:
+            assert_editable(campaign, breaking=True)
 
         item.deleted_date = datetime.now(timezone.utc)
         self.db.flush()

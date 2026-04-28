@@ -7,9 +7,10 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
-from ...models.rewards.management import RewardCampaignDroppoint
+from ...models.rewards.management import RewardCampaignDroppoint, RewardCampaign
 from ...models.rewards.redemptions import Droppoint
 from ...exceptions import APIException, NotFoundException, BadRequestException
+from .campaign_service import assert_editable
 
 
 class CampaignDroppointService:
@@ -76,7 +77,7 @@ class CampaignDroppointService:
         return self._to_dict(row[0], row[1]) if row else self._to_dict(item)
 
     def delete(self, id: int) -> dict:
-        """Soft delete a campaign droppoint link."""
+        """Soft delete a campaign droppoint link. Breaking: reject if campaign is active."""
         item = (
             self.db.query(RewardCampaignDroppoint)
             .filter(
@@ -87,6 +88,10 @@ class CampaignDroppointService:
         )
         if not item:
             raise NotFoundException("Campaign droppoint not found")
+
+        campaign = self.db.query(RewardCampaign).filter(RewardCampaign.id == item.campaign_id).first()
+        if campaign:
+            assert_editable(campaign, breaking=True)
 
         item.deleted_date = datetime.now(timezone.utc)
         self.db.flush()

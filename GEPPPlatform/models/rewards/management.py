@@ -24,6 +24,8 @@ class RewardSetup(Base, BaseModel):
     receipt_template = Column(String(255), nullable=True)
     hash = Column(String(64), unique=True, nullable=False)
     welcome_message = Column(Text, nullable=True)
+    reward_budget_total = Column(DECIMAL(12, 2), nullable=True)  # org-level budget cap (THB)
+    low_stock_threshold = Column(Integer, default=10)  # items below this count flagged as low
 
 
 class RewardCampaign(Base, BaseModel):
@@ -36,9 +38,11 @@ class RewardCampaign(Base, BaseModel):
     image_id = Column(BigInteger, nullable=True)  # FK files.id
     start_date = Column(DateTime(timezone=True), nullable=False)
     end_date = Column(DateTime(timezone=True), nullable=True)  # null = no expiry
-    status = Column(String(20), default='active')  # active / inactive
+    status = Column(String(20), default='draft')  # draft / active / paused / archived; 'ended' is computed
     points_per_transaction_limit = Column(Integer, nullable=True)  # null = no limit
     points_per_day_limit = Column(Integer, nullable=True)  # null = no limit
+    target_participants = Column(Integer, nullable=True)
+    budget_baht = Column(DECIMAL(12, 2), nullable=True)
 
 
 class RewardActivityMaterial(Base, BaseModel):
@@ -51,6 +55,8 @@ class RewardActivityMaterial(Base, BaseModel):
     type = Column(String(20), nullable=False)  # material / activity
     material_id = Column(BigInteger, nullable=True)  # FK materials.id when type=material
     image_id = Column(BigInteger, nullable=True)  # FK files.id
+    selling_price_per_kg = Column(DECIMAL(10, 2), nullable=True)  # waste resale value (THB/kg)
+    ghg_factor = Column(DECIMAL(6, 3), nullable=True)  # kg CO2e saved per kg material
 
 
 class RewardCampaignClaim(Base, BaseModel):
@@ -85,3 +91,25 @@ class RewardCampaignDroppoint(Base, BaseModel):
     droppoint_id = Column(BigInteger, ForeignKey('droppoints.id'), nullable=False)
     tag_id = Column(BigInteger, nullable=True)  # override tag for this campaign+droppoint
     hash = Column(String(64), unique=True, nullable=False)  # QR code hash for staff check-in
+
+
+class RewardCampaignTarget(Base, BaseModel):
+    """Per-material/activity goals for a campaign.
+
+    A campaign can have many targets, each scoped to either:
+      - a main_material (e.g. 'Plastic') — aggregates kg across all material-type ActivityMaterials
+        whose linked Material has this main_material_id; unit is always 'kg'.
+      - a single RewardActivityMaterial (org-scoped) — could be material-type (kg) or
+        activity-type (count of claims, unit='times').
+
+    Exactly one of `main_material_id` / `activity_material_id` must be set (CHECK constraint in DB).
+    Some campaign materials/activities may have no target — that's fine, they're tracked without a goal.
+    """
+    __tablename__ = 'reward_campaign_targets'
+
+    reward_campaign_id = Column(BigInteger, ForeignKey('reward_campaigns.id'), nullable=False)
+    target_level = Column(String(20), nullable=False)  # 'main' | 'activity_material'
+    main_material_id = Column(BigInteger, ForeignKey('main_materials.id'), nullable=True)
+    activity_material_id = Column(BigInteger, ForeignKey('reward_activity_materials.id'), nullable=True)
+    target_amount = Column(DECIMAL(12, 2), nullable=False)  # weight (kg) or count (times)
+    target_unit = Column(String(10), nullable=False, default='kg')  # 'kg' | 'times'
