@@ -1073,6 +1073,31 @@ def handle_get_orphan_locations(
         raise APIException(f'Error fetching orphan locations: {str(e)}')
 
 
+# Member roles are stored in user_locations.members JSONB as camelCase
+# (e.g. "dataInput"), but clients sometimes send the organization_roles.key
+# spelling ("data_input"). Normalize on write so the read query — which only
+# matches the canonical form — finds these memberships.
+_MEMBER_ROLE_ALIASES = {
+    'data_input': 'dataInput',
+    'data-input': 'dataInput',
+    'datainput': 'dataInput',
+}
+
+
+def _normalize_members_payload(members: Any) -> Any:
+    if not isinstance(members, list):
+        return members
+    normalized = []
+    for entry in members:
+        if isinstance(entry, dict) and isinstance(entry.get('role'), str):
+            role = entry['role']
+            canonical = _MEMBER_ROLE_ALIASES.get(role.strip().lower())
+            if canonical and canonical != role:
+                entry = {**entry, 'role': canonical}
+        normalized.append(entry)
+    return normalized
+
+
 def handle_update_location(
     db_session,
     location_id: str,
@@ -1109,7 +1134,7 @@ def handle_update_location(
 
         # Handle user assignments - store in members JSONB column
         if 'users' in data:
-            location.members = data['users']
+            location.members = _normalize_members_payload(data['users'])
             flag_modified(location, 'members')
 
         # Handle tag assignments - update location.tags JSONB array and bidirectional relationship
