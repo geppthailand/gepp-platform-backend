@@ -652,7 +652,19 @@ def handle_get_user_details(
 ) -> Dict[str, Any]:
     """Handle GET /api/users/{user_id} - Get user details with can_delete flag"""
     try:
-        result = user_service.get_user_details(user_id)
+        include_sensitive = False
+        if current_user_id:
+            try:
+                uid_int = int(current_user_id)
+                org_id = int(current_user_organization_id) if current_user_organization_id else None
+                if uid_int == int(user_id):
+                    include_sensitive = True
+                elif org_id and user_service.is_admin_or_org_owner(uid_int, org_id):
+                    include_sensitive = True
+            except (TypeError, ValueError):
+                pass
+
+        result = user_service.get_user_details(user_id, include_sensitive=include_sensitive)
         if not result:
             raise NotFoundException('User not found')
 
@@ -1061,6 +1073,31 @@ def handle_get_orphan_locations(
         raise APIException(f'Error fetching orphan locations: {str(e)}')
 
 
+# Member roles are stored in user_locations.members JSONB as camelCase
+# (e.g. "dataInput"), but clients sometimes send the organization_roles.key
+# spelling ("data_input"). Normalize on write so the read query — which only
+# matches the canonical form — finds these memberships.
+_MEMBER_ROLE_ALIASES = {
+    'data_input': 'dataInput',
+    'data-input': 'dataInput',
+    'datainput': 'dataInput',
+}
+
+
+def _normalize_members_payload(members: Any) -> Any:
+    if not isinstance(members, list):
+        return members
+    normalized = []
+    for entry in members:
+        if isinstance(entry, dict) and isinstance(entry.get('role'), str):
+            role = entry['role']
+            canonical = _MEMBER_ROLE_ALIASES.get(role.strip().lower())
+            if canonical and canonical != role:
+                entry = {**entry, 'role': canonical}
+        normalized.append(entry)
+    return normalized
+
+
 def handle_update_location(
     db_session,
     location_id: str,
@@ -1097,7 +1134,7 @@ def handle_update_location(
 
         # Handle user assignments - store in members JSONB column
         if 'users' in data:
-            location.members = data['users']
+            location.members = _normalize_members_payload(data['users'])
             flag_modified(location, 'members')
 
         # Handle tag assignments - update location.tags JSONB array and bidirectional relationship
@@ -1395,20 +1432,33 @@ def handle_get_location_allowed_materials(
                     'material_id': row[2],
                 })
 
+        # Only return categories and main_materials referenced by the fetched materials
+        used_category_ids = {m.category_id for m in materials_list if m.category_id}
+        used_main_material_ids = {m.main_material_id for m in materials_list if m.main_material_id}
+
         categories = db_session.query(MaterialCategory).filter(
-            and_(MaterialCategory.is_active == True, MaterialCategory.deleted_date.is_(None))
-        ).order_by(MaterialCategory.name_th).all()
+            and_(
+                MaterialCategory.is_active == True,
+                MaterialCategory.deleted_date.is_(None),
+                MaterialCategory.id.in_(used_category_ids) if used_category_ids else False
+            )
+        ).order_by(MaterialCategory.name_th).all() if used_category_ids else []
 
         main_materials = db_session.query(MainMaterial).filter(
-            and_(MainMaterial.is_active == True, MainMaterial.deleted_date.is_(None))
-        ).order_by(MainMaterial.display_order).all()
+            and_(
+                MainMaterial.is_active == True,
+                MainMaterial.deleted_date.is_(None),
+                MainMaterial.id.in_(used_main_material_ids) if used_main_material_ids else False
+            )
+        ).order_by(MainMaterial.display_order).all() if used_main_material_ids else []
 
         return {
             'materials': [{
-                'id': m.id, 'name_th': m.name_th, 'name_en': m.name_en,
-                'unit_name_th': m.unit_name_th, 'unit_name_en': m.unit_name_en,
-                'color': m.color, 'category_id': m.category_id,
-                'main_material_id': m.main_material_id,
+                'id': m.id, 'name_th': m.name_th or '', 'name_en': m.name_en or '',
+                'unit_name_th': m.unit_name_th or '', 'unit_name_en': m.unit_name_en or '',
+                'category_id': m.category_id or 0,
+                'main_material_id': m.main_material_id or 0,
+                'unit_weight': float(m.unit_weight) if m.unit_weight is not None else 1.0,
                 'images': material_images_map.get(m.id, []),
             } for m in materials_list],
             'categories': [{
@@ -1698,8 +1748,46 @@ def handle_delete_location_with_transactions(
             )
         ).first()
 
-        # If location doesn't exist or is already deleted, return success (idempotent delete)
+        # Helper function to remove a node (and its subtree) from the tree by nodeId
+        def remove_node_from_tree(nodes, node_id_to_remove):
+            """Remove a node (and its subtree) from the tree structure by nodeId."""
+            if not nodes:
+                return nodes
+            result = []
+            for node in nodes:
+                if node.get('nodeId') == node_id_to_remove:
+                    continue  # skip this node and its entire subtree
+                node_copy = dict(node)
+                if 'children' in node_copy:
+                    node_copy['children'] = remove_node_from_tree(node_copy['children'], node_id_to_remove)
+                result.append(node_copy)
+            return result
+
+        def cleanup_tree_node(target_node_id):
+            """Remove a node from org_setup tree hierarchy and commit."""
+            setup = db_session.query(OrganizationSetup).filter(
+                and_(
+                    OrganizationSetup.organization_id == organization_id,
+                    OrganizationSetup.deleted_date.is_(None)
+                )
+            ).order_by(OrganizationSetup.id.desc()).first()
+            if not setup:
+                return
+            from sqlalchemy.orm.attributes import flag_modified
+            if setup.root_nodes:
+                setup.root_nodes = remove_node_from_tree(setup.root_nodes, target_node_id)
+                flag_modified(setup, 'root_nodes')
+            if setup.hub_node:
+                hub_copy = dict(setup.hub_node)
+                if 'children' in hub_copy:
+                    hub_copy['children'] = remove_node_from_tree(hub_copy['children'], target_node_id)
+                setup.hub_node = hub_copy
+                flag_modified(setup, 'hub_node')
+            db_session.commit()
+
+        # If location doesn't exist or is already deleted, still clean up tree (stale data) then return
         if not location:
+            cleanup_tree_node(int(location_id))
             return {
                 'success': True,
                 'deleted_locations_count': 0,
@@ -1769,8 +1857,9 @@ def handle_delete_location_with_transactions(
             ).update({
                 'deleted_date': now
             }, synchronize_session=False)
-        
-        db_session.commit()
+
+        # Remove deleted nodes from the tree hierarchy so they no longer appear in the org chart
+        cleanup_tree_node(target_id)
 
         return {
             'success': True,

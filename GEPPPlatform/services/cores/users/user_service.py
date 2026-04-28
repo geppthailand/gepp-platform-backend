@@ -288,6 +288,22 @@ class UserService:
         chain_descendants = self._get_created_by_descendants(current_user_id, organization_id)
         visible_user_ids |= chain_descendants
 
+        # All children down the parent_user_id chain (BFS)
+        parent_queue = [current_user_id]
+        parent_visited: Set[int] = {current_user_id}
+        while parent_queue:
+            children_rows = self.db.query(UserLocation.id).filter(
+                UserLocation.parent_user_id.in_(parent_queue),
+                UserLocation.organization_id == organization_id,
+                UserLocation.deleted_date.is_(None),
+            ).all()
+            parent_queue = []
+            for (uid,) in children_rows:
+                if uid not in parent_visited:
+                    parent_visited.add(uid)
+                    visible_user_ids.add(uid)
+                    parent_queue.append(uid)
+
         # Members in assigned locations (already union'd via _resolve_location_tiers)
         setup_location_ids = self._get_setup_location_ids(organization_id)
         if setup_location_ids is not None:
@@ -354,7 +370,7 @@ class UserService:
             'aggregations': aggregations
         }
 
-    def get_user_details(self, user_id: str) -> Optional[Dict[str, Any]]:
+    def get_user_details(self, user_id: str, include_sensitive: bool = False) -> Optional[Dict[str, Any]]:
         """
         Get comprehensive user details
         """
@@ -367,7 +383,7 @@ class UserService:
         permissions = self.permissions.get_user_permissions(user_id)
 
         return {
-            'user': self._serialize_user(user, include_sensitive=False),
+            'user': self._serialize_user(user, include_sensitive=include_sensitive),
             'activities': [self._serialize_activity(activity) for activity in activities],
             'permissions': permissions,
             'organization_tree': self._get_user_organization_tree(user),

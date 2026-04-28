@@ -71,10 +71,16 @@ def main(event, context):
             path = raw_path
 
         # Handle CORS preflight
+        # Note: If API Gateway has CORS configured, it handles OPTIONS automatically
+        # and never forwards to Lambda. If OPTIONS reaches here, API Gateway CORS is
+        # not configured — so we handle it in Lambda.
         if http_method == "OPTIONS":
             return {
                 "statusCode": 200,
                 "headers": {
+                    "Access-Control-Allow-Origin": "*",
+                    "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+                    "Access-Control-Allow-Headers": "Content-Type, Authorization",
                     "Content-Type": "application/json",
                 },
                 "body": json.dumps({"message": "CORS preflight"})
@@ -96,6 +102,9 @@ def main(event, context):
                 return {
                     "statusCode": 400,
                     "headers": {
+                        "Access-Control-Allow-Origin": "*",
+                        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+                        "Access-Control-Allow-Headers": "Content-Type, Authorization",
                         "Content-Type": "application/json",
                     },
                     "body": json.dumps({"error": "Invalid JSON in request body"})
@@ -103,11 +112,11 @@ def main(event, context):
         
         results = {}
 
-        # CORS headers
+        # CORS headers — included on all responses so browser accepts them
         headers = {
-            # 'Access-Control-Allow-Origin': '*',
-            # 'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-            # 'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type, Authorization',
             'Content-Type': 'application/json'
         }
 
@@ -277,20 +286,57 @@ def main(event, context):
                         })
                     }
 
+            elif path == '/api/esg/liff/invitation/accept' and http_method == 'POST':
+                # Public: Accept invitation (no JWT required — user doesn't have one yet)
+                from GEPPPlatform.services.esg.liff_auth_service import LiffAuthService
+
+                with get_session() as session:
+                    liff_svc = LiffAuthService(session)
+                    try:
+                        accept_result = liff_svc.accept_invitation(
+                            invitation_token=body.get('invitation_token', ''),
+                            line_access_token=body.get('access_token', ''),
+                        )
+                        results = {"success": True, "data": accept_result}
+                    except ValueError as ve:
+                        results = {"success": False, "message": str(ve), "error_code": "BAD_REQUEST"}
+
             elif path == '/api/esg/line/webhook' and http_method == 'POST':
                 # Public ESG LINE webhook (no JWT required, signature verified internally)
                 from GEPPPlatform.services.esg.esg_line_service import EsgLineService
 
-                signature = event.get('headers', {}).get('x-line-signature', '')
+                _raw_h = event.get('headers', {}) or {}
+                _lc_h = {k.lower(): v for k, v in _raw_h.items()}
+                signature = _lc_h.get('x-line-signature', '')
                 raw_body = event.get('body', '{}')
+                logger.info("----------- LINE WEBHOOK RECEIVED -----------")
+                logger.info(f"[LINE-WEBHOOK] body_len={len(raw_body or '')}")
+                logger.info(f"[LINE-WEBHOOK] signature={signature[:30] if signature else 'NONE'}")
+                logger.info(f"[LINE-WEBHOOK] raw_body={raw_body[:500] if raw_body else 'EMPTY'}")
+                logger.info("----------------------------------------------")
 
-                with get_session() as session:
-                    line_service = EsgLineService(session)
-                    webhook_result = line_service.handle_webhook(raw_body, signature)
-                    results = {
-                        "success": True,
-                        "data": webhook_result
-                    }
+                # Pass simulator headers if present (case-insensitive lookup — Flask uses Title-Case)
+                raw_headers = event.get('headers', {})
+                h = {k.lower(): v for k, v in raw_headers.items()} if raw_headers else {}
+                simulator_opts = {}
+                if h.get('x-simulator') == 'true':
+                    simulator_opts['org_id'] = int(h.get('x-simulator-org-id', 0)) or None
+                    simulator_opts['user_id'] = h.get('x-simulator-user-id', '')
+                    simulator_opts['dry_run'] = h.get('x-simulator-dry-run') == 'true'
+                    logger.info(f"[LINE-WEBHOOK] SIMULATOR MODE: org_id={simulator_opts.get('org_id')}, dry_run={simulator_opts.get('dry_run')}, user_id={simulator_opts.get('user_id', '')[:20]}")
+
+                try:
+                    with get_session() as session:
+                        line_service = EsgLineService(session)
+                        webhook_result = line_service.handle_webhook(raw_body, signature, simulator_opts=simulator_opts)
+                        results = {
+                            "success": True,
+                            "data": webhook_result
+                        }
+                        logger.info(f"[LINE-WEBHOOK] Result: {json.dumps(webhook_result, default=str)[:500]}")
+                except Exception as webhook_err:
+                    logger.error(f"[LINE-WEBHOOK] Error: {webhook_err}", exc_info=True)
+                    results = {"success": False, "message": str(webhook_err)}
 
             elif "/api/input-channel/" in path:
                 # Public input channel access (no authorization required)
@@ -1086,6 +1132,9 @@ def main(event, context):
         return {
             "statusCode": 401,
             "headers": {
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type, Authorization",
                 "Content-Type": "application/json",
             },
             "body": json.dumps({
@@ -1093,12 +1142,15 @@ def main(event, context):
                 "message": str(auth_error)
             })
         }
-        
+
     except Exception as e:
         import traceback
         return {
             "statusCode": 500,
             "headers": {
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type, Authorization",
                 "Content-Type": "application/json",
             },
             "body": json.dumps({
