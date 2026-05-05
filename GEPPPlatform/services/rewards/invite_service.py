@@ -21,14 +21,32 @@ class InviteService:
     def __init__(self, db: Session):
         self.db = db
 
-    def create_invite(self, organization_id: int, created_by_id: int) -> dict:
-        """Create a one-time staff invite link (admin action)."""
+    ALLOWED_EXPIRY_HOURS = {24, 168, 720, 0}  # 1d / 7d / 30d / never
+
+    def create_invite(
+        self,
+        organization_id: int,
+        created_by_id: int,
+        expiry_hours: int | None = None,
+    ) -> dict:
+        """Create a one-time staff invite link (admin action).
+
+        expiry_hours: one of {24, 168, 720, 0}. None → default 168 (7d). 0 → never expires.
+        """
+        hours = 168 if expiry_hours is None else int(expiry_hours)
+        if hours not in self.ALLOWED_EXPIRY_HOURS:
+            raise BadRequestException(
+                f"expiry_hours must be one of {sorted(self.ALLOWED_EXPIRY_HOURS)}"
+            )
+
+        expires_date = None if hours == 0 else datetime.now(timezone.utc) + timedelta(hours=hours)
+
         invite = RewardStaffInvite(
             hash=uuid.uuid4().hex,
             organization_id=organization_id,
             created_by_id=created_by_id,
             status="pending",
-            expires_date=datetime.now(timezone.utc) + timedelta(hours=48),
+            expires_date=expires_date,
         )
         self.db.add(invite)
         self.db.flush()
@@ -41,6 +59,26 @@ class InviteService:
             "expires_date": invite.expires_date.isoformat() if invite.expires_date else None,
             "created_date": invite.created_date.isoformat() if invite.created_date else None,
         }
+
+    def revoke_invite(self, invite_id: int, organization_id: int) -> dict:
+        """Revoke a pending invite → mark as expired."""
+        invite = (
+            self.db.query(RewardStaffInvite)
+            .filter(
+                RewardStaffInvite.id == invite_id,
+                RewardStaffInvite.organization_id == organization_id,
+                RewardStaffInvite.deleted_date.is_(None),
+            )
+            .first()
+        )
+        if not invite:
+            raise NotFoundException("Invite not found")
+        if invite.status != "pending":
+            raise BadRequestException(f"Cannot revoke invite with status '{invite.status}'")
+
+        invite.status = "expired"
+        self.db.flush()
+        return {"id": invite.id, "status": "expired"}
 
     def list_invites(self, organization_id: int) -> list[dict]:
         """List all invites for an organization."""
@@ -64,7 +102,7 @@ class InviteService:
                 status = "expired"
                 self.db.flush()
 
-            # Get used_by display name
+            # Get used_by display name — fallback to line_user_id or staff sentinel
             used_by_name = None
             if inv.used_by_id:
                 user = (
@@ -74,6 +112,10 @@ class InviteService:
                 )
                 if user:
                     used_by_name = user.display_name or user.line_display_name
+                    if not used_by_name and user.line_user_id:
+                        used_by_name = f"@{user.line_user_id[:12]}…"
+                if not used_by_name:
+                    used_by_name = f"User #{inv.used_by_id}"
 
             result.append({
                 "id": inv.id,
