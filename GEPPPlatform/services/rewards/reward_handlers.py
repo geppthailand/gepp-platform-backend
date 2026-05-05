@@ -7,6 +7,8 @@ import traceback
 
 from .setup_service import RewardSetupService
 from .activity_material_service import ActivityMaterialService
+from .activity_type_service import ActivityTypeService
+from .cost_report_service import CostReportService
 from .campaign_service import CampaignService
 from .campaign_claim_service import CampaignClaimService
 from .campaign_catalog_service import CampaignCatalogService
@@ -61,6 +63,11 @@ def handle_reward_routes(event: Dict[str, Any], data: Dict[str, Any], **params) 
             svc = RewardSetupService(db_session)
             return svc.upsert_setup(current_org_id, data)
 
+        # --- Phase 2: Conversion Rate (org-level point→baht) ---
+        if path == "/api/rewards/setup/conversion-rate" and method == "PUT":
+            svc = RewardSetupService(db_session)
+            return svc.update_conversion_rate(current_org_id, data)
+
         # --- Overview ---
         if path == "/api/rewards/overview" and method == "GET":
             svc = OverviewService(db_session)
@@ -91,6 +98,34 @@ def handle_reward_routes(event: Dict[str, Any], data: Dict[str, Any], **params) 
             svc = OverviewService(db_session)
             limit = int(query_params.get("limit", 5))
             return svc.get_top_members(current_org_id, limit=limit)
+
+        # --- Phase 2: Drop Point Breakdown (Material kg / Activity count) ---
+        if path == "/api/rewards/overview/dropoint-breakdown" and method == "GET":
+            svc = OverviewService(db_session)
+            metric = query_params.get("metric", "material")
+            campaign_id = query_params.get("campaign_id")
+            campaign_id_int = int(campaign_id) if campaign_id else None
+            return svc.get_dropoint_breakdown(
+                current_org_id, metric=metric, campaign_id=campaign_id_int,
+            )
+
+        # --- Phase 2: Activity Types CRUD ---
+        if path == "/api/rewards/activity-types" and method == "GET":
+            svc = ActivityTypeService(db_session)
+            return svc.list(current_org_id)
+
+        if path == "/api/rewards/activity-types" and method == "POST":
+            svc = ActivityTypeService(db_session)
+            return svc.create(current_org_id, data)
+
+        if path == "/api/rewards/activity-types" and method == "PUT":
+            svc = ActivityTypeService(db_session)
+            return svc.update(int(data.get("id")), current_org_id, data)
+
+        if path == "/api/rewards/activity-types" and method == "DELETE":
+            svc = ActivityTypeService(db_session)
+            item_id = data.get("id") or query_params.get("id")
+            return svc.delete(int(item_id), current_org_id)
 
         # --- Activity Materials ---
         if path == "/api/rewards/activity-materials" and method == "GET":
@@ -341,6 +376,15 @@ def handle_reward_routes(event: Dict[str, Any], data: Dict[str, Any], **params) 
         if path == "/api/rewards/inventory/kpis" and method == "GET":
             svc = StockService(db_session)
             return svc.get_inventory_kpis(current_org_id)
+
+        # --- Phase 2: Cost Report (full-page destination) ---
+        if path == "/api/rewards/inventory/cost-report" and method == "GET":
+            svc = CostReportService(db_session)
+            return svc.get_report(
+                organization_id=current_org_id,
+                date_from=query_params.get("date_from"),
+                date_to=query_params.get("date_to"),
+            )
 
         if path == "/api/rewards/inventory/summary" and method == "GET":
             svc = StockService(db_session)

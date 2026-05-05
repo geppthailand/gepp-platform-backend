@@ -539,6 +539,141 @@ class OverviewService:
         return result
 
     # ================================================================
+    # § Phase 2 — Drop Point Breakdown (Material kg / Activity count)
+    # ================================================================
+    def get_dropoint_breakdown(
+        self,
+        organization_id: int,
+        metric: str = "material",
+        campaign_id: int | None = None,
+    ) -> dict:
+        """Phase 2 endpoint powering the 2 Drop Point Breakdown cards on Overview.
+
+        - metric='material': sum of weight (kg) per droppoint, broken down by material name.
+        - metric='activity': count of activity-type claims per droppoint.
+
+        If campaign_id provided, scope to that campaign only; otherwise aggregate all
+        active campaigns matching the metric type.
+        """
+        if metric not in ("material", "activity"):
+            metric = "material"
+
+        # Resolve eligible campaigns for this metric
+        eligible_q = self.db.query(RewardCampaign.id).filter(
+            RewardCampaign.organization_id == organization_id,
+            RewardCampaign.deleted_date.is_(None),
+            RewardCampaign.metric_type == metric,
+        )
+        if campaign_id is not None:
+            eligible_q = eligible_q.filter(RewardCampaign.id == campaign_id)
+        eligible_ids = [row.id for row in eligible_q.all()]
+        if not eligible_ids:
+            return {
+                "metric": metric,
+                "campaigns": [],
+                "rows": [],
+            }
+
+        # Aggregate claim transactions in those campaigns, grouped by droppoint × material
+        if metric == "material":
+            rows = (
+                self.db.query(
+                    RewardPointTransaction.droppoint_id.label("droppoint_id"),
+                    RewardActivityMaterial.id.label("material_id"),
+                    RewardActivityMaterial.name.label("material_name"),
+                    func.coalesce(func.sum(RewardPointTransaction.value), 0).label("total"),
+                )
+                .join(
+                    RewardActivityMaterial,
+                    RewardActivityMaterial.id == RewardPointTransaction.activity_material_id,
+                    isouter=True,
+                )
+                .filter(
+                    RewardPointTransaction.campaign_id.in_(eligible_ids),
+                    RewardPointTransaction.reference_type == "claim",
+                    RewardPointTransaction.deleted_date.is_(None),
+                )
+                .group_by(
+                    RewardPointTransaction.droppoint_id,
+                    RewardActivityMaterial.id,
+                    RewardActivityMaterial.name,
+                )
+                .all()
+            )
+        else:
+            # activity: count of claims per droppoint × activity_material
+            rows = (
+                self.db.query(
+                    RewardPointTransaction.droppoint_id.label("droppoint_id"),
+                    RewardActivityMaterial.id.label("material_id"),
+                    RewardActivityMaterial.name.label("material_name"),
+                    func.count(RewardPointTransaction.id).label("total"),
+                )
+                .join(
+                    RewardActivityMaterial,
+                    RewardActivityMaterial.id == RewardPointTransaction.activity_material_id,
+                    isouter=True,
+                )
+                .filter(
+                    RewardPointTransaction.campaign_id.in_(eligible_ids),
+                    RewardPointTransaction.reference_type == "claim",
+                    RewardPointTransaction.deleted_date.is_(None),
+                )
+                .group_by(
+                    RewardPointTransaction.droppoint_id,
+                    RewardActivityMaterial.id,
+                    RewardActivityMaterial.name,
+                )
+                .all()
+            )
+
+        # Resolve droppoint names
+        dp_ids = {r.droppoint_id for r in rows if r.droppoint_id}
+        dp_names: dict[int, str] = {}
+        if dp_ids:
+            for dp in self.db.query(Droppoint).filter(Droppoint.id.in_(dp_ids)).all():
+                dp_names[dp.id] = dp.name
+
+        # Group: { droppoint_id → { droppoint_name, total, by_material: [...] } }
+        grouped: dict[int | None, dict] = {}
+        for r in rows:
+            dp_id = r.droppoint_id
+            bucket = grouped.setdefault(dp_id, {
+                "droppoint_id": dp_id,
+                "droppoint_name": dp_names.get(dp_id) if dp_id else "ไม่ระบุจุดรับ",
+                "total": 0.0,
+                "by_material": [],
+            })
+            value = float(r.total or 0)
+            bucket["total"] += value
+            bucket["by_material"].append({
+                "material_id": r.material_id,
+                "material_name": r.material_name or "อื่น ๆ",
+                "value": value,
+            })
+
+        # Sort each droppoint's materials by value desc, droppoints by total desc
+        result_rows = list(grouped.values())
+        for row in result_rows:
+            row["by_material"].sort(key=lambda x: -x["value"])
+        result_rows.sort(key=lambda x: -x["total"])
+
+        # Eligible campaigns metadata (for client-side dropdown)
+        campaign_meta = (
+            self.db.query(RewardCampaign.id, RewardCampaign.name)
+            .filter(RewardCampaign.id.in_(eligible_ids))
+            .all()
+        )
+        campaigns_payload = [{"id": c.id, "name": c.name} for c in campaign_meta]
+
+        return {
+            "metric": metric,
+            "unit": "kg" if metric == "material" else "times",
+            "campaigns": campaigns_payload,
+            "rows": result_rows,
+        }
+
+    # ================================================================
     # § 5 — Trends (6-month time-series) + § 6 Environmental Impact
     # ================================================================
     def get_trends(self, organization_id: int, months: int = 6) -> dict:

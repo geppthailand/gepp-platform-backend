@@ -47,6 +47,7 @@ class RewardSetupService:
             "points_rounding_method": setup.points_rounding_method,
             "timezone": setup.timezone,
             "cost_per_point": float(setup.cost_per_point) if setup.cost_per_point is not None else None,
+            "point_to_baht_rate": float(setup.point_to_baht_rate) if setup.point_to_baht_rate is not None else None,
             "qr_code_size": setup.qr_code_size,
             "qr_error_correction": setup.qr_error_correction,
             "receipt_template": setup.receipt_template,
@@ -71,7 +72,8 @@ class RewardSetupService:
 
         updatable_fields = [
             "program_name", "program_name_local", "points_rounding_method",
-            "timezone", "cost_per_point", "qr_code_size", "qr_error_correction",
+            "timezone", "cost_per_point", "point_to_baht_rate",
+            "qr_code_size", "qr_error_correction",
             "receipt_template", "welcome_message",
             "reward_budget_total", "low_stock_threshold",
         ]
@@ -92,4 +94,44 @@ class RewardSetupService:
 
         self.db.flush()
 
+        return self.get_setup(organization_id)
+
+    def update_conversion_rate(self, organization_id: int, data: dict) -> dict:
+        """PUT /api/rewards/setup/conversion-rate — update org-level point→baht rate.
+
+        Phase 2: powers Cost Report ROI/profit calculations.
+        """
+        rate = data.get("point_to_baht_rate")
+        if rate is None:
+            raise BadRequestException("point_to_baht_rate is required")
+        try:
+            rate_dec = Decimal(str(rate))
+        except Exception:
+            raise BadRequestException("point_to_baht_rate must be a number")
+        if rate_dec < 0:
+            raise BadRequestException("point_to_baht_rate cannot be negative")
+
+        setup = (
+            self.db.query(RewardSetup)
+            .filter(
+                RewardSetup.organization_id == organization_id,
+                RewardSetup.deleted_date.is_(None),
+            )
+            .first()
+        )
+        if not setup:
+            # Auto-create setup with this rate
+            setup = RewardSetup(
+                organization_id=organization_id,
+                hash=uuid.uuid4().hex,
+                point_to_baht_rate=rate_dec,
+                cost_per_point=rate_dec,  # mirror for backward compat
+            )
+            self.db.add(setup)
+        else:
+            setup.point_to_baht_rate = rate_dec
+            # Mirror to legacy column so anything still reading cost_per_point stays in sync
+            setup.cost_per_point = rate_dec
+
+        self.db.flush()
         return self.get_setup(organization_id)
