@@ -15,6 +15,7 @@ import base64
 import io
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
@@ -34,6 +35,12 @@ from GEPPPlatform.models.users.user_related import UserLocationTag
 # Default level labels when the org hasn't customised them.
 DEFAULT_LEVEL_LABELS = ('Branch', 'Building', 'Floor', 'Room')
 
+# All user-facing dates and date filters are interpreted in this zone.
+# `transactions.transaction_date` is `timestamp with time zone` stored in
+# UTC; we convert to Bangkok at the boundary so the user's calendar
+# view matches what they typed and what gets exported.
+DISPLAY_TZ = ZoneInfo('Asia/Bangkok')
+
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -48,15 +55,54 @@ def _derive_status(record_statuses: List[Optional[str]]) -> str:
     return 'pending'
 
 
-def _parse_iso(value: Optional[str]) -> Optional[datetime]:
+def _parse_date_from(value: Optional[str]) -> Optional[datetime]:
+    """Parse the lower bound. A plain `YYYY-MM-DD` is anchored to
+    00:00:00 in DISPLAY_TZ (Asia/Bangkok); a full ISO timestamp is
+    accepted as-is. Returns a tz-aware datetime so SQLAlchemy can
+    compare it against `timestamp with time zone` columns directly."""
     if not value:
         return None
     try:
         if 'T' not in value:
-            return datetime.strptime(value, '%Y-%m-%d')
-        return datetime.fromisoformat(value.replace('Z', '+00:00'))
+            d = datetime.strptime(value, '%Y-%m-%d')
+            return d.replace(tzinfo=DISPLAY_TZ)
+        dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=DISPLAY_TZ)
+        return dt
     except ValueError:
         raise BadRequestException(f'Invalid date format: {value}')
+
+
+def _parse_date_to(value: Optional[str]) -> Optional[datetime]:
+    """Parse the upper bound. A plain `YYYY-MM-DD` snaps to
+    23:59:59.999999 in DISPLAY_TZ so the user's "to 30/04" filter
+    actually includes April 30 transactions in their local calendar."""
+    if not value:
+        return None
+    try:
+        if 'T' not in value:
+            d = datetime.strptime(value, '%Y-%m-%d')
+            return d.replace(
+                hour=23, minute=59, second=59, microsecond=999999,
+                tzinfo=DISPLAY_TZ,
+            )
+        dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=DISPLAY_TZ)
+        return dt
+    except ValueError:
+        raise BadRequestException(f'Invalid date format: {value}')
+
+
+def _fmt_bkk_date(dt: Optional[datetime]) -> str:
+    """Render a tz-aware datetime as DD/MM/YYYY in DISPLAY_TZ. Naive
+    inputs are assumed to already be in Bangkok local time."""
+    if dt is None:
+        return ''
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(DISPLAY_TZ)
+    return dt.strftime('%d/%m/%Y')
 
 
 def _loc_label(loc: Optional[UserLocation]) -> str:
@@ -106,8 +152,8 @@ class AdminTransactionExportService:
             raise NotFoundException(f'Organization {organization_id} not found')
 
         origin_id = query_params.get('originId')
-        date_from = _parse_iso(query_params.get('dateFrom'))
-        date_to = _parse_iso(query_params.get('dateTo'))
+        date_from = _parse_date_from(query_params.get('dateFrom'))
+        date_to = _parse_date_to(query_params.get('dateTo'))
         status_filter = (query_params.get('status') or 'all').strip().lower()
         if status_filter not in ('all', 'pending', 'approved', 'rejected'):
             raise BadRequestException(
@@ -394,7 +440,7 @@ class AdminTransactionExportService:
         row_idx = 2
         seq = 0
         for tx, tx_records, derived, tag_label, level_columns in rows:
-            tx_date_str = tx.transaction_date.strftime('%d/%m/%Y') if tx.transaction_date else ''
+            tx_date_str = _fmt_bkk_date(tx.transaction_date)
 
             # `level_columns` is already in [branch, building, floor, room]
             # order, with empty strings for levels the origin's path skips.

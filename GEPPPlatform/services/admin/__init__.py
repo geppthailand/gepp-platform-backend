@@ -233,9 +233,18 @@ def handle_admin_routes(path: str, data: dict, **commonParams):
             # GET /admin/organizations/{id}/transactions-export — XLSX export
             if resource == 'organizations' and path_parts[2] == 'transactions-export':
                 from .transaction_export_service import AdminTransactionExportService
-                return AdminTransactionExportService(db_session).export(
-                    int(path_parts[1]), query_params
-                )
+                from .db_target_resolver import session_for_target
+                target = (query_params.get('dbTarget') or 'local')
+                # Mint a session against the requested DB if needed; the
+                # request's normal `db_session` is used otherwise.
+                target_session, owns_session = session_for_target(target, db_session)
+                try:
+                    return AdminTransactionExportService(target_session).export(
+                        int(path_parts[1]), query_params
+                    )
+                finally:
+                    if owns_session:
+                        target_session.close()
             # GET /admin/organizations/{id}/users or /organizations/{id}/locations
             resource_id = int(path_parts[1])
             sub_resource = path_parts[2]

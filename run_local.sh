@@ -10,18 +10,30 @@ set -euo pipefail
 #   3. Starts Flask server that simulates API Gateway → Lambda
 #
 # Usage:
-#   ./run_local.sh              # default port 9000
+#   ./run_local.sh              # default port 9000, local DB
 #   ./run_local.sh 8080         # custom port
 #   ./run_local.sh --install    # force reinstall all deps
+#   ./run_local.sh dev          # point local backend at DEV DB
+#                               #   (sources migrations/.env.development)
+#   ./run_local.sh prd          # point local backend at PROD DB (READ-ONLY-MINDSET!)
+#                               #   (sources migrations/.env)
+#   ./run_local.sh --db=dev     # same as above, explicit form
+#   DB_TARGET=dev ./run_local.sh
 # ──────────────────────────────────────────────────────────────
 
 PORT="9000"
 FORCE_INSTALL=false
+# DB_TARGET: local (default) | dev | prd. Drives which env file is sourced
+# in step 2 below. Env-var form lets CI / wrappers override without args.
+DB_TARGET="${DB_TARGET:-local}"
 
 for arg in "$@"; do
   case "$arg" in
-    --install) FORCE_INSTALL=true ;;
-    [0-9]*)    PORT="$arg" ;;
+    --install)        FORCE_INSTALL=true ;;
+    --db=*)           DB_TARGET="${arg#--db=}" ;;
+    local|dev|prd)    DB_TARGET="$arg" ;;
+    prod|production)  DB_TARGET="prd" ;;
+    [0-9]*)           PORT="$arg" ;;
   esac
 done
 
@@ -61,7 +73,12 @@ fi
 
 log "Using Python 3.13 ($PYTHON)"
 
-# ── 2. Load .env.local (local dev config) ─────────────────────
+# ── 2. Load .env files based on DB_TARGET ─────────────────────
+# Always load $SCRIPT_DIR/.env.local first for non-DB config (JWT, log
+# level, AWS keys, etc.). When DB_TARGET != local, a second file from
+# migrations/ is sourced *after* with `set -a` so its DB_* vars override
+# whatever .env.local set. The migrations env files use DB_PASSWORD; we
+# alias it to DB_PASS (which is what database.py reads) below.
 ENV_FILE="$SCRIPT_DIR/.env.local"
 if [ -f "$ENV_FILE" ]; then
   log "Loading .env.local"
@@ -91,6 +108,45 @@ ENVEOF
   exit 1
 fi
 
+# Resolve which DB env file (if any) to overlay.
+DB_ENV_OVERLAY=""
+case "$DB_TARGET" in
+  local)
+    : # use whatever .env.local provided
+    ;;
+  dev)
+    DB_ENV_OVERLAY="$SCRIPT_DIR/migrations/.env.development"
+    ;;
+  prd)
+    DB_ENV_OVERLAY="$SCRIPT_DIR/migrations/.env"
+    ;;
+  *)
+    err "Unknown DB_TARGET '$DB_TARGET'. Use local | dev | prd."
+    exit 1
+    ;;
+esac
+
+if [ -n "$DB_ENV_OVERLAY" ]; then
+  if [ ! -f "$DB_ENV_OVERLAY" ]; then
+    err "DB_TARGET=$DB_TARGET but env file not found: $DB_ENV_OVERLAY"
+    exit 1
+  fi
+  # Wipe any DB_* values from .env.local so we don't accidentally mix
+  # them with the overlay (e.g. local DB_HOST sticking around).
+  unset DB_HOST DB_PORT DB_NAME DB_USER DB_PASS DB_PASSWORD DATABASE_URL
+  log "Loading DB overlay: ${DB_ENV_OVERLAY#$SCRIPT_DIR/}"
+  set -a; source "$DB_ENV_OVERLAY"; set +a
+fi
+
+# Migrations env files set DB_PASSWORD (long form); database.py reads
+# DB_PASS (short form). Bridge them in either direction.
+if [ -z "${DB_PASS:-}" ] && [ -n "${DB_PASSWORD:-}" ]; then
+  export DB_PASS="$DB_PASSWORD"
+fi
+if [ -z "${DB_PASSWORD:-}" ] && [ -n "${DB_PASS:-}" ]; then
+  export DB_PASSWORD="$DB_PASS"
+fi
+
 # ── 3. Parse DATABASE_URL if individual DB_* vars missing ────
 if [ -n "${DATABASE_URL:-}" ] && [ -z "${DB_HOST:-}" ]; then
   rest="${DATABASE_URL#*://}"
@@ -104,6 +160,30 @@ if [ -n "${DATABASE_URL:-}" ] && [ -z "${DB_HOST:-}" ]; then
   export DB_NAME="${hostportdb#*/}"
   log "Parsed DATABASE_URL -> ${DB_HOST}:${DB_PORT}/${DB_NAME}"
 fi
+
+# ── 3b. Loud banner so the user can never confuse which DB is in play.
+case "$DB_TARGET" in
+  dev)
+    echo
+    echo -e "${YELLOW}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${YELLOW}║  LOCAL BACKEND IS POINTED AT  *DEV*  DATABASE                ║${NC}"
+    echo -e "${YELLOW}║  Host: ${DB_HOST:-?}  DB: ${DB_NAME:-?}${NC}"
+    echo -e "${YELLOW}╚══════════════════════════════════════════════════════════════╝${NC}"
+    echo
+    ;;
+  prd)
+    echo
+    echo -e "${RED}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${RED}║  ⚠  LOCAL BACKEND IS POINTED AT  *PRODUCTION*  DATABASE     ║${NC}"
+    echo -e "${RED}║  Any write you trigger will hit production. Be careful.     ║${NC}"
+    echo -e "${RED}║  Host: ${DB_HOST:-?}  DB: ${DB_NAME:-?}${NC}"
+    echo -e "${RED}╚══════════════════════════════════════════════════════════════╝${NC}"
+    echo
+    ;;
+  local)
+    log "DB target: local (${DB_HOST:-?}:${DB_PORT:-?}/${DB_NAME:-?})"
+    ;;
+esac
 
 # ── 4. Create venv if missing ────────────────────────────────
 # Recreate venv if it exists but uses wrong Python version
