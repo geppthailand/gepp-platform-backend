@@ -46,9 +46,15 @@ _HB_SHORT_KEY_MAP: Dict[str, str] = {
     'sc': 'scale_connected',
     'sm': 'scale_mac_bt',
     'cs': 'cache_summary',
+    # Per-tablet GPS — written to iot_hardwares (not iot_device_health) by
+    # the /sync handler so the location follows the physical tablet across
+    # iot_devices logins. Tablet only includes these on full cycles.
+    'lat': 'last_lat',
+    'lng': 'last_lng',
+    'acc': 'last_location_accuracy_m',
 }
 
-# Columns that map onto device_health table — used to decide which UPSERT slots are valid.
+# Columns that map onto iot_device_health table — used to decide which UPSERT slots are valid.
 _DEVICE_HEALTH_COLUMNS: Set[str] = {
     'battery_level', 'battery_charging', 'cpu_temp_c', 'network_type', 'network_strength',
     'ip_address', 'storage_free_mb', 'ram_free_mb', 'os_version', 'app_version',
@@ -66,7 +72,7 @@ def _expand_hb_keys(hb: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Expand short heartbeat keys (e.g. ``bl``) onto full column names (``battery_level``).
 
     Unknown keys are dropped silently. Full-form keys pass through.
-    Only keys mapping to known device_health columns are kept.
+    Only keys mapping to known iot_device_health columns are kept.
     """
     if not isinstance(hb, dict):
         return {}
@@ -107,7 +113,13 @@ def _emit_iot_event(db_session, event_type: str, organization_id=None, user_id=N
             organization_id=organization_id,
             user_location_id=user_id,
             properties=properties or {},
-            event_source='device',
+            # `crm_events.event_source` has a CHECK constraint accepting
+            # only {'server','client','system','email_provider'}. The
+            # tablet acts as a client — use that label. Previously emitted
+            # 'device' which spammed the log with chk_crm_event_source
+            # violations on every /sync (caught by the SAVEPOINT but still
+            # noisy).
+            event_source='client',
             commit=False,
         )
         # Force the INSERT now (inside the savepoint) so any schema drift
@@ -377,6 +389,51 @@ def handle_get_locations_by_membership(user_service: UserService, query_params: 
 # ========== /sync + /commands/{id}/ack HANDLERS ==========
 
 
+def _run_daily_log_cleanup(db_session) -> None:
+    """Delete IoT device-log rows older than yesterday (UTC).
+
+    Triggered by the day-rollover branch in `handle_iot_device_sync` —
+    fires at most once per day per device (subsequent same-day syncs see a
+    matching date on the previous last_seen_at). Three log tables get
+    pruned:
+
+      * iot_device_events         — append-only action trail (~50/min/device)
+      * iot_device_health_history — 5-min health buckets (already 7-day
+                                    retention via the aggregator, but we
+                                    enforce 1-day here too so the user-spec
+                                    is consistent across all log tables)
+      * iot_device_commands       — only TERMINAL rows (succeeded / failed
+                                    / expired). Pending / delivered cmds
+                                    are NEVER pruned — those are the cmds
+                                    the tablet hasn't picked up yet.
+
+    "Older than yesterday" = `< CURRENT_DATE - INTERVAL '1 day'`. So if
+    today is 2026-05-25, anything with date < 2026-05-24 dies; 2026-05-24
+    + 2026-05-25 survive ≈ "1 full day" max retention.
+
+    Per /sync (i.e. per device-tick) the cleanup is server-wide — it
+    deletes across ALL devices, not just the calling one. Idempotent:
+    once today's run cleared the boundary rows, subsequent runs are
+    no-ops because the predicate `< CURRENT_DATE - 1` is already empty.
+    """
+    from sqlalchemy import text as _t
+
+    db_session.execute(_t(
+        "DELETE FROM iot_device_events "
+        "WHERE occurred_at < CURRENT_DATE - INTERVAL '1 day'"
+    ))
+    db_session.execute(_t(
+        "DELETE FROM iot_device_health_history "
+        "WHERE bucket_start < CURRENT_DATE - INTERVAL '1 day'"
+    ))
+    db_session.execute(_t(
+        "DELETE FROM iot_device_commands "
+        "WHERE issued_at < CURRENT_DATE - INTERVAL '1 day' "
+        "  AND status IN ('succeeded', 'failed', 'expired')"
+    ))
+    db_session.commit()
+
+
 def _compute_next_interval(hb_full: Dict[str, Any], delivered_count: int) -> int:
     """Adaptive cadence per the plan."""
     if delivered_count > 0:
@@ -456,8 +513,8 @@ def handle_iot_sync(db_session, current_device: Dict[str, Any], data: Dict[str, 
 
     long_poll_req = bool(data.get('long_poll', False))
 
-    # ── 1. UPSERT device_health ────────────────────────────────────────────
-    # JSONB columns on device_health (other than `raw`, which is handled
+    # ── 1. UPSERT iot_device_health ────────────────────────────────────────────
+    # JSONB columns on iot_device_health (other than `raw`, which is handled
     # separately below). psycopg2 does not adapt a Python dict directly into
     # JSONB — we json.dumps these values AND wrap their placeholders in
     # CAST(... AS JSONB). Otherwise the upsert errors with
@@ -505,17 +562,86 @@ def handle_iot_sync(db_session, current_device: Dict[str, Any], data: Dict[str, 
         # Delta: COALESCE merge — only update non-null fields, JSONB-merge raw.
         update_assignments = ['last_seen_at = NOW()']
         for col in expanded_hb.keys():
-            update_assignments.append(f"{col} = COALESCE(EXCLUDED.{col}, device_health.{col})")
-        update_assignments.append('raw = COALESCE(device_health.raw, \'{}\'::jsonb) || EXCLUDED.raw')
+            update_assignments.append(f"{col} = COALESCE(EXCLUDED.{col}, iot_device_health.{col})")
+        update_assignments.append('raw = COALESCE(iot_device_health.raw, \'{}\'::jsonb) || EXCLUDED.raw')
+
+    # Capture the PREVIOUS last_seen_at so we can detect a UTC-day rollover
+    # — used by the post-upsert daily-log cleanup. Cheap one-row read; the
+    # ON CONFLICT path overwrites it in the same statement so without this
+    # SELECT we'd lose the "yesterday" timestamp.
+    _prev_row = db_session.execute(text(
+        "SELECT last_seen_at FROM iot_device_health WHERE device_id = :device_id"
+    ), {'device_id': device_id}).fetchone()
+    _prev_last_seen = _prev_row[0] if _prev_row else None
 
     sql = (
-        f"INSERT INTO device_health ({', '.join(insert_cols)}) "
+        f"INSERT INTO iot_device_health ({', '.join(insert_cols)}) "
         f"VALUES ({', '.join(insert_placeholders)}) "
         f"ON CONFLICT (device_id) DO UPDATE SET {', '.join(update_assignments)} "
         f"RETURNING raw, current_route, cache_summary, last_seen_at"
     )
 
     res = db_session.execute(text(sql), upsert_params).fetchone()
+
+    # ── 1b. GPS → iot_hardwares ────────────────────────────────────────
+    # Tablet opportunistically reports its GPS coords on full cycles. We
+    # write them onto the PHYSICAL tablet row (iot_hardwares) — not the
+    # logical login (iot_devices) — so the location follows the tablet
+    # across re-pairings. UPDATE is a no-op when the iot_devices row has
+    # no hardware_id (legacy / unpaired login).
+    try:
+        _lat = hb_raw.get('lat')
+        _lng = hb_raw.get('lng')
+        if isinstance(_lat, (int, float)) and isinstance(_lng, (int, float)):
+            _acc = hb_raw.get('acc')
+            db_session.execute(text(
+                "UPDATE iot_hardwares SET "
+                "  last_lat = :lat, last_lng = :lng, "
+                "  last_location_accuracy_m = :acc, "
+                "  last_location_at = NOW(), "
+                "  updated_date = NOW() "
+                "WHERE id = ("
+                "  SELECT hardware_id FROM iot_devices WHERE id = :device_id "
+                ") "
+                "  AND (SELECT hardware_id FROM iot_devices WHERE id = :device_id) IS NOT NULL"
+            ), {
+                'lat': float(_lat),
+                'lng': float(_lng),
+                'acc': float(_acc) if isinstance(_acc, (int, float)) else None,
+                'device_id': device_id,
+            })
+    except Exception as _e:
+        _iot_logger.warning("[/sync] GPS write skipped: %s", _e)
+
+    # ── 1a. Day-rollover cleanup ───────────────────────────────────────
+    # If today's date != the date of THIS device's previous /sync, we
+    # crossed midnight (UTC). Use the rollover as a trigger to delete log
+    # records older than yesterday — keeps device_events / older command
+    # rows / older history buckets from accumulating forever.
+    #
+    # Spec: "วันที่ 25 เป็น trigger point ให้ลบของวันที่ 23 ทิ้ง" — i.e.
+    # delete strictly before yesterday (CURRENT_DATE - 1 day). Today and
+    # yesterday survive; everything else dies.
+    #
+    # The cleanup runs at most once per day per device because subsequent
+    # syncs from the same tablet on the same UTC date find an updated
+    # last_seen_at already in today's date and skip the branch.
+    try:
+        if _prev_last_seen is not None:
+            from datetime import datetime as _dt, timezone as _tz
+            now_utc = _dt.now(_tz.utc).date()
+            prev_utc = _prev_last_seen.astimezone(_tz.utc).date() \
+                if _prev_last_seen.tzinfo else _prev_last_seen.date()
+            if prev_utc != now_utc:
+                _run_daily_log_cleanup(db_session)
+                _iot_logger.info(
+                    "[/sync] daily log rollover trigger: prev=%s now=%s — cleanup ran",
+                    prev_utc, now_utc,
+                )
+    except Exception as _e:
+        # Cleanup is best-effort. If it ever fails, /sync must NOT fail —
+        # the heartbeat is more important than disk hygiene.
+        _iot_logger.warning("[/sync] daily log cleanup error (non-fatal): %s", _e)
     # Force-flush the upsert to the DB right now (still inside the parent
     # transaction). If anything later in this handler fails or rolls back,
     # the rollback would otherwise undo the heartbeat too — defeating the
@@ -524,10 +650,10 @@ def handle_iot_sync(db_session, current_device: Dict[str, Any], data: Dict[str, 
     try:
         db_session.flush()
     except Exception as _e:
-        _iot_logger.error("[/sync] device_health flush failed: %s", _e)
+        _iot_logger.error("[/sync] iot_device_health flush failed: %s", _e)
         raise
     _iot_logger.info(
-        "[/sync] device_health upsert OK device_id=%s kind=%s last_seen_at=%s",
+        "[/sync] iot_device_health upsert OK device_id=%s kind=%s last_seen_at=%s",
         device_id, kind, res[3] if res is not None else None,
     )
 
@@ -544,10 +670,10 @@ def handle_iot_sync(db_session, current_device: Dict[str, Any], data: Dict[str, 
         except Exception:
             cache_after = {}
 
-    # ── 2. Bulk-INSERT device_events ─────────────────────────────────────
+    # ── 2. Bulk-INSERT iot_device_events ─────────────────────────────────────
     if events_in:
         ev_sql = text(
-            "INSERT INTO device_events "
+            "INSERT INTO iot_device_events "
             "(device_id, occurred_at, event_type, route, payload, user_id, session_id) "
             "VALUES (:device_id, :occurred_at, :event_type, :route, CAST(:payload AS jsonb), :user_id, :session_id)"
         )
@@ -568,7 +694,7 @@ def handle_iot_sync(db_session, current_device: Dict[str, Any], data: Dict[str, 
 
     if rejected_count > 0:
         db_session.execute(text(
-            "INSERT INTO device_events (device_id, occurred_at, event_type, payload) "
+            "INSERT INTO iot_device_events (device_id, occurred_at, event_type, payload) "
             "VALUES (:device_id, NOW(), 'event_batch_overflow', CAST(:payload AS jsonb))"
         ), {
             'device_id': device_id,
@@ -577,10 +703,10 @@ def handle_iot_sync(db_session, current_device: Dict[str, Any], data: Dict[str, 
 
     # ── 3. Atomically claim pending commands (limit 10) ─────────────────
     claim_sql = text(
-        "UPDATE device_commands "
+        "UPDATE iot_device_commands "
         "SET status='delivered', delivered_at=NOW() "
         "WHERE id IN ("
-        "  SELECT id FROM device_commands "
+        "  SELECT id FROM iot_device_commands "
         "  WHERE device_id = :device_id AND status='pending' AND expires_at > NOW() "
         "  ORDER BY issued_at ASC LIMIT 10 FOR UPDATE SKIP LOCKED"
         ") "
@@ -670,7 +796,7 @@ def handle_iot_command_ack(db_session, current_device: Dict[str, Any], command_i
 
     # UPDATE only if device matches (one device cannot ack another's command).
     res = db_session.execute(text(
-        "UPDATE device_commands "
+        "UPDATE iot_device_commands "
         "SET status = :status, result = CAST(:result AS jsonb), acked_at = NOW(), completed_at = NOW() "
         "WHERE id = :command_id AND device_id = :device_id "
         "RETURNING command_type"
@@ -688,7 +814,7 @@ def handle_iot_command_ack(db_session, current_device: Dict[str, Any], command_i
 
     # Auto-insert a 'command_executed' event row.
     db_session.execute(text(
-        "INSERT INTO device_events (device_id, occurred_at, event_type, payload) "
+        "INSERT INTO iot_device_events (device_id, occurred_at, event_type, payload) "
         "VALUES (:device_id, NOW(), 'command_executed', CAST(:payload AS jsonb))"
     ), {
         'device_id': device_id,

@@ -12,7 +12,7 @@ from ..base import Base
 
 
 class DeviceEvent(Base):
-    __tablename__ = 'device_events'
+    __tablename__ = 'iot_device_events'
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     device_id = Column(

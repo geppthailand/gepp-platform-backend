@@ -124,9 +124,28 @@ def handle_iot_hardware_checkin(event: Dict[str, Any], data: Dict[str, Any], **k
     # Tablet stores it like a normal device login + transitions to /sync flow.
     if paired_device_id:
         device_row = db_session.execute(text(
-            "SELECT id, device_name, device_type, organization_id "
+            "SELECT id, device_name, device_type, organization_id, "
+            "       (SELECT raw->>'admin_watching_until' "
+            "          FROM iot_device_health WHERE device_id = iot_devices.id) "
+            "         AS admin_watching_until "
             "FROM iot_devices WHERE id = :id AND deleted_date IS NULL"
         ), {'id': paired_device_id}).fetchone()
+        # Wake-up signal: when an admin has just paired/unpaired/issued a
+        # command (admin_watching_until > NOW()) we flip `sync_now: true` so
+        # the tablet's HwCheckin loop calls sync_service.forceCycle() and
+        # picks up the queued command within ~1 s instead of waiting for
+        # the next adaptive sync cycle (up to 30 s in idle mode).
+        if device_row and device_row[4]:
+            try:
+                from datetime import datetime as _dt
+                watching_until_str = str(device_row[4])
+                # Strip trailing 'Z' so fromisoformat parses on Python <3.11.
+                if watching_until_str.endswith('Z'):
+                    watching_until_str = watching_until_str[:-1] + '+00:00'
+                if _dt.fromisoformat(watching_until_str) > datetime.now(timezone.utc):
+                    response['sync_now'] = True
+            except Exception:
+                pass
         if device_row:
             try:
                 auth = AuthHandlers(db_session)

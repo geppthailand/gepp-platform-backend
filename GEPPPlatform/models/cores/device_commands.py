@@ -12,7 +12,7 @@ from ..base import Base
 
 
 class DeviceCommand(Base):
-    __tablename__ = 'device_commands'
+    __tablename__ = 'iot_device_commands'
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     device_id = Column(

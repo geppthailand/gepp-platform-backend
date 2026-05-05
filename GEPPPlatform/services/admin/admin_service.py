@@ -1065,12 +1065,35 @@ class AdminService:
             for row in top_orgs_rows
         ]
 
+        # Pending command count (FleetOverview "Pending Commands" card).
+        # Counts cmds that are still waiting to be picked up by the device
+        # OR have been delivered but not yet ACKed. Both states warrant
+        # admin attention.
+        from sqlalchemy import text as _t
+        pending_cmds = int(self.db_session.execute(_t(
+            "SELECT COUNT(*) FROM iot_device_commands "
+            "WHERE status IN ('pending', 'delivered')"
+        )).fetchone()[0] or 0)
+
+        # Active-watcher count (FleetOverview "Active Watchers" card).
+        # Devices whose admin_watching_until flag is currently in the
+        # future — i.e. an admin is actively watching the detail page or
+        # has just clicked Pair / Unpair / issue-cmd within the last
+        # 5 min, putting the tablet into long-poll mode.
+        active_watchers = int(self.db_session.execute(_t(
+            "SELECT COUNT(*) FROM iot_device_health "
+            "WHERE raw->>'admin_watching_until' IS NOT NULL "
+            "  AND (raw->>'admin_watching_until')::timestamptz > NOW()"
+        )).fetchone()[0] or 0)
+
         return {
             'totalDevices': total,
             'assignedDevices': assigned,
             'unassignedDevices': unassigned,
             'byType': by_type,
             'topOrganizations': top_organizations,
+            'pendingCommands': pending_cmds,
+            'activeWatchers': active_watchers,
         }
 
     # ── IoT Devices: realtime / status / commands / events ─────────────
@@ -1078,6 +1101,15 @@ class AdminService:
     ALLOWED_DEVICE_COMMAND_TYPES = [
         'force_login', 'force_logout', 'navigate', 'reset_to_home', 'reset_input',
         'overwrite_cache', 'clear_storage', 'restart_app', 'ping',
+        # Server-issued during Pair-with-PIN. Tablet hijack_agent writes the
+        # 4–8 digit PIN to secure storage. Admin command-issue endpoint
+        # accepts this too for ad-hoc PIN resets.
+        'set_settings_pin',
+        # Kiosk Mode toggle. The tablet calls KioskModeNotifier which opens
+        # the system Home-app chooser — an on-site tap is required to
+        # complete the launcher swap. The kiosk flag (router gating, wake-
+        # lock, allowed-paths whitelist) flips immediately regardless.
+        'enable_kiosk', 'disable_kiosk',
     ]
 
     def _serialize_device_row(self, row) -> Dict[str, Any]:
@@ -1142,7 +1174,7 @@ class AdminService:
         "d.tags, d.maintenance_mode, d.maintenance_reason, "
         "d.hardware_id, hw.mac_address AS hardware_mac "
         "FROM iot_devices d "
-        "LEFT JOIN device_health h ON h.device_id = d.id "
+        "LEFT JOIN iot_device_health h ON h.device_id = d.id "
         "LEFT JOIN organizations o ON o.id = d.organization_id "
         "LEFT JOIN organization_info oi ON oi.id = o.organization_info_id "
         "LEFT JOIN iot_hardwares hw ON hw.id = d.hardware_id "
@@ -1193,7 +1225,7 @@ class AdminService:
 
         # ETag based on global health watermark (cheap to compute)
         etag_row = self.db_session.execute(_t(
-            "SELECT MAX(last_seen_at) AS m, COUNT(*) AS c FROM device_health"
+            "SELECT MAX(last_seen_at) AS m, COUNT(*) AS c FROM iot_device_health"
         )).fetchone()
         watermark = etag_row[0].isoformat() if (etag_row and etag_row[0]) else 'none'
         count = int(etag_row[1] if etag_row else 0)
@@ -1278,21 +1310,21 @@ class AdminService:
         """Full health row + last 5 commands + last 50 events.
 
         Side-effect: extends the per-device ``admin_watching_until`` flag in
-        ``device_health.raw`` for 30 minutes so subsequent /sync calls long-poll.
+        ``iot_device_health.raw`` for 30 minutes so subsequent /sync calls long-poll.
         """
         from sqlalchemy import text as _t
         self._ensure_device_exists(device_id)
 
         # Refresh (or insert sentinel) admin_watching_until.
         self.db_session.execute(_t(
-            "INSERT INTO device_health (device_id, last_seen_at, raw) "
+            "INSERT INTO iot_device_health (device_id, last_seen_at, raw) "
             "VALUES (:device_id, NOW() - INTERVAL '1 hour', "
             "        jsonb_build_object('admin_watching_until', "
-            "                           to_char(NOW() + INTERVAL '30 minutes', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'))) "
+            "                           to_char((NOW() + INTERVAL '30 minutes') AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'))) "
             "ON CONFLICT (device_id) DO UPDATE "
-            "SET raw = COALESCE(device_health.raw, '{}'::jsonb) || "
+            "SET raw = COALESCE(iot_device_health.raw, '{}'::jsonb) || "
             "          jsonb_build_object('admin_watching_until', "
-            "            to_char(NOW() + INTERVAL '30 minutes', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'))"
+            "            to_char((NOW() + INTERVAL '30 minutes') AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'))"
         ), {'device_id': device_id})
 
         health_row = self.db_session.execute(_t(
@@ -1302,7 +1334,7 @@ class AdminService:
             "ip_address, storage_free_mb, ram_free_mb, os_version, app_version, "
             "current_route, current_user_id, current_org_id, current_location_id, "
             "scale_connected, scale_mac_bt, cache_summary, raw "
-            "FROM device_health WHERE device_id = :device_id"
+            "FROM iot_device_health WHERE device_id = :device_id"
         ), {'device_id': device_id}).fetchone()
 
         health: Optional[Dict[str, Any]] = None
@@ -1334,7 +1366,7 @@ class AdminService:
         cmd_rows = self.db_session.execute(_t(
             "SELECT id, command_type, payload, status, issued_by, issued_at, "
             "delivered_at, acked_at, completed_at, result, expires_at "
-            "FROM device_commands WHERE device_id = :device_id "
+            "FROM iot_device_commands WHERE device_id = :device_id "
             "ORDER BY issued_at DESC LIMIT 5"
         ), {'device_id': device_id}).fetchall()
         recent_commands = [
@@ -1353,7 +1385,7 @@ class AdminService:
 
         ev_rows = self.db_session.execute(_t(
             "SELECT id, occurred_at, received_at, event_type, route, payload, user_id, session_id "
-            "FROM device_events WHERE device_id = :device_id "
+            "FROM iot_device_events WHERE device_id = :device_id "
             "ORDER BY occurred_at DESC LIMIT 50"
         ), {'device_id': device_id}).fetchall()
         recent_events = [
@@ -1376,7 +1408,7 @@ class AdminService:
             'recent_events': recent_events,
         }
 
-    def list_device_events(self, device_id: int, query_params: dict) -> Dict[str, Any]:
+    def list_iot_device_events(self, device_id: int, query_params: dict) -> Dict[str, Any]:
         from sqlalchemy import text as _t
         self._ensure_device_exists(device_id)
 
@@ -1411,7 +1443,7 @@ class AdminService:
         where_sql = ' AND '.join(where)
 
         total_row = self.db_session.execute(_t(
-            f"SELECT COUNT(*) FROM device_events WHERE {where_sql}"
+            f"SELECT COUNT(*) FROM iot_device_events WHERE {where_sql}"
         ), params).fetchone()
         total = int(total_row[0] if total_row else 0)
 
@@ -1420,7 +1452,7 @@ class AdminService:
         params_paged['_offset'] = (page - 1) * page_size
         rows = self.db_session.execute(_t(
             f"SELECT id, occurred_at, received_at, event_type, route, payload, user_id, session_id "
-            f"FROM device_events WHERE {where_sql} "
+            f"FROM iot_device_events WHERE {where_sql} "
             f"ORDER BY occurred_at DESC LIMIT :_limit OFFSET :_offset"
         ), params_paged).fetchall()
 
@@ -1447,7 +1479,7 @@ class AdminService:
             'pageSize': page_size,
         }
 
-    def list_device_commands(self, device_id: int, query_params: dict) -> Dict[str, Any]:
+    def list_iot_device_commands(self, device_id: int, query_params: dict) -> Dict[str, Any]:
         from sqlalchemy import text as _t
         self._ensure_device_exists(device_id)
 
@@ -1469,7 +1501,7 @@ class AdminService:
         where_sql = ' AND '.join(where)
 
         total_row = self.db_session.execute(_t(
-            f"SELECT COUNT(*) FROM device_commands c WHERE {where_sql}"
+            f"SELECT COUNT(*) FROM iot_device_commands c WHERE {where_sql}"
         ), params).fetchone()
         total = int(total_row[0] if total_row else 0)
 
@@ -1480,13 +1512,13 @@ class AdminService:
             f"SELECT c.id, c.command_type, c.payload, c.status, c.issued_by, "
             f"COALESCE(NULLIF(TRIM(CONCAT_WS(' ', u.first_name, u.last_name)), ''), u.display_name, u.email) AS issued_by_name, "
             f"c.issued_at, c.delivered_at, c.acked_at, c.completed_at, c.result, c.expires_at "
-            f"FROM device_commands c "
+            f"FROM iot_device_commands c "
             f"LEFT JOIN user_locations u ON u.id = c.issued_by "
             f"WHERE {where_sql} "
             f"ORDER BY c.issued_at DESC LIMIT :_limit OFFSET :_offset"
         ), params_paged).fetchall()
 
-        # See note in list_device_events about `items` vs `data`.
+        # See note in list_iot_device_events about `items` vs `data`.
         return {
             'items': [
                 {
@@ -1533,7 +1565,7 @@ class AdminService:
             raise BadRequestException('Cannot determine issuing admin user')
 
         row = self.db_session.execute(_t(
-            "INSERT INTO device_commands "
+            "INSERT INTO iot_device_commands "
             "(device_id, command_type, payload, status, issued_by, issued_at, expires_at) "
             "VALUES (:device_id, :command_type, CAST(:payload AS jsonb), 'pending', "
             ":issued_by, NOW(), NOW() + INTERVAL '5 minutes') "
@@ -1547,14 +1579,14 @@ class AdminService:
 
         # Refresh the admin_watching_until flag so the device long-polls eagerly.
         self.db_session.execute(_t(
-            "INSERT INTO device_health (device_id, last_seen_at, raw) "
+            "INSERT INTO iot_device_health (device_id, last_seen_at, raw) "
             "VALUES (:device_id, NOW() - INTERVAL '1 hour', "
             "        jsonb_build_object('admin_watching_until', "
-            "                           to_char(NOW() + INTERVAL '30 minutes', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'))) "
+            "                           to_char((NOW() + INTERVAL '30 minutes') AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'))) "
             "ON CONFLICT (device_id) DO UPDATE "
-            "SET raw = COALESCE(device_health.raw, '{}'::jsonb) || "
+            "SET raw = COALESCE(iot_device_health.raw, '{}'::jsonb) || "
             "          jsonb_build_object('admin_watching_until', "
-            "            to_char(NOW() + INTERVAL '30 minutes', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'))"
+            "            to_char((NOW() + INTERVAL '30 minutes') AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'))"
         ), {'device_id': device_id})
 
         return {
@@ -1706,7 +1738,7 @@ class AdminService:
             "       c.command_type, c.status, c.issued_at, c.delivered_at, "
             "       c.acked_at, c.completed_at, c.expires_at, c.payload, c.result, "
             "       c.issued_by, ul.first_name, ul.last_name "
-            "FROM device_commands c "
+            "FROM iot_device_commands c "
             "LEFT JOIN iot_devices d ON d.id = c.device_id "
             "LEFT JOIN user_locations ul ON ul.id = c.issued_by "
             f"WHERE {where_sql} "
@@ -1789,9 +1821,15 @@ class AdminService:
             "SELECT h.id, h.mac_address, h.serial_number, h.device_code, "
             "       h.device_model, h.os_version, h.app_version, "
             "       h.last_checkin_at, h.last_ip_address, "
-            "       h.paired_iot_device_id, d.device_name, h.paired_at, h.created_date "
+            "       h.paired_iot_device_id, d.device_name, h.paired_at, h.created_date, "
+            "       h.last_lat, h.last_lng, h.last_location_accuracy_m, h.last_location_at, "
+            "       o.id AS organization_id, "
+            "       o.name AS organization_name, "
+            "       dh.current_route "
             "FROM iot_hardwares h "
             "LEFT JOIN iot_devices d ON d.id = h.paired_iot_device_id "
+            "LEFT JOIN organizations o ON o.id = d.organization_id "
+            "LEFT JOIN iot_device_health dh ON dh.device_id = d.id "
             f"WHERE {where_sql} "
             "ORDER BY h.last_checkin_at DESC NULLS LAST, h.id ASC "
             "LIMIT :_lim OFFSET :_off"
@@ -1823,6 +1861,15 @@ class AdminService:
                 'paired_iot_device_name': r[10],
                 'paired_at': r[11].isoformat() if r[11] else None,
                 'created_date': r[12].isoformat() if r[12] else None,
+                # GPS — drives the Map tab.
+                'last_lat': float(r[13]) if r[13] is not None else None,
+                'last_lng': float(r[14]) if r[14] is not None else None,
+                'last_location_accuracy_m': float(r[15]) if r[15] is not None else None,
+                'last_location_at': r[16].isoformat() if r[16] else None,
+                # Joined org name + current_route — handy for the Map popup.
+                'organization_id': r[17],
+                'organization_name': r[18],
+                'current_route': r[19],
             })
 
         return {
@@ -1839,6 +1886,34 @@ class AdminService:
         ), {'id': hardware_id}).fetchone()
         if not row:
             raise NotFoundException(f'iot_hardware {hardware_id} not found')
+
+    def _bump_admin_watching_until(self, device_id: int, minutes: int = 5) -> None:
+        """Mark `iot_device_health.raw.admin_watching_until = NOW() + N min`.
+
+        Causes the device's next `/sync` to:
+          1. Receive `next_interval_s = 5` (down from 10/30/120 s adaptive).
+          2. Long-poll for up to 25 s waiting for new commands.
+
+        Used after Pair / Unpair so the tablet picks up `force_login` (mints
+        live on /checkin) or the queued `force_logout {unpair:true}` within
+        ~1 s of admin action — instead of waiting up to 30 s for the next
+        idle-cadence sync. 5 min is a generous window: more than enough for
+        the next sync to fire, short enough that an admin who navigates
+        away doesn't keep the tablet in long-poll mode forever.
+        """
+        from sqlalchemy import text as _t
+        self.db_session.execute(_t(
+            "INSERT INTO iot_device_health (device_id, last_seen_at, raw) "
+            "VALUES (:device_id, NOW() - INTERVAL '1 hour', "
+            "        jsonb_build_object('admin_watching_until', "
+            "                           to_char((NOW() + (:mins || ' minutes')::interval) AT TIME ZONE 'UTC', "
+            "                                   'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'))) "
+            "ON CONFLICT (device_id) DO UPDATE "
+            "SET raw = COALESCE(iot_device_health.raw, '{}'::jsonb) || "
+            "          jsonb_build_object('admin_watching_until', "
+            "            to_char((NOW() + (:mins || ' minutes')::interval) AT TIME ZONE 'UTC', "
+            "                    'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'))"
+        ), {'device_id': device_id, 'mins': str(minutes)})
 
     def pair_iot_hardware(self, hardware_id: int, data: dict, current_user: dict) -> Dict[str, Any]:
         """POST /api/admin/iot-hardwares/{id}/pair  body: {device_id}.
@@ -1915,21 +1990,55 @@ class AdminService:
             "UPDATE iot_devices SET hardware_id = :hw, updated_date = NOW() "
             "WHERE id = :id"
         ), {'id': device_id, 'hw': hardware_id})
-        # Expire any stale unpair-style force_logout commands sitting in the
-        # queue from a previous unpair. Without this the tablet's first /sync
-        # after the new pair would deliver the ghost command and immediately
-        # log itself out, only recovering on the next checkin tick — visible
-        # to operators as a flash of /device-setup mid-pair. Generic
-        # force_logout commands (without `unpair:true`) are left alone.
+        # Expire STALE unpair-style force_logout commands sitting in the
+        # queue from a long-past unpair (e.g. a tablet that was offline at
+        # the time and never picked up the cmd). Without this, the tablet's
+        # first /sync after a fresh pair would deliver the ghost command
+        # and immediately log itself out — see the 2026-05-03 ghost-loop
+        # fix. Generic force_logout commands (without `unpair:true`) are
+        # left alone — they're operator-only logouts with separate semantics.
+        #
+        # CRITICAL: only sweep cmds older than 60 s. A force_logout queued
+        # in the last minute is almost certainly a legitimate Unpair the
+        # admin just clicked — possibly followed by Pair-to-same-device
+        # for testing or to push a new PIN — and the tablet must actually
+        # execute that logout before re-authenticating. Sweeping it would
+        # leave the tablet silently in stale state ("Unpair then Pair
+        # doesn't work" UX bug from 2026-05-05).
         self.db_session.execute(_t(
-            "UPDATE device_commands SET "
+            "UPDATE iot_device_commands SET "
             "  status = 'expired', "
             "  completed_at = NOW() "
             "WHERE device_id = :dev "
             "  AND command_type = 'force_logout' "
             "  AND status IN ('pending', 'delivered') "
-            "  AND payload @> '{\"unpair\": true}'::jsonb"
+            "  AND payload @> '{\"unpair\": true}'::jsonb "
+            "  AND issued_at < NOW() - INTERVAL '60 seconds'"
         ), {'dev': device_id})
+        # Tell the tablet to enter long-poll mode for the next 5 minutes so
+        # the very next /sync fetches the freshly-minted force_login (if it
+        # somehow missed the /checkin response) within ≤1 s instead of
+        # waiting up to 30 s for the idle-cadence sync.
+        self._bump_admin_watching_until(device_id, minutes=5)
+
+        # If admin set a PIN, ALSO queue a `set_settings_pin` device command.
+        # This covers the re-pair-with-PIN case where the tablet is already
+        # paired and on /sync (so the /checkin pending_pin column never gets
+        # consumed because HwCheckin is no-op'ing in steady state). The
+        # command rides /sync's long-poll flow, so the PIN reaches the
+        # tablet within ~1 s. Idempotent with the /checkin path: if both
+        # arrive, the second write of the same value is harmless.
+        if pending_pin:
+            import json as _json
+            self.db_session.execute(_t(
+                "INSERT INTO iot_device_commands "
+                "(device_id, command_type, payload, status, issued_by) "
+                "VALUES (:dev, 'set_settings_pin', CAST(:pl AS JSONB), 'pending', :actor)"
+            ), {
+                'dev': device_id,
+                'actor': actor_id,
+                'pl': _json.dumps({'pin': pending_pin}),
+            })
         self.db_session.commit()
 
         return {
@@ -1977,7 +2086,7 @@ class AdminService:
             # just the operator session) and restart the hardware checkin loop.
             actor_id = (current_user or {}).get('user_id') or (current_user or {}).get('id')
             self.db_session.execute(_t(
-                "INSERT INTO device_commands "
+                "INSERT INTO iot_device_commands "
                 "(device_id, command_type, payload, status, issued_by) "
                 "VALUES (:dev, 'force_logout', CAST(:pl AS JSONB), 'pending', :actor)"
             ), {
@@ -1985,6 +2094,11 @@ class AdminService:
                 'actor': actor_id,
                 'pl': '{"unpair": true}',
             })
+            # Drop the tablet into long-poll mode so it fetches the queued
+            # force_logout within ~1 s (vs up to 30 s on the idle-cadence
+            # sync). Without this an idle paired tablet can take 30 s to
+            # actually log out, which made the Unpair button feel slow.
+            self._bump_admin_watching_until(prev_device_id, minutes=5)
         self.db_session.commit()
 
         return {
@@ -2016,7 +2130,7 @@ class AdminService:
         # Postgres expression keeps the math server-side so we don't drift
         # on clock skew between app server + db.
         result = self.db_session.execute(_t(
-            "INSERT INTO device_health_history "
+            "INSERT INTO iot_device_health_history "
             "  (device_id, bucket_start, online, battery_level, "
             "   battery_charging, network_type, network_strength, last_seen_at) "
             "SELECT "
@@ -2028,14 +2142,14 @@ class AdminService:
             "  h.battery_level, h.battery_charging, h.network_type, h.network_strength, "
             "  h.last_seen_at "
             "FROM iot_devices d "
-            "LEFT JOIN device_health h ON h.device_id = d.id "
+            "LEFT JOIN iot_device_health h ON h.device_id = d.id "
             "WHERE d.deleted_date IS NULL "
             "ON CONFLICT (device_id, bucket_start) DO NOTHING"
         ), {'bucket_min': self._HISTORY_BUCKET_MIN})
 
         # Drop rows older than the retention window. Keeps the table small.
         purged = self.db_session.execute(_t(
-            "DELETE FROM device_health_history "
+            "DELETE FROM iot_device_health_history "
             "WHERE bucket_start < NOW() - INTERVAL ':d days'".replace(
                 ':d', str(self._HISTORY_RETENTION_DAYS)
             )
@@ -2081,7 +2195,7 @@ class AdminService:
             "SELECT h.bucket_start, "
             "       COUNT(*) AS total, "
             "       COUNT(*) FILTER (WHERE h.online) AS online "
-            "FROM device_health_history h "
+            "FROM iot_device_health_history h "
             "JOIN iot_devices d ON d.id = h.device_id "
             "WHERE h.bucket_start >= NOW() - " + interval_sql + " "
             "  AND d.deleted_date IS NULL"
@@ -2102,7 +2216,7 @@ class AdminService:
             })
         return {'items': items, 'range': rng}
 
-    def list_device_health_history(
+    def list_iot_device_health_history(
         self, device_id: int, query_params: dict
     ) -> Dict[str, Any]:
         """Per-device history for sparklines on the show.tsx Status tab.
@@ -2128,7 +2242,7 @@ class AdminService:
         rows = self.db_session.execute(_t(
             "SELECT bucket_start, online, battery_level, battery_charging, "
             "       network_type, network_strength, last_seen_at "
-            "FROM device_health_history "
+            "FROM iot_device_health_history "
             "WHERE device_id = :id "
             "  AND bucket_start >= NOW() - " + interval_sql + " "
             "ORDER BY bucket_start ASC"

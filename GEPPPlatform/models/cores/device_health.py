@@ -13,7 +13,7 @@ from ..base import Base
 
 
 class DeviceHealth(Base):
-    __tablename__ = 'device_health'
+    __tablename__ = 'iot_device_health'
 
     # Primary key is device_id (no surrogate id) — one row per device.
     device_id = Column(

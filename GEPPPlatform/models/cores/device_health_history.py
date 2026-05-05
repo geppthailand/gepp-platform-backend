@@ -19,7 +19,7 @@ from ..base import Base
 
 
 class DeviceHealthHistory(Base):
-    __tablename__ = 'device_health_history'
+    __tablename__ = 'iot_device_health_history'
 
     device_id = Column(
         BigInteger,
