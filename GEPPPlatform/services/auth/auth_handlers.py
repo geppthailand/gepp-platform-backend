@@ -1050,6 +1050,9 @@ class AuthHandlers:
                 }
             }
 
+        except APIException:
+            # preserve typed status codes (401 from UnauthorizedException, 422 from ValidationException, …)
+            raise
         except Exception as e:
             raise APIException(str(e))
 

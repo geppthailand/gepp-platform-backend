@@ -21,7 +21,12 @@ from GEPPPlatform.models.subscriptions.subscription_models import (
 from GEPPPlatform.models.cores.roles import SystemPermission, subscription_permissions
 from GEPPPlatform.models.cores.iot_devices import IoTDevice
 from GEPPPlatform.models.cores.iot_scales import IoTScale
-from GEPPPlatform.exceptions import NotFoundException, BadRequestException, ValidationException
+from GEPPPlatform.exceptions import (
+    NotFoundException,
+    BadRequestException,
+    ValidationException,
+    ConflictException,
+)
 
 
 class AdminService:
@@ -921,6 +926,19 @@ class AdminService:
             if org:
                 org_name = org.name
 
+        # Resolve paired hardware (if any) so the show page can render the
+        # HW#id + MAC badge without a second round-trip.
+        hardware_id = getattr(device, 'hardware_id', None)
+        hardware_mac = None
+        if hardware_id:
+            from sqlalchemy import text as _t
+            hw_row = self.db_session.execute(_t(
+                "SELECT mac_address FROM iot_hardwares "
+                "WHERE id = :id AND deleted_date IS NULL"
+            ), {'id': int(hardware_id)}).fetchone()
+            if hw_row:
+                hardware_mac = hw_row[0]
+
         return {
             'id': device.id,
             'deviceName': device.device_name,
@@ -931,6 +949,8 @@ class AdminService:
             'organizationName': org_name,
             'hasPassword': bool(device.password),
             'isActive': device.is_active,
+            'hardwareId': hardware_id,
+            'hardwareMac': hardware_mac,
             'createdDate': device.created_date.isoformat() if device.created_date else None,
             'updatedDate': device.updated_date.isoformat() if device.updated_date else None,
         }
@@ -1051,6 +1071,1083 @@ class AdminService:
             'unassignedDevices': unassigned,
             'byType': by_type,
             'topOrganizations': top_organizations,
+        }
+
+    # ── IoT Devices: realtime / status / commands / events ─────────────
+
+    ALLOWED_DEVICE_COMMAND_TYPES = [
+        'force_login', 'force_logout', 'navigate', 'reset_to_home', 'reset_input',
+        'overwrite_cache', 'clear_storage', 'restart_app', 'ping',
+    ]
+
+    def _serialize_device_row(self, row) -> Dict[str, Any]:
+        """Shared row shape for /realtime + /by-organization."""
+        # Row indexes match the SELECT below in list_realtime / list_by_organization.
+        # Cols 15-17 are the tags + maintenance metadata added in
+        # 20260503_*_049_add_tags_and_maintenance_to_iot_devices.sql.
+        tags_raw = row[15]
+        # JSONB comes back as a Python list already with most drivers; tolerate
+        # bytes/str just in case.
+        if isinstance(tags_raw, (bytes, bytearray)):
+            try:
+                import json as _json
+                tags = _json.loads(tags_raw.decode('utf-8'))
+            except Exception:
+                tags = []
+        elif isinstance(tags_raw, str):
+            try:
+                import json as _json
+                tags = _json.loads(tags_raw)
+            except Exception:
+                tags = []
+        elif isinstance(tags_raw, list):
+            tags = tags_raw
+        else:
+            tags = []
+        return {
+            'id': row[0],
+            'device_name': row[1],
+            'type': row[2],
+            'mac_bt': row[3],
+            'mac_tablet': row[4],
+            'organization': (
+                {'id': row[5], 'name': row[6]} if row[5] is not None else None
+            ),
+            'online': bool(row[7]),
+            'last_seen_at': row[8].isoformat() if row[8] else None,
+            'current_route': row[9],
+            'current_user_id': row[10],
+            'battery_level': row[11],
+            'battery_charging': row[12],
+            'network_type': row[13],
+            'network_strength': row[14],
+            'tags': tags,
+            'maintenance_mode': bool(row[16]) if row[16] is not None else False,
+            'maintenance_reason': row[17],
+            # Hardware pairing — when a physical tablet is bound to this
+            # logical iot_devices account, surface the MAC for the admin
+            # list ("MAC Address" column before Device Name) and the
+            # hardware_id for the detail-page badge.
+            'hardware_id': row[18],
+            'hardware_mac': row[19],
+        }
+
+    _REALTIME_BASE_SELECT = (
+        "SELECT d.id, d.device_name, d.device_type, d.mac_address_bluetooth, "
+        "d.mac_address_tablet, d.organization_id, "
+        "COALESCE(oi.company_name, o.name) AS org_name, "
+        "(h.last_seen_at > NOW() - INTERVAL '30 seconds') AS online, "
+        "h.last_seen_at, h.current_route, h.current_user_id, "
+        "h.battery_level, h.battery_charging, h.network_type, h.network_strength, "
+        "d.tags, d.maintenance_mode, d.maintenance_reason, "
+        "d.hardware_id, hw.mac_address AS hardware_mac "
+        "FROM iot_devices d "
+        "LEFT JOIN device_health h ON h.device_id = d.id "
+        "LEFT JOIN organizations o ON o.id = d.organization_id "
+        "LEFT JOIN organization_info oi ON oi.id = o.organization_info_id "
+        "LEFT JOIN iot_hardwares hw ON hw.id = d.hardware_id "
+    )
+
+    def list_realtime(self, query_params: dict, headers: Optional[dict] = None) -> Dict[str, Any]:
+        """List of devices with realtime health for the admin dashboard.
+
+        Supports filters: organizationId, status (online|offline), search.
+        Provides ETag/304 short-circuit so the dashboard can poll cheaply.
+        Always returns a dict; callers use the optional ``__http__`` key when present
+        to override status/headers (e.g. 304).
+        """
+        from sqlalchemy import text as _t
+        import hashlib as _hashlib
+
+        org_id = (query_params.get('organizationId') or '').strip() if query_params else ''
+        status = (query_params.get('status') or '').strip().lower() if query_params else ''
+        search = (query_params.get('search') or '').strip() if query_params else ''
+        tag = (query_params.get('tag') or '').strip() if query_params else ''
+        maintenance = (query_params.get('maintenance') or '').strip().lower() if query_params else ''
+
+        where_clauses = ['d.deleted_date IS NULL']
+        params: Dict[str, Any] = {}
+        if org_id:
+            where_clauses.append('d.organization_id = :org_id')
+            params['org_id'] = int(org_id)
+        if search:
+            where_clauses.append("(d.device_name ILIKE :search OR d.mac_address_bluetooth ILIKE :search OR d.mac_address_tablet ILIKE :search)")
+            params['search'] = f'%{search}%'
+        if status == 'online':
+            where_clauses.append("(h.last_seen_at > NOW() - INTERVAL '30 seconds')")
+        elif status == 'offline':
+            where_clauses.append("(h.last_seen_at IS NULL OR h.last_seen_at <= NOW() - INTERVAL '30 seconds')")
+        # Tag filter — `tags` is a JSONB array of strings; the @> operator
+        # uses the GIN index added in migration 049 for fast lookup.
+        if tag:
+            where_clauses.append("d.tags @> CAST(:tag_filter AS JSONB)")
+            import json as _json
+            params['tag_filter'] = _json.dumps([tag])
+        # Maintenance filter — accepts 'on' / 'off'.
+        if maintenance == 'on':
+            where_clauses.append('d.maintenance_mode = TRUE')
+        elif maintenance == 'off':
+            where_clauses.append('d.maintenance_mode = FALSE')
+
+        where_sql = ' AND '.join(where_clauses)
+
+        # ETag based on global health watermark (cheap to compute)
+        etag_row = self.db_session.execute(_t(
+            "SELECT MAX(last_seen_at) AS m, COUNT(*) AS c FROM device_health"
+        )).fetchone()
+        watermark = etag_row[0].isoformat() if (etag_row and etag_row[0]) else 'none'
+        count = int(etag_row[1] if etag_row else 0)
+        etag = '"' + _hashlib.md5(f'{watermark}|{count}|{where_sql}|{params}'.encode('utf-8')).hexdigest() + '"'
+
+        if_none_match = None
+        if headers:
+            for k, v in headers.items():
+                if k.lower() == 'if-none-match':
+                    if_none_match = v
+                    break
+
+        if if_none_match and if_none_match == etag:
+            return {
+                '__http__': {
+                    'statusCode': 304,
+                    'headers': {'ETag': etag},
+                    'body': '',
+                }
+            }
+
+        sql = self._REALTIME_BASE_SELECT + 'WHERE ' + where_sql + ' ORDER BY d.id ASC'
+        rows = self.db_session.execute(_t(sql), params).fetchall()
+        items = [self._serialize_device_row(r) for r in rows]
+
+        return {
+            'items': items,
+            'etag': etag,
+            '__http__': {'headers': {'ETag': etag}},
+        }
+
+    def list_by_organization(self) -> Dict[str, Any]:
+        """Devices grouped by organization, including an unassigned bucket."""
+        from sqlalchemy import text as _t
+
+        sql = self._REALTIME_BASE_SELECT + 'WHERE d.deleted_date IS NULL ORDER BY d.organization_id NULLS LAST, d.id ASC'
+        rows = self.db_session.execute(_t(sql)).fetchall()
+
+        groups: Dict[Any, Dict[str, Any]] = {}
+        for r in rows:
+            row = self._serialize_device_row(r)
+            org_id = r[5]
+            org_name = r[6]
+            key = org_id if org_id is not None else '__unassigned__'
+            if key not in groups:
+                groups[key] = {
+                    'organization': (
+                        {'id': org_id, 'name': org_name}
+                        if org_id is not None else
+                        {'id': None, 'name': 'Unassigned'}
+                    ),
+                    'devices': [],
+                    'online_count': 0,
+                    'total_count': 0,
+                    'last_activity_at': None,
+                }
+            entry = groups[key]
+            entry['devices'].append(row)
+            entry['total_count'] += 1
+            if row['online']:
+                entry['online_count'] += 1
+            if row['last_seen_at']:
+                if entry['last_activity_at'] is None or row['last_seen_at'] > entry['last_activity_at']:
+                    entry['last_activity_at'] = row['last_seen_at']
+
+        # Stable order: orgs first by id ASC, unassigned last.
+        ordered: List[Dict[str, Any]] = []
+        for key in sorted([k for k in groups.keys() if k != '__unassigned__']):
+            ordered.append(groups[key])
+        if '__unassigned__' in groups:
+            ordered.append(groups['__unassigned__'])
+
+        return {'items': ordered}
+
+    def _ensure_device_exists(self, device_id: int) -> None:
+        from GEPPPlatform.models.cores.iot_devices import IoTDevice as _D
+        device = self.db_session.query(_D).filter(_D.id == device_id, _D.deleted_date.is_(None)).first()
+        if not device:
+            raise NotFoundException(f'IoT device {device_id} not found')
+
+    def get_device_status(self, device_id: int) -> Dict[str, Any]:
+        """Full health row + last 5 commands + last 50 events.
+
+        Side-effect: extends the per-device ``admin_watching_until`` flag in
+        ``device_health.raw`` for 30 minutes so subsequent /sync calls long-poll.
+        """
+        from sqlalchemy import text as _t
+        self._ensure_device_exists(device_id)
+
+        # Refresh (or insert sentinel) admin_watching_until.
+        self.db_session.execute(_t(
+            "INSERT INTO device_health (device_id, last_seen_at, raw) "
+            "VALUES (:device_id, NOW() - INTERVAL '1 hour', "
+            "        jsonb_build_object('admin_watching_until', "
+            "                           to_char(NOW() + INTERVAL '30 minutes', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'))) "
+            "ON CONFLICT (device_id) DO UPDATE "
+            "SET raw = COALESCE(device_health.raw, '{}'::jsonb) || "
+            "          jsonb_build_object('admin_watching_until', "
+            "            to_char(NOW() + INTERVAL '30 minutes', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'))"
+        ), {'device_id': device_id})
+
+        health_row = self.db_session.execute(_t(
+            "SELECT device_id, last_seen_at, "
+            "(last_seen_at > NOW() - INTERVAL '30 seconds') AS online, "
+            "battery_level, battery_charging, cpu_temp_c, network_type, network_strength, "
+            "ip_address, storage_free_mb, ram_free_mb, os_version, app_version, "
+            "current_route, current_user_id, current_org_id, current_location_id, "
+            "scale_connected, scale_mac_bt, cache_summary, raw "
+            "FROM device_health WHERE device_id = :device_id"
+        ), {'device_id': device_id}).fetchone()
+
+        health: Optional[Dict[str, Any]] = None
+        if health_row:
+            health = {
+                'device_id': health_row[0],
+                'last_seen_at': health_row[1].isoformat() if health_row[1] else None,
+                'online': bool(health_row[2]),
+                'battery_level': health_row[3],
+                'battery_charging': health_row[4],
+                'cpu_temp_c': float(health_row[5]) if health_row[5] is not None else None,
+                'network_type': health_row[6],
+                'network_strength': health_row[7],
+                'ip_address': health_row[8],
+                'storage_free_mb': health_row[9],
+                'ram_free_mb': health_row[10],
+                'os_version': health_row[11],
+                'app_version': health_row[12],
+                'current_route': health_row[13],
+                'current_user_id': health_row[14],
+                'current_org_id': health_row[15],
+                'current_location_id': health_row[16],
+                'scale_connected': health_row[17],
+                'scale_mac_bt': health_row[18],
+                'cache_summary': health_row[19],
+                'raw': health_row[20],
+            }
+
+        cmd_rows = self.db_session.execute(_t(
+            "SELECT id, command_type, payload, status, issued_by, issued_at, "
+            "delivered_at, acked_at, completed_at, result, expires_at "
+            "FROM device_commands WHERE device_id = :device_id "
+            "ORDER BY issued_at DESC LIMIT 5"
+        ), {'device_id': device_id}).fetchall()
+        recent_commands = [
+            {
+                'id': r[0], 'command_type': r[1], 'payload': r[2], 'status': r[3],
+                'issued_by': r[4],
+                'issued_at': r[5].isoformat() if r[5] else None,
+                'delivered_at': r[6].isoformat() if r[6] else None,
+                'acked_at': r[7].isoformat() if r[7] else None,
+                'completed_at': r[8].isoformat() if r[8] else None,
+                'result': r[9],
+                'expires_at': r[10].isoformat() if r[10] else None,
+            }
+            for r in cmd_rows
+        ]
+
+        ev_rows = self.db_session.execute(_t(
+            "SELECT id, occurred_at, received_at, event_type, route, payload, user_id, session_id "
+            "FROM device_events WHERE device_id = :device_id "
+            "ORDER BY occurred_at DESC LIMIT 50"
+        ), {'device_id': device_id}).fetchall()
+        recent_events = [
+            {
+                'id': r[0],
+                'occurred_at': r[1].isoformat() if r[1] else None,
+                'received_at': r[2].isoformat() if r[2] else None,
+                'event_type': r[3],
+                'route': r[4],
+                'payload': r[5],
+                'user_id': r[6],
+                'session_id': r[7],
+            }
+            for r in ev_rows
+        ]
+
+        return {
+            'health': health,
+            'recent_commands': recent_commands,
+            'recent_events': recent_events,
+        }
+
+    def list_device_events(self, device_id: int, query_params: dict) -> Dict[str, Any]:
+        from sqlalchemy import text as _t
+        self._ensure_device_exists(device_id)
+
+        page = max(1, int(query_params.get('page', 1)))
+        page_size = int(query_params.get('pageSize', 50))
+        if page_size > 200:
+            page_size = 200
+        if page_size < 1:
+            page_size = 50
+
+        date_from = (query_params.get('from') or '').strip()
+        date_to = (query_params.get('to') or '').strip()
+        type_filter = (query_params.get('type') or '').strip()
+        route_filter = (query_params.get('route') or '').strip()
+
+        where = ['device_id = :device_id']
+        params: Dict[str, Any] = {'device_id': device_id}
+        if date_from:
+            where.append('occurred_at >= :date_from')
+            params['date_from'] = date_from
+        if date_to:
+            where.append('occurred_at <= :date_to')
+            params['date_to'] = date_to
+        if type_filter:
+            type_list = [t.strip() for t in type_filter.split(',') if t.strip()]
+            if type_list:
+                where.append('event_type = ANY(:type_list)')
+                params['type_list'] = type_list
+        if route_filter:
+            where.append('route = :route_filter')
+            params['route_filter'] = route_filter
+        where_sql = ' AND '.join(where)
+
+        total_row = self.db_session.execute(_t(
+            f"SELECT COUNT(*) FROM device_events WHERE {where_sql}"
+        ), params).fetchone()
+        total = int(total_row[0] if total_row else 0)
+
+        params_paged = dict(params)
+        params_paged['_limit'] = page_size
+        params_paged['_offset'] = (page - 1) * page_size
+        rows = self.db_session.execute(_t(
+            f"SELECT id, occurred_at, received_at, event_type, route, payload, user_id, session_id "
+            f"FROM device_events WHERE {where_sql} "
+            f"ORDER BY occurred_at DESC LIMIT :_limit OFFSET :_offset"
+        ), params_paged).fetchall()
+
+        # NB: top-level key is `items` (NOT `data`). The frontend provider's
+        # unwrap() helper collapses `{data: ...}` wrappers, so a `data:[…]`
+        # payload would arrive at the consumer as a bare array, dropping
+        # `total`/`page` and breaking the Action Trail / Commands tabs.
+        return {
+            'items': [
+                {
+                    'id': r[0],
+                    'occurred_at': r[1].isoformat() if r[1] else None,
+                    'received_at': r[2].isoformat() if r[2] else None,
+                    'event_type': r[3],
+                    'route': r[4],
+                    'payload': r[5],
+                    'user_id': r[6],
+                    'session_id': r[7],
+                }
+                for r in rows
+            ],
+            'total': total,
+            'page': page,
+            'pageSize': page_size,
+        }
+
+    def list_device_commands(self, device_id: int, query_params: dict) -> Dict[str, Any]:
+        from sqlalchemy import text as _t
+        self._ensure_device_exists(device_id)
+
+        page = max(1, int(query_params.get('page', 1)))
+        page_size = int(query_params.get('pageSize', 50))
+        if page_size > 200:
+            page_size = 200
+        if page_size < 1:
+            page_size = 50
+
+        status_filter = (query_params.get('status') or '').strip()
+        where = ['c.device_id = :device_id']
+        params: Dict[str, Any] = {'device_id': device_id}
+        if status_filter:
+            status_list = [s.strip() for s in status_filter.split(',') if s.strip()]
+            if status_list:
+                where.append('c.status = ANY(:status_list)')
+                params['status_list'] = status_list
+        where_sql = ' AND '.join(where)
+
+        total_row = self.db_session.execute(_t(
+            f"SELECT COUNT(*) FROM device_commands c WHERE {where_sql}"
+        ), params).fetchone()
+        total = int(total_row[0] if total_row else 0)
+
+        params_paged = dict(params)
+        params_paged['_limit'] = page_size
+        params_paged['_offset'] = (page - 1) * page_size
+        rows = self.db_session.execute(_t(
+            f"SELECT c.id, c.command_type, c.payload, c.status, c.issued_by, "
+            f"COALESCE(NULLIF(TRIM(CONCAT_WS(' ', u.first_name, u.last_name)), ''), u.display_name, u.email) AS issued_by_name, "
+            f"c.issued_at, c.delivered_at, c.acked_at, c.completed_at, c.result, c.expires_at "
+            f"FROM device_commands c "
+            f"LEFT JOIN user_locations u ON u.id = c.issued_by "
+            f"WHERE {where_sql} "
+            f"ORDER BY c.issued_at DESC LIMIT :_limit OFFSET :_offset"
+        ), params_paged).fetchall()
+
+        # See note in list_device_events about `items` vs `data`.
+        return {
+            'items': [
+                {
+                    'id': r[0],
+                    'command_type': r[1],
+                    'payload': r[2],
+                    'status': r[3],
+                    'issued_by': r[4],
+                    'issued_by_name': r[5],
+                    'issued_at': r[6].isoformat() if r[6] else None,
+                    'delivered_at': r[7].isoformat() if r[7] else None,
+                    'acked_at': r[8].isoformat() if r[8] else None,
+                    'completed_at': r[9].isoformat() if r[9] else None,
+                    'result': r[10],
+                    'expires_at': r[11].isoformat() if r[11] else None,
+                }
+                for r in rows
+            ],
+            'total': total,
+            'page': page,
+            'pageSize': page_size,
+        }
+
+    def issue_device_command(self, device_id: int, data: dict, current_user: dict) -> Dict[str, Any]:
+        from sqlalchemy import text as _t
+        import json as _json
+
+        self._ensure_device_exists(device_id)
+
+        if not isinstance(data, dict):
+            raise BadRequestException('Body must be an object')
+        command_type = (data.get('command_type') or '').strip()
+        if command_type not in self.ALLOWED_DEVICE_COMMAND_TYPES:
+            raise BadRequestException(
+                f'command_type must be one of {self.ALLOWED_DEVICE_COMMAND_TYPES}'
+            )
+
+        payload = data.get('payload') or {}
+        if not isinstance(payload, dict):
+            raise BadRequestException('payload must be an object')
+
+        issuer_id = (current_user or {}).get('user_id')
+        if not issuer_id:
+            raise BadRequestException('Cannot determine issuing admin user')
+
+        row = self.db_session.execute(_t(
+            "INSERT INTO device_commands "
+            "(device_id, command_type, payload, status, issued_by, issued_at, expires_at) "
+            "VALUES (:device_id, :command_type, CAST(:payload AS jsonb), 'pending', "
+            ":issued_by, NOW(), NOW() + INTERVAL '5 minutes') "
+            "RETURNING id, status, expires_at"
+        ), {
+            'device_id': device_id,
+            'command_type': command_type,
+            'payload': _json.dumps(payload),
+            'issued_by': issuer_id,
+        }).fetchone()
+
+        # Refresh the admin_watching_until flag so the device long-polls eagerly.
+        self.db_session.execute(_t(
+            "INSERT INTO device_health (device_id, last_seen_at, raw) "
+            "VALUES (:device_id, NOW() - INTERVAL '1 hour', "
+            "        jsonb_build_object('admin_watching_until', "
+            "                           to_char(NOW() + INTERVAL '30 minutes', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'))) "
+            "ON CONFLICT (device_id) DO UPDATE "
+            "SET raw = COALESCE(device_health.raw, '{}'::jsonb) || "
+            "          jsonb_build_object('admin_watching_until', "
+            "            to_char(NOW() + INTERVAL '30 minutes', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'))"
+        ), {'device_id': device_id})
+
+        return {
+            'id': row[0],
+            'status': row[1],
+            'expires_at': row[2].isoformat() if row[2] else None,
+        }
+
+    # ── IoT Devices: tags + maintenance + activity feed ──────────────
+
+    def update_device_tags(self, device_id: int, data: dict) -> Dict[str, Any]:
+        """Replace the tags JSONB array on a device.
+
+        Body: ``{tags: ["pilot-group-a", "firmware-v2"]}``. Tags are
+        deduped + lowercased + trimmed server-side so the GIN index
+        matches consistently.
+        """
+        from sqlalchemy import text as _t
+        import json as _json
+
+        self._ensure_device_exists(device_id)
+
+        raw = data.get('tags')
+        if not isinstance(raw, list):
+            raise BadRequestException('tags must be an array of strings')
+        # Normalise: trim, lowercase, drop empty + dupes, cap length.
+        seen: set = set()
+        cleaned: list = []
+        for t in raw:
+            if not isinstance(t, str):
+                continue
+            v = t.strip().lower()
+            if not v or v in seen:
+                continue
+            if len(v) > 64:
+                v = v[:64]
+            seen.add(v)
+            cleaned.append(v)
+        # Hard cap: 20 tags per device — enough for any realistic combination
+        # without letting the array grow unbounded.
+        cleaned = cleaned[:20]
+
+        self.db_session.execute(_t(
+            "UPDATE iot_devices SET tags = CAST(:tags AS JSONB), updated_date = NOW() "
+            "WHERE id = :id AND deleted_date IS NULL"
+        ), {'id': device_id, 'tags': _json.dumps(cleaned)})
+        self.db_session.commit()
+        return {'id': device_id, 'tags': cleaned}
+
+    def list_device_tags(self) -> Dict[str, Any]:
+        """Return the distinct set of tags currently in use across the fleet,
+        with usage counts. Powers the tag-filter dropdown in the admin list.
+        """
+        from sqlalchemy import text as _t
+        rows = self.db_session.execute(_t(
+            "SELECT tag, COUNT(*) AS n "
+            "FROM iot_devices, jsonb_array_elements_text(tags) AS tag "
+            "WHERE deleted_date IS NULL "
+            "GROUP BY tag "
+            "ORDER BY n DESC, tag ASC"
+        )).fetchall()
+        return {'items': [{'tag': r[0], 'count': int(r[1])} for r in rows]}
+
+    def update_device_maintenance(self, device_id: int, data: dict) -> Dict[str, Any]:
+        """Toggle maintenance mode + reason + auto-clear timestamp.
+
+        Body: ``{maintenance_mode: bool, reason?: str, until?: iso8601}``.
+        Devices in maintenance are suppressed from the alerts panel and
+        proactive notifications (when the cron lands).
+        """
+        from sqlalchemy import text as _t
+        from datetime import datetime as _dt
+
+        self._ensure_device_exists(device_id)
+
+        mm = data.get('maintenance_mode')
+        if not isinstance(mm, bool):
+            raise BadRequestException('maintenance_mode must be a boolean')
+        reason = data.get('reason')
+        if reason is not None and not isinstance(reason, str):
+            raise BadRequestException('reason must be a string when provided')
+
+        until_iso = data.get('until')
+        until_val = None
+        if until_iso:
+            try:
+                # Accept Z-suffixed and offset-aware ISO strings alike.
+                until_val = _dt.fromisoformat(until_iso.replace('Z', '+00:00'))
+            except Exception:
+                raise BadRequestException('until must be a valid ISO 8601 timestamp')
+
+        self.db_session.execute(_t(
+            "UPDATE iot_devices SET "
+            "  maintenance_mode = :mm, "
+            "  maintenance_reason = :reason, "
+            "  maintenance_until = :until, "
+            "  updated_date = NOW() "
+            "WHERE id = :id AND deleted_date IS NULL"
+        ), {
+            'id': device_id,
+            'mm': mm,
+            'reason': reason,
+            'until': until_val,
+        })
+        self.db_session.commit()
+        return {
+            'id': device_id,
+            'maintenance_mode': mm,
+            'maintenance_reason': reason,
+            'maintenance_until': until_val.isoformat() if until_val else None,
+        }
+
+    def list_recent_activity(self, query_params: dict) -> Dict[str, Any]:
+        """Fleet-wide activity feed — recent commands joined with device + actor names.
+
+        Query params:
+          * limit (default 50, max 200)
+          * since (ISO 8601; defaults to NOW() - INTERVAL '24 hours')
+          * status (csv of pending/delivered/succeeded/failed/expired)
+        """
+        from sqlalchemy import text as _t
+
+        try:
+            limit = int(query_params.get('limit', 50))
+        except Exception:
+            limit = 50
+        limit = max(1, min(200, limit))
+
+        since = (query_params.get('since') or '').strip()
+        status = (query_params.get('status') or '').strip()
+
+        where_clauses = []
+        params: Dict[str, Any] = {'lim': limit}
+        if since:
+            where_clauses.append('c.issued_at >= :since')
+            params['since'] = since
+        else:
+            where_clauses.append("c.issued_at >= NOW() - INTERVAL '24 hours'")
+        if status:
+            statuses = [s.strip() for s in status.split(',') if s.strip()]
+            if statuses:
+                where_clauses.append('c.status = ANY(:statuses)')
+                params['statuses'] = statuses
+
+        where_sql = ' AND '.join(where_clauses) if where_clauses else 'TRUE'
+
+        rows = self.db_session.execute(_t(
+            "SELECT c.id, c.device_id, d.device_name, "
+            "       c.command_type, c.status, c.issued_at, c.delivered_at, "
+            "       c.acked_at, c.completed_at, c.expires_at, c.payload, c.result, "
+            "       c.issued_by, ul.first_name, ul.last_name "
+            "FROM device_commands c "
+            "LEFT JOIN iot_devices d ON d.id = c.device_id "
+            "LEFT JOIN user_locations ul ON ul.id = c.issued_by "
+            f"WHERE {where_sql} "
+            "ORDER BY c.issued_at DESC "
+            "LIMIT :lim"
+        ), params).fetchall()
+
+        items = []
+        for r in rows:
+            actor_name = None
+            if r[13] or r[14]:
+                actor_name = ' '.join([p for p in (r[13], r[14]) if p]).strip() or None
+            items.append({
+                'id': r[0],
+                'device_id': r[1],
+                'device_name': r[2],
+                'command_type': r[3],
+                'status': r[4],
+                'issued_at': r[5].isoformat() if r[5] else None,
+                'delivered_at': r[6].isoformat() if r[6] else None,
+                'acked_at': r[7].isoformat() if r[7] else None,
+                'completed_at': r[8].isoformat() if r[8] else None,
+                'expires_at': r[9].isoformat() if r[9] else None,
+                'payload': r[10],
+                'result': r[11],
+                'issued_by': r[12],
+                'issued_by_name': actor_name,
+            })
+        return {'items': items, 'total': len(items)}
+
+    # ── IoT Hardwares: physical-tablet registry + pair/unpair ───────
+
+    def list_iot_hardwares(self, query_params: dict) -> Dict[str, Any]:
+        """GET /api/admin/iot-hardwares — list all reporting tablets.
+
+        Filters: paired ('yes'|'no'), search (mac/serial/model).
+        """
+        from sqlalchemy import text as _t
+
+        try:
+            page = max(1, int(query_params.get('page', 1) or 1))
+        except Exception:
+            page = 1
+        try:
+            page_size = int(query_params.get('pageSize', 50) or 50)
+        except Exception:
+            page_size = 50
+        page_size = max(1, min(page_size, 200))
+
+        paired = (query_params.get('paired') or '').strip().lower()
+        search = (query_params.get('search') or '').strip()
+
+        where = ['h.deleted_date IS NULL']
+        params: Dict[str, Any] = {}
+        if paired == 'yes':
+            where.append('h.paired_iot_device_id IS NOT NULL')
+        elif paired == 'no':
+            where.append('h.paired_iot_device_id IS NULL')
+        if search:
+            where.append(
+                '('
+                'h.mac_address ILIKE :search OR '
+                'h.serial_number ILIKE :search OR '
+                'h.device_model ILIKE :search OR '
+                'h.device_code ILIKE :search'
+                ')'
+            )
+            params['search'] = f'%{search}%'
+        where_sql = ' AND '.join(where)
+
+        total = int(self.db_session.execute(_t(
+            f"SELECT COUNT(*) FROM iot_hardwares h WHERE {where_sql}"
+        ), params).fetchone()[0] or 0)
+
+        params_paged = dict(params)
+        params_paged['_lim'] = page_size
+        params_paged['_off'] = (page - 1) * page_size
+
+        rows = self.db_session.execute(_t(
+            "SELECT h.id, h.mac_address, h.serial_number, h.device_code, "
+            "       h.device_model, h.os_version, h.app_version, "
+            "       h.last_checkin_at, h.last_ip_address, "
+            "       h.paired_iot_device_id, d.device_name, h.paired_at, h.created_date "
+            "FROM iot_hardwares h "
+            "LEFT JOIN iot_devices d ON d.id = h.paired_iot_device_id "
+            f"WHERE {where_sql} "
+            "ORDER BY h.last_checkin_at DESC NULLS LAST, h.id ASC "
+            "LIMIT :_lim OFFSET :_off"
+        ), params_paged).fetchall()
+
+        items = []
+        now = self.db_session.execute(_t("SELECT NOW()")).fetchone()[0]
+        for r in rows:
+            last_checkin = r[7]
+            online = False
+            if last_checkin is not None:
+                try:
+                    delta = (now - last_checkin).total_seconds()
+                    online = delta <= 15  # 3 missed beats @ 5 s
+                except Exception:
+                    online = False
+            items.append({
+                'id': r[0],
+                'mac_address': r[1],
+                'serial_number': r[2],
+                'device_code': r[3],
+                'device_model': r[4],
+                'os_version': r[5],
+                'app_version': r[6],
+                'last_checkin_at': last_checkin.isoformat() if last_checkin else None,
+                'online': online,
+                'last_ip_address': r[8],
+                'paired_iot_device_id': r[9],
+                'paired_iot_device_name': r[10],
+                'paired_at': r[11].isoformat() if r[11] else None,
+                'created_date': r[12].isoformat() if r[12] else None,
+            })
+
+        return {
+            'items': items,
+            'total': total,
+            'page': page,
+            'pageSize': page_size,
+        }
+
+    def _ensure_hardware_exists(self, hardware_id: int):
+        from sqlalchemy import text as _t
+        row = self.db_session.execute(_t(
+            "SELECT id FROM iot_hardwares WHERE id = :id AND deleted_date IS NULL"
+        ), {'id': hardware_id}).fetchone()
+        if not row:
+            raise NotFoundException(f'iot_hardware {hardware_id} not found')
+
+    def pair_iot_hardware(self, hardware_id: int, data: dict, current_user: dict) -> Dict[str, Any]:
+        """POST /api/admin/iot-hardwares/{id}/pair  body: {device_id}.
+
+        Sets the bidirectional pointer:
+          iot_hardwares.paired_iot_device_id = D
+          iot_devices.hardware_id           = H
+
+        On the hardware's NEXT /checkin (within ~15 s) it will receive a
+        `force_login` directive in the response and transition to the
+        device-token sync flow automatically.
+        """
+        from sqlalchemy import text as _t
+
+        self._ensure_hardware_exists(hardware_id)
+
+        # Accept either `iot_device_id` (preferred — matches the bidirectional
+        # column name) or `device_id` (legacy) so older callers don't break.
+        device_id_raw = data.get('iot_device_id', data.get('device_id'))
+        if device_id_raw is None:
+            raise BadRequestException('iot_device_id is required')
+        try:
+            device_id = int(device_id_raw)
+        except Exception:
+            raise BadRequestException('iot_device_id must be an integer')
+
+        # Optional settings-PIN. Stored transiently on the hardware row;
+        # consumed and cleared by the next /checkin response. 4–8 digits.
+        pin_raw = data.get('pin')
+        pending_pin: str | None = None
+        if pin_raw is not None and str(pin_raw).strip() != '':
+            pin_str = str(pin_raw).strip()
+            if not pin_str.isdigit() or not (4 <= len(pin_str) <= 8):
+                raise BadRequestException('pin must be 4–8 digits')
+            pending_pin = pin_str
+
+        # Validate target device exists.
+        dev = self.db_session.execute(_t(
+            "SELECT id, device_name FROM iot_devices "
+            "WHERE id = :id AND deleted_date IS NULL"
+        ), {'id': device_id}).fetchone()
+        if not dev:
+            raise NotFoundException(f'iot_device {device_id} not found')
+
+        # Reject if either side is already paired to something else.
+        existing = self.db_session.execute(_t(
+            "SELECT paired_iot_device_id FROM iot_hardwares WHERE id = :id"
+        ), {'id': hardware_id}).fetchone()
+        if existing and existing[0] is not None and int(existing[0]) != device_id:
+            raise ConflictException(
+                f'hardware {hardware_id} is already paired to device {int(existing[0])}; unpair first'
+            )
+
+        device_pair = self.db_session.execute(_t(
+            "SELECT hardware_id FROM iot_devices WHERE id = :id"
+        ), {'id': device_id}).fetchone()
+        if device_pair and device_pair[0] is not None and int(device_pair[0]) != hardware_id:
+            raise ConflictException(
+                f'device {device_id} is already paired to hardware {int(device_pair[0])}; unpair first'
+            )
+
+        actor_id = (current_user or {}).get('user_id') or (current_user or {}).get('id')
+
+        # Set both sides atomically. Also stash any admin-supplied PIN so
+        # the tablet picks it up on its next checkin (and we clear it then).
+        self.db_session.execute(_t(
+            "UPDATE iot_hardwares SET "
+            "  paired_iot_device_id = :dev, paired_at = NOW(), paired_by = :actor, "
+            "  pending_pin = :pin, "
+            "  updated_date = NOW() "
+            "WHERE id = :id"
+        ), {'id': hardware_id, 'dev': device_id, 'actor': actor_id, 'pin': pending_pin})
+        self.db_session.execute(_t(
+            "UPDATE iot_devices SET hardware_id = :hw, updated_date = NOW() "
+            "WHERE id = :id"
+        ), {'id': device_id, 'hw': hardware_id})
+        # Expire any stale unpair-style force_logout commands sitting in the
+        # queue from a previous unpair. Without this the tablet's first /sync
+        # after the new pair would deliver the ghost command and immediately
+        # log itself out, only recovering on the next checkin tick — visible
+        # to operators as a flash of /device-setup mid-pair. Generic
+        # force_logout commands (without `unpair:true`) are left alone.
+        self.db_session.execute(_t(
+            "UPDATE device_commands SET "
+            "  status = 'expired', "
+            "  completed_at = NOW() "
+            "WHERE device_id = :dev "
+            "  AND command_type = 'force_logout' "
+            "  AND status IN ('pending', 'delivered') "
+            "  AND payload @> '{\"unpair\": true}'::jsonb"
+        ), {'dev': device_id})
+        self.db_session.commit()
+
+        return {
+            'hardware_id': hardware_id,
+            'iot_device_id': device_id,
+            'iot_device_name': dev[1],
+            'paired': True,
+        }
+
+    def unpair_iot_hardware(self, hardware_id: int, current_user: dict) -> Dict[str, Any]:
+        """POST /api/admin/iot-hardwares/{id}/unpair.
+
+        Clears both sides AND queues a force_logout command on the
+        previously-paired device so the tablet drops back to the pre-login
+        checkin loop on its next /sync.
+        """
+        from sqlalchemy import text as _t
+
+        self._ensure_hardware_exists(hardware_id)
+
+        existing = self.db_session.execute(_t(
+            "SELECT paired_iot_device_id FROM iot_hardwares WHERE id = :id"
+        ), {'id': hardware_id}).fetchone()
+        prev_device_id = (
+            int(existing[0]) if (existing and existing[0] is not None) else None
+        )
+
+        # Clear hardware → device.
+        self.db_session.execute(_t(
+            "UPDATE iot_hardwares SET "
+            "  paired_iot_device_id = NULL, paired_at = NULL, paired_by = NULL, "
+            "  updated_date = NOW() "
+            "WHERE id = :id"
+        ), {'id': hardware_id})
+        # Clear device → hardware (only if it points back at us).
+        if prev_device_id:
+            self.db_session.execute(_t(
+                "UPDATE iot_devices SET hardware_id = NULL, updated_date = NOW() "
+                "WHERE id = :id AND hardware_id = :hw"
+            ), {'id': prev_device_id, 'hw': hardware_id})
+
+            # Queue a force_logout command so the tablet drops back into the
+            # pre-login state on its next /sync. The `unpair: true` payload
+            # flag tells the tablet to also clear *device* credentials (not
+            # just the operator session) and restart the hardware checkin loop.
+            actor_id = (current_user or {}).get('user_id') or (current_user or {}).get('id')
+            self.db_session.execute(_t(
+                "INSERT INTO device_commands "
+                "(device_id, command_type, payload, status, issued_by) "
+                "VALUES (:dev, 'force_logout', CAST(:pl AS JSONB), 'pending', :actor)"
+            ), {
+                'dev': prev_device_id,
+                'actor': actor_id,
+                'pl': '{"unpair": true}',
+            })
+        self.db_session.commit()
+
+        return {
+            'hardware_id': hardware_id,
+            'unpaired_from_iot_device_id': prev_device_id,
+            'paired': False,
+        }
+
+    # ── IoT Devices: aggregated history (5-min buckets) ─────────────
+
+    # 5-min aggregation cadence — matches the bucket size in the SQL.
+    _HISTORY_BUCKET_MIN = 5
+    _HISTORY_RETENTION_DAYS = 7
+
+    def aggregate_health_snapshot(self) -> Dict[str, Any]:
+        """Write a single 5-min bucket row per active device.
+
+        Idempotent — the table's PK (device_id, bucket_start) means calling
+        this twice in the same bucket is a no-op. Designed to be called by:
+          * a CloudWatch / cron job every 5 minutes (preferred), OR
+          * manually via this endpoint for testing / backfill.
+
+        Also opportunistically drops rows older than 7 days from the same
+        bucket so retention stays bounded without a separate sweeper.
+        """
+        from sqlalchemy import text as _t
+
+        # Bucket alignment: floor NOW() to the nearest 5-min boundary.
+        # Postgres expression keeps the math server-side so we don't drift
+        # on clock skew between app server + db.
+        result = self.db_session.execute(_t(
+            "INSERT INTO device_health_history "
+            "  (device_id, bucket_start, online, battery_level, "
+            "   battery_charging, network_type, network_strength, last_seen_at) "
+            "SELECT "
+            "  d.id, "
+            "  date_trunc('hour', NOW()) "
+            "    + (FLOOR(EXTRACT(MINUTE FROM NOW())::int / :bucket_min) "
+            "       * :bucket_min) * INTERVAL '1 minute' AS bucket_start, "
+            "  COALESCE(h.last_seen_at > NOW() - INTERVAL '30 seconds', FALSE) AS online, "
+            "  h.battery_level, h.battery_charging, h.network_type, h.network_strength, "
+            "  h.last_seen_at "
+            "FROM iot_devices d "
+            "LEFT JOIN device_health h ON h.device_id = d.id "
+            "WHERE d.deleted_date IS NULL "
+            "ON CONFLICT (device_id, bucket_start) DO NOTHING"
+        ), {'bucket_min': self._HISTORY_BUCKET_MIN})
+
+        # Drop rows older than the retention window. Keeps the table small.
+        purged = self.db_session.execute(_t(
+            "DELETE FROM device_health_history "
+            "WHERE bucket_start < NOW() - INTERVAL ':d days'".replace(
+                ':d', str(self._HISTORY_RETENTION_DAYS)
+            )
+        ))
+
+        self.db_session.commit()
+
+        return {
+            'inserted': getattr(result, 'rowcount', 0) or 0,
+            'purged': getattr(purged, 'rowcount', 0) or 0,
+            'bucket_minutes': self._HISTORY_BUCKET_MIN,
+            'retention_days': self._HISTORY_RETENTION_DAYS,
+        }
+
+    def list_online_history(self, query_params: dict) -> Dict[str, Any]:
+        """Fleet-wide online% over a time range.
+
+        Params:
+          * range  — ``24h`` (default) | ``7d`` | ``1h``
+          * organizationId — restrict to one org
+        Returns ``[{bucket_start, total, online, online_pct}, …]`` ordered
+        chronologically; empty buckets are skipped (frontend renders gaps).
+        """
+        from sqlalchemy import text as _t
+
+        rng = (query_params.get('range') or '24h').strip()
+        if rng not in ('1h', '24h', '7d'):
+            rng = '24h'
+        interval_sql = {
+            '1h': "INTERVAL '1 hour'",
+            '24h': "INTERVAL '24 hours'",
+            '7d': "INTERVAL '7 days'",
+        }[rng]
+
+        org_id = (query_params.get('organizationId') or '').strip()
+        params: Dict[str, Any] = {}
+        org_filter = ''
+        if org_id:
+            org_filter = ' AND d.organization_id = :org_id'
+            params['org_id'] = int(org_id)
+
+        rows = self.db_session.execute(_t(
+            "SELECT h.bucket_start, "
+            "       COUNT(*) AS total, "
+            "       COUNT(*) FILTER (WHERE h.online) AS online "
+            "FROM device_health_history h "
+            "JOIN iot_devices d ON d.id = h.device_id "
+            "WHERE h.bucket_start >= NOW() - " + interval_sql + " "
+            "  AND d.deleted_date IS NULL"
+            + org_filter +
+            " GROUP BY h.bucket_start "
+            "ORDER BY h.bucket_start ASC"
+        ), params).fetchall()
+
+        items = []
+        for r in rows:
+            total = int(r[1] or 0)
+            online = int(r[2] or 0)
+            items.append({
+                'bucket_start': r[0].isoformat() if r[0] else None,
+                'total': total,
+                'online': online,
+                'online_pct': round(100.0 * online / total, 1) if total else 0.0,
+            })
+        return {'items': items, 'range': rng}
+
+    def list_device_health_history(
+        self, device_id: int, query_params: dict
+    ) -> Dict[str, Any]:
+        """Per-device history for sparklines on the show.tsx Status tab.
+
+        Params:
+          * range  — ``24h`` (default) | ``7d`` | ``1h``
+        Returns ``[{bucket_start, online, battery_level, network_strength,
+                    network_type}, …]`` ordered chronologically.
+        """
+        from sqlalchemy import text as _t
+
+        self._ensure_device_exists(device_id)
+
+        rng = (query_params.get('range') or '24h').strip()
+        if rng not in ('1h', '24h', '7d'):
+            rng = '24h'
+        interval_sql = {
+            '1h': "INTERVAL '1 hour'",
+            '24h': "INTERVAL '24 hours'",
+            '7d': "INTERVAL '7 days'",
+        }[rng]
+
+        rows = self.db_session.execute(_t(
+            "SELECT bucket_start, online, battery_level, battery_charging, "
+            "       network_type, network_strength, last_seen_at "
+            "FROM device_health_history "
+            "WHERE device_id = :id "
+            "  AND bucket_start >= NOW() - " + interval_sql + " "
+            "ORDER BY bucket_start ASC"
+        ), {'id': device_id}).fetchall()
+
+        return {
+            'items': [
+                {
+                    'bucket_start': r[0].isoformat() if r[0] else None,
+                    'online': bool(r[1]),
+                    'battery_level': r[2],
+                    'battery_charging': r[3],
+                    'network_type': r[4],
+                    'network_strength': r[5],
+                    'last_seen_at': r[6].isoformat() if r[6] else None,
+                }
+                for r in rows
+            ],
+            'range': rng,
         }
 
     # ── IoT Scales ──────────────────────────────────────────────────

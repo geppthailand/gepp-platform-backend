@@ -4,8 +4,10 @@ and crm_org_profiles from crm_events using a single parameterized SQL UPSERT
 per table.
 
 Entry points:
-  refresh_user_profiles(db_session)  — called by cron / Lambda scheduler
-  refresh_org_profiles(db_session)   — same
+  refresh_user_profiles(db_session)         — called by cron / Lambda scheduler
+  refresh_org_profiles(db_session)          — same
+  refresh_email_engagement(db_session)      — Sprint 4: email stats from crm_events
+  run_full_refresh(db_session)              — calls all three in sequence
 
 CLI:
   python -m GEPPPlatform.services.admin.crm.profile_refresher
@@ -23,6 +25,15 @@ Tier:
   active   if score >= 70
   at_risk  if score >= 40
   dormant  if score <  40
+
+Email engagement rollup (Sprint 4 — 30-day window):
+  Reads crm_events WHERE event_category='email' AND occurred_at > NOW()-30d.
+  Aggregates per user_location_id → UPSERTs emails_received_30d / emails_opened_30d /
+  emails_clicked_30d / last_email_received_at / last_email_opened_at into
+  crm_user_profiles.
+  Mirrors the same for organization_id → crm_org_profiles (org_* columns).
+  Users/orgs with no email events in the last 30 days are reset to zero.
+  Idempotent: running twice produces the same counts.
 """
 
 from __future__ import annotations
@@ -459,11 +470,215 @@ def refresh_org_profiles(db_session: Session) -> dict:
     return {"rows_upserted": rows, "duration_s": round(elapsed, 3)}
 
 
+# ─── Email engagement UPSERT (Sprint 4) ────────────────────────────────────────
+# Two-phase approach:
+#   Phase 1 — aggregate email events per user/org from crm_events (30-day window).
+#   Phase 2 — UPSERT the counts into the profile tables; reset zero for absent rows.
+#
+# Idempotency: running twice with the same event data produces identical column values
+# because:
+#   - Phase 1 is a pure read (SELECT/aggregate).
+#   - Phase 2 uses ON CONFLICT … DO UPDATE SET, so re-running overwrites with the
+#     same computed values.
+#   - The "reset to zero" UPDATE at the end ensures users/orgs with no email events
+#     in the last 30 days are not left with stale non-zero counts from a prior run.
+
+_EMAIL_USER_AGG_SQL = text("""
+SELECT
+    user_location_id,
+    COUNT(*) FILTER (WHERE event_type = 'email_sent')    AS emails_received_30d,
+    COUNT(*) FILTER (WHERE event_type = 'email_opened')  AS emails_opened_30d,
+    COUNT(*) FILTER (WHERE event_type = 'email_clicked') AS emails_clicked_30d,
+    MAX(occurred_at) FILTER (WHERE event_type = 'email_sent')   AS last_email_received_at,
+    MAX(occurred_at) FILTER (WHERE event_type = 'email_opened') AS last_email_opened_at
+FROM crm_events
+WHERE event_category = 'email'
+  AND occurred_at > :window_30d
+  AND user_location_id IS NOT NULL
+GROUP BY user_location_id
+""")
+
+_EMAIL_ORG_AGG_SQL = text("""
+SELECT
+    organization_id,
+    COUNT(*) FILTER (WHERE event_type = 'email_sent')    AS org_emails_received_30d,
+    COUNT(*) FILTER (WHERE event_type = 'email_opened')  AS org_emails_opened_30d,
+    COUNT(*) FILTER (WHERE event_type = 'email_clicked') AS org_emails_clicked_30d,
+    MAX(occurred_at) FILTER (WHERE event_type = 'email_opened') AS org_last_email_opened_at
+FROM crm_events
+WHERE event_category = 'email'
+  AND occurred_at > :window_30d
+  AND organization_id IS NOT NULL
+GROUP BY organization_id
+""")
+
+
+def refresh_email_engagement(db_session: Session) -> dict:
+    """
+    Aggregate email events from crm_events (30-day window) and UPSERT into
+    crm_user_profiles and crm_org_profiles.
+
+    Phase 1 — SELECT aggregate from crm_events.
+    Phase 2 — For each user/org row: UPDATE crm_*_profiles with computed counts.
+    Phase 3 — Reset rows with no email events in last 30 days to zero.
+
+    Safe to call repeatedly (idempotent).
+    Returns {"user_rows_updated": N, "org_rows_updated": M, "duration_s": X}.
+    """
+    from datetime import timedelta
+
+    t0 = datetime.now(timezone.utc)
+    window_30d = t0 - timedelta(days=30)
+    params_window = {"window_30d": window_30d}
+
+    # ── User: aggregate ────────────────────────────────────────────────────────
+    user_rows = db_session.execute(_EMAIL_USER_AGG_SQL, params_window).fetchall()
+    user_ids_updated: list = []
+    for row in user_rows:
+        (uid, recv, opened, clicked, last_recv, last_opened) = row
+        db_session.execute(
+            text("""
+                UPDATE crm_user_profiles
+                SET
+                    emails_received_30d    = :recv,
+                    emails_opened_30d      = :opened,
+                    emails_clicked_30d     = :clicked,
+                    last_email_received_at = :last_recv,
+                    last_email_opened_at   = :last_opened,
+                    updated_date           = NOW()
+                WHERE user_location_id = :uid
+            """),
+            {
+                "uid": uid,
+                "recv": int(recv or 0),
+                "opened": int(opened or 0),
+                "clicked": int(clicked or 0),
+                "last_recv": last_recv,
+                "last_opened": last_opened,
+            },
+        )
+        user_ids_updated.append(uid)
+
+    # Phase 3 — reset users with no email events in last 30d to zero
+    if user_ids_updated:
+        db_session.execute(
+            text("""
+                UPDATE crm_user_profiles
+                SET
+                    emails_received_30d    = 0,
+                    emails_opened_30d      = 0,
+                    emails_clicked_30d     = 0,
+                    last_email_received_at = NULL,
+                    last_email_opened_at   = NULL,
+                    updated_date           = NOW()
+                WHERE user_location_id != ALL(:active_ids)
+                  AND (emails_received_30d > 0
+                       OR emails_opened_30d > 0
+                       OR emails_clicked_30d > 0)
+            """),
+            {"active_ids": user_ids_updated},
+        )
+    else:
+        # No email events at all in 30 days — reset everything
+        db_session.execute(
+            text("""
+                UPDATE crm_user_profiles
+                SET
+                    emails_received_30d    = 0,
+                    emails_opened_30d      = 0,
+                    emails_clicked_30d     = 0,
+                    last_email_received_at = NULL,
+                    last_email_opened_at   = NULL,
+                    updated_date           = NOW()
+                WHERE emails_received_30d > 0
+                   OR emails_opened_30d > 0
+                   OR emails_clicked_30d > 0
+            """),
+        )
+
+    # ── Org: aggregate ─────────────────────────────────────────────────────────
+    org_rows = db_session.execute(_EMAIL_ORG_AGG_SQL, params_window).fetchall()
+    org_ids_updated: list = []
+    for row in org_rows:
+        (oid, recv, opened, clicked, last_opened) = row
+        db_session.execute(
+            text("""
+                UPDATE crm_org_profiles
+                SET
+                    org_emails_received_30d  = :recv,
+                    org_emails_opened_30d    = :opened,
+                    org_emails_clicked_30d   = :clicked,
+                    org_last_email_opened_at = :last_opened,
+                    updated_date             = NOW()
+                WHERE organization_id = :oid
+            """),
+            {
+                "oid": oid,
+                "recv": int(recv or 0),
+                "opened": int(opened or 0),
+                "clicked": int(clicked or 0),
+                "last_opened": last_opened,
+            },
+        )
+        org_ids_updated.append(oid)
+
+    # Phase 3 — reset orgs with no email events in last 30d to zero
+    if org_ids_updated:
+        db_session.execute(
+            text("""
+                UPDATE crm_org_profiles
+                SET
+                    org_emails_received_30d  = 0,
+                    org_emails_opened_30d    = 0,
+                    org_emails_clicked_30d   = 0,
+                    org_last_email_opened_at = NULL,
+                    updated_date             = NOW()
+                WHERE organization_id != ALL(:active_ids)
+                  AND (org_emails_received_30d > 0
+                       OR org_emails_opened_30d > 0
+                       OR org_emails_clicked_30d > 0)
+            """),
+            {"active_ids": org_ids_updated},
+        )
+    else:
+        db_session.execute(
+            text("""
+                UPDATE crm_org_profiles
+                SET
+                    org_emails_received_30d  = 0,
+                    org_emails_opened_30d    = 0,
+                    org_emails_clicked_30d   = 0,
+                    org_last_email_opened_at = NULL,
+                    updated_date             = NOW()
+                WHERE org_emails_received_30d > 0
+                   OR org_emails_opened_30d > 0
+                   OR org_emails_clicked_30d > 0
+            """),
+        )
+
+    db_session.commit()
+    elapsed = (datetime.now(timezone.utc) - t0).total_seconds()
+    logger.info(
+        "refresh_email_engagement: %d user rows, %d org rows in %.2fs",
+        len(user_ids_updated), len(org_ids_updated), elapsed,
+    )
+    return {
+        "user_rows_updated": len(user_ids_updated),
+        "org_rows_updated": len(org_ids_updated),
+        "duration_s": round(elapsed, 3),
+    }
+
+
 def run_full_refresh(db_session: Session) -> dict:
-    """Run both refreshes in sequence (users first, then orgs)."""
+    """Run all three refreshes in sequence: users → orgs → email engagement."""
     user_result = refresh_user_profiles(db_session)
     org_result = refresh_org_profiles(db_session)
-    return {"user_profiles": user_result, "org_profiles": org_result}
+    email_result = refresh_email_engagement(db_session)
+    return {
+        "user_profiles": user_result,
+        "org_profiles": org_result,
+        "email_engagement": email_result,
+    }
 
 
 # ─── CLI entry point ─────────────────────────────────────────────────────────

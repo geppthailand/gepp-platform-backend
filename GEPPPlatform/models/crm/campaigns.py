@@ -24,6 +24,7 @@ class CrmCampaign(Base, BaseModel):
     send_from_email = Column(String(255))
     reply_to = Column(String(255))
     cc_list_id = Column(BigInteger)  # FK to crm_email_lists added in migration 035
+    recipient_list_id = Column(BigInteger, ForeignKey('crm_email_lists.id', ondelete='SET NULL'))
     metrics_cache = Column(JSON)
     last_trigger_eval_at = Column(DateTime(timezone=True))
     created_by = Column(BigInteger, ForeignKey('user_locations.id'))

@@ -166,16 +166,67 @@ else
   fi
 fi
 
-# ── 6. Start local server ────────────────────────────────────
+# ── 6. Detect LAN IP (so other devices on the same Wi-Fi can hit us) ─
+# Tries the standard primary-interface route first; falls back to ifconfig.
+# On macOS the primary Wi-Fi is usually en0 or en1; on Linux the active
+# default route exposes the LAN IP via `ip route`.
+detect_lan_ip() {
+  local ip=""
+  if command -v route &>/dev/null && [ "$(uname)" = "Darwin" ]; then
+    # macOS: query the routing table for the primary interface, then read
+    # its inet address.
+    local iface
+    iface=$(route -n get default 2>/dev/null | awk '/interface:/ {print $2}')
+    if [ -n "$iface" ]; then
+      ip=$(ipconfig getifaddr "$iface" 2>/dev/null || true)
+    fi
+  fi
+  if [ -z "$ip" ] && command -v ip &>/dev/null; then
+    # Linux
+    ip=$(ip -4 -o route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if ($i=="src") print $(i+1)}')
+  fi
+  if [ -z "$ip" ]; then
+    # Last resort — pick the first non-loopback IPv4 from ifconfig / ip addr.
+    ip=$( (ifconfig 2>/dev/null || ip -4 addr show 2>/dev/null) \
+        | grep -Eo 'inet (addr:)?([0-9]+\.){3}[0-9]+' \
+        | grep -Eo '([0-9]+\.){3}[0-9]+' \
+        | grep -v '^127\.' \
+        | head -1 )
+  fi
+  echo "$ip"
+}
+
+LAN_IP="$(detect_lan_ip)"
+
+# ── 7. Start local server ────────────────────────────────────
 echo ""
 echo -e "${GREEN}==========================================${NC}"
 echo -e "${GREEN}  GEPP Platform — Local Lambda Server${NC}"
 echo -e "${GREEN}  Port: $PORT${NC}"
 echo -e "${GREEN}==========================================${NC}"
 echo ""
+echo -e "  Reachable at:"
+echo -e "    Localhost  : ${CYAN}http://localhost:${PORT}${NC}"
+echo -e "    Localhost  : ${CYAN}http://127.0.0.1:${PORT}${NC}"
+if [ -n "$LAN_IP" ]; then
+  echo -e "    LAN (Wi-Fi): ${CYAN}http://${LAN_IP}:${PORT}${NC}  ${YELLOW}← use this from tablets / phones on the same Wi-Fi${NC}"
+  echo ""
+  echo -e "  ${YELLOW}IoT scale tablet${NC} (Flutter app) — start with:"
+  echo -e "    ${CYAN}flutter run --dart-define=APP_ENV=local --dart-define=API_BASE_URL=http://${LAN_IP}:${PORT}/api${NC}"
+  echo ""
+  echo -e "  ${YELLOW}Backoffice${NC} (gepp-new-webapp) — set in .env.local:"
+  echo -e "    ${CYAN}VITE_V3_API_URL_LOCAL=http://${LAN_IP}:${PORT}/api${NC}"
+else
+  warn "Could not auto-detect LAN IP. Manual: ipconfig getifaddr en0 (macOS) / hostname -I (Linux)"
+fi
+echo ""
+warn "First-time LAN access on macOS may show 'Allow Python to accept incoming connections?' — click Allow."
+warn "If LAN clients can't connect, check System Settings → Network → Firewall (allow Python or temporarily disable)."
+echo ""
 
 export PYTHONPATH="$SCRIPT_DIR"
 export PORT="$PORT"
+export LAN_IP="$LAN_IP"
 
 exec "$VENV_DIR/bin/python" -c "
 import json, sys, os, traceback
@@ -259,13 +310,28 @@ def catch_all(path):
     try:
         result = lambda_handler(event, None)
     except Exception as e:
+        tb = traceback.format_exc()
+        print(f'\n\033[0;31m[500 EXCEPTION]\033[0m {request.method} /{path}', file=sys.stderr)
+        print(tb, file=sys.stderr)
         result = {
             'statusCode': 500,
             'headers': {'Content-Type': 'application/json'},
-            'body': json.dumps({'error': str(e), 'trace': traceback.format_exc()}),
+            'body': json.dumps({'error': str(e), 'trace': tb}),
         }
 
     status = result.get('statusCode', 200)
+    if status >= 500:
+        try:
+            body_data = json.loads(result.get('body', '{}'))
+            print(f'\n\033[0;31m[500 RESPONSE]\033[0m {request.method} /{path}', file=sys.stderr)
+            if 'stack_trace' in body_data:
+                print(body_data['stack_trace'], file=sys.stderr)
+            elif 'trace' in body_data:
+                print(body_data['trace'], file=sys.stderr)
+            else:
+                print(json.dumps(body_data, indent=2), file=sys.stderr)
+        except Exception:
+            print(result.get('body', ''), file=sys.stderr)
     resp_headers = result.get('headers', {})
     body = result.get('body', '')
 
@@ -273,13 +339,20 @@ def catch_all(path):
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 9000))
+    lan_ip = os.environ.get('LAN_IP', '').strip()
     print()
-    print('  Routes:')
+    print('  Routes (localhost):')
     print(f'    Health check  : http://localhost:{port}/health')
     print(f'    Auth          : http://localhost:{port}/api/auth/...')
     print(f'    Users         : http://localhost:{port}/api/users/...')
     print(f'    Transactions  : http://localhost:{port}/api/transactions/...')
     print(f'    Materials     : http://localhost:{port}/api/materials/...')
+    if lan_ip:
+        print()
+        print(f'  LAN (Wi-Fi): http://{lan_ip}:{port}  ← reachable from any device on the same network')
     print()
+    # Bind to 0.0.0.0 so the dev server is reachable from any host on the
+    # local network (LAN), not just loopback. Required for the Flutter
+    # tablet / iOS device on the same Wi-Fi to hit the API.
     app.run(host='0.0.0.0', port=port, debug=True)
 "

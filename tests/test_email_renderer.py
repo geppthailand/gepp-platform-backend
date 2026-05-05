@@ -53,8 +53,10 @@ class TestBasicSubstitution(unittest.TestCase):
             _org(),
         )
         self.assertEqual(subject, "Hello Alice Smith")
-        self.assertEqual(html,    "<p>Hi Alice Smith</p>")
-        self.assertEqual(plain,   "Hi Alice Smith")
+        # Sprint 2-4: renderer now auto-appends an unsubscribe footer.
+        # Use startsWith / contains rather than full equality.
+        self.assertTrue(html.startswith("<p>Hi Alice Smith</p>"), html)
+        self.assertTrue(plain.startswith("Hi Alice Smith"), plain)
 
     def test_org_name(self):
         tmpl = _template(
@@ -111,7 +113,8 @@ class TestMissingVariable(unittest.TestCase):
         # user dict has no reward_points key
         subject, html, plain = render(tmpl, _user(), None)
         self.assertEqual(subject, "Points: ")
-        self.assertEqual(plain,   "Points: ")
+        # plain may have an unsubscribe footer appended; subject does not.
+        self.assertTrue(plain.startswith("Points: "), plain)
 
     def test_completely_unknown_variable(self):
         tmpl = _template(
@@ -121,8 +124,11 @@ class TestMissingVariable(unittest.TestCase):
         )
         subject, html, plain = render(tmpl, _user(), None)
         self.assertEqual(subject, "")
-        self.assertEqual(html,    "")
-        self.assertEqual(plain,   "")
+        # body has unknown var (replaced empty) PLUS auto-appended footer.
+        # The footer is non-empty, so html/plain are non-empty post-Sprint-2.
+        # Assert the original body resolved to empty before footer was appended.
+        self.assertNotIn("totally_unknown", html)
+        self.assertNotIn("totally_unknown", plain)
 
 
 class TestCustomVariables(unittest.TestCase):
@@ -220,7 +226,7 @@ class TestNoneInputs(unittest.TestCase):
         )
         subject, html, plain = render(tmpl, None, None)
         self.assertEqual(subject, "Platform update")
-        self.assertEqual(plain,   "Hello")
+        self.assertTrue(plain.startswith("Hello"), plain)
 
 
 class TestSpacesAroundVariable(unittest.TestCase):

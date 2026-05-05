@@ -46,6 +46,12 @@ ALLOWED_FIELDS: Dict[str, Set[str]] = {
         "onboarded",
         "subscription_plan_id",
         "organization_id",
+        # Sprint 4 — email engagement fields (populated by profile_refresher)
+        "emails_received_30d",
+        "emails_opened_30d",
+        "emails_clicked_30d",
+        "last_email_received_at",
+        "last_email_opened_at",
     },
     "organization": {
         "active_user_count_30d",
@@ -59,6 +65,11 @@ ALLOWED_FIELDS: Dict[str, Set[str]] = {
         "quota_used_pct",
         "activity_tier",
         "organization_id",
+        # Sprint 4 — org-level email engagement fields
+        "org_emails_received_30d",
+        "org_emails_opened_30d",
+        "org_emails_clicked_30d",
+        "org_last_email_opened_at",
     },
 }
 
@@ -66,6 +77,8 @@ ALLOWED_FIELDS: Dict[str, Set[str]] = {
 ALLOWED_OPERATORS: Set[str] = {
     "=", "!=", ">", "<", ">=", "<=",
     "IN", "NOT IN", "BETWEEN",
+    # Sprint 4: nullable datetime fields (last_email_opened_at etc.)
+    "IS NULL", "IS NOT NULL",
 }
 
 _SCOPE_TABLE = {
@@ -98,6 +111,45 @@ _FIELD_DEFINITIONS: Dict[str, List[Dict[str, Any]]] = {
         {"name": "onboarded",                "label": "Onboarded",                   "type": "boolean", "operators": ["=", "!="]},
         {"name": "subscription_plan_id",     "label": "Subscription plan",           "type": "fk:subscription_plans", "operators": ["=", "!=", "IN", "NOT IN"]},
         {"name": "organization_id",          "label": "Organisation",                "type": "fk:organizations", "operators": ["=", "!=", "IN", "NOT IN"]},
+        # Sprint 4 — email engagement fields
+        {
+            "name": "emails_received_30d",
+            "label": "Emails received (30d)",
+            "type": "number",
+            "description": "Number of campaign emails sent to this user in the last 30 days.",
+            "unit": "emails",
+            "operators": ["=", "!=", ">", "<", ">=", "<="],
+        },
+        {
+            "name": "emails_opened_30d",
+            "label": "Emails opened (30d)",
+            "type": "number",
+            "description": "Number of campaign emails this user opened in the last 30 days.",
+            "unit": "emails",
+            "operators": ["=", "!=", ">", "<", ">=", "<="],
+        },
+        {
+            "name": "emails_clicked_30d",
+            "label": "Emails clicked (30d)",
+            "type": "number",
+            "description": "Number of campaign emails where this user clicked a link in the last 30 days.",
+            "unit": "emails",
+            "operators": ["=", "!=", ">", "<", ">=", "<="],
+        },
+        {
+            "name": "last_email_received_at",
+            "label": "Last email received at",
+            "type": "datetime",
+            "description": "Timestamp of the most recent campaign email sent to this user.",
+            "operators": ["=", "!=", ">", "<", "IS NULL", "IS NOT NULL"],
+        },
+        {
+            "name": "last_email_opened_at",
+            "label": "Last email opened at",
+            "type": "datetime",
+            "description": "Timestamp of the most recent campaign email this user opened.",
+            "operators": ["=", "!=", ">", "<", "IS NULL", "IS NOT NULL"],
+        },
     ],
     "organizationFields": [
         {"name": "active_user_count_30d",    "label": "Active users (30d)",          "type": "number",  "operators": ["=", "!=", ">", "<", ">=", "<="]},
@@ -110,6 +162,38 @@ _FIELD_DEFINITIONS: Dict[str, List[Dict[str, Any]]] = {
         {"name": "subscription_active",      "label": "Subscription active",        "type": "boolean", "operators": ["=", "!="]},
         {"name": "quota_used_pct",           "label": "Quota used (%)",             "type": "number",  "operators": ["=", "!=", ">", "<", ">=", "<="]},
         {"name": "activity_tier",            "label": "Activity tier",              "type": "enum",    "operators": ["=", "!=", "IN", "NOT IN"], "options": ["active", "at_risk", "dormant"]},
+        # Sprint 4 — org-level email engagement fields
+        {
+            "name": "org_emails_received_30d",
+            "label": "Org emails received (30d)",
+            "type": "number",
+            "description": "Total campaign emails sent to this organisation's users in the last 30 days.",
+            "unit": "emails",
+            "operators": ["=", "!=", ">", "<", ">=", "<="],
+        },
+        {
+            "name": "org_emails_opened_30d",
+            "label": "Org emails opened (30d)",
+            "type": "number",
+            "description": "Total campaign emails opened by this organisation's users in the last 30 days.",
+            "unit": "emails",
+            "operators": ["=", "!=", ">", "<", ">=", "<="],
+        },
+        {
+            "name": "org_emails_clicked_30d",
+            "label": "Org emails clicked (30d)",
+            "type": "number",
+            "description": "Total campaign emails clicked by this organisation's users in the last 30 days.",
+            "unit": "emails",
+            "operators": ["=", "!=", ">", "<", ">=", "<="],
+        },
+        {
+            "name": "org_last_email_opened_at",
+            "label": "Org last email opened at",
+            "type": "datetime",
+            "description": "Timestamp of the most recent campaign email opened by any user in this organisation.",
+            "operators": ["=", "!=", ">", "<", "IS NULL", "IS NOT NULL"],
+        },
     ],
 }
 
@@ -170,6 +254,10 @@ def _compile_condition(
 
     # Column name is now safe (validated against whitelist — no user-supplied text in SQL).
     col = field
+
+    # IS NULL / IS NOT NULL take no value — just emit the keyword clause.
+    if operator in ("IS NULL", "IS NOT NULL"):
+        return f"{col} {operator}"
 
     if operator in ("IN", "NOT IN"):
         if not isinstance(value, (list, tuple)):
@@ -337,7 +425,10 @@ def evaluate_segment(db_session: Session, segment_id: int) -> int:
     # Lazy import to avoid circular deps at module load time.
     from ....models.crm.segments import CrmSegment, CrmSegmentMember
 
-    segment = db_session.query(CrmSegment).filter_by(id=segment_id, is_deleted=False).first()
+    segment = db_session.query(CrmSegment).filter(
+        CrmSegment.id == segment_id,
+        CrmSegment.deleted_date.is_(None),
+    ).first()
     if not segment:
         raise NotFoundException(f"Segment {segment_id} not found.")
 

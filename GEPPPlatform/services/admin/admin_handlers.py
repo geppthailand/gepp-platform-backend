@@ -23,8 +23,9 @@ from .crm import crm_handlers as crm
 
 class AdminHandlers:
 
-    def __init__(self, db_session: Session):
+    def __init__(self, db_session: Session, current_user: dict = None):
         self.db_session = db_session
+        self.current_user = current_user or {}
         self.admin_service = AdminService(db_session)
         self.jwt_secret = os.environ.get('JWT_SECRET_KEY', 'your-secret-key-here')
 
@@ -117,7 +118,7 @@ class AdminHandlers:
             'crm-segments': lambda qp: crm.list_crm_segments(self.db_session, qp),
             'crm-templates': lambda qp: crm.list_crm_templates(self.db_session, qp),
             'crm-campaigns': lambda qp: crm.list_crm_campaigns(self.db_session, qp),
-            'crm-email-lists': lambda qp: crm.list_crm_email_lists(self.db_session, qp),
+            'crm-email-lists': lambda qp: crm.list_crm_email_lists(self.db_session, qp, current_user=self.current_user),
             'crm-user-profiles': lambda qp: crm.list_crm_user_profiles(self.db_session, qp),
             'crm-org-profiles': lambda qp: crm.list_crm_org_profiles(self.db_session, qp),
             'crm-deliveries': lambda qp: crm.list_crm_deliveries(self.db_session, qp),
@@ -141,7 +142,7 @@ class AdminHandlers:
             'crm-segments': lambda rid: crm.get_crm_segment(self.db_session, rid),
             'crm-templates': lambda rid: crm.get_crm_template(self.db_session, rid),
             'crm-campaigns': lambda rid: crm.get_crm_campaign(self.db_session, rid),
-            'crm-email-lists': lambda rid: crm.get_crm_email_list(self.db_session, rid),
+            'crm-email-lists': lambda rid: crm.get_crm_email_list(self.db_session, rid, current_user=self.current_user),
         }
         handler = handler_map.get(resource)
         if not handler:
@@ -159,7 +160,7 @@ class AdminHandlers:
             'crm-segments': lambda d: crm.create_crm_segment(self.db_session, d),
             'crm-templates': lambda d: crm.create_crm_template(self.db_session, d),
             'crm-campaigns': lambda d: crm.create_crm_campaign(self.db_session, d),
-            'crm-email-lists': lambda d: crm.create_crm_email_list(self.db_session, d),
+            'crm-email-lists': lambda d: crm.create_crm_email_list(self.db_session, d, current_user=self.current_user),
         }
         handler = handler_map.get(resource)
         if not handler:
@@ -179,7 +180,7 @@ class AdminHandlers:
             'crm-segments': lambda rid, d: crm.update_crm_segment(self.db_session, rid, d),
             'crm-templates': lambda rid, d: crm.update_crm_template(self.db_session, rid, d),
             'crm-campaigns': lambda rid, d: crm.update_crm_campaign(self.db_session, rid, d),
-            'crm-email-lists': lambda rid, d: crm.update_crm_email_list(self.db_session, rid, d),
+            'crm-email-lists': lambda rid, d: crm.update_crm_email_list(self.db_session, rid, d, current_user=self.current_user),
         }
         handler = handler_map.get(resource)
         if not handler:
@@ -197,7 +198,7 @@ class AdminHandlers:
             'crm-segments': lambda rid: crm.delete_crm_segment(self.db_session, rid),
             'crm-templates': lambda rid: crm.delete_crm_template(self.db_session, rid),
             'crm-campaigns': lambda rid: crm.delete_crm_campaign(self.db_session, rid),
-            'crm-email-lists': lambda rid: crm.delete_crm_email_list(self.db_session, rid),
+            'crm-email-lists': lambda rid: crm.delete_crm_email_list(self.db_session, rid, current_user=self.current_user),
         }
         handler = handler_map.get(resource)
         if not handler:

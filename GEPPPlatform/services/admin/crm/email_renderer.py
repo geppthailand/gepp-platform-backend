@@ -184,8 +184,30 @@ def render(
     html_raw     = template_row.get("body_html", "")
     plain_raw    = template_row.get("body_plain", "")
 
+    # Ensure unsubscribe_url is in context — fill lazily from token utility if missing
+    if not context.get("unsubscribe_url"):
+        try:
+            from .unsubscribe_token import make_unsub_url  # lazy to avoid circular
+            user_email = context.get("user.email") or ""
+            if user_email:
+                context["unsubscribe_url"] = make_unsub_url(user_email)
+        except Exception as exc:
+            logger.warning("email_renderer: could not generate unsubscribe_url: %s", exc)
+
     subject = _substitute(subject_raw, context, html_escape=False)
     html    = _substitute(html_raw,    context, html_escape=True)
     plain   = _substitute(plain_raw,   context, html_escape=False)
+
+    # Auto-inject unsubscribe footer if the rendered output doesn't already reference it
+    unsub_url = context.get("unsubscribe_url", "")
+    if unsub_url:
+        if "unsubscribe_url" not in html_raw.lower() and "unsubscribe" not in html.lower():
+            html += (
+                '\n<p style="text-align:center;color:#888;font-size:12px;margin-top:24px;">'
+                f'Don\'t want these emails? <a href="{unsub_url}">Unsubscribe</a>.'
+                "</p>"
+            )
+        if "unsubscribe_url" not in plain_raw.lower() and "unsubscribe" not in plain.lower():
+            plain += f"\n\nUnsubscribe: {unsub_url}\n"
 
     return subject, html, plain

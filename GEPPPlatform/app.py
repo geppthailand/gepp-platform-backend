@@ -48,6 +48,14 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# ── Startup env-var checks ─────────────────────────────────────────────────
+if not os.environ.get('MAILCHIMP_WEBHOOK_KEY'):
+    logger.critical(
+        "MAILCHIMP_WEBHOOK_KEY env var is missing — Mandrill webhooks will all 401"
+    )
+# ──────────────────────────────────────────────────────────────────────────
+
+
 def main(event, context):
     try:
         # Get HTTP method
@@ -143,6 +151,17 @@ def main(event, context):
                 # Support both legacy format and direct data for POST requests
                 auth_result = handle_auth_routes(path, data=body, **commonParams)
                 results = {"data": auth_result}
+
+            elif "/api/iot-hardwares" in path:
+                # PUBLIC: physical-tablet self-checkin (every ~15 s, pre-login).
+                # See migration 051 + iot_hardwares_handlers.py for the
+                # rationale. Routed here so unauthenticated tablets can
+                # report MAC + serial without needing device-token first.
+                from GEPPPlatform.services.cores.iot_hardwares.iot_hardwares_handlers import (
+                    handle_iot_hardware_routes,
+                )
+                hw_result = handle_iot_hardware_routes(event, data=body, **commonParams)
+                results = {"success": True, "data": hw_result}
 
             elif "/documents/api-docs" in raw_path or "/docs/bma/" in raw_path:
                 # Handle documentation routes (no authorization required)
@@ -608,6 +627,7 @@ def main(event, context):
                         'user_id': token_data['user_id'],
                         'organization_id': token_data.get('organization_id'),
                         'email': token_data.get('email'),
+                        'admin_role': token_data.get('admin_role'),  # Sprint 4: needed by CRM email-list scoping
                         'token_data': token_data  # Include full token data for future use
                     }
                     commonParams['current_user'] = current_user
@@ -625,10 +645,37 @@ def main(event, context):
                             }
                         from GEPPPlatform.services.admin import handle_admin_routes
                         admin_result = handle_admin_routes(path, data=body, **commonParams)
-                        results = {
-                            "success": True,
-                            "data": admin_result
-                        }
+                        # Allow admin handlers to return a raw proxy response
+                        # (e.g. 304 Not Modified for ETag-aware endpoints).
+                        if isinstance(admin_result, dict) and isinstance(admin_result.get('__http__'), dict):
+                            http_meta = admin_result['__http__']
+                            if 'statusCode' in http_meta:
+                                # Full proxy response — return directly.
+                                proxy_headers = dict(headers)
+                                proxy_headers.update(http_meta.get('headers', {}) or {})
+                                results = {
+                                    "statusCode": http_meta['statusCode'],
+                                    "headers": proxy_headers,
+                                    "body": http_meta.get('body', ''),
+                                }
+                            else:
+                                # Headers-only override (e.g. attach ETag to a normal JSON response).
+                                extra_headers = http_meta.get('headers', {}) or {}
+                                # Strip the meta key from the payload before serialising.
+                                payload = {k: v for k, v in admin_result.items() if k != '__http__'}
+                                body_dict = {"success": True, "data": payload}
+                                merged_headers = dict(headers)
+                                merged_headers.update(extra_headers)
+                                results = {
+                                    "statusCode": 200,
+                                    "headers": merged_headers,
+                                    "body": json.dumps(body_dict, cls=DateTimeEncoder),
+                                }
+                        else:
+                            results = {
+                                "success": True,
+                                "data": admin_result
+                            }
                     elif "/api/crm/events" in path and http_method == "POST":
                         # Authed client-side event ingest (user JWT)
                         from GEPPPlatform.services.public.crm_client_events_handler import handle_client_event

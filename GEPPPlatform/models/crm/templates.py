@@ -20,4 +20,7 @@ class CrmEmailTemplate(Base, BaseModel):
     ai_model = Column(String(128))
     ai_token_usage = Column(JSON)
     version = Column(Integer, nullable=False, default=1)
+    # Versioning — added by migration 043
+    parent_template_id = Column(BigInteger, ForeignKey('crm_email_templates.id'), nullable=True)
+    is_current = Column(Boolean, nullable=False, default=True)
     created_by = Column(BigInteger, ForeignKey('user_locations.id'))
