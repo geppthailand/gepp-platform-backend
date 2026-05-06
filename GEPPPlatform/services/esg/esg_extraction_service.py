@@ -11,10 +11,14 @@ from sqlalchemy.orm import Session
 
 from ...models.esg.data_hierarchy import EsgDataCategory, EsgDataSubcategory, EsgDatapoint
 from ...models.esg.data_extraction import EsgOrganizationDataExtraction
+from ...models.esg.settings import EsgOrganizationSettings
 from ...prompts.esg_extract.prompts import (
     CATEGORY_CLASSIFY_PROMPT,
     SUBCATEGORY_CLASSIFY_PROMPT,
     DATAPOINT_EXTRACT_PROMPT,
+    CATEGORY_CLASSIFY_PROMPT_SCOPE3,
+    SUBCATEGORY_CLASSIFY_PROMPT_SCOPE3,
+    DATAPOINT_EXTRACT_PROMPT_SCOPE3,
 )
 
 logger = logging.getLogger(__name__)
@@ -25,6 +29,34 @@ class EsgExtractionService:
 
     def __init__(self, db: Session):
         self.db = db
+        # Per-extraction focus context (resolved at run start). Default to
+        # scope3_only so misconfigured orgs still get the narrowed taxonomy.
+        self._focus_mode: str = 'scope3_only'
+        self._enabled_scope3_ids: Optional[List[int]] = None
+
+    def _resolve_focus_context(self, organization_id: Optional[int]) -> None:
+        """Look up org settings to decide which prompt + category list to use."""
+        if not organization_id:
+            self._focus_mode = 'scope3_only'
+            self._enabled_scope3_ids = None
+            return
+        try:
+            settings = (
+                self.db.query(EsgOrganizationSettings)
+                .filter(EsgOrganizationSettings.organization_id == organization_id)
+                .first()
+            )
+            if settings:
+                self._focus_mode = settings.focus_mode or 'scope3_only'
+                whitelist = list(settings.enabled_scope3_categories or [])
+                self._enabled_scope3_ids = whitelist if whitelist else None
+            else:
+                self._focus_mode = 'scope3_only'
+                self._enabled_scope3_ids = None
+        except Exception:
+            logger.exception('Failed to resolve focus context; defaulting to scope3_only')
+            self._focus_mode = 'scope3_only'
+            self._enabled_scope3_ids = None
 
     def process_extraction(self, extraction_id: int) -> Dict[str, Any]:
         """Run the full cascade extraction pipeline on an extraction record"""
@@ -34,6 +66,10 @@ class EsgExtractionService:
 
         if not extraction:
             return {'success': False, 'message': 'Extraction record not found'}
+
+        # Decide focus mode + Scope-3 whitelist based on the org's settings.
+        # Drives both the prompt template choice and the validation guard.
+        self._resolve_focus_context(getattr(extraction, 'organization_id', None))
 
         if extraction.type == 'none':
             extraction.processing_status = 'completed'
@@ -141,11 +177,34 @@ class EsgExtractionService:
     # ==========================================
 
     def _load_categories(self) -> List[Dict]:
-        """Load all active ESG data categories"""
-        cats = self.db.query(EsgDataCategory).filter(
+        """
+        Load active ESG data categories, narrowed by focus mode + the org's
+        Scope 3 whitelist when applicable.
+
+        - focus_mode='scope3_only' (default):
+            * is_scope3 = TRUE
+            * if the org has a non-empty enabled_scope3_categories list,
+              further narrow to scope3_category_id IN that list
+            * if the whitelist is empty (org hasn't completed materiality
+              yet), all 15 Scope 3 categories are still allowed (sensible
+              default — narrowing past Scope 3 boundary already cuts the
+              taxonomy by ~80%, which is what reduces false positives).
+
+        - focus_mode='full_esg': returns all rows as before.
+        """
+        query = self.db.query(EsgDataCategory).filter(
             EsgDataCategory.is_active == True,
-            EsgDataCategory.deleted_date.is_(None)
-        ).order_by(EsgDataCategory.pillar, EsgDataCategory.sort_order).all()
+            EsgDataCategory.deleted_date.is_(None),
+        )
+        if self._focus_mode == 'scope3_only':
+            query = query.filter(EsgDataCategory.is_scope3 == True)
+            if self._enabled_scope3_ids:
+                query = query.filter(
+                    EsgDataCategory.scope3_category_id.in_(self._enabled_scope3_ids)
+                )
+        cats = query.order_by(
+            EsgDataCategory.pillar, EsgDataCategory.sort_order
+        ).all()
         return [c.to_dict() for c in cats]
 
     def _load_subcategories(self, category_id: int) -> List[Dict]:
@@ -172,12 +231,27 @@ class EsgExtractionService:
 
     def _classify_categories(self, input_content: str, categories: List[Dict], image_urls: List[str]) -> List[Dict]:
         """Step 1: Classify input into ESG categories"""
-        categories_json = json.dumps([
-            {'id': c['id'], 'pillar': c['pillar'], 'name': c['name'], 'description': c.get('description', '')}
-            for c in categories
-        ], indent=2)
+        # Include scope3_category_id in the prompt menu when narrowed so the
+        # model sees stable GHG numbering (1..15) alongside the row id.
+        is_scope3 = self._focus_mode == 'scope3_only'
+        categories_json = json.dumps(
+            [
+                {
+                    'id': c['id'],
+                    'pillar': c['pillar'],
+                    'name': c['name'],
+                    'description': c.get('description', ''),
+                    **({'scope3_category_id': c['scope3_category_id']}
+                       if is_scope3 and c.get('scope3_category_id')
+                       else {}),
+                }
+                for c in categories
+            ],
+            indent=2,
+        )
 
-        prompt = CATEGORY_CLASSIFY_PROMPT.format(
+        template = CATEGORY_CLASSIFY_PROMPT_SCOPE3 if is_scope3 else CATEGORY_CLASSIFY_PROMPT
+        prompt = template.format(
             categories_json=categories_json,
             input_content=input_content,
         )
@@ -186,7 +260,22 @@ class EsgExtractionService:
         parsed = self._parse_json(result)
 
         if parsed and parsed.get('matches'):
-            return sorted(parsed['matches'], key=lambda x: x.get('confidence', 0), reverse=True)
+            sorted_matches = sorted(
+                parsed['matches'], key=lambda x: x.get('confidence', 0), reverse=True
+            )
+            # Validation safety net: drop any category id the LLM hallucinated
+            # outside the prompt's menu. With scope3_only this also drops any
+            # would-be S/G/non-Scope-3 classifications.
+            allowed_ids = {c['id'] for c in categories}
+            valid = [m for m in sorted_matches if m.get('category_id') in allowed_ids]
+            dropped = len(sorted_matches) - len(valid)
+            if dropped:
+                logger.warning(
+                    'Dropped %d category match(es) outside allowed menu '
+                    '(focus_mode=%s); kept %d',
+                    dropped, self._focus_mode, len(valid),
+                )
+            return valid
         return []
 
     def _classify_subcategories(self, input_content: str, category_name: str, subcategories: List[Dict], image_urls: List[str]) -> List[Dict]:
@@ -196,7 +285,12 @@ class EsgExtractionService:
             for s in subcategories
         ], indent=2)
 
-        prompt = SUBCATEGORY_CLASSIFY_PROMPT.format(
+        template = (
+            SUBCATEGORY_CLASSIFY_PROMPT_SCOPE3
+            if self._focus_mode == 'scope3_only'
+            else SUBCATEGORY_CLASSIFY_PROMPT
+        )
+        prompt = template.format(
             category_name=category_name,
             subcategories_json=subcategories_json,
             input_content=input_content,
@@ -206,7 +300,18 @@ class EsgExtractionService:
         parsed = self._parse_json(result)
 
         if parsed and parsed.get('matches'):
-            return sorted(parsed['matches'], key=lambda x: x.get('confidence', 0), reverse=True)
+            sorted_matches = sorted(
+                parsed['matches'], key=lambda x: x.get('confidence', 0), reverse=True
+            )
+            allowed_ids = {s['id'] for s in subcategories}
+            valid = [m for m in sorted_matches if m.get('subcategory_id') in allowed_ids]
+            dropped = len(sorted_matches) - len(valid)
+            if dropped:
+                logger.warning(
+                    'Dropped %d subcategory match(es) outside allowed menu',
+                    dropped,
+                )
+            return valid
         return []
 
     def _extract_datapoints(self, input_content: str, subcategory_name: str, datapoints: List[Dict], image_urls: List[str]) -> Optional[Dict]:
@@ -216,7 +321,12 @@ class EsgExtractionService:
             for d in datapoints
         ], indent=2)
 
-        prompt = DATAPOINT_EXTRACT_PROMPT.format(
+        template = (
+            DATAPOINT_EXTRACT_PROMPT_SCOPE3
+            if self._focus_mode == 'scope3_only'
+            else DATAPOINT_EXTRACT_PROMPT
+        )
+        prompt = template.format(
             subcategory_name=subcategory_name,
             datapoints_json=datapoints_json,
             input_content=input_content,

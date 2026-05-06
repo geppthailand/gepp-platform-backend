@@ -235,9 +235,12 @@ def handle_admin_routes(path: str, data: dict, **commonParams):
                 from .transaction_export_service import AdminTransactionExportService
                 from .db_target_resolver import session_for_target
                 target = (query_params.get('dbTarget') or 'local')
-                # Mint a session against the requested DB if needed; the
-                # request's normal `db_session` is used otherwise.
-                target_session, owns_session = session_for_target(target, db_session)
+                try:
+                    # Mint a session against the requested DB if needed;
+                    # the request's normal `db_session` is used otherwise.
+                    target_session, owns_session = session_for_target(target, db_session)
+                except PermissionError as e:
+                    raise BadRequestException(str(e))
                 try:
                     return AdminTransactionExportService(target_session).export(
                         int(path_parts[1]), query_params

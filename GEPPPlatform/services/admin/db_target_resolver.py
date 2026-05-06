@@ -87,6 +87,22 @@ def _engine_for(creds: Dict[str, str]) -> Engine:
     return eng
 
 
+def _switching_allowed() -> bool:
+    """Cross-DB switching is opt-in. Allowed when:
+      - the runtime explicitly enables it (`ALLOW_DB_TARGET_SWITCH=1`), OR
+      - the host appears to be a local dev box: DB_HOST is empty or one
+        of localhost / 127.0.0.1 / 0.0.0.0.
+
+    Any deployed Lambda or remote server fails both checks and rejects
+    non-local targets, so a leaked admin session can't reach across to
+    another env's data."""
+    flag = os.environ.get('ALLOW_DB_TARGET_SWITCH', '').strip().lower()
+    if flag in ('1', 'true', 'yes', 'on'):
+        return True
+    db_host = (os.environ.get('DB_HOST') or '').strip().lower()
+    return db_host in ('', 'localhost', '127.0.0.1', '0.0.0.0', '::1')
+
+
 def session_for_target(
     target: str,
     fallback_session: Session,
@@ -95,11 +111,20 @@ def session_for_target(
 
     `is_new=True` means the caller owns the session and must close it
     (we minted it for this target). `is_new=False` means we returned the
-    request's existing session — don't close it."""
+    request's existing session — don't close it.
+
+    Raises `PermissionError` if a non-local target is requested on a
+    runtime that hasn't opted in via `ALLOW_DB_TARGET_SWITCH=1`."""
     target = (target or 'local').strip().lower()
     if target not in SUPPORTED_TARGETS:
         raise ValueError(
             f"Unknown dbTarget '{target}'. Use one of: {', '.join(SUPPORTED_TARGETS)}"
+        )
+    if target != 'local' and not _switching_allowed():
+        raise PermissionError(
+            f"DB target switching is disabled on this server "
+            f"(target='{target}'). Set ALLOW_DB_TARGET_SWITCH=1 only on "
+            f"trusted local dev hosts."
         )
     creds = _conn_creds_for_target(target)
     if creds is None:

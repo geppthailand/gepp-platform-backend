@@ -17,6 +17,12 @@ class EsgDataCategory(Base, BaseModel):
     description = Column(Text)
     sort_order = Column(Integer, default=0)
 
+    # Scope 3 focus mode (migration 056).
+    # is_scope3 = TRUE for the 15 GHG Protocol Scope 3 categories.
+    # scope3_category_id = 1..15 with stable numbering even if `id` differs.
+    is_scope3 = Column(Boolean, nullable=False, default=False)
+    scope3_category_id = Column(Integer)
+
     def to_dict(self):
         return {
             'id': self.id,
@@ -25,6 +31,8 @@ class EsgDataCategory(Base, BaseModel):
             'name_th': self.name_th,
             'description': self.description,
             'sort_order': self.sort_order,
+            'is_scope3': bool(self.is_scope3),
+            'scope3_category_id': self.scope3_category_id,
             'is_active': self.is_active,
         }
 

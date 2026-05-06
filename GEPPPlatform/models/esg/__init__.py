@@ -23,6 +23,7 @@ from .cbam import EsgCbamProduct, EsgCbamReport
 from .macc import EsgMaccInitiative
 from .condition_rules import EsgConditionRule
 from .xbrl import EsgXbrlTag, EsgXbrlReportValue
+from .user_materiality import EsgUserMateriality
 
 __all__ = [
     'EsgOrganizationSettings',
@@ -46,4 +47,5 @@ __all__ = [
     'EsgMaccInitiative',
     'EsgConditionRule',
     'EsgXbrlTag', 'EsgXbrlReportValue',
+    'EsgUserMateriality',
 ]

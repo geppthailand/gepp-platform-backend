@@ -66,6 +66,7 @@ class LiffAuthService:
             }
 
         tokens = self._generate_tokens(user.id, user.organization_id, '')
+        materiality_state = self._get_materiality_state(user.id, user.organization_id)
         return {
             'success': True,
             'auth_token': tokens['auth_token'],
@@ -78,8 +79,40 @@ class LiffAuthService:
                 'displayName': user.display_name or display_name,
                 'organizationId': user.organization_id,
                 'pictureUrl': user.profile_image_url,
+                **materiality_state,
             },
         }
+
+    def _get_materiality_state(self, user_id: int, org_id: int) -> dict:
+        """
+        Returns the LIFF gate fields the frontend needs on first paint:
+          - materialityCompleted: bool
+          - enabledScope3Categories: int[]
+          - focusMode: 'scope3_only' | 'full_esg'
+        Imported locally to avoid a circular dep with esg_handlers.
+        Never breaks login: catches all errors.
+        """
+        try:
+            from .materiality_service import MaterialityService
+            from . import materiality_config
+            mat = MaterialityService(self.session)
+            state = mat.get_state(user_id, org_id)
+            settings = mat._get_or_create_settings(org_id)
+            enabled = list(settings.enabled_scope3_categories or [])
+            if not enabled:
+                enabled = materiality_config.default_categories_pre_materiality()
+            return {
+                'materialityCompleted': bool(state.get('completed')),
+                'enabledScope3Categories': enabled,
+                'focusMode': settings.focus_mode or 'scope3_only',
+            }
+        except Exception:  # noqa: BLE001 - never break login on this
+            logger.exception('Failed to resolve materiality state for LIFF login')
+            return {
+                'materialityCompleted': False,
+                'enabledScope3Categories': [1, 5, 6, 7],
+                'focusMode': 'scope3_only',
+            }
 
     # ==========================================
     # INVITATION
@@ -174,6 +207,7 @@ class LiffAuthService:
         logger.info(f"EsgUser {user.id} (line:{line_user_id}) joined org {invitation.organization_id}")
 
         tokens = self._generate_tokens(user.id, user.organization_id, '')
+        materiality_state = self._get_materiality_state(user.id, user.organization_id)
         return {
             'success': True,
             'auth_token': tokens['auth_token'],
@@ -186,6 +220,7 @@ class LiffAuthService:
                 'displayName': user.display_name or display_name,
                 'organizationId': user.organization_id,
                 'pictureUrl': user.profile_image_url,
+                **materiality_state,
             },
         }
 

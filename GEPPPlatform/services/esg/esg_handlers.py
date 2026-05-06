@@ -16,6 +16,7 @@ from .esg_dashboard_service import EsgDashboardService
 from .esg_carbon_service import EsgCarbonService
 from .esg_notification_service import EsgNotificationService
 from .liff_auth_service import LiffAuthService
+from .materiality_service import MaterialityService
 from ...exceptions import (
     APIException, UnauthorizedException, NotFoundException,
     BadRequestException, ValidationException
@@ -386,6 +387,41 @@ def handle_esg_routes(event: Dict[str, Any], data: Dict[str, Any], **params) -> 
         # ===== PRESIGNED URLs =====
         elif path == '/api/esg/presigneds' and method == 'POST':
             return _handle_presigned_urls(data, current_user_id, current_user_org_id, db_session)
+
+        # ===== Materiality Filter =====
+        elif path == '/api/esg/materiality/me' and method == 'GET':
+            if not current_user_id or not current_user_org_id:
+                raise UnauthorizedException('User context required')
+            mat = MaterialityService(db_session)
+            state = mat.get_state(int(current_user_id), int(current_user_org_id))
+            return {'success': True, 'data': state}
+
+        elif path == '/api/esg/materiality/me' and method == 'PATCH':
+            if not current_user_id or not current_user_org_id:
+                raise UnauthorizedException('User context required')
+            if not data:
+                raise BadRequestException('Request body is required')
+            mat = MaterialityService(db_session)
+            state = mat.patch_progress(
+                int(current_user_id),
+                int(current_user_org_id),
+                data.get('answers') or {},
+                data.get('lastQuestionId'),
+            )
+            return {'success': True, 'data': state}
+
+        elif path == '/api/esg/materiality/me/complete' and method == 'POST':
+            if not current_user_id or not current_user_org_id:
+                raise UnauthorizedException('User context required')
+            if not data:
+                raise BadRequestException('Request body is required')
+            mat = MaterialityService(db_session)
+            result = mat.complete(
+                int(current_user_id),
+                int(current_user_org_id),
+                data.get('answers') or {},
+            )
+            return {'success': True, 'data': result}
 
         else:
             return {
