@@ -14,7 +14,7 @@ class EsgScope3Entry(Base, BaseModel):
     organization_id = Column(BigInteger, ForeignKey('organizations.id'), nullable=False, index=True)
     category_number = Column(Integer, nullable=False)
     supplier_id = Column(BigInteger, ForeignKey('esg_suppliers.id'), nullable=True, index=True)
-    data_entry_id = Column(BigInteger, ForeignKey('esg_data_entries.id'), nullable=True)
+    record_id = Column(BigInteger, ForeignKey('esg_records.id'), nullable=True)
     reporting_year = Column(Integer, nullable=False)
     reporting_month = Column(Integer, nullable=True)
     calculation_method = Column(String(30), nullable=True)
@@ -35,7 +35,7 @@ class EsgScope3Entry(Base, BaseModel):
             'organization_id': self.organization_id,
             'category_number': self.category_number,
             'supplier_id': self.supplier_id,
-            'data_entry_id': self.data_entry_id,
+            'record_id': self.record_id,
             'reporting_year': self.reporting_year,
             'reporting_month': self.reporting_month,
             'calculation_method': self.calculation_method,

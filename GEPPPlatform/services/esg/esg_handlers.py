@@ -323,6 +323,14 @@ def handle_esg_routes(event: Dict[str, Any], data: Dict[str, Any], **params) -> 
             dp_id = int(path.split('/datapoint/')[1].split('/records')[0])
             return esg_service.get_datapoint_records(current_user_org_id, dp_id)
 
+        elif '/api/esg/data-warehouse/scope3/' in path and '/records' in path and method == 'GET':
+            # GET /api/esg/data-warehouse/scope3/{1..15}/records
+            # Returns records grouped by record_label for the modal table.
+            scope3_cat_id = int(path.split('/scope3/')[1].split('/records')[0])
+            return esg_service.get_scope3_category_records(
+                current_user_org_id, scope3_cat_id
+            )
+
         # ===== DATA HIERARCHY =====
         elif path == '/api/esg/categories' and method == 'GET':
             return esg_service.list_categories(query_params.get('pillar'))

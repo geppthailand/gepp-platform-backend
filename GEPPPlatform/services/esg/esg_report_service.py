@@ -10,11 +10,21 @@ from sqlalchemy import func, extract, and_, case
 from sqlalchemy.orm import Session
 import logging
 
-from ...models.esg.data_entries import EsgDataEntry, EntryStatus, EntrySource
+from ...models.esg.records import EsgRecord
 from ...models.esg.data_hierarchy import EsgDataCategory, EsgDataSubcategory, EsgDatapoint
 from ...models.esg.settings import EsgOrganizationSettings
 from .esg_insight_engine import generate_insights
 from ...models.esg.organization_setup import EsgOrganizationSetup
+
+
+class EntryStatus:
+    PENDING_VERIFY = 'PENDING_VERIFY'
+    VERIFIED = 'VERIFIED'
+
+
+class EntrySource:
+    LINE_CHAT = 'LINE_CHAT'
+    LIFF_MANUAL = 'LIFF_MANUAL'
 
 logger = logging.getLogger(__name__)
 
@@ -70,22 +80,22 @@ class EsgReportService:
 
         # Base query — per-user filter ORs on user_id and line_user_id so
         # legacy LINE-webhook entries with user_id=0 still surface.
-        base = self.db.query(EsgDataEntry).filter(
-            EsgDataEntry.organization_id == organization_id,
-            EsgDataEntry.is_active == True,
+        base = self.db.query(EsgRecord).filter(
+            EsgRecord.organization_id == organization_id,
+            EsgRecord.is_active == True,
         )
         if user_id is not None:
             line_uid = self._resolve_line_user_id(user_id, organization_id)
             if line_uid:
                 from sqlalchemy import or_
                 base = base.filter(or_(
-                    EsgDataEntry.user_id == user_id,
-                    EsgDataEntry.line_user_id == line_uid,
+                    EsgRecord.user_id == user_id,
+                    EsgRecord.line_user_id == line_uid,
                 ))
             else:
-                base = base.filter(EsgDataEntry.user_id == user_id)
-        base_year_q = base.filter(extract('year', EsgDataEntry.entry_date) == year)
-        base_prev_q = base.filter(extract('year', EsgDataEntry.entry_date) == prev_year)
+                base = base.filter(EsgRecord.user_id == user_id)
+        base_year_q = base.filter(extract('year', EsgRecord.entry_date) == year)
+        base_prev_q = base.filter(extract('year', EsgRecord.entry_date) == prev_year)
 
         # ── 1. Organization info ──
         org_info = self._get_org_info(organization_id)
@@ -193,18 +203,18 @@ class EsgReportService:
 
     def _get_summary(self, base, base_year_q) -> Dict:
         total_tco2e = float(base.with_entities(
-            func.coalesce(func.sum(EsgDataEntry.calculated_tco2e), 0)
+            func.coalesce(func.sum((EsgRecord.kgco2e / 1000.0)), 0)
         ).scalar() or 0)
 
         total_entries = base.count()
-        verified = base.filter(EsgDataEntry.status == EntryStatus.VERIFIED).count()
-        pending = base.filter(EsgDataEntry.status == EntryStatus.PENDING_VERIFY).count()
+        verified = base.filter(EsgRecord.status == EntryStatus.VERIFIED).count()
+        pending = base.filter(EsgRecord.status == EntryStatus.PENDING_VERIFY).count()
 
         scope_breakdown = []
         total_scope = 0
         for scope in ['Scope 1', 'Scope 2', 'Scope 3']:
-            val = float(base.filter(EsgDataEntry.scope_tag == scope).with_entities(
-                func.coalesce(func.sum(EsgDataEntry.calculated_tco2e), 0)
+            val = float(base.filter(EsgRecord.pillar == scope).with_entities(
+                func.coalesce(func.sum((EsgRecord.kgco2e / 1000.0)), 0)
             ).scalar() or 0)
             scope_breakdown.append({'scope': scope, 'tco2e': val})
             total_scope += val
@@ -221,10 +231,10 @@ class EsgReportService:
         # instead, but we keep this for legacy free-form text grouping.
         top_cats = (
             base
-            .filter(EsgDataEntry.calculated_tco2e.isnot(None))
-            .with_entities(EsgDataEntry.category, func.sum(EsgDataEntry.calculated_tco2e))
-            .group_by(EsgDataEntry.category)
-            .order_by(func.sum(EsgDataEntry.calculated_tco2e).desc())
+            .filter((EsgRecord.kgco2e / 1000.0).isnot(None))
+            .join(EsgDataCategory, EsgDataCategory.id == EsgRecord.category_id, isouter=True).with_entities(EsgDataCategory.name, func.sum((EsgRecord.kgco2e / 1000.0)))
+            .group_by(EsgDataCategory.name)
+            .order_by(func.sum(EsgRecord.kgco2e).desc())
             .limit(5).all()
         )
 
@@ -257,10 +267,10 @@ class EsgReportService:
             .with_entities(
                 EsgDataCategory.scope3_category_id.label('cat_id'),
                 EsgDataCategory.name.label('cat_name'),
-                func.coalesce(func.sum(EsgDataEntry.calculated_tco2e), 0).label('total'),
-                func.count(EsgDataEntry.id).label('cnt'),
+                func.coalesce(func.sum((EsgRecord.kgco2e / 1000.0)), 0).label('total'),
+                func.count(EsgRecord.id).label('cnt'),
             )
-            .join(EsgDataCategory, EsgDataCategory.id == EsgDataEntry.category_id)
+            .join(EsgDataCategory, EsgDataCategory.id == EsgRecord.category_id)
             .filter(
                 EsgDataCategory.is_scope3 == True,
                 EsgDataCategory.scope3_category_id.isnot(None),
@@ -287,11 +297,11 @@ class EsgReportService:
 
     def _get_yoy(self, curr_q, prev_q, year, prev_year) -> Dict:
         curr = float(curr_q.with_entities(
-            func.coalesce(func.sum(EsgDataEntry.calculated_tco2e), 0)
+            func.coalesce(func.sum((EsgRecord.kgco2e / 1000.0)), 0)
         ).scalar() or 0)
 
         prev = float(prev_q.with_entities(
-            func.coalesce(func.sum(EsgDataEntry.calculated_tco2e), 0)
+            func.coalesce(func.sum((EsgRecord.kgco2e / 1000.0)), 0)
         ).scalar() or 0)
 
         change_pct = round((curr - prev) / prev * 100, 1) if prev > 0 else None
@@ -330,8 +340,8 @@ class EsgReportService:
 
         # Get base year emissions
         base_tco2e = float(
-            base.filter(extract('year', EsgDataEntry.entry_date) == settings.base_year)
-            .with_entities(func.coalesce(func.sum(EsgDataEntry.calculated_tco2e), 0))
+            base.filter(extract('year', EsgRecord.entry_date) == settings.base_year)
+            .with_entities(func.coalesce(func.sum((EsgRecord.kgco2e / 1000.0)), 0))
             .scalar() or 0
         )
 
@@ -353,10 +363,10 @@ class EsgReportService:
         for m in range(1, 13):
             val = float(
                 base.filter(
-                    extract('year', EsgDataEntry.entry_date) == year,
-                    extract('month', EsgDataEntry.entry_date) == m,
+                    extract('year', EsgRecord.entry_date) == year,
+                    extract('month', EsgRecord.entry_date) == m,
                 ).with_entities(
-                    func.coalesce(func.sum(EsgDataEntry.calculated_tco2e), 0)
+                    func.coalesce(func.sum((EsgRecord.kgco2e / 1000.0)), 0)
                 ).scalar() or 0
             )
             months.append({
@@ -370,26 +380,26 @@ class EsgReportService:
         # Current year by category
         curr_cats = dict(
             curr_q
-            .filter(EsgDataEntry.calculated_tco2e.isnot(None))
-            .with_entities(EsgDataEntry.category, func.sum(EsgDataEntry.calculated_tco2e))
-            .group_by(EsgDataEntry.category)
-            .order_by(func.sum(EsgDataEntry.calculated_tco2e).desc())
+            .filter((EsgRecord.kgco2e / 1000.0).isnot(None))
+            .join(EsgDataCategory, EsgDataCategory.id == EsgRecord.category_id, isouter=True).with_entities(EsgDataCategory.name, func.sum((EsgRecord.kgco2e / 1000.0)))
+            .group_by(EsgDataCategory.name)
+            .order_by(func.sum(EsgRecord.kgco2e).desc())
             .limit(limit).all()
         )
 
         # Previous year by category
         prev_cats = dict(
             prev_q
-            .filter(EsgDataEntry.calculated_tco2e.isnot(None))
-            .with_entities(EsgDataEntry.category, func.sum(EsgDataEntry.calculated_tco2e))
-            .group_by(EsgDataEntry.category).all()
+            .filter((EsgRecord.kgco2e / 1000.0).isnot(None))
+            .join(EsgDataCategory, EsgDataCategory.id == EsgRecord.category_id, isouter=True).with_entities(EsgDataCategory.name, func.sum((EsgRecord.kgco2e / 1000.0)))
+            .group_by(EsgDataCategory.name).all()
         )
 
         # Get scope tags
         scope_map = dict(
             curr_q
-            .filter(EsgDataEntry.scope_tag.isnot(None))
-            .with_entities(EsgDataEntry.category, EsgDataEntry.scope_tag)
+            .filter(EsgRecord.pillar.isnot(None))
+            .join(EsgDataCategory, EsgDataCategory.id == EsgRecord.category_id, isouter=True).with_entities(EsgDataCategory.name, EsgRecord.pillar)
             .distinct().all()
         )
 
@@ -417,11 +427,11 @@ class EsgReportService:
         # Get datapoint IDs that have entries
         filled_ids = set(
             r[0] for r in
-            self.db.query(EsgDataEntry.datapoint_id)
+            self.db.query(EsgRecord.id)
             .filter(
-                EsgDataEntry.organization_id == organization_id,
-                EsgDataEntry.is_active == True,
-                EsgDataEntry.datapoint_id.isnot(None),
+                EsgRecord.organization_id == organization_id,
+                EsgRecord.is_active == True,
+                EsgRecord.id.isnot(None),
             )
             .distinct().all()
         )
@@ -455,9 +465,9 @@ class EsgReportService:
 
     def _get_data_quality(self, base) -> Dict:
         total = base.count()
-        verified = base.filter(EsgDataEntry.status == EntryStatus.VERIFIED).count()
-        line_chat = base.filter(EsgDataEntry.entry_source == EntrySource.LINE_CHAT).count()
-        liff_manual = base.filter(EsgDataEntry.entry_source == EntrySource.LIFF_MANUAL).count()
+        verified = base.filter(EsgRecord.status == EntryStatus.VERIFIED).count()
+        line_chat = base.filter(EsgRecord.entry_source == EntrySource.LINE_CHAT).count()
+        liff_manual = base.filter(EsgRecord.entry_source == EntrySource.LIFF_MANUAL).count()
 
         return {
             'verified_percent': round(verified / total * 100, 1) if total > 0 else 0,
@@ -494,15 +504,15 @@ class EsgReportService:
         """Detailed Scope 3 breakdown by subcategory (maps to GHG Protocol 15 categories)."""
         rows = (
             curr_q
-            .filter(EsgDataEntry.scope_tag == 'Scope 3')
-            .join(EsgDataSubcategory, EsgDataEntry.subcategory_id == EsgDataSubcategory.id, isouter=True)
+            .filter(EsgRecord.pillar == 'Scope 3')
+            .join(EsgDataSubcategory, EsgRecord.subcategory_id == EsgDataSubcategory.id, isouter=True)
             .with_entities(
                 EsgDataSubcategory.name,
-                func.sum(EsgDataEntry.calculated_tco2e),
-                func.count(EsgDataEntry.id),
+                func.sum((EsgRecord.kgco2e / 1000.0)),
+                func.count(EsgRecord.id),
             )
             .group_by(EsgDataSubcategory.name)
-            .order_by(func.sum(EsgDataEntry.calculated_tco2e).desc())
+            .order_by(func.sum(EsgRecord.kgco2e).desc())
             .all()
         )
 

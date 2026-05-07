@@ -10,7 +10,7 @@ import boto3
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
-from GEPPPlatform.models.esg.data_entries import EsgDataEntry
+from GEPPPlatform.models.esg.records import EsgRecord
 
 
 class EsgExportService:
@@ -34,12 +34,12 @@ class EsgExportService:
 
     def _query_entries(self, organization_id: int) -> list:
         return (
-            self.session.query(EsgDataEntry)
+            self.session.query(EsgRecord)
             .filter(
-                EsgDataEntry.organization_id == organization_id,
-                EsgDataEntry.is_active == True,
+                EsgRecord.organization_id == organization_id,
+                EsgRecord.is_active == True,
             )
-            .order_by(EsgDataEntry.entry_date.desc())
+            .order_by(EsgRecord.entry_date.desc())
             .all()
         )
 
@@ -155,10 +155,16 @@ class EsgExportService:
             ExpiresIn=3600,
         )
 
+        # Nest the payload under `data` to match the rest of the ESG API
+        # surface — the frontend's normalizeResponse picks `data.data` when a
+        # `success` key is present, so a flat shape would arrive as undefined
+        # and trip the "ไม่ได้รับลิงก์ดาวน์โหลดจากระบบ" error in LiffExcelDownload.
         return {
             'success': True,
-            'download_url': download_url,
-            'file_name': file_name,
-            'format': ext,
-            'expires_in': 3600,
+            'data': {
+                'download_url': download_url,
+                'file_name': file_name,
+                'format': ext,
+                'expires_in': 3600,
+            },
         }

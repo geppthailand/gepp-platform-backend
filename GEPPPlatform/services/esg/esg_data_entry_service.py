@@ -1,9 +1,17 @@
 """
-ESG Data Entry Service - CRUD with tCO2e auto-calculation and status management
+ESG Data Entry Service — record-centric (esg_records).
+
+The legacy `esg_data_entries` table has been retired. Every operation
+now reads/writes `EsgRecord` rows whose datapoints live in a JSONB
+column. The list/get response shape is preserved (one item per record)
+so the LIFF history and admin pages don't need changes.
 """
 
-from datetime import date
-from GEPPPlatform.models.esg.data_entries import EsgDataEntry, EntrySource, EntryStatus
+from datetime import date, datetime, timezone
+from sqlalchemy import or_, func
+
+from GEPPPlatform.models.esg.records import EsgRecord, GhgStatus
+from GEPPPlatform.models.esg.data_hierarchy import EsgDataCategory
 from GEPPPlatform.services.esg.esg_carbon_service import EsgCarbonService
 from GEPPPlatform.services.esg.esg_categorization_service import EsgCategorizationService
 
@@ -17,116 +25,129 @@ class EsgDataEntryService:
 
     def create_entry(self, organization_id: int, user_id: int, data: dict,
                      entry_source: str = 'LIFF_MANUAL', line_user_id: str = None) -> dict:
-        """Create a new data entry with auto tCO2e calculation."""
+        """
+        LIFF / desktop manual entry. Becomes a single-datapoint
+        EsgRecord. The LIFF form supplies category, value and unit;
+        we wrap that into the JSONB datapoints array and run the same
+        GHG sufficiency check as the LINE-image extractor.
+        """
         category_name = data.get('category', '')
-        scope_tag = self.categorization.categorize(
-            category_id=data.get('category_id'),
-            subcategory_id=data.get('subcategory_id'),
+        category_id = data.get('category_id')
+
+        # Resolve scope3_category_id + pillar
+        scope3_id = None
+        pillar = None
+        if category_id:
+            cat_row = self.session.query(EsgDataCategory).filter(
+                EsgDataCategory.id == category_id,
+            ).first()
+            if cat_row:
+                scope3_id = int(cat_row.scope3_category_id) if cat_row.scope3_category_id else None
+                pillar = cat_row.pillar
+
+        unit = (data.get('unit') or '').strip() or None
+        value = data.get('value')
+        dp_label = (data.get('datapoint_name') or category_name or 'value').strip()
+
+        datapoints = [{
+            'datapoint_id': data.get('datapoint_id'),
+            'datapoint_name': dp_label,
+            'canonical_name': None,
+            'is_canonical': False,
+            'value': value,
+            'unit': unit,
+            'confidence': 1.0,
+            'tags': data.get('metadata', {}).get('tags', []) if isinstance(data.get('metadata'), dict) else [],
+        }]
+
+        ghg = self.carbon.evaluate_record_ghg(
+            scope3_category_id=scope3_id,
+            category_id=category_id,
+            category_name=category_name,
+            datapoints=datapoints,
         )
 
-        # Calculate tCO2e — pass category_id so the carbon service can resolve
-        # the Scope 3 category id and apply the conservative default EF when
-        # no DB factor matches (prevents the dashboard showing 0).
-        calculated_tco2e = None
-        if data.get('value') is not None and data.get('unit'):
-            calculated_tco2e = self.carbon.calculate_tco2e(
-                category=category_name,
-                amount=float(data['value']),
-                unit=data['unit'],
-                category_id=data.get('category_id'),
-            )
-            if calculated_tco2e is None and scope_tag:
-                calculated_tco2e = self.carbon.calculate_tco2e(
-                    category=scope_tag,
-                    amount=float(data['value']),
-                    unit=data['unit'],
-                    category_id=data.get('category_id'),
-                )
+        entry_date = data.get('entry_date') or datetime.now(timezone.utc).date()
+        record_label = (data.get('record_label')
+                        or data.get('notes')
+                        or dp_label
+                        or 'รายการ')
+        if isinstance(record_label, str):
+            record_label = record_label[:255]
 
-        source_enum = EntrySource.LINE_CHAT if entry_source == 'LINE_CHAT' else EntrySource.LIFF_MANUAL
-
-        entry = EsgDataEntry(
+        rec = EsgRecord(
             organization_id=organization_id,
-            user_id=user_id,
             line_user_id=line_user_id,
-            category_id=data.get('category_id'),
-            subcategory_id=data.get('subcategory_id'),
-            datapoint_id=data.get('datapoint_id'),
-            category=category_name,
-            value=data['value'],
-            unit=data['unit'],
-            calculated_tco2e=calculated_tco2e,
-            entry_date=data.get('entry_date'),
-            record_date=data.get('record_date') or data.get('entry_date'),
-            notes=data.get('notes'),
-            file_key=data.get('file_key'),
-            file_name=data.get('file_name'),
+            user_id=user_id,
+            extraction_id=None,
             evidence_image_url=data.get('evidence_image_url'),
-            scope_tag=scope_tag,
-            extra_data=data.get('metadata', {}),
+            file_key=data.get('file_key'),
+            category_id=category_id,
+            subcategory_id=data.get('subcategory_id'),
+            scope3_category_id=scope3_id,
+            pillar=pillar,
+            record_label=record_label,
+            entry_date=entry_date,
+            datapoints=datapoints,
+            kgco2e=ghg.get('kgco2e'),
+            ghg_status=ghg.get('status') or GhgStatus.PENDING,
+            ghg_method=ghg.get('method'),
+            ghg_missing_fields=ghg.get('missing_fields') or [],
+            ghg_reason=ghg.get('reason'),
             currency=data.get('currency'),
-            entry_source=source_enum,
-            status=EntryStatus.PENDING_VERIFY,
+            status='PENDING_VERIFY',
+            entry_source='LINE_CHAT' if entry_source == 'LINE_CHAT' else 'LIFF_MANUAL',
+            notes=data.get('notes'),
         )
-        self.session.add(entry)
+        self.session.add(rec)
         self.session.commit()
-        self.session.refresh(entry)
-        return entry.to_dict()
+        self.session.refresh(rec)
+        return self._record_to_legacy_dict(rec)
 
     def verify_entry(self, entry_id: int, organization_id: int) -> dict | None:
-        """Set entry status to VERIFIED."""
-        entry = self._get_active_entry(entry_id, organization_id)
-        if not entry:
+        rec = self._get_active_record(entry_id, organization_id)
+        if not rec:
             return None
-        entry.status = EntryStatus.VERIFIED
+        rec.status = 'VERIFIED'
         self.session.commit()
-        self.session.refresh(entry)
-        return entry.to_dict()
+        self.session.refresh(rec)
+        return self._record_to_legacy_dict(rec)
 
     def get_entry(self, entry_id: int, organization_id: int) -> dict | None:
-        entry = self._get_active_entry(entry_id, organization_id)
-        return entry.to_dict() if entry else None
+        rec = self._get_active_record(entry_id, organization_id)
+        return self._record_to_legacy_dict(rec) if rec else None
 
     def list_entries(self, organization_id: int, page: int = 1, size: int = 10,
                      status: str = None, user_id: int = None) -> dict:
         """
-        List entries.
-
-        - desktop / admin callers: leave user_id=None → all org entries.
-        - LIFF /api/esg/liff/entries: pass current EsgUser.id → only that
-          LINE user's entries are returned. Each user sees their own
-          history; the org-wide view stays on the desktop platform.
-
-        Per-user filter is OR'd between EsgDataEntry.user_id and
-        EsgDataEntry.line_user_id so legacy entries that were saved with
-        user_id=0 (created via the LINE webhook before the EsgUser-id
-        backfill landed) still surface for the right LIFF user.
+        List records as legacy-shaped entry dicts (one item per
+        EsgRecord row). Per-user filter mirrors the legacy OR on
+        user_id / line_user_id.
         """
         query = (
-            self.session.query(EsgDataEntry)
+            self.session.query(EsgRecord)
             .filter(
-                EsgDataEntry.organization_id == organization_id,
-                EsgDataEntry.is_active == True,
+                EsgRecord.organization_id == organization_id,
+                EsgRecord.is_active == True,
             )
         )
         if user_id is not None:
             line_uid = self._resolve_line_user_id(user_id, organization_id)
             if line_uid:
-                from sqlalchemy import or_
                 query = query.filter(or_(
-                    EsgDataEntry.user_id == user_id,
-                    EsgDataEntry.line_user_id == line_uid,
+                    EsgRecord.user_id == user_id,
+                    EsgRecord.line_user_id == line_uid,
                 ))
             else:
-                query = query.filter(EsgDataEntry.user_id == user_id)
+                query = query.filter(EsgRecord.user_id == user_id)
         if status:
-            query = query.filter(EsgDataEntry.status == status)
+            query = query.filter(EsgRecord.status == status)
 
-        query = query.order_by(EsgDataEntry.created_date.desc())
+        query = query.order_by(EsgRecord.created_date.desc())
         total = query.count()
-        entries = query.offset((page - 1) * size).limit(size).all()
+        rows = query.offset((page - 1) * size).limit(size).all()
         return {
-            'data': [e.to_dict() for e in entries],
+            'data': [self._record_to_legacy_dict(r) for r in rows],
             'meta': {
                 'page': page,
                 'size': size,
@@ -137,45 +158,117 @@ class EsgDataEntryService:
         }
 
     def update_entry(self, entry_id: int, organization_id: int, data: dict) -> dict | None:
-        entry = self._get_active_entry(entry_id, organization_id)
-        if not entry:
+        rec = self._get_active_record(entry_id, organization_id)
+        if not rec:
             return None
 
-        protected = ('id', 'organization_id', 'user_id', 'created_date', 'entry_source')
-        for key, value in data.items():
-            if hasattr(entry, key) and key not in protected:
-                setattr(entry, key, value)
+        # Direct fields on the record
+        for key in ('record_label', 'entry_date', 'notes', 'status',
+                    'currency', 'category_id', 'subcategory_id'):
+            if key in data and data[key] is not None:
+                setattr(rec, key, data[key])
 
-        # Recalculate tCO2e if value/unit/category changed
-        if any(k in data for k in ('value', 'unit', 'category')):
-            cat = data.get('category', entry.category)
-            val = float(data.get('value', entry.value))
-            unit = data.get('unit', entry.unit)
-            if cat and val and unit:
-                entry.calculated_tco2e = self.carbon.calculate_tco2e(cat, val, unit)
+        # Single-datapoint update — for the legacy LIFF form, value/unit
+        # are top-level. We update the first datapoint in the JSONB
+        # array (or insert one if empty) and re-evaluate GHG.
+        if any(k in data for k in ('value', 'unit', 'datapoint_name')):
+            datapoints = list(rec.datapoints or [])
+            head = datapoints[0] if datapoints else {}
+            if 'value' in data:
+                head['value'] = data['value']
+            if 'unit' in data:
+                head['unit'] = data['unit']
+            if 'datapoint_name' in data:
+                head['datapoint_name'] = data['datapoint_name']
+            if not datapoints:
+                datapoints = [head]
+            else:
+                datapoints[0] = head
+            rec.datapoints = datapoints
+            ghg = self.carbon.evaluate_record_ghg(
+                scope3_category_id=rec.scope3_category_id,
+                category_id=rec.category_id,
+                category_name=data.get('category', '') or '',
+                datapoints=datapoints,
+            )
+            rec.kgco2e = ghg.get('kgco2e')
+            rec.ghg_status = ghg.get('status') or GhgStatus.PENDING
+            rec.ghg_method = ghg.get('method')
+            rec.ghg_missing_fields = ghg.get('missing_fields') or []
+            rec.ghg_reason = ghg.get('reason')
 
         self.session.commit()
-        self.session.refresh(entry)
-        return entry.to_dict()
+        self.session.refresh(rec)
+        return self._record_to_legacy_dict(rec)
 
     def delete_entry(self, entry_id: int, organization_id: int) -> bool:
-        entry = self._get_active_entry(entry_id, organization_id)
-        if not entry:
+        rec = self._get_active_record(entry_id, organization_id)
+        if not rec:
             return False
-        entry.is_active = False
+        rec.is_active = False
         self.session.commit()
         return True
 
-    def _get_active_entry(self, entry_id: int, organization_id: int):
+    def _get_active_record(self, entry_id: int, organization_id: int):
         return (
-            self.session.query(EsgDataEntry)
+            self.session.query(EsgRecord)
             .filter(
-                EsgDataEntry.id == entry_id,
-                EsgDataEntry.organization_id == organization_id,
-                EsgDataEntry.is_active == True,
+                EsgRecord.id == entry_id,
+                EsgRecord.organization_id == organization_id,
+                EsgRecord.is_active == True,
             )
             .first()
         )
+
+    def _record_to_legacy_dict(self, rec: 'EsgRecord') -> dict:
+        """
+        Project an EsgRecord into the response shape the LIFF history
+        / desktop pages already consume — the legacy `EsgDataEntry`
+        dict. Reads the head datapoint as the "value/unit/datapoint_id"
+        of the entry; the full datapoints array is exposed under
+        `metadata.datapoints` for richer detail views.
+        """
+        if rec is None:
+            return None
+        datapoints = rec.datapoints or []
+        head = datapoints[0] if datapoints else {}
+        meta = {
+            'datapoints': datapoints,
+            'record_label': rec.record_label,
+            'ghg_status': rec.ghg_status,
+            'ghg_method': rec.ghg_method,
+            'ghg_missing_fields': rec.ghg_missing_fields or [],
+            'ghg_reason': rec.ghg_reason,
+        }
+        kg = float(rec.kgco2e) if rec.kgco2e is not None else None
+        return {
+            'id': rec.id,
+            'organization_id': rec.organization_id,
+            'user_id': rec.user_id,
+            'line_user_id': rec.line_user_id,
+            'category_id': rec.category_id,
+            'subcategory_id': rec.subcategory_id,
+            'datapoint_id': head.get('datapoint_id'),
+            'category': '',  # category name resolved via category_id by FE
+            'value': head.get('value'),
+            'unit': head.get('unit'),
+            'calculated_tco2e': (kg / 1000.0) if kg is not None else None,
+            'entry_date': str(rec.entry_date) if rec.entry_date else None,
+            'record_date': str(rec.entry_date) if rec.entry_date else None,
+            'notes': rec.notes,
+            'file_key': rec.file_key,
+            'file_name': None,
+            'evidence_image_url': rec.evidence_image_url,
+            'scope_tag': rec.pillar,
+            'metadata': meta,
+            'extra_data': meta,
+            'currency': rec.currency,
+            'entry_source': rec.entry_source,
+            'status': rec.status,
+            'is_active': rec.is_active,
+            'created_date': rec.created_date.isoformat() if rec.created_date else None,
+            'updated_date': rec.updated_date.isoformat() if rec.updated_date else None,
+        }
 
     def _resolve_line_user_id(self, esg_user_id: int, organization_id: int = None) -> str | None:
         """

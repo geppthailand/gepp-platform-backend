@@ -16,9 +16,15 @@ from typing import Dict, Any, Optional
 from sqlalchemy import func, extract
 from sqlalchemy.orm import Session
 
-from ...models.esg.data_entries import EsgDataEntry, EntryStatus
+from ...models.esg.records import EsgRecord
 from ...models.esg.data_hierarchy import EsgDataCategory
 from ...models.esg.settings import EsgOrganizationSettings
+
+
+# Status enum (legacy) — kept for compatibility with pre-existing callers.
+class EntryStatus:
+    PENDING_VERIFY = 'PENDING_VERIFY'
+    VERIFIED = 'VERIFIED'
 
 
 # Bilingual canonical labels for the 15 Scope 3 categories. Used when the
@@ -61,20 +67,20 @@ class EsgDashboardService:
         return (settings.focus_mode or 'scope3_only') == 'scope3_only'
 
     def _base_query(self, organization_id: int, user_id: Optional[int] = None):
-        q = self.db.query(EsgDataEntry).filter(
-            EsgDataEntry.organization_id == organization_id,
-            EsgDataEntry.is_active == True,
+        q = self.db.query(EsgRecord).filter(
+            EsgRecord.organization_id == organization_id,
+            EsgRecord.is_active == True,
         )
         if user_id is not None:
             line_uid = self._resolve_line_user_id(user_id, organization_id)
             if line_uid:
                 from sqlalchemy import or_
                 q = q.filter(or_(
-                    EsgDataEntry.user_id == user_id,
-                    EsgDataEntry.line_user_id == line_uid,
+                    EsgRecord.user_id == user_id,
+                    EsgRecord.line_user_id == line_uid,
                 ))
             else:
-                q = q.filter(EsgDataEntry.user_id == user_id)
+                q = q.filter(EsgRecord.user_id == user_id)
         return q
 
     def _resolve_line_user_id(self, esg_user_id: int, organization_id: int = None) -> Optional[str]:
@@ -111,13 +117,13 @@ class EsgDashboardService:
             self.db.query(
                 EsgDataCategory.scope3_category_id.label('cat_id'),
                 EsgDataCategory.name.label('cat_name'),
-                func.coalesce(func.sum(EsgDataEntry.calculated_tco2e), 0).label('total_tco2e'),
-                func.count(EsgDataEntry.id).label('entry_count'),
+                func.coalesce(func.sum((EsgRecord.kgco2e / 1000.0)), 0).label('total_tco2e'),
+                func.count(EsgRecord.id).label('entry_count'),
             )
-            .join(EsgDataEntry, EsgDataEntry.category_id == EsgDataCategory.id)
+            .join(EsgRecord, EsgRecord.category_id == EsgDataCategory.id)
             .filter(
-                EsgDataEntry.organization_id == organization_id,
-                EsgDataEntry.is_active == True,
+                EsgRecord.organization_id == organization_id,
+                EsgRecord.is_active == True,
                 EsgDataCategory.is_scope3 == True,
                 EsgDataCategory.scope3_category_id.isnot(None),
             )
@@ -127,11 +133,11 @@ class EsgDashboardService:
             if line_uid:
                 from sqlalchemy import or_
                 q = q.filter(or_(
-                    EsgDataEntry.user_id == user_id,
-                    EsgDataEntry.line_user_id == line_uid,
+                    EsgRecord.user_id == user_id,
+                    EsgRecord.line_user_id == line_uid,
                 ))
             else:
-                q = q.filter(EsgDataEntry.user_id == user_id)
+                q = q.filter(EsgRecord.user_id == user_id)
         q = q.group_by(EsgDataCategory.scope3_category_id, EsgDataCategory.name)
         rows = q.all()
 
@@ -172,14 +178,14 @@ class EsgDashboardService:
 
         # Total tCO2e
         total_tco2e_row = base.with_entities(
-            func.coalesce(func.sum(EsgDataEntry.calculated_tco2e), 0)
+            func.coalesce(func.sum((EsgRecord.kgco2e / 1000.0)), 0)
         ).scalar()
         total_tco2e = float(total_tco2e_row or 0)
 
         # Entry counts by status
         total_entries = base.count()
-        verified_count = base.filter(EsgDataEntry.status == EntryStatus.VERIFIED).count()
-        pending_count = base.filter(EsgDataEntry.status == EntryStatus.PENDING_VERIFY).count()
+        verified_count = base.filter(EsgRecord.status == EntryStatus.VERIFIED).count()
+        pending_count = base.filter(EsgRecord.status == EntryStatus.PENDING_VERIFY).count()
 
         # Breakdown — scope3 categories when scope3_only, else legacy scopes
         if scope3_only:
@@ -188,8 +194,8 @@ class EsgDashboardService:
         else:
             scope_breakdown = []
             for scope_tag in ['Scope 1', 'Scope 2', 'Scope 3']:
-                val = base.filter(EsgDataEntry.scope_tag == scope_tag).with_entities(
-                    func.coalesce(func.sum(EsgDataEntry.calculated_tco2e), 0)
+                val = base.filter(EsgRecord.pillar == scope_tag).with_entities(
+                    func.coalesce(func.sum((EsgRecord.kgco2e / 1000.0)), 0)
                 ).scalar()
                 scope_breakdown.append({'scope': scope_tag, 'tco2e': float(val or 0)})
             scope3_breakdown = []
@@ -209,13 +215,14 @@ class EsgDashboardService:
         else:
             top_q = (
                 base
-                .filter(EsgDataEntry.calculated_tco2e.isnot(None))
+                .filter(EsgRecord.kgco2e.isnot(None))
+                .join(EsgDataCategory, EsgDataCategory.id == EsgRecord.category_id)
                 .with_entities(
-                    EsgDataEntry.category,
-                    func.sum(EsgDataEntry.calculated_tco2e).label('total'),
+                    EsgDataCategory.name.label('cat_name'),
+                    func.sum(EsgRecord.kgco2e / 1000.0).label('total'),
                 )
-                .group_by(EsgDataEntry.category)
-                .order_by(func.sum(EsgDataEntry.calculated_tco2e).desc())
+                .group_by(EsgDataCategory.name)
+                .order_by(func.sum(EsgRecord.kgco2e).desc())
                 .limit(3)
                 .all()
             )
@@ -268,8 +275,8 @@ class EsgDashboardService:
         else:
             donut_data = []
             for scope_tag in ['Scope 1', 'Scope 2', 'Scope 3']:
-                val = base.filter(EsgDataEntry.scope_tag == scope_tag).with_entities(
-                    func.coalesce(func.sum(EsgDataEntry.calculated_tco2e), 0)
+                val = base.filter(EsgRecord.pillar == scope_tag).with_entities(
+                    func.coalesce(func.sum((EsgRecord.kgco2e / 1000.0)), 0)
                 ).scalar()
                 donut_data.append({'label': scope_tag, 'value': float(val or 0)})
 
@@ -279,10 +286,10 @@ class EsgDashboardService:
             val = (
                 base
                 .filter(
-                    extract('year', EsgDataEntry.entry_date) == year,
-                    extract('month', EsgDataEntry.entry_date) == month,
+                    extract('year', EsgRecord.entry_date) == year,
+                    extract('month', EsgRecord.entry_date) == month,
                 )
-                .with_entities(func.coalesce(func.sum(EsgDataEntry.calculated_tco2e), 0))
+                .with_entities(func.coalesce(func.sum((EsgRecord.kgco2e / 1000.0)), 0))
                 .scalar()
             )
             monthly_data.append({

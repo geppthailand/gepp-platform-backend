@@ -9,7 +9,7 @@ from .organization_setup import EsgOrganizationSetup
 from .platform_binding import EsgExternalPlatformBinding
 from .data_hierarchy import EsgDataCategory, EsgDataSubcategory, EsgDatapoint
 from .data_extraction import EsgOrganizationDataExtraction
-from .data_entries import EsgDataEntry, EntrySource, EntryStatus
+from .records import EsgRecord, GhgStatus
 from .emission_factors import EmissionFactor
 from .esg_users import EsgUser
 from .esg_external_invitation_links import EsgExternalInvitationLink
@@ -33,7 +33,7 @@ __all__ = [
     'EsgExternalPlatformBinding',
     'EsgDataCategory', 'EsgDataSubcategory', 'EsgDatapoint',
     'EsgOrganizationDataExtraction',
-    'EsgDataEntry', 'EntrySource', 'EntryStatus',
+    'EsgRecord', 'GhgStatus',
     'EmissionFactor',
     'EsgUser',
     'EsgExternalInvitationLink',

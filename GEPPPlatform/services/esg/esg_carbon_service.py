@@ -95,6 +95,42 @@ SCOPE3_FALLBACK_EFS = {
 }
 
 
+# Currency units. When a record's only quantitative datapoint uses a
+# currency, the spend-based EF is a *very rough* proxy and we record
+# that explicitly via `ghg_method='spend_based'` so the user can see
+# how the number was derived (and choose to upgrade with activity data).
+CURRENCY_UNITS = {
+    'thb', 'baht', '฿',
+    'usd', '$', 'usd$', 'us$',
+    'eur', '€', 'gbp', '£', 'jpy', '¥',
+    'cny', 'rmb', 'sgd', 'sg$', 'hkd', 'hk$',
+    'aud', 'krw', 'inr', 'rs', 'idr', 'rp',
+    'vnd', '₫', 'php', '₱', 'myr', 'rm',
+}
+
+# What activity-data is required to compute a real (non-spend-based)
+# kgCO2e for each Scope 3 category. The first list of any tuple that
+# is fully satisfied = sufficient. Values are normalized field names
+# (lower, snake-style) checked against the LLM-emitted `datapoint_name`.
+SCOPE3_REQUIRED_FIELDS = {
+    1:  [],                                 # spend-based legitimate
+    2:  [],                                 # spend-based legitimate
+    3:  [['kwh'], ['mwh'], ['litre']],
+    4:  [['weight', 'distance'], ['tonne_km'], ['tkm']],
+    5:  [['weight'], ['mass'], ['kg']],
+    6:  [['distance'], ['nights'], ['flight_legs', 'class'], ['flight']],
+    7:  [['distance'], ['passenger_km']],
+    8:  [['kwh'], ['floor_area']],
+    9:  [['weight', 'distance'], ['tonne_km']],
+    10: [['weight']],
+    11: [['kwh'], ['litre'], ['unit_year']],
+    12: [['weight']],
+    13: [['kwh'], ['floor_area']],
+    14: [['kwh'], ['stores']],              # franchises spend-based fallback
+    15: [],                                 # spend-based legitimate (financed)
+}
+
+
 def _normalize_unit(unit: str) -> str:
     if not unit:
         return ''
@@ -115,6 +151,144 @@ def _normalize_unit(unit: str) -> str:
         'kilowatt-hour': 'kwh', 'kilowatt hour': 'kwh', 'kw-h': 'kwh',
     }
     return aliases.get(u, u)
+
+
+def _is_currency_unit(unit: str) -> bool:
+    return _normalize_unit(unit) in CURRENCY_UNITS
+
+
+# When the LLM forgets to set `unit` (or sets it to a label like
+# "distance"), we infer the canonical unit from the datapoint_name /
+# tags. This fills in the gap that was making evaluate_record_ghg
+# declare records insufficient even when distance/weight/kWh was
+# clearly extracted (just the unit field was empty).
+_NAME_TO_UNIT = {
+    # distance
+    'distance': 'km', 'travel distance': 'km', 'travel_distance': 'km',
+    'distance km': 'km', 'distance_km': 'km',
+    'kilometer': 'km', 'kilometers': 'km', 'kilometre': 'km', 'kilometres': 'km',
+    'ระยะทาง': 'km',
+    'mileage': 'km', 'mile': 'mile',
+    # weight
+    'weight': 'kg', 'mass': 'kg', 'cargo weight': 'kg', 'cargo_weight': 'kg',
+    'waste weight': 'kg', 'waste_weight': 'kg', 'น้ำหนัก': 'kg',
+    'tonnage': 'tonne',
+    # energy
+    'kwh': 'kwh', 'kilowatt hour': 'kwh', 'kilowatt-hour': 'kwh',
+    'energy': 'kwh', 'electricity': 'kwh', 'kwh consumed': 'kwh',
+    'พลังงาน': 'kwh', 'หน่วย': 'kwh',
+    # nights / hotel
+    'nights': 'nights', 'night': 'nights', 'จำนวนคืน': 'nights',
+    'room nights': 'nights', 'room_nights': 'nights',
+    # passenger
+    'passenger km': 'passenger-km', 'passenger-km': 'passenger-km',
+    # composite
+    'tonne km': 'tonne-km', 'tonne-km': 'tonne-km', 'tkm': 'tonne-km',
+    # litre
+    'litre': 'litre', 'liter': 'litre', 'volume': 'litre', 'fuel': 'litre',
+    'น้ำมัน': 'litre',
+}
+
+
+def _infer_unit_from_field(datapoint_name: str, tags) -> str:
+    """
+    Best-effort: pick a canonical unit from the datapoint_name, then
+    from each tag (most-specific first). Empty string if nothing
+    matches — caller decides whether to skip the field.
+    """
+    candidates = []
+    if datapoint_name:
+        candidates.append(datapoint_name)
+    if isinstance(tags, list):
+        # tags are emitted general → specific; reverse so the most
+        # descriptive one wins ("travel distance" beats "fare").
+        candidates.extend([t for t in reversed(tags) if isinstance(t, str)])
+    for c in candidates:
+        key = (c or '').strip().lower()
+        if not key:
+            continue
+        if key in _NAME_TO_UNIT:
+            return _NAME_TO_UNIT[key]
+        # Also try collapsing "_" / "-" to spaces, in case the LLM
+        # emitted "travel_distance" vs "travel distance".
+        flat = key.replace('_', ' ').replace('-', ' ').strip()
+        if flat in _NAME_TO_UNIT:
+            return _NAME_TO_UNIT[flat]
+    return ''
+
+
+# Per Scope 3 category default EF citation. Used when the LLM didn't
+# emit `ghg_source_url` (e.g. records created before the prompt was
+# updated, or low-confidence extractions). The URL must be a real,
+# verifiable root from an authoritative publisher.
+SCOPE3_DEFAULT_CITATIONS: dict = {
+    1:  {  # Purchased goods and services — spend-based
+        'name': 'GHG Protocol — Scope 3 Calculation Guidance (Cat 1: Purchased goods and services, spend-based method)',
+        'url':  'https://ghgprotocol.org/scope-3-calculation-guidance-2',
+    },
+    2:  {  # Capital goods
+        'name': 'GHG Protocol — Scope 3 Calculation Guidance (Cat 2: Capital goods)',
+        'url':  'https://ghgprotocol.org/scope-3-calculation-guidance-2',
+    },
+    3:  {  # Fuel & energy related
+        'name': 'DEFRA 2024 GHG Conversion Factors — Well-to-tank fuels & T&D losses',
+        'url':  'https://www.gov.uk/government/collections/government-conversion-factors-for-company-reporting',
+    },
+    4:  {  # Upstream transportation
+        'name': 'DEFRA 2024 GHG Conversion Factors — Freight (tonne-km)',
+        'url':  'https://www.gov.uk/government/collections/government-conversion-factors-for-company-reporting',
+    },
+    5:  {  # Waste in operations
+        'name': 'DEFRA 2024 GHG Conversion Factors — Waste disposal',
+        'url':  'https://www.gov.uk/government/collections/government-conversion-factors-for-company-reporting',
+    },
+    6:  {  # Business travel
+        'name': 'DEFRA 2024 GHG Conversion Factors — Business travel (passenger.km)',
+        'url':  'https://www.gov.uk/government/collections/government-conversion-factors-for-company-reporting',
+    },
+    7:  {  # Employee commuting
+        'name': 'DEFRA 2024 GHG Conversion Factors — Passenger transport (passenger.km)',
+        'url':  'https://www.gov.uk/government/collections/government-conversion-factors-for-company-reporting',
+    },
+    8:  {  # Upstream leased assets
+        'name': 'TGO Thailand Grid Emission Factor (purchased electricity)',
+        'url':  'https://ghgreduction.tgo.or.th/',
+    },
+    9:  {  # Downstream transportation
+        'name': 'DEFRA 2024 GHG Conversion Factors — Freight (tonne-km)',
+        'url':  'https://www.gov.uk/government/collections/government-conversion-factors-for-company-reporting',
+    },
+    10: {  # Processing of sold
+        'name': 'GHG Protocol — Scope 3 Calculation Guidance (Cat 10: Processing of sold products)',
+        'url':  'https://ghgprotocol.org/scope-3-calculation-guidance-2',
+    },
+    11: {  # Use of sold
+        'name': 'GHG Protocol — Scope 3 Calculation Guidance (Cat 11: Use of sold products)',
+        'url':  'https://ghgprotocol.org/scope-3-calculation-guidance-2',
+    },
+    12: {  # End-of-life
+        'name': 'DEFRA 2024 GHG Conversion Factors — Waste disposal (end-of-life)',
+        'url':  'https://www.gov.uk/government/collections/government-conversion-factors-for-company-reporting',
+    },
+    13: {  # Downstream leased
+        'name': 'TGO Thailand Grid Emission Factor (purchased electricity)',
+        'url':  'https://ghgreduction.tgo.or.th/',
+    },
+    14: {  # Franchises
+        'name': 'GHG Protocol — Scope 3 Calculation Guidance (Cat 14: Franchises)',
+        'url':  'https://ghgprotocol.org/scope-3-calculation-guidance-2',
+    },
+    15: {  # Investments
+        'name': 'GHG Protocol — Scope 3 Calculation Guidance (Cat 15: Investments)',
+        'url':  'https://ghgprotocol.org/scope-3-calculation-guidance-2',
+    },
+}
+
+
+def get_default_citation(scope3_category_id):
+    if scope3_category_id is None:
+        return None
+    return SCOPE3_DEFAULT_CITATIONS.get(int(scope3_category_id))
 
 
 class EsgCarbonService:
@@ -203,6 +377,227 @@ class EsgCarbonService:
         if category:
             query = query.filter(EmissionFactor.category == category)
         return [f.to_dict() for f in query.order_by(EmissionFactor.category).all()]
+
+    def reevaluate_records(self, organization_id: int = None) -> dict:
+        """
+        Walk existing EsgRecord rows and re-run `evaluate_record_ghg`
+        on each. Used after the unit-inference fix landed — records
+        that were previously declared insufficient because the LLM
+        left `unit` empty can now compute. Idempotent.
+        """
+        from ...models.esg.records import EsgRecord
+        q = self.db.query(EsgRecord).filter(EsgRecord.is_active == True)
+        if organization_id:
+            q = q.filter(EsgRecord.organization_id == organization_id)
+        updated = 0
+        skipped = 0
+        for rec in q.all():
+            ghg = self.evaluate_record_ghg(
+                scope3_category_id=rec.scope3_category_id,
+                category_id=rec.category_id,
+                category_name=None,
+                datapoints=rec.datapoints or [],
+            )
+            new_kg = ghg.get('kgco2e')
+            new_status = ghg.get('status')
+            old_kg = float(rec.kgco2e) if rec.kgco2e is not None else None
+            if new_status == rec.ghg_status and new_kg == old_kg:
+                skipped += 1
+                continue
+            rec.kgco2e = new_kg
+            rec.ghg_status = new_status
+            rec.ghg_method = ghg.get('method')
+            rec.ghg_missing_fields = ghg.get('missing_fields') or []
+            rec.ghg_reason = ghg.get('reason')
+            if ghg.get('source_name') and not rec.ghg_source_name:
+                rec.ghg_source_name = ghg.get('source_name')
+            if ghg.get('source_url') and not rec.ghg_source_url:
+                rec.ghg_source_url = ghg.get('source_url')
+            if ghg.get('ef_value') is not None:
+                rec.ghg_ef_value = ghg.get('ef_value')
+            if ghg.get('ef_unit'):
+                rec.ghg_ef_unit = ghg.get('ef_unit')
+            updated += 1
+        self.db.commit()
+        return {'updated': updated, 'skipped': skipped}
+
+    # ─── record-level GHG evaluator ─────────────────────────────────────
+
+    def evaluate_record_ghg(
+        self,
+        scope3_category_id: Optional[int],
+        category_id: Optional[int],
+        category_name: Optional[str],
+        datapoints: list,
+    ) -> dict:
+        """
+        Evaluate whether a record has enough activity data to compute
+        a *real* (non-spend-based) kgCO2e, then compute it.
+
+        Returns dict:
+          {
+            'kgco2e':           float | None,
+            'status':           'computed' | 'insufficient' | 'method_unknown',
+            'method':           'activity_ef' | 'spend_based' | None,
+            'missing_fields':   ['distance_km', 'transport_mode', ...],
+            'reason':           short Thai/English explanation,
+            'used_field':       which datapoint produced the number,
+          }
+
+        Rules:
+          • If a datapoint with a *physical* unit (km / kg / kwh / nights …)
+            has both a value and an EF → status='computed', method='activity_ef'.
+          • Else, if the only available unit is currency AND the category
+            permits spend-based (Cat 1, 2, 14, 15) → status='computed',
+            method='spend_based'.
+          • Else → status='insufficient' with an explicit list of what's
+            missing, surfaced to the user via the LINE analysis card.
+        """
+        if not datapoints:
+            return {
+                'kgco2e': None, 'status': 'insufficient',
+                'method': None, 'missing_fields': ['ANY_QUANTITATIVE_DATA'],
+                'reason': 'ไม่มีข้อมูลเชิงปริมาณใด ๆ ในเอกสาร',
+                'used_field': None,
+            }
+
+        # Helper — populate the citation fields from the per-category
+        # fallback table whenever the LLM didn't supply its own.
+        cite = get_default_citation(scope3_category_id) or {}
+
+        # 1. Try every physical-unit datapoint first.
+        for d in datapoints:
+            unit = (d.get('unit') or '').strip()
+            value = d.get('value')
+            # When the LLM left `unit` empty but the datapoint name
+            # implies one (e.g. "distance" → km), infer it. This fixes
+            # a class of false-insufficient cases where the value was
+            # clearly extracted (28.60 in a Distance column) but the
+            # evaluator skipped it because unit was blank.
+            if not unit:
+                unit = _infer_unit_from_field(
+                    d.get('datapoint_name') or d.get('canonical_name') or '',
+                    d.get('tags') or [],
+                )
+            if value is None or unit == '' or _is_currency_unit(unit):
+                continue
+            try:
+                num = float(value)
+            except (TypeError, ValueError):
+                continue
+            if num <= 0:
+                continue
+            kg = self._compute_kg(category_name, unit, num,
+                                   category_id=category_id)
+            if kg is not None:
+                # Reverse-derive the EF we actually applied so the
+                # popover can display "EF = 0.45 kgCO2e/kg" (kg / num).
+                ef_value = round(kg / num, 6) if num else None
+                ef_unit = f'kgCO2e/{_normalize_unit(unit)}' if unit else None
+                return {
+                    'kgco2e': kg,
+                    'status': 'computed',
+                    'method': 'activity_ef',
+                    'missing_fields': [],
+                    'reason': f'คำนวณจาก {num:g} {unit} × ค่าการปล่อยมาตรฐาน',
+                    'used_field': d.get('datapoint_name') or d.get('canonical_name'),
+                    'source_name': cite.get('name'),
+                    'source_url':  cite.get('url'),
+                    'ef_value': ef_value,
+                    'ef_unit': ef_unit,
+                }
+
+        # 2. Currency-only fallback. Only allowed for spend-based-friendly cats.
+        SPEND_OK = {1, 2, 14, 15}
+        currency_dp = None
+        for d in datapoints:
+            unit = (d.get('unit') or '').strip()
+            if _is_currency_unit(unit) and d.get('value') is not None:
+                currency_dp = d
+                break
+
+        if currency_dp and scope3_category_id in SPEND_OK:
+            try:
+                num = float(currency_dp.get('value'))
+            except (TypeError, ValueError):
+                num = None
+            if num and num > 0:
+                kg = self._compute_kg(category_name,
+                                      currency_dp.get('unit') or '',
+                                      num, category_id=category_id)
+                if kg is not None:
+                    spend_unit = currency_dp.get('unit') or ''
+                    ef_value = round(kg / num, 6) if num else None
+                    ef_unit = f'kgCO2e/{_normalize_unit(spend_unit)}' if spend_unit else None
+                    return {
+                        'kgco2e': kg,
+                        'status': 'computed',
+                        'method': 'spend_based',
+                        'missing_fields': [],
+                        'reason': (
+                            'คำนวณแบบ spend-based (เป็นค่าประมาณจากจำนวนเงิน). '
+                            'หากมีข้อมูลกิจกรรม เช่น น้ำหนัก / ระยะทาง / kWh '
+                            'จะได้ค่าที่แม่นยำขึ้น.'
+                        ),
+                        'used_field': currency_dp.get('datapoint_name')
+                                       or currency_dp.get('canonical_name'),
+                        'source_name': cite.get('name'),
+                        'source_url':  cite.get('url'),
+                        'ef_value': ef_value,
+                        'ef_unit': ef_unit,
+                    }
+
+        # 3. Insufficient — list what's needed.
+        missing = []
+        if scope3_category_id and scope3_category_id in SCOPE3_REQUIRED_FIELDS:
+            specs = SCOPE3_REQUIRED_FIELDS[scope3_category_id]
+            if specs:
+                # Show the first option set (most common) as the missing list.
+                missing = list(specs[0])
+
+        if not missing:
+            missing = ['ACTIVITY_DATA']
+
+        # Friendly Thai explanation per category
+        cat_label = {
+            6:  'ต้องการระยะทาง (km) หรือจำนวนคืนพัก (nights) ไม่ใช่แค่จำนวนเงิน',
+            7:  'ต้องการระยะทาง (km) หรือ passenger-km',
+            4:  'ต้องการน้ำหนัก × ระยะทาง (tonne-km) หรืออย่างน้อย kg + km',
+            9:  'ต้องการน้ำหนัก × ระยะทาง (tonne-km) สำหรับขนส่งปลายน้ำ',
+            3:  'ต้องการ kWh / MWh / litre ของพลังงาน',
+            5:  'ต้องการน้ำหนักของของเสีย (kg / tonne)',
+            10: 'ต้องการน้ำหนักของสินค้าที่ขายเข้าสู่กระบวนการ',
+            11: 'ต้องการ kWh / litre ที่สินค้าใช้พลังงาน',
+            12: 'ต้องการน้ำหนักของสินค้าที่หมดอายุ',
+            8:  'ต้องการ kWh หรือพื้นที่ (m²) ของสินทรัพย์เช่า',
+            13: 'ต้องการ kWh หรือพื้นที่ (m²) ของสินทรัพย์เช่าปลายน้ำ',
+        }.get(scope3_category_id, 'ข้อมูลกิจกรรมไม่เพียงพอที่จะคำนวณ kgCO₂e')
+
+        return {
+            'kgco2e': None,
+            'status': 'insufficient',
+            'method': None,
+            'missing_fields': missing,
+            'reason': cat_label,
+            'used_field': None,
+            'source_name': cite.get('name'),
+            'source_url':  cite.get('url'),
+            'ef_value': None,
+            'ef_unit': None,
+        }
+
+    def _compute_kg(self, category_name: Optional[str], unit: str,
+                    amount: float, category_id: Optional[int] = None) -> Optional[float]:
+        """Internal — returns kgCO2e (not tCO2e). Reuses calculate_tco2e and converts."""
+        tco2e = self.calculate_tco2e(
+            category=category_name or '',
+            amount=amount,
+            unit=unit,
+            category_id=category_id,
+        )
+        if tco2e is None:
+            return None
+        return float(tco2e) * 1000.0
 
     # ─── helpers ────────────────────────────────────────────────────────
 

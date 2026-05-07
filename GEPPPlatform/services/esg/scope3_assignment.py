@@ -188,11 +188,94 @@ def assign_scope3_category(
     return cid, lbl.get('en', ''), lbl.get('th', ''), 'default'
 
 
+# Synonyms — for each expected Thai phrase, what English/unit tokens
+# also satisfy it. Used by `missing_fields_for` so an entry labelled
+# "Net Weight" (English) counts as having "น้ำหนัก".
+_FIELD_SYNONYMS: Dict[str, List[str]] = {
+    'รูปแบบ':       ['mode', 'transport', 'transport mode', 'method',
+                    'sea', 'air', 'road', 'rail', 'truck', 'flight',
+                    'shipping', 'freight'],
+    'น้ำหนัก':      ['weight', 'net weight', 'gross weight', 'kg',
+                    'tonne', 'tonnes', 'ton', 'kgs', 'mass'],
+    'ระยะทาง':     ['distance', 'km', 'mile', 'miles', 'tonne-km',
+                    'pkm', 'route', 'port of loading', 'port of discharge',
+                    'origin', 'destination', 'place of receipt', 'final destination'],
+    'จำนวน':       ['quantity', 'qty', 'count', 'units', 'pieces', 'pcs'],
+    'ผู้ขาย':      ['vendor', 'supplier', 'seller', 'shipper', 'issuer',
+                    'company', 'co., ltd', 'co.,ltd', 'ltd', 'inc',
+                    'corp', 'partner'],
+    'บริษัท':       ['company', 'co., ltd', 'co.,ltd', 'corp', 'inc'],
+    'ยอดเงิน':     ['amount', 'total', 'value', 'cost', 'price',
+                    'subtotal', 'thb', 'usd', 'eur', 'baht'],
+    'มูลค่า':       ['amount', 'value', 'cost', 'price', 'total'],
+    'ราคา':        ['price', 'cost', 'amount', 'rate', 'unit price'],
+    'ประเภท':       ['type', 'category', 'description', 'kind', 'goods'],
+    'สินค้า':      ['goods', 'item', 'product', 'description'],
+    'ประเภทสินค้า': ['type', 'description', 'category', 'item'],
+    'บริการ':      ['service'],
+    'พลังงาน':     ['energy', 'kwh', 'mwh', 'electricity', 'power'],
+    'พลังงานตลอดอายุ': ['lifetime', 'annual', 'kwh', 'energy'],
+    'ปริมาณ':      ['quantity', 'volume', 'qty', 'amount', 'kg', 'litre', 'liter'],
+    'เชื้อเพลิง':   ['fuel', 'gasoline', 'diesel', 'lpg', 'natural gas'],
+    'อายุการใช้งาน': ['lifetime', 'lifespan', 'years'],
+    'หน่วย':       ['unit', 'units'],
+    'วันที่':       ['date', 'time'],
+    'สถานที่':      ['location', 'place', 'address'],
+    'การเดินทาง':   ['travel', 'commute', 'trip', 'journey'],
+    'ชั้นโดยสาร':   ['class', 'cabin', 'economy', 'business'],
+    'ชั้น':         ['class', 'cabin', 'economy', 'business'],
+    'เส้นทาง':      ['route', 'origin', 'destination', 'from', 'to'],
+    'พื้นที่':      ['area', 'sqm', 'm2', 'floor', 'space'],
+    'บัญชี':        ['account', 'investment', 'invest'],
+    'หุ้น':         ['equity', 'shares', 'ownership'],
+    'การลงทุน':    ['investment', 'invest', 'fund', 'portfolio'],
+    'เปอร์เซ็นต์':   ['percent', '%', 'percentage', 'share'],
+}
+
+
+def _expected_token_satisfied(thai_phrase: str, present_norm: set) -> bool:
+    """
+    Check if any present token satisfies a Thai expected phrase, with
+    English synonyms + partial-key matching. The expected phrase may be
+    a slash-separated alternative list ("เส้นทาง/ระยะทาง") OR contain a
+    parenthetical hint ("รูปแบบ (sea/air/road/rail)") — each candidate
+    base is tried independently. ANY match satisfies the phrase.
+    """
+    # Strip parenthetical, then split on '/' to get all alternative bases
+    cleaned = thai_phrase.split(' (')[0]
+    bases = [_normalize(b) for b in cleaned.split('/') if b.strip()]
+
+    def _hits(base: str) -> bool:
+        if not base:
+            return False
+        # 1. Thai substring
+        if any(base in p for p in present_norm):
+            return True
+        # 2. exact-key synonyms
+        for syn in _FIELD_SYNONYMS.get(base, []):
+            if any(_normalize(syn) in p for p in present_norm):
+                return True
+        # 3. partial-key synonyms (e.g. base "รูปแบบขนส่ง" → key "รูปแบบ")
+        for key, syns in _FIELD_SYNONYMS.items():
+            if key and key in base:
+                for syn in syns:
+                    if any(_normalize(syn) in p for p in present_norm):
+                        return True
+        return False
+
+    return any(_hits(b) for b in bases)
+
+
 def missing_fields_for(scope3_id: int, present_fields: List[str], lang: str = 'th') -> List[str]:
     """
     Given a Scope 3 category and the field names the LLM extracted,
     return the list of expected fields that are NOT yet present. Used
     to render the "ข้อมูลที่ยังขาด" / "Still needed" section.
+
+    Bilingual matching: Thai expected phrases are checked against
+    English synonyms via `_FIELD_SYNONYMS`, so English entry labels
+    like "Net Weight" satisfy "น้ำหนัก", "Sea/Air/Road" satisfies
+    "รูปแบบ", "Port of Loading" satisfies "ระยะทาง", etc.
     """
     if not scope3_id:
         return []
@@ -202,7 +285,6 @@ def missing_fields_for(scope3_id: int, present_fields: List[str], lang: str = 't
     present_norm = {_normalize(f) for f in present_fields if f}
     missing: List[str] = []
     for exp in expected:
-        token = _normalize(exp.split(' (')[0].split('/')[0])
-        if not any(token in p for p in present_norm):
+        if not _expected_token_satisfied(exp, present_norm):
             missing.append(exp)
     return missing

@@ -4,7 +4,7 @@ ESG Service — CRUD for settings, documents, org setup, platform bindings, data
 
 from typing import List, Optional, Dict, Any
 from sqlalchemy.orm import Session
-from sqlalchemy import func, extract, and_
+from sqlalchemy import func, extract, and_, distinct, case, String
 from datetime import datetime, date
 from decimal import Decimal
 import logging
@@ -15,7 +15,7 @@ from ...models.esg.organization_setup import EsgOrganizationSetup
 from ...models.esg.platform_binding import EsgExternalPlatformBinding
 from ...models.esg.data_hierarchy import EsgDataCategory, EsgDataSubcategory, EsgDatapoint
 from ...models.esg.data_extraction import EsgOrganizationDataExtraction
-from ...models.esg.data_entries import EsgDataEntry
+from ...models.esg.records import EsgRecord
 
 logger = logging.getLogger(__name__)
 
@@ -488,38 +488,123 @@ class EsgService:
             EsgDatapoint.is_active == True,
         ).order_by(EsgDatapoint.sort_order).all()
 
-        # 2. Entry counts per datapoint (1 query)
-        entry_counts_raw = (
+        # 2. Per-datapoint stats — derived from each EsgRecord's
+        # JSONB datapoints array. A datapoint is "filled" if any
+        # record under any category references its id. We also
+        # approximate latest_value / latest_unit / total_tco2e by
+        # scanning the array (small N — typically <500 records/org).
+        all_records_for_dp = (
             self.db.query(
-                EsgDataEntry.datapoint_id,
-                func.count(EsgDataEntry.id),
-                func.max(EsgDataEntry.value),
-                func.max(EsgDataEntry.unit),
-                func.sum(EsgDataEntry.calculated_tco2e),
+                EsgRecord.id,
+                EsgRecord.datapoints,
+                EsgRecord.kgco2e,
             )
             .filter(
-                EsgDataEntry.organization_id == organization_id,
-                EsgDataEntry.is_active == True,
-                EsgDataEntry.datapoint_id.isnot(None),
+                EsgRecord.organization_id == organization_id,
+                EsgRecord.is_active == True,
             )
-            .group_by(EsgDataEntry.datapoint_id)
             .all()
         )
-
-        entry_data = {}
-        for dp_id, cnt, latest_val, latest_unit, total_tco2e in entry_counts_raw:
-            entry_data[dp_id] = {
-                'count': cnt,
-                'latest_value': float(latest_val) if latest_val is not None else None,
-                'latest_unit': latest_unit,
-                'total_tco2e': float(total_tco2e) if total_tco2e else None,
-            }
+        entry_data: dict = {}
+        for _rec_id, dp_array, kgco2e in all_records_for_dp:
+            for d in (dp_array or []):
+                dp_id = d.get('datapoint_id')
+                if not dp_id:
+                    continue
+                bucket = entry_data.setdefault(dp_id, {
+                    'count': 0,
+                    'latest_value': None,
+                    'latest_unit': None,
+                    'total_tco2e': 0.0,
+                })
+                bucket['count'] += 1
+                v = d.get('value')
+                if v is not None:
+                    try:
+                        bucket['latest_value'] = float(v)
+                    except (TypeError, ValueError):
+                        pass
+                u = d.get('unit')
+                if u:
+                    bucket['latest_unit'] = u
+            if kgco2e is not None:
+                # Distribute the record's tco2e equally to each
+                # datapoint that has an id (best-effort attribution).
+                ids = [d.get('datapoint_id') for d in (dp_array or []) if d.get('datapoint_id')]
+                if ids:
+                    share = float(kgco2e) / 1000.0 / len(ids)
+                    for i in ids:
+                        entry_data.setdefault(i, {
+                            'count': 0, 'latest_value': None,
+                            'latest_unit': None, 'total_tco2e': 0.0,
+                        })
+                        entry_data[i]['total_tco2e'] += share
 
         # Total entries (including unlinked)
-        total_entries = self.db.query(func.count(EsgDataEntry.id)).filter(
-            EsgDataEntry.organization_id == organization_id,
-            EsgDataEntry.is_active == True,
+        total_entries = self.db.query(func.count(EsgRecord.id)).filter(
+            EsgRecord.organization_id == organization_id,
+            EsgRecord.is_active == True,
         ).scalar() or 0
+
+        # Record + entry counts per category — keyed off
+        # `EsgRecord.category_id` directly so we still count entries
+        # whose datapoint_id falls outside the canonical hierarchy
+        # (mis-classified rows still belong to the right category).
+        #
+        # A "record" = one **atomic GHG-calculatable item** — one trip,
+        # one stay, one invoice line — represented as one
+        # `(record_label, evidence_url)` group. This mirrors exactly
+        # how `get_scope3_category_records` groups rows in the modal,
+        # so the card and the modal always agree on the count.
+        cat_entry_rows = (
+            self.db.query(
+                EsgRecord.id,
+                EsgRecord.category_id,
+                EsgRecord.evidence_image_url,
+                EsgRecord.file_key,
+                EsgRecord.datapoints,
+            )
+            .filter(
+                EsgRecord.organization_id == organization_id,
+                EsgRecord.is_active == True,
+                EsgRecord.category_id.isnot(None),
+            )
+            .all()
+        )
+        record_groups_by_cat: dict[int, set[tuple]] = {}
+        entry_count_by_cat: dict[int, int] = {}
+        for row_id, cat_id, ev_url, file_key, extra in cat_entry_rows:
+            entry_count_by_cat[cat_id] = entry_count_by_cat.get(cat_id, 0) + 1
+            record_label = ''
+            if isinstance(extra, dict):
+                record_label = (extra.get('record_label') or '').strip()
+            evidence = (ev_url or file_key or '').strip()
+            group_key = (record_label or f'entry-{row_id}', evidence)
+            record_groups_by_cat.setdefault(cat_id, set()).add(group_key)
+        record_count_by_cat: dict[int, int] = {
+            cat_id: len(groups) for cat_id, groups in record_groups_by_cat.items()
+        }
+
+        # Direct count by EsgRecord.category_id — one row = one record,
+        # so this is exact and matches the modal grouping.
+        try:
+            rec_counts = (
+                self.db.query(
+                    EsgRecord.category_id,
+                    func.count(EsgRecord.id),
+                )
+                .filter(
+                    EsgRecord.organization_id == organization_id,
+                    EsgRecord.is_active == True,
+                    EsgRecord.category_id.isnot(None),
+                )
+                .group_by(EsgRecord.category_id)
+                .all()
+            )
+            for cat_id, cnt in rec_counts:
+                record_count_by_cat[cat_id] = int(cnt or 0)
+        except Exception:
+            logger.exception('record_count_by_cat from esg_records failed — using entries fallback')
 
         # 3. Build maps
         sub_by_cat = {}
@@ -596,21 +681,31 @@ class EsgService:
                 cat_entries += sc_entries
 
             cat_pct = round(cat_dp_filled / cat_dp_total * 100, 1) if cat_dp_total > 0 else 0
+            # Direct-by-category counts — these include entries whose
+            # datapoint_id sits outside this category's canonical
+            # hierarchy (LLM mis-classified onto the wrong datapoint
+            # but still tagged the right category_id). Falls back to
+            # the walked count when the direct count isn't populated.
+            direct_entries = entry_count_by_cat.get(cat.id, cat_entries)
+            direct_records = record_count_by_cat.get(cat.id, 0)
             pillar_map[p]['categories'].append({
                 'id': cat.id,
                 'name': cat.name,
                 'name_th': cat.name_th,
+                'is_scope3': bool(cat.is_scope3),
+                'scope3_category_id': cat.scope3_category_id,
                 'subcategory_count': len(cat_subs),
                 'datapoint_count': cat_dp_total,
                 'filled_datapoints': cat_dp_filled,
-                'entry_count': cat_entries,
+                'entry_count': direct_entries,
+                'record_count': direct_records,
                 'completeness_pct': cat_pct,
                 'subcategories': sub_list,
             })
 
             pillar_map[p]['_dp_total'] += cat_dp_total
             pillar_map[p]['_dp_filled'] += cat_dp_filled
-            pillar_map[p]['_entries'] += cat_entries
+            pillar_map[p]['_entries'] += direct_entries
 
         # 5. Finalize pillars
         pillars = []
@@ -664,13 +759,13 @@ class EsgService:
 
         # 1. Get all entries for this datapoint
         entries = (
-            self.db.query(EsgDataEntry)
+            self.db.query(EsgRecord)
             .filter(
-                EsgDataEntry.organization_id == organization_id,
-                EsgDataEntry.datapoint_id == datapoint_id,
-                EsgDataEntry.is_active == True,
+                EsgRecord.organization_id == organization_id,
+                EsgRecord.id == datapoint_id,
+                EsgRecord.is_active == True,
             )
-            .order_by(EsgDataEntry.entry_date.desc(), EsgDataEntry.created_date.desc())
+            .order_by(EsgRecord.entry_date.desc(), EsgRecord.created_date.desc())
             .all()
         )
         if not entries:
@@ -704,12 +799,12 @@ class EsgService:
         all_siblings = []
         if evidence_keys:
             all_siblings = (
-                self.db.query(EsgDataEntry)
+                self.db.query(EsgRecord)
                 .filter(
-                    EsgDataEntry.organization_id == organization_id,
-                    EsgDataEntry.is_active == True,
-                    EsgDataEntry.subcategory_id == dp.esg_data_subcategory_id,
-                    EsgDataEntry.evidence_image_url.in_(evidence_keys),
+                    EsgRecord.organization_id == organization_id,
+                    EsgRecord.is_active == True,
+                    EsgRecord.subcategory_id == dp.esg_data_subcategory_id,
+                    EsgRecord.evidence_image_url.in_(evidence_keys),
                 )
                 .all()
             )
@@ -861,3 +956,213 @@ class EsgService:
             'instance_count': sum(len(d['instances']) for d in documents),
             'documents': documents,
         }
+
+    def get_scope3_category_records(self, organization_id: int,
+                                    scope3_category_id: int) -> Dict[str, Any]:
+        """
+        Records under a Scope 3 category — used by the Data Warehouse
+        modal. Reads from `esg_records` (one row = one atomic record,
+        datapoints stored as JSONB array). Falls back to the legacy
+        `esg_data_entries` grouping when no record-rows exist yet for
+        this org/category (e.g. rows imported before migration 058).
+
+          { columns: [datapoint_name, ...],
+            records: [
+              { id, record_label, source_doc, fields: {dp_name: '...'},
+                kgco2e_total, entry_date,
+                ghg_status, ghg_missing_fields, ghg_reason }
+            ]
+          }
+        """
+        from ...models.esg.records import EsgRecord
+
+        # 1. Try the new record-centric table first.
+        rec_rows = (
+            self.db.query(EsgRecord)
+            .filter(
+                EsgRecord.organization_id == organization_id,
+                EsgRecord.is_active == True,
+                EsgRecord.scope3_category_id == int(scope3_category_id),
+            )
+            .order_by(EsgRecord.id.desc())
+            .all()
+        )
+
+        # esg_data_entries fallback removed — table has been retired.
+        return self._scope3_records_from_records_table(rec_rows, scope3_category_id)
+
+    def _scope3_records_from_records_table(
+        self, rows, scope3_category_id: int,
+    ) -> Dict[str, Any]:
+        """
+        Build the modal payload from EsgRecord rows. Columns are the
+        union of every datapoint identity (most-specific first), in
+        first-seen order across the rows.
+        """
+        column_seen: set[str] = set()
+        column_set: list[str] = []
+        records_out = []
+
+        # Generic-name blocklist — when the LLM emits the category name
+        # as datapoint_name (sparse hierarchy fallback), we don't want
+        # that as a column header. The first descriptive tag wins instead.
+        from .esg_dashboard_service import SCOPE3_CATEGORY_LABELS
+        scope3_label = SCOPE3_CATEGORY_LABELS.get(int(scope3_category_id), {})
+        GENERIC_NAMES = {
+            (scope3_label.get('en') or '').strip().lower(),
+            (scope3_label.get('th') or '').strip().lower(),
+            'business travel', 'employee commuting', 'capital goods',
+            'purchased goods and services', 'fuel- and energy-related activities',
+            'upstream transportation and distribution', 'waste generated in operations',
+            'upstream leased assets', 'downstream transportation and distribution',
+            'processing of sold products', 'use of sold products',
+            'end-of-life treatment of sold products', 'downstream leased assets',
+            'franchises', 'investments',
+            'value', '', None,
+        }
+
+        # Currency codes never make good column headers
+        CURRENCY_CODES = {'USD', 'THB', 'EUR', 'GBP', 'JPY', 'CNY', 'SGD',
+                          'HKD', 'AUD', 'KRW', 'INR', 'IDR', 'VND', 'PHP', 'MYR'}
+
+        def _humanize(s: str) -> str:
+            s = (s or '').strip().replace('_', ' ').replace('-', ' ')
+            return ' '.join(w.capitalize() for w in s.split() if w) or s
+
+        def _is_generic(name: str) -> bool:
+            return (name or '').strip().lower() in GENERIC_NAMES
+
+        def _resolve_field_name(d: dict) -> str:
+            """
+            Most-specific identity wins:
+              1. tags' last non-currency, non-generic entry  (LLM emits
+                 general → specific so reverse iteration finds the
+                 most descriptive label, e.g. "base fare", "expressway fee").
+              2. canonical_name from EsgDatapoint table (when not generic).
+              3. datapoint_name (LLM-reported, when not generic).
+              4. 'Value' as last resort.
+            """
+            tags = d.get('tags') or []
+            for t in reversed(tags):
+                if not isinstance(t, str):
+                    continue
+                ts = t.strip()
+                if not ts:
+                    continue
+                if ts.upper() in CURRENCY_CODES:
+                    continue
+                if _is_generic(ts):
+                    continue
+                return _humanize(ts)
+            cn = (d.get('canonical_name') or '').strip()
+            if cn and not _is_generic(cn):
+                return _humanize(cn)
+            dn = (d.get('datapoint_name') or '').strip()
+            if dn and not _is_generic(dn):
+                return _humanize(dn)
+            return 'Value'
+
+        # Real measurement units only — anything else (field labels
+        # the LLM mis-classified into `unit`) gets dropped from the
+        # cell render so we don't end up with rows like
+        # "Sukhumvit Hotel Bangkok hotel_name".
+        REAL_UNITS = {
+            'kg', 'g', 't', 'tonne', 'tonnes', 'mg',
+            'km', 'm', 'mile', 'miles', 'mi',
+            'kwh', 'mwh', 'wh', 'gj', 'mj', 'kj',
+            'l', 'litre', 'liter', 'gallon', 'm3', 'ml',
+            'sqm', 'm²', 'm2', 'sqft', 'ft²',
+            'hour', 'hours', 'h', 'min', 'minute', 'second',
+            'night', 'nights', 'day', 'days', 'year', 'years',
+            'piece', 'pieces', 'pc', 'pcs', 'unit', 'units',
+            'flight', 'flights', 'leg', 'legs', 'trip', 'trips',
+            'passenger-km', 'pkm', 'tonne-km', 'tkm', 't-km', 'kg-km',
+            'tco2e', 'kgco2e', 'co2e', 'tco2', 'kgco2',
+            '%', 'percent',
+        }
+        REAL_UNITS |= CURRENCY_CODES        # currency units OK
+        REAL_UNITS |= {c.lower() for c in CURRENCY_CODES}
+
+        def _clean_unit(u: str) -> str:
+            """Drop unit when it isn't actually a measurement unit."""
+            us = (u or '').strip()
+            if not us:
+                return ''
+            if us.lower() in REAL_UNITS:
+                return us
+            # Tolerate composite real units (e.g. "kg/year", "USD per MT")
+            if any(part.strip().lower() in REAL_UNITS for part in us.replace('/', ' ').split()):
+                return us
+            return ''   # looks like a label, not a unit — drop
+
+        # Pull in the same name-to-unit inference the carbon service
+        # uses, so the modal cell displays "28.60 km" even when the
+        # LLM left `unit` empty (it always sets `datapoint_name`).
+        from .esg_carbon_service import _infer_unit_from_field
+
+        for r in rows:
+            fields_map: dict[str, str] = {}
+            datapoints = r.datapoints or []
+            for d in datapoints:
+                name = _resolve_field_name(d)
+                if not name:
+                    continue
+                value = d.get('value')
+                unit = _clean_unit(d.get('unit') or '')
+                if not unit:
+                    inferred = _infer_unit_from_field(
+                        d.get('datapoint_name') or d.get('canonical_name') or '',
+                        d.get('tags') or [],
+                    )
+                    unit = _clean_unit(inferred)
+                if value is None or value == '':
+                    text = '—'
+                else:
+                    try:
+                        text = f'{float(value):,.2f}'
+                    except (TypeError, ValueError):
+                        text = str(value)
+                if unit:
+                    text = f'{text} {unit}'.strip()
+                fields_map[name] = text
+                if name not in column_seen:
+                    column_seen.add(name)
+                    column_set.append(name)
+
+            kg = float(r.kgco2e) if r.kgco2e is not None else 0.0
+            records_out.append({
+                'id': r.id,
+                'record_label': r.record_label or 'รายการ',
+                'category_name': '',
+                'source_doc': r.evidence_image_url or r.file_key or '',
+                'entry_date': str(r.entry_date) if r.entry_date else '',
+                'created_date': r.created_date.isoformat() if r.created_date else '',
+                'fields': fields_map,
+                'kgco2e_total': kg,
+                'ghg_status': r.ghg_status or 'pending',
+                'ghg_method': r.ghg_method,
+                'ghg_missing_fields': r.ghg_missing_fields or [],
+                'ghg_reason': r.ghg_reason,
+                'ghg_source_name': r.ghg_source_name,
+                'ghg_source_url': r.ghg_source_url,
+                'ghg_ef_value': float(r.ghg_ef_value) if r.ghg_ef_value is not None else None,
+                'ghg_ef_unit': r.ghg_ef_unit,
+            })
+
+        # Category metadata for the response header (re-uses the
+        # SCOPE3_CATEGORY_LABELS we imported above for GENERIC_NAMES).
+        category_meta = {
+            'scope3_category_id': int(scope3_category_id),
+            'name_en': scope3_label.get('en'),
+            'name_th': scope3_label.get('th'),
+        }
+
+        return {
+            'success': True,
+            'category': category_meta,
+            'columns': column_set,
+            'records': records_out,
+            'record_count': len(records_out),
+            'source': 'esg_records',
+        }
+

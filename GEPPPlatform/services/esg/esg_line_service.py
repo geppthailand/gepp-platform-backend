@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 
 from ...models.esg.settings import EsgOrganizationSettings
 from ...models.esg.line_messages import EsgLineMessage
-from ...models.esg.data_entries import EsgDataEntry, EntrySource, EntryStatus
+from ...models.esg.records import EsgRecord
 from ...models.esg.data_extraction import EsgOrganizationDataExtraction
 from ...models.esg.esg_users import EsgUser
 from .esg_document_service import EsgDocumentService
@@ -193,14 +193,14 @@ class EsgLineService:
         return {'status': 'skipped'}
 
     def _confirm_entry(self, entry_id: int, org, reply_token: str) -> Dict:
-        entry = self.db.query(EsgDataEntry).filter(
-            EsgDataEntry.id == entry_id, EsgDataEntry.is_active == True,
+        entry = self.db.query(EsgRecord).filter(
+            EsgRecord.id == entry_id, EsgRecord.is_active == True,
         ).first()
         if not entry:
             self._send_text_reply(org.line_channel_token, reply_token, 'ไม่พบข้อมูลนี้')
             return {'status': 'error', 'reason': 'Entry not found'}
 
-        entry.status = EntryStatus.VERIFIED
+        entry.status = 'VERIFIED'
         self.db.commit()
         token = getattr(org, 'line_channel_token', None) or LINE_FALLBACK_TOKEN
         self._send_text_reply(token, reply_token, f'ยืนยันแล้ว! {entry.category} {entry.value} {entry.unit} = {entry.calculated_tco2e or "-"} tCO2e')
@@ -220,10 +220,10 @@ class EsgLineService:
             self._send_text_reply(token, reply_token, 'ไม่พบรายการที่จะยืนยัน')
             return {'status': 'error'}
 
-        count = self.db.query(EsgDataEntry).filter(
-            EsgDataEntry.id.in_(entry_ids),
-            EsgDataEntry.is_active == True,
-        ).update({EsgDataEntry.status: EntryStatus.VERIFIED}, synchronize_session='fetch')
+        count = self.db.query(EsgRecord).filter(
+            EsgRecord.id.in_(entry_ids),
+            EsgRecord.is_active == True,
+        ).update({EsgRecord.status: 'VERIFIED'}, synchronize_session='fetch')
         self.db.commit()
 
         self._send_text_reply(token, reply_token, f'✅ ยืนยันแล้ว {count} รายการ')
@@ -396,6 +396,8 @@ class EsgLineService:
                 reply_token=line_msg.line_reply_token,
                 doc_id=doc_no,
                 entries=[entry],
+                organization_id=org_id,
+                refs={'document_date': str(entry.get('entry_date') or '')},
             )
         else:
             err_card = self._build_error_flex(
@@ -493,6 +495,8 @@ class EsgLineService:
                     reply_token=line_msg.line_reply_token,
                     doc_id=doc_no,
                     entries=result['entries'],
+                    organization_id=org_id,
+                    refs=result.get('refs', {}),
                 )
             else:
                 err_msg = result.get('message', 'อ่านข้อมูลจากรูปไม่ออก กรุณาถ่ายใหม่ให้ชัดขึ้น')
@@ -771,7 +775,7 @@ class EsgLineService:
         cat_name = cat_match.get('name') or cat_match.get('category_name') or ''
         # The LLM cascade returns category_id (the DB row id). Persist it so
         # the dashboard JOIN to esg_data_category works and the LIFF per-user
-        # filter (EsgDataEntry.user_id = current LIFF user) returns rows.
+        # filter (EsgRecord.user_id = current LIFF user) returns rows.
         cat_id = cat_match.get('category_id') or cat_match.get('id')
 
         # Force the category to one of the 15 specific Scope 3 rows. The
@@ -826,7 +830,7 @@ class EsgLineService:
         )
         scope = self.carbon.get_scope_for_category(cat_name) if cat_name else None
 
-        entry = EsgDataEntry(
+        entry = EsgRecord(
             organization_id=org_id,
             user_id=liff_user_id or 0,
             line_user_id=line_user_id,
@@ -838,8 +842,8 @@ class EsgLineService:
             unit=unit,
             calculated_tco2e=tco2e,
             scope_tag=scope,
-            entry_source=EntrySource.LINE_CHAT,
-            status=EntryStatus.PENDING_VERIFY,
+            entry_source='LINE_CHAT',
+            status='PENDING_VERIFY',
             entry_date=datetime.utcnow().date(),
         )
         self.db.add(entry)
@@ -1002,6 +1006,501 @@ class EsgLineService:
                 {'type': 'text', 'text': text, 'flex': 1,
                  'size': 'xs', 'color': text_color, 'weight': weight},
             ],
+        }
+
+    # ── Thai-Buddhist date formatting ──────────────────────────────────
+    _THAI_MONTHS = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.',
+                    'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.']
+
+    def _fmt_thai_date(self, date_input) -> str:
+        """Format a date as '27 มี.ค. 2569' (Thai short, Buddhist year)."""
+        if not date_input:
+            return ''
+        try:
+            from datetime import datetime, date
+            if isinstance(date_input, str):
+                # Try common formats
+                for fmt in ('%Y-%m-%d', '%Y-%m-%dT%H:%M:%S', '%d/%m/%Y'):
+                    try:
+                        d = datetime.strptime(date_input.split('T')[0], fmt.split('T')[0])
+                        return f"{d.day} {self._THAI_MONTHS[d.month - 1]} {d.year + 543}"
+                    except (ValueError, IndexError):
+                        continue
+                return str(date_input)
+            if isinstance(date_input, (datetime, date)):
+                return f"{date_input.day} {self._THAI_MONTHS[date_input.month - 1]} {date_input.year + 543}"
+        except Exception:
+            pass
+        return str(date_input)
+
+    def _build_analysis_flex(self, doc_id, scope3_id: int, refs: dict,
+                             entries: list, total_kg: float = 0) -> dict:
+        """
+        Message 1 of the per-category pair.
+        White card with a green divider showing the EXTRACTED RAW FIELDS:
+        document type, vendor, line item count, total amount, date.
+
+        When `total_kg` is 0/None (i.e. CO₂e couldn't be computed), append
+        a "⚠️ ขาดข้อมูล" section explaining which inputs are missing and
+        why the calculation can't proceed.
+        """
+        doc = self._doc_no(doc_id)
+        refs = refs if isinstance(refs, dict) else {}
+
+        rows = []
+
+        # ── ประเภทเอกสาร (document_type) — NOT the vendor name ──
+        doc_type = refs.get('document_type') or refs.get('type')
+        if doc_type:
+            rows.append(self._kv_row('📄', 'ประเภท', str(doc_type)))
+
+        # ── ผู้ขาย / บริษัท (vendor) ──
+        vendor = refs.get('vendor')
+        if vendor:
+            rows.append(self._kv_row('🏢', 'ผู้ขาย', str(vendor)))
+
+        # ── ราคารวม (total_amount) — entire document, not 1 SKU ──
+        total_amount = refs.get('total_amount')
+        currency = (refs.get('currency') or '').upper() or 'THB'
+        if total_amount is not None:
+            try:
+                amt_text = f'{float(total_amount):,.2f} {currency}'
+            except (TypeError, ValueError):
+                amt_text = f'{total_amount} {currency}'
+            rows.append(self._kv_row('💰', 'ราคารวม', amt_text))
+
+        # ── จำนวนรายการ (line_item_count) ──
+        line_count = refs.get('line_item_count')
+        if line_count:
+            rows.append(self._kv_row('🔢', 'จำนวนรายการ', f'{int(line_count)} รายการ'))
+
+        # ── วันที่ (Buddhist year) ──
+        doc_date = refs.get('document_date')
+        if doc_date:
+            rows.append(self._kv_row('📅', 'วันที่', self._fmt_thai_date(doc_date)))
+
+        # ── เลขที่เอกสาร ──
+        ref_no = refs.get('reference_number')
+        if ref_no:
+            rows.append(self._kv_row('🧾', 'เลขที่', str(ref_no)))
+
+        if not rows:
+            rows.append({
+                'type': 'text',
+                'text': 'ไม่พบข้อมูลที่ extract ได้จากเอกสารนี้',
+                'size': 'sm', 'color': '#64748b', 'wrap': True,
+            })
+
+        # ── Diagnostic: why couldn't we compute CO₂e? ──
+        diagnostic_box = None
+        if not total_kg or total_kg <= 0:
+            diagnostic_box = self._build_co2_diagnostic_box(scope3_id, refs, entries)
+
+        body_contents = [
+            {'type': 'text', 'text': 'ผลการวิเคราะห์เอกสาร',
+             'size': 'md', 'weight': 'bold', 'color': '#0b1120'},
+            # green divider line under header
+            {'type': 'box', 'layout': 'vertical',
+             'height': '3px', 'width': '64px',
+             'backgroundColor': '#10b981',
+             'cornerRadius': '2px', 'margin': 'sm',
+             'contents': []},
+            {'type': 'box', 'layout': 'vertical',
+             'spacing': 'md', 'margin': 'lg',
+             'contents': rows},
+        ]
+        if diagnostic_box is not None:
+            body_contents.append(diagnostic_box)
+
+        return {
+            'type': 'flex',
+            'altText': f'{doc} — ผลการวิเคราะห์เอกสาร',
+            'contents': {
+                'type': 'bubble', 'size': 'kilo',
+                'body': {
+                    'type': 'box', 'layout': 'vertical',
+                    'paddingAll': '20px', 'spacing': 'sm',
+                    'contents': body_contents,
+                },
+            },
+        }
+
+    def _build_co2_diagnostic_box(self, scope3_id: int, refs: dict, entries: list) -> dict:
+        """
+        Amber diagnostic block explaining why kgCO₂e couldn't be computed
+        for this document yet — lists the missing fields per the Scope 3
+        category's expected inputs and gives a one-line reason.
+        """
+        from .scope3_assignment import EXPECTED_FIELDS, missing_fields_for, SCOPE3_LABELS
+
+        # Collect what we DID get. Push BOTH Thai and English tokens so
+        # the matcher (which checks Thai EXPECTED_FIELDS by substring)
+        # can find evidence regardless of which language the field name
+        # was extracted in.
+        present_fields: list[str] = []
+        for e in entries:
+            label = (e.get('field') or e.get('datapoint_name') or '').strip()
+            if label:
+                present_fields.append(label.lower())
+            unit = (e.get('unit') or '').strip().lower()
+            if unit:
+                present_fields.append(unit)
+        if refs.get('total_amount'):
+            # Match Thai expected tokens like "ยอดเงิน (บาท)" / "ค่าใช้จ่าย" /
+            # "มูลค่าลงทุน" — all share the substring "เงิน" or "บาท"/"มูลค่า".
+            present_fields.extend(['amount', 'ยอดเงิน', 'มูลค่า', 'ราคา', 'บาท'])
+        if refs.get('vendor'):
+            present_fields.extend(['vendor', 'ผู้ขาย', 'บริษัท'])
+        if refs.get('document_type'):
+            present_fields.extend(['document_type', 'ประเภท'])
+        if refs.get('document_date'):
+            present_fields.extend(['date', 'วันที่'])
+        if refs.get('line_item_count'):
+            present_fields.extend(['count', 'จำนวน', 'รายการ'])
+        if refs.get('reference_number'):
+            present_fields.extend(['ref', 'เลขที่'])
+
+        missing = missing_fields_for(scope3_id, present_fields, lang='th')
+        if not missing:
+            # Spend-only docs (e.g. cat 1 receipts) usually have everything
+            # the heuristic looks for — but the *real* blocker is missing
+            # an emission factor. Make that explicit.
+            missing = ['ค่า EF (emission factor) ที่จับคู่กับสินค้านี้']
+
+        cat_th = SCOPE3_LABELS.get(int(scope3_id), {}).get('th', f'หมวด {scope3_id}')
+
+        # Pick a reason. Rules of thumb:
+        #   - cat 1/2/15: spend-based but no item description/quantity → can't classify EF
+        #   - cat 4/9: missing distance / mode / weight
+        #   - cat 5/12: missing weight / waste stream
+        #   - cat 6/7: missing distance / mode / class
+        #   - cat 11: missing energy/lifetime/units
+        reason_map = {
+            1:  'มีเฉพาะมูลค่าเงิน แต่ขาดประเภทสินค้าหรือ EF ที่ตรงหมวดนี้ ทำให้คำนวณ kgCO₂e ตามมูลค่าได้ไม่แม่นยำ',
+            2:  'ขาดข้อมูลประเภทสินทรัพย์ทุน หรือ EPD/LCA จากผู้ผลิต',
+            3:  'ขาดค่า EF แบบ well-to-tank หรือสัดส่วนสูญเสียในระบบส่งจ่าย',
+            4:  'ขาดน้ำหนัก × ระยะทาง × รูปแบบขนส่ง — ต้องการอย่างน้อย 2 ใน 3 อย่าง',
+            5:  'ขาดน้ำหนักและประเภทของเสีย/วิธีกำจัด',
+            6:  'ขาดเส้นทางการเดินทางหรือชั้นโดยสาร / ระยะทาง',
+            7:  'ขาดรูปแบบการเดินทาง × ระยะทาง × จำนวนวัน',
+            8:  'ขาดข้อมูลพื้นที่หรือการใช้พลังงานของพื้นที่เช่า',
+            9:  'ขาดน้ำหนัก × ระยะทาง × รูปแบบขนส่ง — ต้องการอย่างน้อย 2 ใน 3 อย่าง',
+            10: 'ขาดข้อมูลพลังงานในขั้นตอนแปรรูปต่อ',
+            11: 'ขาดกำลังไฟฟ้าหรือพลังงานที่ใช้ตลอดอายุการใช้งานของสินค้า',
+            12: 'ขาดน้ำหนัก/วัสดุของสินค้าและช่องทางกำจัด',
+            13: 'ขาดข้อมูลการใช้พลังงานของผู้เช่า',
+            14: 'ขาดจำนวนแฟรนไชส์หรือพลังงานเฉลี่ยต่อสาขา',
+            15: 'ขาดข้อมูลผู้รับการลงทุนหรือ % การถือหุ้น',
+        }
+        reason = reason_map.get(int(scope3_id),
+                                'ข้อมูลที่สกัดได้ยังไม่เพียงพอสำหรับคำนวณ kgCO₂e ตามมาตรฐาน GHG Protocol')
+
+        missing_rows = []
+        for m in missing[:4]:
+            missing_rows.append({
+                'type': 'box', 'layout': 'baseline', 'spacing': 'sm',
+                'contents': [
+                    {'type': 'text', 'text': '•', 'flex': 0,
+                     'size': 'sm', 'color': '#b45309', 'weight': 'bold'},
+                    {'type': 'text', 'text': str(m),
+                     'size': 'xs', 'color': '#92400e',
+                     'wrap': True, 'flex': 1},
+                ],
+            })
+
+        return {
+            'type': 'box', 'layout': 'vertical',
+            'backgroundColor': '#fffbeb',
+            'cornerRadius': '10px',
+            'paddingAll': '12px', 'spacing': 'xs',
+            'margin': 'lg',
+            'contents': [
+                {'type': 'box', 'layout': 'baseline', 'spacing': 'sm',
+                 'contents': [
+                     {'type': 'text', 'text': '⚠️', 'flex': 0, 'size': 'sm'},
+                     {'type': 'text', 'text': 'ยังคำนวณ kgCO₂e ไม่ได้',
+                      'size': 'sm', 'weight': 'bold',
+                      'color': '#b45309', 'flex': 1},
+                 ]},
+                {'type': 'text',
+                 'text': f'เพราะ: {reason}',
+                 'size': 'xxs', 'color': '#78350f',
+                 'wrap': True, 'margin': 'sm'},
+                {'type': 'text', 'text': f'ต้องการข้อมูลเพิ่มสำหรับ{cat_th}:',
+                 'size': 'xxs', 'color': '#92400e',
+                 'weight': 'bold', 'margin': 'md'},
+                {'type': 'box', 'layout': 'vertical',
+                 'spacing': 'xs', 'margin': 'xs',
+                 'contents': missing_rows},
+            ],
+        }
+
+    def _kv_row(self, icon: str, label: str, value: str) -> dict:
+        return {
+            'type': 'box', 'layout': 'baseline', 'spacing': 'sm',
+            'contents': [
+                {'type': 'text', 'text': icon, 'flex': 0, 'size': 'sm'},
+                {'type': 'text', 'text': f'{label}:', 'flex': 0,
+                 'size': 'sm', 'weight': 'bold', 'color': '#0b1120'},
+                {'type': 'text', 'text': value, 'flex': 1,
+                 'size': 'sm', 'color': '#0b1120', 'wrap': True},
+            ],
+        }
+
+    @staticmethod
+    def _field_icon(label: str, unit: str, scope3_id: int) -> str:
+        """Pick an emoji that fits the field label / unit / category."""
+        lab = (label or '').lower()
+        u = (unit or '').lower()
+        if any(k in lab for k in ('ระยะทาง', 'distance', 'km')) or 'km' in u:
+            return '🚗' if scope3_id in (4, 6, 7, 9) else '📏'
+        if any(k in lab for k in ('น้ำหนัก', 'weight', 'kg', 'ตัน', 'tonne')) or u in ('kg', 'tonne'):
+            return '⚖️'
+        if any(k in lab for k in ('ราคา', 'cost', 'amount', 'thb', 'บาท', 'price')) or u in ('thb', 'baht', 'usd'):
+            return '💰'
+        if 'kwh' in u or any(k in lab for k in ('พลังงาน', 'energy', 'electric')):
+            return '⚡'
+        if any(k in lab for k in ('volume', 'litre', 'liter', 'l')) or u in ('l', 'litre'):
+            return '🧴'
+        return '🔹'
+
+    # Maps the EntrySource enum stored on each EsgRecord to a Thai label
+    # the success card surfaces under "ที่มาของข้อมูล:". Keep keys in sync
+    # with EntrySource in models/esg/records.py.
+    _SOURCE_TYPE_LABELS_TH = {
+        'LINE_CHAT': 'รูปภาพเอกสาร',
+        'LIFF_MANUAL': 'บันทึกด้วยตนเอง',
+        'IMAGE': 'รูปภาพเอกสาร',
+        'DOCUMENT': 'เอกสารของเสียจากระบบ',
+        'SYSTEM': 'เอกสารของเสียจากระบบ',
+    }
+
+    @classmethod
+    def _resolve_source_type_label(cls, entries: list) -> str:
+        """
+        Pick the Thai source-type label most representative of these entries.
+        Falls back to "—" when nothing identifies the source.
+        """
+        if not entries:
+            return '—'
+        from collections import Counter
+        votes: Counter = Counter()
+        for e in entries:
+            src = (e.get('entry_source') or '').upper()
+            if not src:
+                continue
+            label = cls._SOURCE_TYPE_LABELS_TH.get(src)
+            if label:
+                votes[label] += 1
+        if votes:
+            return votes.most_common(1)[0][0]
+        # Heuristic fallback: image evidence implies document image
+        for e in entries:
+            if e.get('evidence_image_url') or e.get('file_key'):
+                return 'รูปภาพเอกสาร'
+        return '—'
+
+    @staticmethod
+    def _format_record_id_list(record_ids: list, max_show: int = 8) -> str:
+        # Dedupe while preserving first-seen order. With the new
+        # esg_records storage one record = one row, but the synthesised
+        # entry-dict list still carries one tuple per datapoint within
+        # the same record — so the same id appears N times.
+        seen: set = set()
+        ids: list = []
+        for rid in (record_ids or []):
+            if rid is None or rid in seen:
+                continue
+            seen.add(rid)
+            ids.append(rid)
+        if not ids:
+            return '—'
+        formatted = [f'#{rid}' for rid in ids[:max_show]]
+        if len(ids) > max_show:
+            formatted.append(f'+{len(ids) - max_show}')
+        return ', '.join(formatted)
+
+    def _build_saved_flex(self, doc_id, scope3_id: int, name_th: str, name_en: str,
+                         source_text: str, total_kg: float,
+                         doc_total_amount: float, doc_currency: str,
+                         period_total_kg: float,
+                         record_count: int = 0,
+                         record_ids: list = None) -> dict:
+        """
+        Message 2 of the per-category pair — save confirmation card.
+        Header: ✓ บันทึกลงระบบสำเร็จ + Audit-Ready pill
+        Body: หมวดหมู่ + Cat number, source TYPE, record count + IDs,
+              doc total amount, doc CO₂e
+        Footer: ดู Executive Dashboard / ดาวน์โหลด Excel / สร้างภาพ Social Report
+        """
+        doc = self._doc_no(doc_id)
+        cat_label = f'Cat {scope3_id}: {name_en or name_th or "Scope 3"}'
+        currency = (doc_currency or 'THB').upper()
+        amt_text = (
+            f'{float(doc_total_amount):,.0f} {currency}'
+            if doc_total_amount and doc_total_amount > 0
+            else '—'
+        )
+        # Show this document's CO2e (total_kg). Period aggregate is appended
+        # in the body as a small subtitle so the user knows their running
+        # total too.
+        kg_text = (
+            f'{total_kg:,.2f} kg'
+            if total_kg and total_kg > 0 else '—'
+        )
+        period_subtitle = (
+            f'รวมเดือนนี้: {period_total_kg:,.1f} kg'
+            if period_total_kg and period_total_kg > 0 else ''
+        )
+        record_count_text = f'{record_count:,} รายการ' if record_count else '—'
+        record_ids_text = self._format_record_id_list(record_ids)
+        excel_url = f'{LIFF_BASE_URL}/liff/app/excel-download?cat={scope3_id}'
+        social_url = f'{LIFF_BASE_URL}/liff/app/social-report?cat={scope3_id}'
+        dashboard_url = f'{LIFF_BASE_URL}/liff/app/esg'
+
+        return {
+            'type': 'flex',
+            'altText': f'{doc} — บันทึกลงระบบสำเร็จ ({cat_label})',
+            'contents': {
+                'type': 'bubble', 'size': 'kilo',
+                'body': {
+                    'type': 'box', 'layout': 'vertical',
+                    'paddingAll': '0px', 'spacing': 'none',
+                    'contents': [
+                        # ── Header bar (dark ink) ──
+                        {'type': 'box', 'layout': 'horizontal',
+                         'backgroundColor': '#0b1120',
+                         'paddingAll': '14px', 'spacing': 'sm',
+                         'alignItems': 'center',
+                         'contents': [
+                             {'type': 'text', 'text': '✓', 'flex': 0,
+                              'size': 'lg', 'color': '#10b981', 'weight': 'bold'},
+                             {'type': 'text', 'text': 'บันทึกลงระบบสำเร็จ',
+                              'size': 'sm', 'color': '#ffffff',
+                              'weight': 'bold', 'flex': 1},
+                             # Audit-Ready pill
+                             {'type': 'box', 'layout': 'vertical',
+                              'backgroundColor': '#10b981',
+                              'cornerRadius': '999px',
+                              'paddingTop': '4px', 'paddingBottom': '4px',
+                              'paddingStart': '10px', 'paddingEnd': '10px',
+                              'flex': 0,
+                              'contents': [
+                                  {'type': 'text', 'text': 'Audit-Ready',
+                                   'size': 'xxs', 'color': '#ffffff',
+                                   'weight': 'bold'},
+                              ]},
+                         ]},
+                        # ── Content ──
+                        {'type': 'box', 'layout': 'vertical',
+                         'paddingAll': '16px', 'spacing': 'sm',
+                         'contents': [
+                             {'type': 'text', 'text': 'หมวดหมู่',
+                              'size': 'xs', 'color': '#64748b'},
+                             {'type': 'text', 'text': cat_label,
+                              'size': 'lg', 'color': '#0b1120',
+                              'weight': 'bold', 'wrap': True},
+
+                             # Source TYPE row (light-emerald background) — shows
+                             # how the data was captured (image / manual / system).
+                             {'type': 'box', 'layout': 'baseline',
+                              'backgroundColor': '#ecfdf5',
+                              'cornerRadius': '8px',
+                              'paddingAll': '12px',
+                              'margin': 'md', 'spacing': 'sm',
+                              'contents': [
+                                  {'type': 'text', 'text': 'ที่มาของข้อมูล:',
+                                   'size': 'xs', 'color': '#475569', 'flex': 0},
+                                  {'type': 'text', 'text': source_text or '—',
+                                   'size': 'sm', 'color': '#047857',
+                                   'weight': 'bold', 'flex': 1, 'align': 'end'},
+                              ]},
+
+                             # Record count row
+                             {'type': 'box', 'layout': 'baseline',
+                              'backgroundColor': '#f8fafc',
+                              'cornerRadius': '8px',
+                              'paddingAll': '12px',
+                              'margin': 'sm', 'spacing': 'sm',
+                              'contents': [
+                                  {'type': 'text', 'text': 'จำนวนรายการ:',
+                                   'size': 'xs', 'color': '#475569', 'flex': 0},
+                                  {'type': 'text', 'text': record_count_text,
+                                   'size': 'sm', 'color': '#0b1120',
+                                   'weight': 'bold', 'flex': 1, 'align': 'end'},
+                              ]},
+
+                             # Saved record IDs row
+                             {'type': 'box', 'layout': 'vertical',
+                              'backgroundColor': '#f8fafc',
+                              'cornerRadius': '8px',
+                              'paddingAll': '12px',
+                              'margin': 'sm', 'spacing': 'xs',
+                              'contents': [
+                                  {'type': 'text', 'text': 'บันทึก Records:',
+                                   'size': 'xs', 'color': '#475569'},
+                                  {'type': 'text', 'text': record_ids_text,
+                                   'size': 'sm', 'color': '#0b1120',
+                                   'weight': 'bold', 'wrap': True},
+                              ]},
+
+                             # Two-up: doc total amount | total kg
+                             {'type': 'box', 'layout': 'horizontal',
+                              'spacing': 'sm', 'margin': 'md',
+                              'contents': [
+                                  {'type': 'box', 'layout': 'vertical',
+                                   'backgroundColor': '#f8fafc',
+                                   'cornerRadius': '12px',
+                                   'paddingAll': '14px', 'flex': 1,
+                                   'alignItems': 'center', 'spacing': 'xs',
+                                   'contents': [
+                                       {'type': 'text', 'text': amt_text,
+                                        'size': 'lg', 'color': '#0b1120',
+                                        'weight': 'bold', 'align': 'center',
+                                        'wrap': True},
+                                       {'type': 'text', 'text': 'ราคารวม',
+                                        'size': 'xs', 'color': '#64748b',
+                                        'align': 'center'},
+                                   ]},
+                                  {'type': 'box', 'layout': 'vertical',
+                                   'backgroundColor': '#ecfdf5',
+                                   'cornerRadius': '12px',
+                                   'paddingAll': '14px', 'flex': 1,
+                                   'alignItems': 'center', 'spacing': 'xs',
+                                   'contents': [
+                                       {'type': 'text', 'text': kg_text,
+                                        'size': 'xxl', 'color': '#10b981',
+                                        'weight': 'bold', 'align': 'center'},
+                                       {'type': 'text', 'text': 'รวม CO₂e',
+                                        'size': 'xs', 'color': '#047857',
+                                        'align': 'center'},
+                                   ]},
+                              ]},
+                         ]},
+                    ],
+                },
+                'footer': {
+                    'type': 'box', 'layout': 'vertical',
+                    'paddingAll': '16px', 'spacing': 'sm',
+                    'contents': [
+                        {'type': 'button', 'style': 'primary',
+                         'color': '#0b1120', 'height': 'sm',
+                         'action': {'type': 'uri',
+                                    'label': 'ดู Executive Dashboard',
+                                    'uri': dashboard_url}},
+                        {'type': 'button', 'style': 'secondary',
+                         'height': 'sm',
+                         'action': {'type': 'uri',
+                                    'label': 'ดาวน์โหลด Excel',
+                                    'uri': excel_url}},
+                        {'type': 'button', 'style': 'secondary',
+                         'height': 'sm',
+                         'action': {'type': 'uri',
+                                    'label': 'สร้างภาพ Social Report',
+                                    'uri': social_url}},
+                    ],
+                },
+            },
         }
 
     def _build_category_flex(self, doc_id, scope3_id: int, name_th: str, name_en: str,
@@ -1262,20 +1761,79 @@ class EsgLineService:
             groups.setdefault(key, []).append(e)
         return groups
 
+    def _get_category_period_aggregate(self, organization_id: int, scope3_cat_id: int,
+                                       year: int, month: int) -> tuple[int, float]:
+        """
+        Returns (doc_count, total_kg) for entries in the given org +
+        scope3 category, for the given calendar month. Used by the
+        save-confirmation card to show "15 เอกสารที่พบ / 342.5 kg".
+        """
+        try:
+            from sqlalchemy import func, extract
+            from ...models.esg.data_hierarchy import EsgDataCategory
+            row = (
+                self.db.query(
+                    func.count(EsgRecord.id).label('cnt'),
+                    func.coalesce(func.sum((EsgRecord.kgco2e / 1000.0)), 0).label('tco2e'),
+                )
+                .join(EsgDataCategory, EsgDataCategory.id == EsgRecord.category_id)
+                .filter(
+                    EsgRecord.organization_id == organization_id,
+                    EsgRecord.is_active == True,
+                    EsgDataCategory.is_scope3 == True,
+                    EsgDataCategory.scope3_category_id == int(scope3_cat_id),
+                    extract('year', EsgRecord.entry_date) == year,
+                    extract('month', EsgRecord.entry_date) == month,
+                )
+                .one()
+            )
+            cnt = int(row.cnt or 0)
+            kg = float(row.tco2e or 0) * 1000.0  # tCO2e → kgCO2e
+            return cnt, kg
+        except Exception:
+            logger.exception('[LINE] failed to compute period aggregate')
+            return 0, 0.0
+
+    @staticmethod
+    def _summarize_source(entries: list) -> str:
+        """Build a short '15.2 km (Taxi)' style source string from entries."""
+        # Pick the most informative numeric field
+        for e in entries:
+            v = e.get('value')
+            u = (e.get('unit', '') or '').strip()
+            label = (e.get('field') or e.get('datapoint_name') or '').strip()
+            if v is None or u == '':
+                continue
+            try:
+                num = f'{float(v):,.1f}'
+            except (TypeError, ValueError):
+                num = str(v)
+            if label:
+                return f'{num} {u} ({label})'
+            return f'{num} {u}'
+        return '—'
+
     def _dispatch_extraction_messages(self, token: str, line_user_id: str,
-                                      reply_token: str, doc_id, entries: list):
+                                      reply_token: str, doc_id, entries: list,
+                                      organization_id: int = None,
+                                      refs: dict = None):
         """
-        Push one card per Scope 3 category, then REPLY with the final
-        completion summary. Falls back to PUSH for the completion card if
-        the reply_token has already expired (LINE 60s TTL).
+        Per-category fan-out:
+          For each Scope 3 cat detected →
+            PUSH 1) "ผลการวิเคราะห์เอกสาร"  (raw extracted fields)
+            PUSH 2) "บันทึกลงระบบสำเร็จ"   (status + dashboard buttons)
+          Then REPLY (or PUSH fallback) the grand-total completion card.
         """
+        from datetime import datetime, timezone
         from .scope3_assignment import SCOPE3_LABELS
 
         groups = self._group_entries_by_scope3(entries)
         cat_totals: dict[int, float] = {}
         grand_total = 0.0
 
-        # Push per-category cards
+        now = datetime.now(timezone.utc)
+        year, month = now.year, now.month
+
         for cid in sorted(groups.keys()):
             cat_entries = groups[cid]
             tco2e_total = 0.0
@@ -1289,24 +1847,58 @@ class EsgLineService:
             grand_total += tco2e_total
 
             lbl = SCOPE3_LABELS.get(cid, {})
-            cat_card = self._build_category_flex(
+            kg_total_for_cat = tco2e_total * 1000.0  # tCO2e → kgCO2e
+
+            # ── Message 1: analysis result (raw extracted fields + diagnostics) ──
+            analysis_card = self._build_analysis_flex(
+                doc_id=doc_id,
+                scope3_id=cid,
+                refs=refs or {},
+                entries=cat_entries,
+                total_kg=kg_total_for_cat,
+            )
+            if line_user_id:
+                self._send_push_message(token, line_user_id, [analysis_card])
+
+            # ── Message 2: save confirmation + dashboard CTAs ──
+            _doc_count, period_kg = (0, 0.0)
+            if organization_id:
+                _doc_count, period_kg = self._get_category_period_aggregate(
+                    organization_id, cid, year, month
+                )
+            doc_total_amount = (refs or {}).get('total_amount')
+            doc_currency = (refs or {}).get('currency') or 'THB'
+            # Collect record IDs that actually persisted for this
+            # category. With the new esg_records storage, one record =
+            # one row but the synthesised entry-dict list carries one
+            # tuple per datapoint within that record, so we dedupe
+            # before counting + listing.
+            cat_record_ids: list = []
+            _seen_ids: set = set()
+            for e in cat_entries:
+                rid = e.get('id')
+                if rid is None or rid in _seen_ids:
+                    continue
+                _seen_ids.add(rid)
+                cat_record_ids.append(rid)
+            saved_card = self._build_saved_flex(
                 doc_id=doc_id,
                 scope3_id=cid,
                 name_th=lbl.get('th', ''),
                 name_en=lbl.get('en', ''),
-                entries=cat_entries,
-                total_tco2e=tco2e_total,
+                source_text=self._resolve_source_type_label(cat_entries),
+                total_kg=kg_total_for_cat,
+                doc_total_amount=doc_total_amount,
+                doc_currency=doc_currency,
+                period_total_kg=period_kg,
+                record_count=len(cat_record_ids),
+                record_ids=cat_record_ids,
             )
-            try:
-                if line_user_id:
-                    self._send_push_message(token, line_user_id, [cat_card])
-                    logger.info(f"[IMG] Push: cat {cid} card sent ({len(cat_entries)} fields)")
-            except Exception as e:
-                logger.warning(f"[IMG] Failed to push cat {cid} card: {e}")
+            if line_user_id:
+                self._send_push_message(token, line_user_id, [saved_card])
+                logger.info(f"[LINE] Pushed cat {cid} pair (analysis + saved) — {len(cat_entries)} fields")
 
-        # Final completion card via REPLY. If reply fails (token expired
-        # OR already consumed by the immediate ack on a different code
-        # path), fall back to PUSH so the user always gets the summary.
+        # Final completion card via REPLY (fallback to PUSH if expired)
         completion = self._build_completion_flex(doc_id, cat_totals, grand_total)
         replied = self._send_reply_raw(token, reply_token, [completion])
         if replied:
