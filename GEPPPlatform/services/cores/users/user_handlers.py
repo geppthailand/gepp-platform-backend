@@ -979,17 +979,41 @@ def handle_get_locations(db_session, user_service: UserService, query_params: Di
         # Get current user ID for member-based filtering
         current_user_id = current_user.get('user_id') if current_user else None
 
-        # Get user locations with 3-tier filtering
+        # Pagination — clients (e.g. gepp-business-v3 frontend) page through
+        # large orgs in chunks of 50 to keep the response small AND, more
+        # importantly, to keep the request itself under the 10s axios timeout.
+        # When neither `page` nor `page_size` is given, fall back to the legacy
+        # "all at once" behavior for any non-paginated callers.
+        try:
+            req_page = int(query_params.get('page', 0) or 0)
+        except (TypeError, ValueError):
+            req_page = 0
+        try:
+            req_page_size = int(query_params.get('page_size', 0) or 0)
+        except (TypeError, ValueError):
+            req_page_size = 0
+
+        paginate = req_page > 0 or req_page_size > 0
+        page = req_page if req_page > 0 else 1
+        page_size = req_page_size if req_page_size > 0 else 50
+        if page_size > 200:
+            page_size = 200
+
+        # Service paginates internally when page/page_size are passed —
+        # only the page slice is loaded + serialized + has paths/tags built.
         result = user_service.get_locations(
             organization_id=organization_id,
             include_all=include_all,
-            current_user_id=current_user_id
+            current_user_id=current_user_id,
+            page=page if paginate else None,
+            page_size=page_size if paginate else None,
         )
 
         locations = result['data']
         ancestors = result['ancestors']
         is_owner = result['is_owner']
         manageable_user_ids = result.get('manageable_user_ids', [])
+        full_total = int(result.get('total_assigned', len(locations)))
 
         # Enrich each assigned location with tag and tenant info (id, name, start_date, end_date, members)
         def _trim_tag_or_tenant(item: Dict[str, Any]) -> Dict[str, Any]:
@@ -1016,16 +1040,21 @@ def handle_get_locations(db_session, user_service: UserService, query_params: Di
                 loc['tags'] = []
                 loc['tenants'] = []
 
+        has_more = paginate and (page * page_size) < full_total
+
         return {
             'success': True,
             'data': locations,
             'ancestors': ancestors,
             'is_owner': is_owner,
             'manageable_user_ids': manageable_user_ids,
-            'total': len(locations),
+            'total': full_total,
+            'page': page,
+            'page_size': page_size,
+            'has_more': has_more,
             'organization_id': organization_id,
             'include_all': include_all,
-            'message': f'Retrieved {len(locations)} locations'
+            'message': f'Retrieved {len(locations)} of {full_total} locations'
         }
 
     except Exception as e:
