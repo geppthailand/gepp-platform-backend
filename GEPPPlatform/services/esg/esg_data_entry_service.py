@@ -223,15 +223,31 @@ class EsgDataEntryService:
     def _record_to_legacy_dict(self, rec: 'EsgRecord') -> dict:
         """
         Project an EsgRecord into the response shape the LIFF history
-        / desktop pages already consume — the legacy `EsgDataEntry`
-        dict. Reads the head datapoint as the "value/unit/datapoint_id"
-        of the entry; the full datapoints array is exposed under
-        `metadata.datapoints` for richer detail views.
+        / desktop pages already consume. Each list item now represents
+        one record (was: one datapoint row), so:
+          • `category`   → the human-readable record label so the
+            history card no longer shows "Uncategorized".
+          • `value`/`unit` → blank when the record has no single
+            quantity to summarise (we surface kgCO2e directly instead).
+          • `datapoints` → the full JSONB array, so the detail view
+            can render every field the LLM extracted.
         """
         if rec is None:
             return None
         datapoints = rec.datapoints or []
-        head = datapoints[0] if datapoints else {}
+        # Pick the most "summary-worthy" datapoint as value/unit
+        # (numeric, non-currency). Falls back to the first one.
+        summary = next(
+            (
+                d for d in datapoints
+                if d.get('value') is not None and d.get('unit')
+                and (d.get('unit') or '').lower() not in {
+                    'thb', 'usd', 'eur', 'gbp', 'jpy',
+                    'cny', 'sgd', 'hkd', 'aud', 'krw',
+                }
+            ),
+            datapoints[0] if datapoints else {},
+        )
         meta = {
             'datapoints': datapoints,
             'record_label': rec.record_label,
@@ -239,6 +255,10 @@ class EsgDataEntryService:
             'ghg_method': rec.ghg_method,
             'ghg_missing_fields': rec.ghg_missing_fields or [],
             'ghg_reason': rec.ghg_reason,
+            'ghg_source_name': rec.ghg_source_name,
+            'ghg_source_url': rec.ghg_source_url,
+            'ghg_ef_value': float(rec.ghg_ef_value) if rec.ghg_ef_value is not None else None,
+            'ghg_ef_unit': rec.ghg_ef_unit,
         }
         kg = float(rec.kgco2e) if rec.kgco2e is not None else None
         return {
@@ -248,11 +268,18 @@ class EsgDataEntryService:
             'line_user_id': rec.line_user_id,
             'category_id': rec.category_id,
             'subcategory_id': rec.subcategory_id,
-            'datapoint_id': head.get('datapoint_id'),
-            'category': '',  # category name resolved via category_id by FE
-            'value': head.get('value'),
-            'unit': head.get('unit'),
+            'datapoint_id': summary.get('datapoint_id'),
+            # Surface the record label as the card title — gives the
+            # user a real description ("Hotel Stay — Mr. Nattapong S.")
+            # instead of the generic "Uncategorized" fallback.
+            'category': rec.record_label or '',
+            'record_label': rec.record_label,
+            'value': summary.get('value'),
+            'unit': summary.get('unit'),
+            'datapoints': datapoints,            # for detail views
+            'datapoint_count': len(datapoints),
             'calculated_tco2e': (kg / 1000.0) if kg is not None else None,
+            'kgco2e': kg,
             'entry_date': str(rec.entry_date) if rec.entry_date else None,
             'record_date': str(rec.entry_date) if rec.entry_date else None,
             'notes': rec.notes,
@@ -260,8 +287,16 @@ class EsgDataEntryService:
             'file_name': None,
             'evidence_image_url': rec.evidence_image_url,
             'scope_tag': rec.pillar,
+            'scope3_category_id': rec.scope3_category_id,
             'metadata': meta,
             'extra_data': meta,
+            'ghg_status': rec.ghg_status,
+            'ghg_reason': rec.ghg_reason,
+            'ghg_method': rec.ghg_method,
+            'ghg_source_name': rec.ghg_source_name,
+            'ghg_source_url': rec.ghg_source_url,
+            'ghg_ef_value': float(rec.ghg_ef_value) if rec.ghg_ef_value is not None else None,
+            'ghg_ef_unit': rec.ghg_ef_unit,
             'currency': rec.currency,
             'entry_source': rec.entry_source,
             'status': rec.status,

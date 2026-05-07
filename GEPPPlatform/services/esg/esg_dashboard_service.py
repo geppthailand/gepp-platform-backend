@@ -66,21 +66,85 @@ class EsgDashboardService:
             return True  # default to scope3_only when no settings row yet
         return (settings.focus_mode or 'scope3_only') == 'scope3_only'
 
-    def _base_query(self, organization_id: int, user_id: Optional[int] = None):
+    def _resolve_user_org_ids(self, jwt_user_id: Optional[int],
+                               jwt_org_id: int) -> list:
+        """
+        Return every organization id the JWT user belongs to. Used so a
+        desktop user with memberships in multiple orgs sees the union
+        of their records — not just the org currently pinned in the
+        JWT (which can drift behind, e.g. when LINE-uploaded receipts
+        land in a different org_id than the desktop login resolved).
+        Falls back to [jwt_org_id] when we can't enumerate.
+        """
+        ids = {int(jwt_org_id)} if jwt_org_id else set()
+        if not jwt_user_id:
+            return list(ids) or [jwt_org_id]
+        try:
+            from ...models.users.user_location import UserLocation
+            email_row = (
+                self.db.query(UserLocation.email)
+                .filter(UserLocation.id == jwt_user_id)
+                .first()
+            )
+            email = email_row[0] if email_row else None
+            if email:
+                rows = (
+                    self.db.query(UserLocation.organization_id)
+                    .filter(UserLocation.email == email)
+                    .filter(UserLocation.organization_id.isnot(None))
+                    .distinct()
+                    .all()
+                )
+                for (oid,) in rows:
+                    if oid:
+                        ids.add(int(oid))
+        except Exception:
+            pass
+        return list(ids) or [jwt_org_id]
+
+    def _base_query(self, organization_id: int, user_id: Optional[int] = None,
+                    jwt_user_id: Optional[int] = None):
+        # ── Desktop fall-through ──────────────────────────────────────
+        # Desktop pages currently hit the LIFF endpoint (which always
+        # passes user_id). When the JWT user has *no* LINE binding,
+        # they're a desktop user, not a LINE user — so return the org
+        # aggregate instead of a zero-row user-scoped result. This is
+        # what makes the desktop Carbon Dashboard populate with the
+        # same numbers admins expect.
+        if user_id is not None:
+            line_uid = self._resolve_line_user_id(user_id, organization_id)
+            if not line_uid:
+                # No LINE binding → treat as desktop. Span all orgs the
+                # user belongs to so multi-org admins see the union.
+                org_ids = self._resolve_user_org_ids(user_id, organization_id)
+                return self.db.query(EsgRecord).filter(
+                    EsgRecord.organization_id.in_(org_ids),
+                    EsgRecord.is_active == True,
+                )
+
+        # Multi-org membership: when no per-LIFF-user filter is in
+        # play (true /api/dashboard/* path), include records from
+        # every org this email belongs to.
+        if user_id is None and jwt_user_id:
+            org_ids = self._resolve_user_org_ids(jwt_user_id, organization_id)
+            q = self.db.query(EsgRecord).filter(
+                EsgRecord.organization_id.in_(org_ids),
+                EsgRecord.is_active == True,
+            )
+            return q
+
         q = self.db.query(EsgRecord).filter(
             EsgRecord.organization_id == organization_id,
             EsgRecord.is_active == True,
         )
         if user_id is not None:
+            # user_id is set AND has a LINE binding (line_uid resolved above)
             line_uid = self._resolve_line_user_id(user_id, organization_id)
-            if line_uid:
-                from sqlalchemy import or_
-                q = q.filter(or_(
-                    EsgRecord.user_id == user_id,
-                    EsgRecord.line_user_id == line_uid,
-                ))
-            else:
-                q = q.filter(EsgRecord.user_id == user_id)
+            from sqlalchemy import or_
+            q = q.filter(or_(
+                EsgRecord.user_id == user_id,
+                EsgRecord.line_user_id == line_uid,
+            ))
         return q
 
     def _resolve_line_user_id(self, esg_user_id: int, organization_id: int = None) -> Optional[str]:
@@ -105,7 +169,8 @@ class EsgDashboardService:
             return None
 
     def _scope3_breakdown(
-        self, organization_id: int, user_id: Optional[int] = None
+        self, organization_id: int, user_id: Optional[int] = None,
+        jwt_user_id: Optional[int] = None,
     ) -> list:
         """
         SUM(tCO2e) per Scope 3 category 1..15 — for the user (LIFF) or org
@@ -113,6 +178,25 @@ class EsgDashboardService:
         Always returns 15 rows in category-id order, even if some are zero,
         so the dashboard can render a stable bar/donut.
         """
+        # Org scoping mirrors _base_query:
+        #   • user_id with no LINE binding (desktop user mistakenly
+        #     hitting the LIFF path) → expand to every org the user
+        #     belongs to.
+        #   • no user_id but JWT user_id present → multi-org expand.
+        #   • LIFF user with LINE binding → stay org-pinned + apply
+        #     the LINE-user filter below.
+        desktop_fallthrough = False
+        if user_id is not None:
+            line_uid = self._resolve_line_user_id(user_id, organization_id)
+            if not line_uid:
+                org_ids = self._resolve_user_org_ids(user_id, organization_id)
+                desktop_fallthrough = True
+            else:
+                org_ids = [organization_id]
+        elif jwt_user_id:
+            org_ids = self._resolve_user_org_ids(jwt_user_id, organization_id)
+        else:
+            org_ids = [organization_id]
         q = (
             self.db.query(
                 EsgDataCategory.scope3_category_id.label('cat_id'),
@@ -122,22 +206,23 @@ class EsgDashboardService:
             )
             .join(EsgRecord, EsgRecord.category_id == EsgDataCategory.id)
             .filter(
-                EsgRecord.organization_id == organization_id,
+                EsgRecord.organization_id.in_(org_ids),
                 EsgRecord.is_active == True,
                 EsgDataCategory.is_scope3 == True,
                 EsgDataCategory.scope3_category_id.isnot(None),
             )
         )
-        if user_id is not None:
+        # Apply the LINE-user filter only when the caller is a real
+        # LIFF user (has a LINE binding). Desktop users hitting the
+        # LIFF path with a UserLocation id end up here via
+        # desktop_fallthrough and stay unscoped (org-wide).
+        if user_id is not None and not desktop_fallthrough:
             line_uid = self._resolve_line_user_id(user_id, organization_id)
-            if line_uid:
-                from sqlalchemy import or_
-                q = q.filter(or_(
-                    EsgRecord.user_id == user_id,
-                    EsgRecord.line_user_id == line_uid,
-                ))
-            else:
-                q = q.filter(EsgRecord.user_id == user_id)
+            from sqlalchemy import or_
+            q = q.filter(or_(
+                EsgRecord.user_id == user_id,
+                EsgRecord.line_user_id == line_uid,
+            ))
         q = q.group_by(EsgDataCategory.scope3_category_id, EsgDataCategory.name)
         rows = q.all()
 
@@ -162,6 +247,7 @@ class EsgDashboardService:
         self,
         organization_id: int,
         user_id: Optional[int] = None,
+        jwt_user_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Summary KPIs.
@@ -173,7 +259,7 @@ class EsgDashboardService:
                 /summary endpoint so each LINE user sees their own numbers.
                 Desktop callers leave this None.
         """
-        base = self._base_query(organization_id, user_id)
+        base = self._base_query(organization_id, user_id, jwt_user_id=jwt_user_id)
         scope3_only = self._is_scope3_only(organization_id)
 
         # Total tCO2e
@@ -190,7 +276,7 @@ class EsgDashboardService:
         # Breakdown — scope3 categories when scope3_only, else legacy scopes
         if scope3_only:
             scope_breakdown = []
-            scope3_breakdown = self._scope3_breakdown(organization_id, user_id)
+            scope3_breakdown = self._scope3_breakdown(organization_id, user_id, jwt_user_id=jwt_user_id)
         else:
             scope_breakdown = []
             for scope_tag in ['Scope 1', 'Scope 2', 'Scope 3']:
@@ -248,21 +334,37 @@ class EsgDashboardService:
         organization_id: int,
         year: int = None,
         user_id: Optional[int] = None,
+        jwt_user_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Chart data: donut (scope3 categories) + monthly trend.
 
         Same per-user / focus-mode behaviour as get_summary.
         """
+        explicit_year = bool(year)
         if not year:
             year = datetime.utcnow().year
 
-        base = self._base_query(organization_id, user_id)
+        base = self._base_query(organization_id, user_id, jwt_user_id=jwt_user_id)
         scope3_only = self._is_scope3_only(organization_id)
+
+        # If caller didn't pin a year and the default (current calendar)
+        # year has no records, fall back to the most recent year that
+        # does. Without this, an org viewing 2023 receipts from 2026
+        # sees an entirely-empty Monthly Trend chart.
+        if not explicit_year:
+            recent_year = (
+                base
+                .filter(EsgRecord.entry_date.isnot(None))
+                .with_entities(func.max(extract('year', EsgRecord.entry_date)))
+                .scalar()
+            )
+            if recent_year:
+                year = int(recent_year)
 
         # Donut — scope3 category proportions when scope3_only
         if scope3_only:
-            scope3 = self._scope3_breakdown(organization_id, user_id)
+            scope3 = self._scope3_breakdown(organization_id, user_id, jwt_user_id=jwt_user_id)
             donut_data = [
                 {
                     'category_id': r['scope3_category_id'],

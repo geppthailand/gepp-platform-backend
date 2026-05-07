@@ -73,10 +73,9 @@ class EsgReportService:
 
         view: 'executive' | 'manager' | 'operations'
         """
+        explicit_year = bool(year)
         if not year:
             year = datetime.now(timezone.utc).year
-
-        prev_year = year - 1
 
         # Base query — per-user filter ORs on user_id and line_user_id so
         # legacy LINE-webhook entries with user_id=0 still surface.
@@ -94,6 +93,23 @@ class EsgReportService:
                 ))
             else:
                 base = base.filter(EsgRecord.user_id == user_id)
+
+        # If the caller didn't pin a specific year and the default
+        # (current calendar) year has no records, fall back to the
+        # most recent year that does. Without this the LIFF dashboard
+        # silently shows empty sections for orgs whose receipts are
+        # historical (e.g. 2023 test data viewed in 2026).
+        if not explicit_year:
+            recent = (
+                base
+                .filter(EsgRecord.entry_date.isnot(None))
+                .with_entities(func.max(extract('year', EsgRecord.entry_date)))
+                .scalar()
+            )
+            if recent:
+                year = int(recent)
+
+        prev_year = year - 1
         base_year_q = base.filter(extract('year', EsgRecord.entry_date) == year)
         base_prev_q = base.filter(extract('year', EsgRecord.entry_date) == prev_year)
 

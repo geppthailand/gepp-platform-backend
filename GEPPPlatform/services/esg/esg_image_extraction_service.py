@@ -21,6 +21,26 @@ logger = logging.getLogger(__name__)
 
 LIFF_BASE_URL = os.environ.get('LIFF_BASE_URL', 'https://esg.gepp.me')
 
+# All web links sent inside LINE Flex cards must go through the LIFF
+# entry URL so they open inside the LIFF in-app browser.
+#
+# IMPORTANT: the LIFF entry URL itself already maps to the app's
+# `/liff` endpoint. So paths passed in here are RELATIVE to /liff —
+# do NOT include a leading `/liff`. E.g. `_liff_url('/app/history')`
+# resolves to /liff/app/history.
+LIFF_ENTRY_BASE = os.environ.get(
+    'LIFF_ENTRY_BASE',
+    'https://liff.line.me/2009993849-GpYCVVmc',
+).rstrip('/')
+
+
+def _liff_url(path: str = '') -> str:
+    if not path:
+        return LIFF_ENTRY_BASE
+    if not path.startswith('/'):
+        path = '/' + path
+    return f'{LIFF_ENTRY_BASE}{path}'
+
 
 class EsgImageExtractionService:
 
@@ -125,7 +145,12 @@ class EsgImageExtractionService:
                 }
                 for r in record_dicts:
                     cat_name = _label_to_cat.get(r.get('record_label'), '') or 'Unknown'
-                    for d in (r.get('datapoints') or []):
+                    record_kg = r.get('kgco2e')
+                    record_tco2e = (
+                        float(record_kg) / 1000.0
+                        if record_kg is not None else None
+                    )
+                    for idx, d in enumerate(r.get('datapoints') or []):
                         entries.append({
                             'id': r.get('id'),
                             'category': cat_name,
@@ -135,9 +160,11 @@ class EsgImageExtractionService:
                             'field': d.get('canonical_name') or d.get('datapoint_name'),
                             'value': d.get('value'),
                             'unit': d.get('unit'),
-                            'calculated_tco2e':
-                                (float(r.get('kgco2e')) / 1000.0)
-                                if r.get('kgco2e') is not None else None,
+                            # Attach the record-level tCO2e to the FIRST
+                            # datapoint dict only. Otherwise downstream
+                            # SUMs over `entries` would double-count by
+                            # the number of datapoints per record.
+                            'calculated_tco2e': record_tco2e if idx == 0 else None,
                             'extra_data': {
                                 'record_label': r.get('record_label'),
                                 'tags': d.get('tags'),
@@ -1081,7 +1108,7 @@ CRITICAL — DO NOT confuse these refs fields (common LLM errors with Thai recei
                         },
                         {
                             'type': 'button',
-                            'action': {'type': 'uri', 'label': 'ดูใน LIFF', 'uri': f'{LIFF_BASE_URL}/liff/app/history'},
+                            'action': {'type': 'uri', 'label': 'ดูใน LIFF', 'uri': _liff_url('/app/history')},
                             'style': 'secondary', 'height': 'sm',
                         },
                     ],
@@ -1107,7 +1134,7 @@ CRITICAL — DO NOT confuse these refs fields (common LLM errors with Thai recei
                 'footer': {
                     'type': 'box', 'layout': 'vertical',
                     'contents': [
-                        {'type': 'button', 'action': {'type': 'uri', 'label': 'กรอกข้อมูลใน LIFF', 'uri': f'{LIFF_BASE_URL}/liff/app/entry'}, 'style': 'primary', 'color': '#2d6a4f'},
+                        {'type': 'button', 'action': {'type': 'uri', 'label': 'กรอกข้อมูลใน LIFF', 'uri': _liff_url('/app/entry')}, 'style': 'primary', 'color': '#2d6a4f'},
                     ],
                 },
             },

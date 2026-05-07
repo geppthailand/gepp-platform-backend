@@ -23,7 +23,9 @@ from typing import Any, Optional
 from sqlalchemy.orm import Session
 
 from ...models.esg.user_materiality import EsgUserMateriality
+from ...models.esg.materiality_submission import EsgMaterialitySubmission
 from ...models.esg.settings import EsgOrganizationSettings
+from ...models.esg.esg_users import EsgUser
 from . import materiality_config
 
 logger = logging.getLogger(__name__)
@@ -127,16 +129,23 @@ class MaterialityService:
         user_id: int,
         org_id: int,
         answers: dict,
+        submitter_name: Optional[str] = None,
     ) -> dict[str, Any]:
         """
         Final submit: re-runs scoring server-side, persists the result,
-        and set-unions derived_categories into the org-level whitelist.
+        appends an immutable submission record, and set-unions
+        derived_categories into the org-level whitelist.
+
+        `submitter_name` is the "ชื่อ/ชื่อบริษัท" textbox the LIFF
+        wizard now collects before each run. We persist it on every
+        submission row so an admin can see who answered which round
+        even when one EsgUser id covers multiple LINE accounts.
         """
         result = materiality_config.compute_scores(answers or {})
         derived = list(result.get('derivedCategories') or [])
         scores = {str(k): v for k, v in (result.get('scores') or {}).items()}
 
-        # Upsert the per-user record.
+        # Upsert the per-user record (latest state).
         rec = self._get_record(user_id, org_id)
         if not rec:
             rec = EsgUserMateriality(
@@ -151,8 +160,27 @@ class MaterialityService:
         rec.completed_at = datetime.now(timezone.utc)
 
         q1 = (answers or {}).get('q1_industry') or {}
+        industry_other = None
         if q1.get('selected') == 'other' and q1.get('freeText'):
-            rec.industry_other_text = q1.get('freeText')
+            industry_other = q1.get('freeText')
+            rec.industry_other_text = industry_other
+
+        # Append-only history row. One per submission — no upsert.
+        line_user_id, line_display_name = self._lookup_line_identity(user_id)
+        submission = EsgMaterialitySubmission(
+            user_id=user_id,
+            organization_id=org_id,
+            submitter_name=(submitter_name or '').strip()[:255] or '(unspecified)',
+            line_user_id=line_user_id,
+            line_display_name=line_display_name,
+            questions_version=str(materiality_config.questions_version()),
+            answers=answers or {},
+            derived_categories=derived,
+            category_scores=scores,
+            industry_other_text=industry_other,
+            submitted_at=datetime.now(timezone.utc),
+        )
+        self.db.add(submission)
 
         # Set-union into the org whitelist so any teammate's material
         # categories are visible across the org.
@@ -169,4 +197,24 @@ class MaterialityService:
             'enabledScope3Categories': unioned,
             'scores': scores,
             'focusMode': settings.focus_mode or 'scope3_only',
+            'submissionId': submission.id,
         }
+
+    # ─── helpers ────────────────────────────────────────────────────────
+
+    def _lookup_line_identity(self, user_id: int) -> tuple[Optional[str], Optional[str]]:
+        """Best-effort fetch of (line_user_id, displayName) for an EsgUser."""
+        try:
+            row = (
+                self.db.query(EsgUser)
+                .filter(EsgUser.id == user_id, EsgUser.platform == 'line')
+                .first()
+            )
+            if not row:
+                return None, None
+            return (
+                getattr(row, 'platform_user_id', None),
+                getattr(row, 'display_name', None),
+            )
+        except Exception:
+            return None, None

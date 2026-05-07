@@ -24,6 +24,7 @@ from .macc import EsgMaccInitiative
 from .condition_rules import EsgConditionRule
 from .xbrl import EsgXbrlTag, EsgXbrlReportValue
 from .user_materiality import EsgUserMateriality
+from .materiality_submission import EsgMaterialitySubmission
 
 __all__ = [
     'EsgOrganizationSettings',
@@ -48,4 +49,5 @@ __all__ = [
     'EsgConditionRule',
     'EsgXbrlTag', 'EsgXbrlReportValue',
     'EsgUserMateriality',
+    'EsgMaterialitySubmission',
 ]

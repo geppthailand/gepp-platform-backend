@@ -153,8 +153,15 @@ class LiffAuthService:
         self.session.commit()
         self.session.refresh(invitation)
 
-        liff_base = os.environ.get('LIFF_BASE_URL', 'https://esg.gepp.me')
-        invite_url = f'{liff_base}/liff?invite={token}'
+        # Invitation URLs are shared into LINE chat / QR codes — use the
+        # LIFF entry URL so they open inside the LIFF in-app browser.
+        # The LIFF prefix already represents `/liff`, so we just append
+        # the invite query directly.
+        liff_entry = os.environ.get(
+            'LIFF_ENTRY_BASE',
+            'https://liff.line.me/2009993849-GpYCVVmc',
+        ).rstrip('/')
+        invite_url = f'{liff_entry}?invite={token}'
 
         return {
             'success': True,
@@ -301,13 +308,16 @@ class LiffAuthService:
             .limit(20)
             .all()
         )
-        liff_base = os.environ.get('LIFF_BASE_URL', 'https://esg.gepp.me')
+        liff_entry = os.environ.get(
+            'LIFF_ENTRY_BASE',
+            'https://liff.line.me/2009993849-GpYCVVmc',
+        ).rstrip('/')
         return {
             'success': True,
             'invitations': [
                 {
                     **inv.to_dict(),
-                    'url': f'{liff_base}/liff?invite={inv.token}',
+                    'url': f'{liff_entry}?invite={inv.token}',
                 }
                 for inv in invitations
             ],

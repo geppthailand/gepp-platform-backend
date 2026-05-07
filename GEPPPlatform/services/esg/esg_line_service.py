@@ -25,6 +25,33 @@ logger = logging.getLogger(__name__)
 
 LIFF_BASE_URL = os.environ.get('LIFF_BASE_URL', 'https://esg.gepp.me')
 
+# All web links sent inside LINE Flex cards must use the LIFF entry
+# URL so they open inside the LIFF in-app browser (with liff.* APIs
+# available) instead of LINE's plain external browser.
+#
+# IMPORTANT: the LIFF entry URL itself already maps to the app's
+# `/liff` endpoint configured in the LINE Developer Console. So paths
+# passed in here are RELATIVE to /liff — do NOT include a leading
+# `/liff`. E.g. `_liff_url('/app/esg')` resolves to /liff/app/esg.
+# Pass an empty string (or omit) to get the LIFF root URL itself.
+LIFF_ENTRY_BASE = os.environ.get(
+    'LIFF_ENTRY_BASE',
+    'https://liff.line.me/2009993849-GpYCVVmc',
+).rstrip('/')
+
+
+def _liff_url(path: str = '') -> str:
+    """Build a https://liff.line.me/{liffId}{path} URL for use in LINE
+    Flex card buttons. The LIFF prefix already represents `/liff` on
+    the host — pass paths relative to /liff (e.g. '/app/esg', not
+    '/liff/app/esg'). Empty path returns the bare LIFF entry URL,
+    which lands on /liff itself."""
+    if not path:
+        return LIFF_ENTRY_BASE
+    if not path.startswith('/'):
+        path = '/' + path
+    return f'{LIFF_ENTRY_BASE}{path}'
+
 # Fallback LINE channel access token for the ESG Messaging API channel.
 # Per-org tokens stored in esg_organization_settings.line_channel_token
 # take precedence; this env is the fallback. ESG-prefixed so it doesn't
@@ -123,7 +150,7 @@ class EsgLineService:
         channel_token = getattr(org, 'line_channel_token', None) or LINE_FALLBACK_TOKEN
         logger.info(f"[FOLLOW] userId={event.get('source', {}).get('userId', '?')[:12]}, org={org is not None}")
 
-        liff_url = LIFF_BASE_URL
+        join_url = _liff_url()
 
         welcome = {
             'type': 'flex',
@@ -143,7 +170,7 @@ class EsgLineService:
                 'footer': {
                     'type': 'box', 'layout': 'vertical', 'spacing': 'sm',
                     'contents': [
-                        {'type': 'button', 'action': {'type': 'uri', 'label': 'เข้าร่วมองค์กร', 'uri': f'{liff_url}/liff'}, 'style': 'primary', 'color': '#2d6a4f'},
+                        {'type': 'button', 'action': {'type': 'uri', 'label': 'เข้าร่วมองค์กร', 'uri': join_url}, 'style': 'primary', 'color': '#2d6a4f'},
                     ],
                 },
             },
@@ -172,15 +199,15 @@ class EsgLineService:
             return self._confirm_all_entries(int(params['extraction_id']), channel_token, reply_token)
 
         if action == 'edit' and params.get('entry_id'):
-            edit_url = f'{LIFF_BASE_URL}/liff/app/entry?edit={params["entry_id"]}'
+            edit_url = _liff_url(f'/app/entry?edit={params["entry_id"]}')
             self._send_text_reply(channel_token, reply_token, f'แก้ไขข้อมูล:\n{edit_url}')
             return {'status': 'success', 'type': 'edit_redirect'}
 
         uri_actions = {
-            'data_entry': f'{LIFF_BASE_URL}/data-entry',
-            'history': f'{LIFF_BASE_URL}/history',
-            'export': f'{LIFF_BASE_URL}/history',
-            'dashboard': f'{LIFF_BASE_URL}/dashboard',
+            'data_entry': _liff_url('/app/entry'),
+            'history': _liff_url('/app/history'),
+            'export': _liff_url('/app/history'),
+            'dashboard': _liff_url('/app/esg'),
         }
         if action in uri_actions:
             self._send_text_reply(org.line_channel_token, reply_token, f'เปิดหน้า:\n{uri_actions[action]}')
@@ -282,7 +309,7 @@ class EsgLineService:
 
         if not esg_user:
             # User not linked — reply with instruction to join org first
-            liff_url = LIFF_BASE_URL
+            join_url = _liff_url()
             self._send_reply_raw(channel_token, reply_token, [{
                 'type': 'flex',
                 'altText': 'กรุณาเข้าร่วมองค์กรก่อนใช้งาน',
@@ -299,7 +326,7 @@ class EsgLineService:
                     'footer': {
                         'type': 'box', 'layout': 'vertical', 'spacing': 'sm',
                         'contents': [
-                            {'type': 'button', 'action': {'type': 'uri', 'label': 'เข้าร่วมองค์กร', 'uri': f'{liff_url}/liff'}, 'style': 'primary', 'color': '#2d6a4f'},
+                            {'type': 'button', 'action': {'type': 'uri', 'label': 'เข้าร่วมองค์กร', 'uri': join_url}, 'style': 'primary', 'color': '#2d6a4f'},
                         ],
                     },
                 },
@@ -350,7 +377,7 @@ class EsgLineService:
 
         if text_lower in ('status', 'สถานะ', 'สรุป', 'summary'):
             self._send_text_reply(token, line_msg.line_reply_token,
-                                  f'ดูสรุปภาพรวม:\n{LIFF_BASE_URL}/liff/app/esg')
+                                  f'ดูสรุปภาพรวม:\n{_liff_url("/app/esg")}')
             line_msg.processing_status = 'completed'
             self.db.flush()
             return {'status': 'success', 'type': 'status'}
@@ -1331,7 +1358,7 @@ class EsgLineService:
         Header: ✓ บันทึกลงระบบสำเร็จ + Audit-Ready pill
         Body: หมวดหมู่ + Cat number, source TYPE, record count + IDs,
               doc total amount, doc CO₂e
-        Footer: ดู Executive Dashboard / ดาวน์โหลด Excel / สร้างภาพ Social Report
+        Footer: ดู Executive Dashboard / ดาวน์โหลด Excel
         """
         doc = self._doc_no(doc_id)
         cat_label = f'Cat {scope3_id}: {name_en or name_th or "Scope 3"}'
@@ -1354,9 +1381,8 @@ class EsgLineService:
         )
         record_count_text = f'{record_count:,} รายการ' if record_count else '—'
         record_ids_text = self._format_record_id_list(record_ids)
-        excel_url = f'{LIFF_BASE_URL}/liff/app/excel-download?cat={scope3_id}'
-        social_url = f'{LIFF_BASE_URL}/liff/app/social-report?cat={scope3_id}'
-        dashboard_url = f'{LIFF_BASE_URL}/liff/app/esg'
+        excel_url = _liff_url(f'/app/excel-download?cat={scope3_id}')
+        dashboard_url = _liff_url('/app/esg')
 
         return {
             'type': 'flex',
@@ -1493,11 +1519,6 @@ class EsgLineService:
                          'action': {'type': 'uri',
                                     'label': 'ดาวน์โหลด Excel',
                                     'uri': excel_url}},
-                        {'type': 'button', 'style': 'secondary',
-                         'height': 'sm',
-                         'action': {'type': 'uri',
-                                    'label': 'สร้างภาพ Social Report',
-                                    'uri': social_url}},
                     ],
                 },
             },
@@ -1638,7 +1659,7 @@ class EsgLineService:
                 'size': 'xs', 'color': '#64748b', 'wrap': True,
             }]
 
-        liff_url = f'{LIFF_BASE_URL}/liff/app/history'
+        liff_url = _liff_url('/app/history')
         total_text = f'{total_tco2e:.4f}' if total_tco2e and total_tco2e > 0 else '0.0000'
 
         return {

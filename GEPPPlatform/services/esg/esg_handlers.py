@@ -2,7 +2,8 @@
 ESG API Handlers — Route dispatch for all ESG endpoints
 """
 
-from typing import Dict, Any
+from typing import Dict, Any, Optional
+from datetime import datetime
 import logging
 import traceback
 
@@ -133,10 +134,76 @@ def handle_esg_routes(event: Dict[str, Any], data: Dict[str, Any], **params) -> 
                 return export_service.export_to_pdf(current_user_org_id)
             return export_service.export_to_excel(current_user_org_id)
 
+        # ===== TGO-FORMAT SCOPE 3 EXPORT =====
+        # Two routes (LIFF + desktop) hitting the same service. Body:
+        #   { year: int, scope3_category_id?: int (1..15) }
+        # When `scope3_category_id` is omitted, the workbook contains
+        # all 15 detail sheets; when set, just that one sheet + a
+        # 1-row summary block. Audit-grade, org-wide.
+        elif path in ('/api/esg/liff/scope3-export', '/api/esg/scope3-export') and method == 'POST':
+            from .esg_scope3_export_service import EsgScope3ExportService
+            from ...models.esg.esg_users import EsgUser
+            body = data or {}
+            year = body.get('year')
+            try:
+                year = int(year) if year else datetime.utcnow().year
+            except (TypeError, ValueError):
+                raise BadRequestException('`year` must be an integer')
+            cat = body.get('scope3_category_id') or body.get('cat')
+            try:
+                cat = int(cat) if cat else None
+            except (TypeError, ValueError):
+                cat = None
+            if cat is not None and not (1 <= cat <= 15):
+                raise BadRequestException('`scope3_category_id` must be 1..15')
+
+            # Optional LINE-chat delivery. Body: { delivery: 'line_chat' }.
+            # Resolves the JWT user → EsgUser → platform_user_id so we can
+            # call the LINE Push API. When delivery is missing or no LINE
+            # binding exists, fall back to the regular S3 download URL.
+            push_target: Optional[str] = None
+            delivery = (body.get('delivery') or '').strip().lower()
+            if delivery == 'line_chat' and current_user_id:
+                try:
+                    line_user = (
+                        db_session.query(EsgUser)
+                        .filter(
+                            EsgUser.id == int(current_user_id),
+                            EsgUser.platform == 'line',
+                        )
+                        .first()
+                    )
+                    if line_user and line_user.platform_user_id:
+                        push_target = line_user.platform_user_id
+                except Exception:
+                    logger.exception('Could not resolve LINE id for push')
+
+            svc = EsgScope3ExportService(db_session)
+            return svc.export(
+                organization_id=current_user_org_id,
+                year=year,
+                scope3_category_id=cat,
+                push_to_line_user_id=push_target,
+            )
+
         elif path == '/api/esg/liff/upload-url' and method == 'POST':
             if not data or not data.get('file_name'):
                 raise BadRequestException('file_name is required')
             return _handle_upload_url(data, current_user_id, current_user_org_id, db_session)
+
+        # ===== AI EXTRACTION FROM UPLOADED IMAGE =====
+        # Used by /data-entry (desktop) and /liff/app/entry?category=N
+        # to mirror the LINE-chat image-upload flow. Caller first
+        # uploads the file via /upload-url, then POSTs the file_key
+        # here. We run the same extraction pipeline that the LINE
+        # webhook uses and return the resulting EsgRecord rows.
+        elif path == '/api/esg/extract-image' and method == 'POST':
+            if not data or not data.get('file_key'):
+                raise BadRequestException('file_key is required')
+            return _handle_extract_image(
+                data, current_user_id, current_user_org_id, db_session,
+            )
+
 
         # ===== PRESIGNED VIEW URL =====
         elif path == '/api/esg/presigned-view' and method == 'POST':
@@ -179,12 +246,18 @@ def handle_esg_routes(event: Dict[str, Any], data: Dict[str, Any], **params) -> 
         # ===== LEGACY DASHBOARD (keep for backward compat) =====
         elif path == '/api/dashboard/summary' and method == 'GET':
             dash = EsgDashboardService(db_session)
-            return dash.get_summary(current_user_org_id)
+            return dash.get_summary(
+                current_user_org_id,
+                jwt_user_id=int(current_user_id) if current_user_id else None,
+            )
 
         elif path == '/api/dashboard/charts' and method == 'GET':
             dash = EsgDashboardService(db_session)
             year = int(query_params.get('year', 0)) or None
-            return dash.get_charts(current_user_org_id, year)
+            return dash.get_charts(
+                current_user_org_id, year,
+                jwt_user_id=int(current_user_id) if current_user_id else None,
+            )
 
         # ===== SETTINGS =====
         if path == '/api/esg/settings' and method == 'GET':
@@ -440,6 +513,8 @@ def handle_esg_routes(event: Dict[str, Any], data: Dict[str, Any], **params) -> 
                 int(current_user_id),
                 int(current_user_org_id),
                 data.get('answers') or {},
+                submitter_name=data.get('submitterName')
+                              or data.get('submitter_name'),
             )
             return {'success': True, 'data': result}
 
@@ -478,38 +553,110 @@ def _handle_presigned_view(s3_url: str):
 
 
 def _handle_upload_url(data, current_user_id, current_user_org_id, db_session):
-    """Generate a single pre-signed S3 upload URL for data entry evidence"""
-    import boto3
-    import uuid
-    import os
-    from datetime import datetime
+    """
+    Generate a presigned POST for ESG evidence upload.
+
+    Uses the same `TransactionPresignedUrlService` the transactions
+    module uses — that flow is browser-friendly (form POST with
+    `upload_fields`, not raw PUT) and the bucket CORS is already wired
+    for it. Frontend posts a multipart FormData built from
+    `upload_fields` + the file.
+    """
+    from ..cores.transactions.presigned_url_service import TransactionPresignedUrlService
 
     file_name = data['file_name']
-    content_type = data.get('content_type', 'application/octet-stream')
-    line_user_id = data.get('line_user_id', 'web')
-
-    s3 = boto3.client('s3')
-    bucket = os.environ.get('S3_BUCKET_NAME', 'prod-gepp-platform-assets')
-    ext = file_name.rsplit('.', 1)[-1] if '.' in file_name else 'bin'
-    date_str = datetime.utcnow().strftime('%Y%m%d')
-    hash_id = uuid.uuid4().hex[:12]
-    file_key = f'esg/org/{current_user_org_id}/LINE/{line_user_id}/{date_str}_{hash_id}.{ext}'
-
-    upload_url = s3.generate_presigned_url(
-        'put_object',
-        Params={
-            'Bucket': bucket,
-            'Key': file_key,
-            'ContentType': content_type,
-        },
-        ExpiresIn=3600,
+    presigned_service = TransactionPresignedUrlService()
+    result = presigned_service.get_transaction_file_upload_presigned_urls(
+        file_names=[file_name],
+        organization_id=current_user_org_id,
+        user_id=int(current_user_id) if current_user_id else 0,
+        db=db_session,
+        # `FileType.document` is the closest existing enum value for
+        # ESG evidence (receipts, invoices, manifests). Adding a new
+        # enum value would need a DB migration, which we skip here.
+        file_type='document',
+        related_entity_type='esg_record',
+        expiration_seconds=3600,
     )
-
+    if not result.get('success') or not result.get('presigned_urls'):
+        raise BadRequestException(result.get('message') or 'failed to generate upload URL')
+    item = result['presigned_urls'][0]
     return {
         'success': True,
-        'upload_url': upload_url,
-        'file_key': file_key,
+        # Browser POSTs to `upload_url` with FormData containing each
+        # `upload_fields` entry + the file as the last field.
+        'upload_url': item['upload_url'],
+        'upload_fields': item['upload_fields'],
+        'file_key': item['s3_key'],
+        # Final S3 URL once the upload completes — what we hand to the
+        # extraction service as `s3_url`.
+        'final_s3_url': item['final_s3_url'],
         'expires_in': 3600,
+    }
+
+
+def _handle_extract_image(data, current_user_id, current_user_org_id, db_session):
+    """
+    Run the same AI extraction pipeline the LINE webhook uses on a
+    user-uploaded image, then return the persisted EsgRecord rows.
+
+    Caller flow:
+      1) POST /api/esg/liff/upload-url    → { upload_url, file_key }
+      2) PUT  upload_url with the image bytes
+      3) POST /api/esg/extract-image      → { records, summary }
+
+    Body:
+      file_key (str, required)         — S3 key returned in step 1
+      category_hint (int, optional)    — Scope 3 category 1..15 the user
+                                         picked on the form. Currently
+                                         used for telemetry; the LLM
+                                         still classifies on its own.
+    """
+    from .esg_image_extraction_service import EsgImageExtractionService
+    import os
+
+    file_key = data['file_key']
+    # The downstream LLM client (`_call_llm_with_images`) only
+    # presigns URLs that start with `s3://`; anything else (including
+    # the public HTTPS URL the presigned-POST flow returns) gets
+    # passed verbatim and Gemini hits 403 on the private bucket.
+    # Always normalise to `s3://bucket/key` here, identical to how
+    # the LINE webhook passes the image.
+    bucket = os.environ.get('S3_BUCKET_NAME', 'prod-gepp-platform-assets')
+    if file_key.startswith('s3://'):
+        s3_url = file_key
+    elif file_key.startswith('http'):
+        # Strip protocol + host; what's left is the key.
+        from urllib.parse import urlparse
+        parsed = urlparse(file_key)
+        host_bucket = parsed.netloc.split('.')[0] if parsed.netloc else bucket
+        key = parsed.path.lstrip('/')
+        s3_url = f's3://{host_bucket}/{key}'
+    else:
+        s3_url = f's3://{bucket}/{file_key.lstrip("/")}'
+
+    # `line_user_id` is the EsgRecord owner column we filter LIFF
+    # history on. For desktop / LIFF-form uploads we don't have a LINE
+    # platform_user_id, so we tag with a synthetic identifier that the
+    # downstream queries can still match on.
+    line_user_id = (data.get('line_user_id') or '').strip()
+    if not line_user_id and current_user_id:
+        line_user_id = f'user-{current_user_id}'
+
+    svc = EsgImageExtractionService(db_session)
+    result = svc.extract_from_image(
+        s3_url=s3_url,
+        org_id=current_user_org_id,
+        line_user_id=line_user_id,
+        message_id=f'web-{current_user_id}-{file_key[-12:]}',
+    )
+    # Trim down — frontend only needs the records + refs + extraction id
+    return {
+        'success': bool(result.get('success')),
+        'extraction_id': result.get('extraction_id'),
+        'records': result.get('records') or [],
+        'refs': result.get('refs') or {},
+        'message': result.get('message') or 'extraction complete',
     }
 
 
