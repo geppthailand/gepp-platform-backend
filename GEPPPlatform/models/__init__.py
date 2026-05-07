@@ -64,7 +64,8 @@ __all__ = [
     # Core models
     'LocationCountry', 'LocationRegion', 'LocationProvince',
     'LocationDistrict', 'LocationSubdistrict',
-    'Bank', 'Currency', 'Locale', 'Material', 'MainMaterial', 'MaterialCategory', 'IoTDevice',
+    'Bank', 'Currency', 'Locale', 'Material', 'MainMaterial', 'MaterialCategory', 'IoTDevice', 'IoTHardware',
+    'DeviceHealth', 'DeviceEvent', 'DeviceCommand', 'DeviceHealthHistory',
     'MaterialTag', 'MaterialTagGroup',
     'Nationality', 'PhoneNumberCountryCode',
     'Permission', 'PermissionType',

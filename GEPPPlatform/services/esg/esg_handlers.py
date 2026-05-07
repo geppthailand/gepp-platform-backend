@@ -16,6 +16,7 @@ from .esg_dashboard_service import EsgDashboardService
 from .esg_carbon_service import EsgCarbonService
 from .esg_notification_service import EsgNotificationService
 from .liff_auth_service import LiffAuthService
+from .materiality_service import MaterialityService
 from ...exceptions import (
     APIException, UnauthorizedException, NotFoundException,
     BadRequestException, ValidationException
@@ -43,21 +44,32 @@ def handle_esg_routes(event: Dict[str, Any], data: Dict[str, Any], **params) -> 
 
     try:
         # ===== LIFF APIs (/api/esg/liff/*) =====
+        # Every LIFF endpoint is scoped to the current LINE user — they
+        # see their own dashboard / history / report only. The org-wide
+        # view stays on the desktop platform under /api/esg/* (no /liff
+        # prefix).
+        liff_user_id = int(current_user_id) if current_user_id else None
+
         if path == '/api/esg/liff/report' and method == 'GET':
             from .esg_report_service import EsgReportService
             report_svc = EsgReportService(db_session)
             year = int(query_params.get('year', 0)) or None
             view = query_params.get('view', 'executive')
-            return report_svc.get_report(current_user_org_id, year=year, view=view)
+            return report_svc.get_report(
+                current_user_org_id,
+                year=year,
+                view=view,
+                user_id=liff_user_id,
+            )
 
         elif path == '/api/esg/liff/summary' and method == 'GET':
             dash = EsgDashboardService(db_session)
-            return dash.get_summary(current_user_org_id)
+            return dash.get_summary(current_user_org_id, user_id=liff_user_id)
 
         elif path == '/api/esg/liff/charts' and method == 'GET':
             dash = EsgDashboardService(db_session)
             year = int(query_params.get('year', 0)) or None
-            return dash.get_charts(current_user_org_id, year)
+            return dash.get_charts(current_user_org_id, year, user_id=liff_user_id)
 
         elif path == '/api/esg/liff/entries' and method == 'GET':
             entry_service = EsgDataEntryService(db_session)
@@ -66,6 +78,7 @@ def handle_esg_routes(event: Dict[str, Any], data: Dict[str, Any], **params) -> 
                 page=int(query_params.get('page', 1)),
                 size=min(int(query_params.get('size', 10)), 100),
                 status=query_params.get('status'),
+                user_id=liff_user_id,
             )
 
         elif path == '/api/esg/liff/entries' and method == 'POST':
@@ -310,6 +323,14 @@ def handle_esg_routes(event: Dict[str, Any], data: Dict[str, Any], **params) -> 
             dp_id = int(path.split('/datapoint/')[1].split('/records')[0])
             return esg_service.get_datapoint_records(current_user_org_id, dp_id)
 
+        elif '/api/esg/data-warehouse/scope3/' in path and '/records' in path and method == 'GET':
+            # GET /api/esg/data-warehouse/scope3/{1..15}/records
+            # Returns records grouped by record_label for the modal table.
+            scope3_cat_id = int(path.split('/scope3/')[1].split('/records')[0])
+            return esg_service.get_scope3_category_records(
+                current_user_org_id, scope3_cat_id
+            )
+
         # ===== DATA HIERARCHY =====
         elif path == '/api/esg/categories' and method == 'GET':
             return esg_service.list_categories(query_params.get('pillar'))
@@ -386,6 +407,41 @@ def handle_esg_routes(event: Dict[str, Any], data: Dict[str, Any], **params) -> 
         # ===== PRESIGNED URLs =====
         elif path == '/api/esg/presigneds' and method == 'POST':
             return _handle_presigned_urls(data, current_user_id, current_user_org_id, db_session)
+
+        # ===== Materiality Filter =====
+        elif path == '/api/esg/materiality/me' and method == 'GET':
+            if not current_user_id or not current_user_org_id:
+                raise UnauthorizedException('User context required')
+            mat = MaterialityService(db_session)
+            state = mat.get_state(int(current_user_id), int(current_user_org_id))
+            return {'success': True, 'data': state}
+
+        elif path == '/api/esg/materiality/me' and method == 'PATCH':
+            if not current_user_id or not current_user_org_id:
+                raise UnauthorizedException('User context required')
+            if not data:
+                raise BadRequestException('Request body is required')
+            mat = MaterialityService(db_session)
+            state = mat.patch_progress(
+                int(current_user_id),
+                int(current_user_org_id),
+                data.get('answers') or {},
+                data.get('lastQuestionId'),
+            )
+            return {'success': True, 'data': state}
+
+        elif path == '/api/esg/materiality/me/complete' and method == 'POST':
+            if not current_user_id or not current_user_org_id:
+                raise UnauthorizedException('User context required')
+            if not data:
+                raise BadRequestException('Request body is required')
+            mat = MaterialityService(db_session)
+            result = mat.complete(
+                int(current_user_id),
+                int(current_user_org_id),
+                data.get('answers') or {},
+            )
+            return {'success': True, 'data': result}
 
         else:
             return {

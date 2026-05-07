@@ -48,7 +48,7 @@ class EsgXbrlReportValue(Base, BaseModel):
     value = Column(Text, nullable=False)
     unit = Column(String(50), nullable=True)
     context_ref = Column(String(100), nullable=True)
-    data_entry_id = Column(BigInteger, ForeignKey('esg_data_entries.id'), nullable=True)
+    record_id = Column(BigInteger, ForeignKey('esg_records.id'), nullable=True)
 
     def to_dict(self):
         return {
@@ -59,7 +59,7 @@ class EsgXbrlReportValue(Base, BaseModel):
             'value': self.value,
             'unit': self.unit,
             'context_ref': self.context_ref,
-            'data_entry_id': self.data_entry_id,
+            'record_id': self.record_id,
             'is_active': self.is_active,
             'created_date': str(self.created_date) if self.created_date else None,
             'updated_date': str(self.updated_date) if self.updated_date else None,

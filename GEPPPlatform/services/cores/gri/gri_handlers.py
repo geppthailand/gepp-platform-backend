@@ -16,6 +16,25 @@ from ....exceptions import (
 
 logger = logging.getLogger(__name__)
 
+
+def _emit_gri_event(db_session, event_type: str, organization_id=None, user_id=None, properties: dict = None):
+    """Fire-and-forget CRM event emission for GRI events."""
+    try:
+        from GEPPPlatform.services.admin.crm.crm_service import emit_event
+        emit_event(
+            db_session,
+            event_type=event_type,
+            event_category='gri',
+            organization_id=organization_id,
+            user_location_id=user_id,
+            properties=properties or {},
+            event_source='server',
+            commit=False,
+        )
+    except Exception as _exc:
+        logger.warning("CRM emit_event non-fatal (gri): %s", _exc)
+
+
 def handle_gri_routes(event: Dict[str, Any], **params) -> Dict[str, Any]:
     """
     Main handler for GRI routes
@@ -199,12 +218,19 @@ def handle_gri_routes(event: Dict[str, Any], **params) -> Dict[str, Any]:
                  raise BadRequestException("Records must be an array")
                  
             result = gri_service.create_gri306_1_records(
-                organization_id, 
-                user_id, 
+                organization_id,
+                user_id,
                 records_to_process,
-                delete_records, 
+                delete_records,
                 affected_id,
                 str(global_year) if global_year else None
+            )
+            # ── CRM: emit gri_data_submitted ──
+            _emit_gri_event(
+                params.get('db_session'), 'gri_data_submitted',
+                organization_id=organization_id, user_id=user_id,
+                properties={'gri_section': '306-1', 'year': global_year,
+                            'record_count': len(records_to_process)},
             )
             return {"data": result, "message": "Records processed successfully"}
 
@@ -212,14 +238,14 @@ def handle_gri_routes(event: Dict[str, Any], **params) -> Dict[str, Any]:
         if '/api/gri/306-2' in path:
             if not user_id:
                 raise BadRequestException("User ID is required for creation")
-                
+
             global_year = body_data.get('year', '')
             records_to_process = body_data.get('records', [])
             delete_records = body_data.get('deleted_ids', [])
-            
+
             if not isinstance(records_to_process, list):
                  raise BadRequestException("Records must be an array")
-                 
+
             result = gri_service.create_gri306_2_records(
                 organization_id,
                 user_id,
@@ -227,26 +253,40 @@ def handle_gri_routes(event: Dict[str, Any], **params) -> Dict[str, Any]:
                 delete_records,
                 str(global_year) if global_year else None
             )
+            # ── CRM: emit gri_data_submitted ──
+            _emit_gri_event(
+                params.get('db_session'), 'gri_data_submitted',
+                organization_id=organization_id, user_id=user_id,
+                properties={'gri_section': '306-2', 'year': global_year,
+                            'record_count': len(records_to_process)},
+            )
             return {"data": result, "message": "GRI 306-2 Records processed successfully"}
 
         # POST /api/gri/306-3
         if '/api/gri/306-3' in path:
             if not user_id:
                 raise BadRequestException("User ID is required for creation")
-                
+
             global_year = body_data.get('year', '')
             records_to_process = body_data.get('records', [])
             delete_records = body_data.get('deleted_ids', [])
-            
+
             if not isinstance(records_to_process, list):
                  raise BadRequestException("Records must be an array")
-                 
+
             result = gri_service.create_gri306_3_records(
                 organization_id,
                 user_id,
                 records_to_process,
                 delete_records,
                 str(global_year) if global_year else None
+            )
+            # ── CRM: emit gri_data_submitted ──
+            _emit_gri_event(
+                params.get('db_session'), 'gri_data_submitted',
+                organization_id=organization_id, user_id=user_id,
+                properties={'gri_section': '306-3', 'year': global_year,
+                            'record_count': len(records_to_process)},
             )
             return {"data": result, "message": "GRI 306-3 Records processed successfully"}
 

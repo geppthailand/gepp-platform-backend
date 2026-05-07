@@ -40,6 +40,24 @@ logger = logging.getLogger(__name__)
 TWO_PLACES = Decimal('0.01')
 
 
+def _emit_transaction_event(db: Session, event_type: str, transaction, properties: dict = None):
+    """Fire-and-forget CRM event emission for transaction lifecycle events."""
+    try:
+        from GEPPPlatform.services.admin.crm.crm_service import emit_event
+        emit_event(
+            db,
+            event_type=event_type,
+            event_category='transaction',
+            organization_id=getattr(transaction, 'organization_id', None),
+            user_location_id=getattr(transaction, 'created_by_id', None),
+            properties=properties or {},
+            event_source='server',
+            commit=False,
+        )
+    except Exception as _exc:
+        logger.warning("CRM emit_event non-fatal (transaction): %s", _exc)
+
+
 def _round_decimal(value) -> Decimal:
     """Round a numeric value to 2 decimal places as Decimal."""
     if value is None:
@@ -174,6 +192,22 @@ class TransactionService:
                     # Continue without failing the transaction creation
 
             self.db.commit()
+
+            # ── CRM: emit transaction_created (and transaction_qr_input if origin is QR) ──
+            _method = getattr(transaction, 'transaction_method', '')
+            _emit_transaction_event(
+                self.db, 'transaction_created', transaction,
+                properties={
+                    'transaction_id': transaction.id,
+                    'method': _method,
+                    'weight_kg': float(transaction.weight_kg or 0),
+                },
+            )
+            if _method == 'qr_input':
+                _emit_transaction_event(
+                    self.db, 'transaction_qr_input', transaction,
+                    properties={'transaction_id': transaction.id},
+                )
 
             return {
                 'success': True,
@@ -1945,7 +1979,30 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
 
             transaction.updated_date = datetime.now()
 
+            # Capture the new status before commit for CRM emission
+            _new_status = str(getattr(transaction, 'status', '')).replace(
+                'TransactionStatus.', ''
+            )
+
             self.db.commit()
+
+            # ── CRM: emit approval/rejection events ──
+            if 'status' in update_data:
+                _status_val = (
+                    update_data['status'].value
+                    if hasattr(update_data['status'], 'value')
+                    else str(update_data['status'])
+                )
+                if _status_val == 'approved':
+                    _emit_transaction_event(
+                        self.db, 'transaction_approved', transaction,
+                        properties={'transaction_id': transaction_id, 'updated_by_id': updated_by_id},
+                    )
+                elif _status_val == 'rejected':
+                    _emit_transaction_event(
+                        self.db, 'transaction_rejected', transaction,
+                        properties={'transaction_id': transaction_id, 'updated_by_id': updated_by_id},
+                    )
 
             return {
                 'success': True,
