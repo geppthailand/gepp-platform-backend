@@ -33,23 +33,33 @@ class EsgImageExtractionService:
     # ==========================================
 
     def extract_from_image(self, s3_url: str, org_id: int,
-                           line_user_id: str, message_id: str) -> Dict[str, Any]:
+                           line_user_id: str, message_id: str,
+                           existing_extraction=None) -> Dict[str, Any]:
         """
         Full pipeline: image → Gemini → structured data → entries → Flex card data.
+
+        Args:
+            existing_extraction: optional pre-created EsgOrganizationDataExtraction.
+                When supplied (e.g. by `_process_image` which reserves the doc
+                number up-front for the immediate ack), we re-use it instead
+                of inserting a duplicate row.
         """
-        # 1. Create extraction record
-        extraction = EsgOrganizationDataExtraction(
-            organization_id=org_id,
-            channel='line',
-            type='image',
-            source_user_id=line_user_id,
-            source_message_id=message_id,
-            raw_content=s3_url,
-            processing_status='pending',
-        )
-        self.db.add(extraction)
-        self.db.flush()
-        logger.info(f"[EXTRACT] Created extraction {extraction.id} for org={org_id}, s3={s3_url[:60]}")
+        if existing_extraction is not None:
+            extraction = existing_extraction
+            logger.info(f"[EXTRACT] Reusing extraction {extraction.id} (pre-reserved by caller)")
+        else:
+            extraction = EsgOrganizationDataExtraction(
+                organization_id=org_id,
+                channel='line',
+                type='image',
+                source_user_id=line_user_id,
+                source_message_id=message_id,
+                raw_content=s3_url,
+                processing_status='pending',
+            )
+            self.db.add(extraction)
+            self.db.flush()
+            logger.info(f"[EXTRACT] Created extraction {extraction.id} for org={org_id}, s3={s3_url[:60]}")
 
         try:
             # 2. Load hierarchy

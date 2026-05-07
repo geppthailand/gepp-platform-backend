@@ -355,7 +355,7 @@ class EsgLineService:
             self.db.flush()
             return {'status': 'success', 'type': 'status'}
 
-        # AI text extraction → create entry → tCO2e → Flex reply
+        # ── 1. Reserve doc number FIRST so the immediate ack can quote it
         extraction = EsgOrganizationDataExtraction(
             organization_id=org_id,
             channel='line', type='text',
@@ -365,7 +365,19 @@ class EsgLineService:
         )
         self.db.add(extraction)
         self.db.flush()
+        doc_no = extraction.id
 
+        # ── 2. Immediate PUSH "received" card (does NOT consume reply_token)
+        try:
+            if line_msg.line_user_id:
+                self._send_push_message(
+                    token, line_msg.line_user_id,
+                    [self._build_received_flex(doc_no)],
+                )
+        except Exception as e:
+            logger.warning(f"[TEXT] Failed to push received card: {e}")
+
+        # ── 3. Run LLM cascade extraction (synchronous)
         try:
             from .esg_extraction_service import EsgExtractionService
             svc = EsgExtractionService(self.db)
@@ -375,12 +387,22 @@ class EsgLineService:
             logger.error(f"Text extraction failed: {e}")
 
         entry = self._create_entry_from_extraction(extraction, org_id, line_msg.line_user_id)
+
+        # ── 4. + 5. Per-category PUSH + final REPLY
         if entry:
-            flex = self._build_result_flex(entry)
-            self._send_reply_raw(token, line_msg.line_reply_token, [flex])
+            self._dispatch_extraction_messages(
+                token=token,
+                line_user_id=line_msg.line_user_id,
+                reply_token=line_msg.line_reply_token,
+                doc_id=doc_no,
+                entries=[entry],
+            )
         else:
-            self._send_text_reply(token, line_msg.line_reply_token,
-                                  'ได้รับข้อมูลแล้ว แต่ไม่สามารถสกัดตัวเลขได้ กรุณากรอกผ่าน LIFF')
+            err_card = self._build_error_flex(
+                doc_no,
+                'ได้รับข้อความแล้ว แต่ไม่สามารถสกัดตัวเลขได้ กรุณากรอกผ่าน LIFF',
+            )
+            self._send_reply_raw(token, line_msg.line_reply_token, [err_card])
 
         line_msg.processing_status = extraction.processing_status
         self.db.flush()
@@ -389,12 +411,24 @@ class EsgLineService:
     # ---- IMAGE: OCR → tCO2e → Flex Message ----
 
     def _process_image(self, line_msg, message: Dict, org_id: int, token: str) -> Dict:
+        """
+        Image processing flow (push-as-progress-bar pattern):
+
+          1. Reserve a doc number by creating the extraction record up-front.
+          2. PUSH "ได้รับเอกสาร #1232 — กำลังประมวลผล" immediately.
+             (We deliberately don't burn the reply_token on this ack so we
+             can use it for the final completion card.)
+          3. Run the slow LLM extraction synchronously.
+          4. Group results by Scope 3 category and PUSH one card per cat.
+          5. Final summary uses REPLY (the saved reply_token) so it lands
+             as a "real" reply to the user's original image. If the token
+             has already expired (LINE 60s TTL), fall back to PUSH.
+        """
         try:
             message_id = message.get('id')
             logger.info(f"----------- IMAGE PROCESSING START -----------")
             logger.info(f"[IMG] msg_id={message_id}, org_id={org_id}, user={line_msg.line_user_id[:12] if line_msg.line_user_id else '?'}")
 
-            # Simulator support: use base64 image from _simulator metadata instead of LINE CDN
             simulator_data = message.get('_simulator_image_base64')
             if simulator_data:
                 import base64 as b64mod
@@ -412,7 +446,33 @@ class EsgLineService:
                                      line_user_id=line_msg.line_user_id)
             logger.info(f"[IMG] Uploaded to S3: {s3_url[:80]}")
 
-            # Use Gemini vision pipeline for full extraction
+            # ── 1. Reserve a doc number FIRST so the immediate ack can
+            # quote it. Same record is reused by extract_from_image below
+            # (avoids duplicate rows).
+            extraction = EsgOrganizationDataExtraction(
+                organization_id=org_id,
+                channel='line',
+                type='image',
+                source_user_id=line_msg.line_user_id,
+                source_message_id=line_msg.line_message_id,
+                raw_content=s3_url,
+                processing_status='pending',
+            )
+            self.db.add(extraction)
+            self.db.flush()
+            doc_no = extraction.id
+            logger.info(f"[IMG] Doc #{doc_no} reserved")
+
+            # ── 2. Immediate PUSH "received" card (does NOT consume reply_token)
+            try:
+                if line_msg.line_user_id:
+                    received_card = self._build_received_flex(doc_no)
+                    self._send_push_message(token, line_msg.line_user_id, [received_card])
+                    logger.info(f"[IMG] Push #1: received card sent")
+            except Exception as e:
+                logger.warning(f"[IMG] Failed to push received card: {e}")
+
+            # ── 3. Run extraction (synchronous, can take 10-30s)
             logger.info(f"[IMG] Starting Gemini extraction...")
             from .esg_image_extraction_service import EsgImageExtractionService
             extraction_svc = EsgImageExtractionService(self.db)
@@ -421,26 +481,25 @@ class EsgLineService:
                 org_id=org_id,
                 line_user_id=line_msg.line_user_id,
                 message_id=line_msg.line_message_id,
+                existing_extraction=extraction,
             )
-            logger.info(f"[IMG] Extraction result: success={result.get('success')}, matches={result.get('match_count', 0)}, entries={len(result.get('entries', []))}")
+            logger.info(f"[IMG] Extraction result: success={result.get('success')}, entries={len(result.get('entries', []))}")
 
+            # ── 4. + 5. Build per-category PUSHes + final REPLY
             if result.get('success') and result.get('entries'):
-                logger.info(f"[IMG] Building Flex card for {len(result['entries'])} entries, {len(result.get('records', []))} records...")
-                flex = extraction_svc.build_result_flex_card(
+                self._dispatch_extraction_messages(
+                    token=token,
+                    line_user_id=line_msg.line_user_id,
+                    reply_token=line_msg.line_reply_token,
+                    doc_id=doc_no,
                     entries=result['entries'],
-                    refs=result.get('refs', {}),
-                    extraction_id=result['extraction_id'],
-                    document_summary=result.get('document_summary', ''),
-                    records=result.get('records', []),
                 )
-                logger.info(f"[IMG] Flex card built, sending reply...")
-                self._send_reply_raw(token, line_msg.line_reply_token, [flex])
-                logger.info(f"[IMG] Reply sent!")
             else:
-                err_msg = result.get('message', 'กรุณาถ่ายใหม่ให้ชัดขึ้น')
+                err_msg = result.get('message', 'อ่านข้อมูลจากรูปไม่ออก กรุณาถ่ายใหม่ให้ชัดขึ้น')
                 logger.info(f"[IMG] No entries, sending error: {err_msg}")
-                self._send_text_reply(token, line_msg.line_reply_token,
-                                      f"ไม่สามารถอ่านข้อมูลจากรูปได้\n{err_msg}")
+                err_card = self._build_error_flex(doc_no, err_msg)
+                # Use reply_token for the error too (final response)
+                self._send_reply_raw(token, line_msg.line_reply_token, [err_card])
 
             # Simulator dry-run: rollback DB changes, return full extraction data
             sim_dry = getattr(self, '_simulator_opts', {}).get('dry_run', False)
@@ -879,9 +938,397 @@ class EsgLineService:
     def _send_text_reply(self, token: str, reply_token: str, text: str):
         self._send_reply_raw(token, reply_token, [{'type': 'text', 'text': text[:5000]}])
 
-    def _send_reply_raw(self, token: str, reply_token: str, messages: list):
-        if not token or not reply_token:
-            return
+    # ─── Flex builders for the multi-step push flow ────────────────────
+    # Each builder returns a LINE Flex message dict ready for `messages: [..]`.
+    # Design language: dark ink (#0b1120) for primary actions, emerald
+    # (#10b981) for success / carbon, amber (#f59e0b) for warnings.
+
+    def _doc_no(self, doc_id) -> str:
+        try:
+            return f"#{int(doc_id):04d}"
+        except (TypeError, ValueError):
+            return f"#{doc_id}"
+
+    def _build_received_flex(self, doc_id) -> dict:
+        """Sent immediately when an image arrives — confirms receipt + doc no."""
+        doc = self._doc_no(doc_id)
+        return {
+            'type': 'flex',
+            'altText': f'ได้รับเอกสาร {doc} แล้ว — กำลังประมวลผล',
+            'contents': {
+                'type': 'bubble', 'size': 'kilo',
+                'header': {
+                    'type': 'box', 'layout': 'vertical',
+                    'backgroundColor': '#0b1120',
+                    'paddingAll': '16px',
+                    'contents': [
+                        {'type': 'text', 'text': 'กำลังประมวลผล',
+                         'color': '#a7f3d0', 'size': 'xs',
+                         'weight': 'bold'},
+                        {'type': 'text', 'text': f'เอกสาร {doc}',
+                         'color': '#ffffff', 'size': 'xl',
+                         'weight': 'bold', 'margin': 'sm'},
+                    ],
+                },
+                'body': {
+                    'type': 'box', 'layout': 'vertical', 'spacing': 'md',
+                    'paddingAll': '16px',
+                    'contents': [
+                        {'type': 'text', 'text': 'ได้รับเอกสารเรียบร้อยแล้ว',
+                         'size': 'sm', 'color': '#0b1120', 'weight': 'bold'},
+                        {'type': 'text', 'text': 'AI กำลังอ่านและจัดหมวดหมู่ Scope 3...',
+                         'size': 'xs', 'color': '#64748b', 'wrap': True},
+                        {'type': 'separator', 'margin': 'md'},
+                        # Step list
+                        {'type': 'box', 'layout': 'vertical', 'spacing': 'xs', 'margin': 'md',
+                         'contents': [
+                             self._step_row('✓', 'รับเอกสาร', '#10b981', done=True),
+                             self._step_row('●', 'สกัดข้อมูลด้วย AI', '#0b1120', done=False, active=True),
+                             self._step_row('○', 'จัดหมวดหมู่ Scope 3', '#cbd5e1', done=False),
+                         ]},
+                    ],
+                },
+            },
+        }
+
+    def _step_row(self, icon: str, text: str, color: str, done: bool = False, active: bool = False) -> dict:
+        weight = 'bold' if (done or active) else 'regular'
+        text_color = '#0b1120' if (done or active) else '#94a3b8'
+        return {
+            'type': 'box', 'layout': 'horizontal', 'spacing': 'sm',
+            'contents': [
+                {'type': 'text', 'text': icon, 'flex': 0,
+                 'size': 'sm', 'color': color, 'weight': 'bold'},
+                {'type': 'text', 'text': text, 'flex': 1,
+                 'size': 'xs', 'color': text_color, 'weight': weight},
+            ],
+        }
+
+    def _build_category_flex(self, doc_id, scope3_id: int, name_th: str, name_en: str,
+                             entries: list, total_tco2e: float) -> dict:
+        """
+        One card per matched Scope 3 category. Shows the cat number badge,
+        the data fields extracted for this category, and the per-category
+        tCO2e total. Designed to be skimmable in 3 seconds.
+        """
+        doc = self._doc_no(doc_id)
+
+        # Build field rows from entries
+        field_rows = []
+        seen = set()
+        for e in entries[:6]:  # cap at 6 fields per card
+            label = e.get('field') or e.get('datapoint_name') or e.get('category', '')
+            value = e.get('value', '')
+            unit = e.get('unit', '')
+            key = f"{label}|{value}|{unit}"
+            if not label or key in seen:
+                continue
+            seen.add(key)
+            try:
+                value_text = f'{float(value):,.2f} {unit}'.strip()
+            except (TypeError, ValueError):
+                value_text = f'{value} {unit}'.strip() if value else '-'
+            field_rows.append({
+                'type': 'box', 'layout': 'horizontal', 'margin': 'xs',
+                'contents': [
+                    {'type': 'text', 'text': str(label)[:24],
+                     'size': 'xs', 'color': '#64748b', 'flex': 4, 'wrap': True},
+                    {'type': 'text', 'text': value_text[:20],
+                     'size': 'xs', 'color': '#0b1120',
+                     'weight': 'bold', 'flex': 4, 'align': 'end', 'wrap': True},
+                ],
+            })
+
+        if not field_rows:
+            field_rows = [{
+                'type': 'text', 'text': 'อ่านได้บางส่วน — เปิด LIFF เพื่อกรอกเพิ่มเติม',
+                'size': 'xs', 'color': '#64748b', 'wrap': True,
+            }]
+
+        tco2e_text = (
+            f'{total_tco2e:.4f} tCO₂e' if total_tco2e and total_tco2e > 0
+            else 'รอข้อมูลเพิ่ม'
+        )
+
+        return {
+            'type': 'flex',
+            'altText': f'{doc} — หมวด {scope3_id} {name_th or name_en}',
+            'contents': {
+                'type': 'bubble', 'size': 'kilo',
+                'body': {
+                    'type': 'box', 'layout': 'vertical', 'spacing': 'sm',
+                    'paddingAll': '14px',
+                    'contents': [
+                        # Cat badge + name
+                        {'type': 'box', 'layout': 'horizontal', 'spacing': 'md',
+                         'contents': [
+                             {'type': 'box', 'layout': 'vertical',
+                              'backgroundColor': '#0b1120', 'cornerRadius': '8px',
+                              'width': '40px', 'height': '40px',
+                              'justifyContent': 'center',
+                              'contents': [
+                                  {'type': 'text', 'text': str(scope3_id),
+                                   'color': '#a7f3d0', 'size': 'xl',
+                                   'weight': 'bold', 'align': 'center'},
+                              ]},
+                             {'type': 'box', 'layout': 'vertical', 'flex': 1,
+                              'contents': [
+                                  {'type': 'text',
+                                   'text': name_th or name_en or f'หมวด {scope3_id}',
+                                   'size': 'sm', 'weight': 'bold',
+                                   'color': '#0b1120', 'wrap': True},
+                                  {'type': 'text', 'text': name_en or '',
+                                   'size': 'xxs', 'color': '#94a3b8',
+                                   'wrap': True, 'margin': 'xs'},
+                              ]},
+                         ]},
+                        {'type': 'separator', 'margin': 'md'},
+                        # Field rows
+                        {'type': 'box', 'layout': 'vertical', 'spacing': 'xs',
+                         'margin': 'sm', 'contents': field_rows},
+                        {'type': 'separator', 'margin': 'md'},
+                        # tCO2e row
+                        {'type': 'box', 'layout': 'horizontal', 'margin': 'sm',
+                         'contents': [
+                             {'type': 'text', 'text': 'คาร์บอน', 'size': 'sm',
+                              'color': '#047857', 'weight': 'bold', 'flex': 2},
+                             {'type': 'text', 'text': tco2e_text, 'size': 'sm',
+                              'color': '#10b981', 'weight': 'bold',
+                              'flex': 3, 'align': 'end'},
+                         ]},
+                    ],
+                },
+                'footer': {
+                    'type': 'box', 'layout': 'vertical',
+                    'paddingAll': '8px', 'paddingStart': '14px', 'paddingEnd': '14px',
+                    'contents': [
+                        {'type': 'text', 'text': f'จากเอกสาร {doc}',
+                         'size': 'xxs', 'color': '#94a3b8', 'align': 'center'},
+                    ],
+                },
+            },
+        }
+
+    def _build_completion_flex(self, doc_id, cat_groups: dict, total_tco2e: float) -> dict:
+        """
+        Final completion summary — emerald success header, list of matched
+        cats, big total tCO2e, "View in LIFF" CTA.
+        """
+        doc = self._doc_no(doc_id)
+
+        # Bullet list of matched categories
+        from .scope3_assignment import SCOPE3_LABELS
+        cat_lines = []
+        for cid in sorted(cat_groups.keys()):
+            lbl = SCOPE3_LABELS.get(int(cid), {})
+            name = lbl.get('th') or lbl.get('en') or f'หมวด {cid}'
+            cat_lines.append({
+                'type': 'box', 'layout': 'horizontal', 'spacing': 'sm',
+                'contents': [
+                    {'type': 'text', 'text': '▸', 'flex': 0,
+                     'size': 'sm', 'color': '#10b981', 'weight': 'bold'},
+                    {'type': 'text', 'text': f'หมวด {cid} — {name}',
+                     'size': 'xs', 'color': '#0b1120', 'flex': 1, 'wrap': True},
+                ],
+            })
+
+        if not cat_lines:
+            cat_lines = [{
+                'type': 'text',
+                'text': 'ไม่พบข้อมูล Scope 3 ในเอกสารนี้',
+                'size': 'xs', 'color': '#64748b', 'wrap': True,
+            }]
+
+        liff_url = f'{LIFF_BASE_URL}/liff/app/history'
+        total_text = f'{total_tco2e:.4f}' if total_tco2e and total_tco2e > 0 else '0.0000'
+
+        return {
+            'type': 'flex',
+            'altText': f'เอกสาร {doc} ประมวลผลเสร็จสิ้น — รวม {total_text} tCO₂e',
+            'contents': {
+                'type': 'bubble', 'size': 'kilo',
+                'header': {
+                    'type': 'box', 'layout': 'vertical',
+                    'backgroundColor': '#10b981',
+                    'paddingAll': '16px',
+                    'contents': [
+                        {'type': 'text', 'text': '✓ ประมวลผลเสร็จสิ้น',
+                         'color': '#ffffff', 'size': 'sm',
+                         'weight': 'bold'},
+                        {'type': 'text', 'text': f'เอกสาร {doc}',
+                         'color': '#ffffff', 'size': 'xl',
+                         'weight': 'bold', 'margin': 'sm'},
+                    ],
+                },
+                'body': {
+                    'type': 'box', 'layout': 'vertical', 'spacing': 'sm',
+                    'paddingAll': '16px',
+                    'contents': [
+                        {'type': 'text',
+                         'text': f'พบข้อมูล {len(cat_groups)} หมวด:'
+                                 if cat_groups else 'ผลการประมวลผล',
+                         'size': 'sm', 'weight': 'bold', 'color': '#0b1120'},
+                        {'type': 'box', 'layout': 'vertical', 'spacing': 'xs',
+                         'margin': 'sm', 'contents': cat_lines},
+                        {'type': 'separator', 'margin': 'lg'},
+                        {'type': 'text', 'text': 'รวมทั้งสิ้น',
+                         'size': 'xs', 'color': '#64748b', 'margin': 'md'},
+                        {'type': 'box', 'layout': 'baseline', 'spacing': 'xs',
+                         'contents': [
+                             {'type': 'text', 'text': total_text,
+                              'size': 'xxl', 'color': '#10b981', 'weight': 'bold'},
+                             {'type': 'text', 'text': 'tCO₂e',
+                              'size': 'sm', 'color': '#10b981', 'weight': 'bold'},
+                         ]},
+                    ],
+                },
+                'footer': {
+                    'type': 'box', 'layout': 'vertical',
+                    'paddingAll': '14px', 'spacing': 'sm',
+                    'contents': [
+                        {'type': 'button',
+                         'action': {'type': 'uri', 'label': 'ดูทั้งหมดใน LIFF',
+                                    'uri': liff_url},
+                         'style': 'primary', 'color': '#0b1120', 'height': 'sm'},
+                    ],
+                },
+            },
+        }
+
+    def _build_error_flex(self, doc_id, error_message: str) -> dict:
+        doc = self._doc_no(doc_id)
+        return {
+            'type': 'flex',
+            'altText': f'เอกสาร {doc} ประมวลผลไม่สำเร็จ',
+            'contents': {
+                'type': 'bubble', 'size': 'kilo',
+                'header': {
+                    'type': 'box', 'layout': 'vertical',
+                    'backgroundColor': '#f59e0b',
+                    'paddingAll': '16px',
+                    'contents': [
+                        {'type': 'text', 'text': '⚠ ไม่สามารถประมวลผลได้',
+                         'color': '#ffffff', 'size': 'sm', 'weight': 'bold'},
+                        {'type': 'text', 'text': f'เอกสาร {doc}',
+                         'color': '#ffffff', 'size': 'lg',
+                         'weight': 'bold', 'margin': 'sm'},
+                    ],
+                },
+                'body': {
+                    'type': 'box', 'layout': 'vertical', 'spacing': 'sm',
+                    'paddingAll': '16px',
+                    'contents': [
+                        {'type': 'text', 'text': str(error_message)[:200],
+                         'size': 'sm', 'color': '#0b1120', 'wrap': True},
+                        {'type': 'text',
+                         'text': 'กรุณาถ่ายให้ชัดขึ้นแล้วลองส่งใหม่อีกครั้ง',
+                         'size': 'xs', 'color': '#64748b',
+                         'wrap': True, 'margin': 'md'},
+                    ],
+                },
+            },
+        }
+
+    def _group_entries_by_scope3(self, entries: list) -> dict:
+        """
+        Group entries by their Scope 3 category id (1..15). Falls back to
+        the assign_scope3_category heuristic when an entry has no
+        category_id (e.g. legacy or fallback path).
+        """
+        from .scope3_assignment import assign_scope3_category
+        groups: dict[int, list] = {}
+        for e in entries:
+            cid = e.get('scope3_category_id')
+            if not cid:
+                # Resolve from DB / category name / unit
+                cat_id_db = e.get('category_id') or e.get('id')
+                resolved, _, _, _ = assign_scope3_category(
+                    self.db,
+                    category_name=e.get('category') or e.get('category_name'),
+                    category_id=cat_id_db,
+                    unit=e.get('unit'),
+                    raw_input=None,
+                )
+                cid = resolved
+            if not cid:
+                continue
+            try:
+                key = int(cid)
+            except (TypeError, ValueError):
+                continue
+            # Stamp the resolved id back onto the entry so downstream
+            # reuse doesn't re-resolve.
+            e['scope3_category_id'] = key
+            groups.setdefault(key, []).append(e)
+        return groups
+
+    def _dispatch_extraction_messages(self, token: str, line_user_id: str,
+                                      reply_token: str, doc_id, entries: list):
+        """
+        Push one card per Scope 3 category, then REPLY with the final
+        completion summary. Falls back to PUSH for the completion card if
+        the reply_token has already expired (LINE 60s TTL).
+        """
+        from .scope3_assignment import SCOPE3_LABELS
+
+        groups = self._group_entries_by_scope3(entries)
+        cat_totals: dict[int, float] = {}
+        grand_total = 0.0
+
+        # Push per-category cards
+        for cid in sorted(groups.keys()):
+            cat_entries = groups[cid]
+            tco2e_total = 0.0
+            for e in cat_entries:
+                v = e.get('calculated_tco2e') or 0
+                try:
+                    tco2e_total += float(v or 0)
+                except (TypeError, ValueError):
+                    pass
+            cat_totals[cid] = tco2e_total
+            grand_total += tco2e_total
+
+            lbl = SCOPE3_LABELS.get(cid, {})
+            cat_card = self._build_category_flex(
+                doc_id=doc_id,
+                scope3_id=cid,
+                name_th=lbl.get('th', ''),
+                name_en=lbl.get('en', ''),
+                entries=cat_entries,
+                total_tco2e=tco2e_total,
+            )
+            try:
+                if line_user_id:
+                    self._send_push_message(token, line_user_id, [cat_card])
+                    logger.info(f"[IMG] Push: cat {cid} card sent ({len(cat_entries)} fields)")
+            except Exception as e:
+                logger.warning(f"[IMG] Failed to push cat {cid} card: {e}")
+
+        # Final completion card via REPLY. If reply fails (token expired
+        # OR already consumed by the immediate ack on a different code
+        # path), fall back to PUSH so the user always gets the summary.
+        completion = self._build_completion_flex(doc_id, cat_totals, grand_total)
+        replied = self._send_reply_raw(token, reply_token, [completion])
+        if replied:
+            logger.info(f"[LINE] completion via reply (doc #{doc_id}, total={grand_total:.4f} tCO2e)")
+        else:
+            logger.warning(f"[LINE] reply failed for completion — falling back to push")
+            if line_user_id:
+                pushed = self._send_push_message(token, line_user_id, [completion])
+                if pushed:
+                    logger.info(f"[LINE] completion via push fallback (doc #{doc_id})")
+                else:
+                    logger.error(f"[LINE] completion FAILED (both reply and push failed) — doc #{doc_id}")
+
+    def _send_reply_raw(self, token: str, reply_token: str, messages: list) -> bool:
+        """Send reply messages. Returns True on success, False on any failure
+        so the caller can decide whether to fall back to push."""
+        if not token:
+            logger.warning("[LINE] _send_reply_raw: missing token")
+            return False
+        if not reply_token:
+            logger.warning("[LINE] _send_reply_raw: missing reply_token")
+            return False
         # Simulator mode: log the reply instead of sending to LINE
         if reply_token == '00000000000000000000000000000000' or reply_token.startswith('simulator'):
             logger.info(f"[SIMULATOR] Would reply with {len(messages)} message(s)")
@@ -893,12 +1340,69 @@ class EsgLineService:
                     logger.info(f"[SIMULATOR] Reply[{i}]: FLEX alt={msg.get('altText', '')[:100]}")
                 else:
                     logger.info(f"[SIMULATOR] Reply[{i}]: {msg_type}")
-            return
+            return True
         try:
             import urllib.request
             data = json.dumps({'replyToken': reply_token, 'messages': messages}).encode('utf-8')
             req = urllib.request.Request('https://api.line.me/v2/bot/message/reply', data=data,
                                         headers={'Content-Type': 'application/json', 'Authorization': f'Bearer {token}'})
-            urllib.request.urlopen(req, timeout=10)
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                status = resp.status if hasattr(resp, 'status') else resp.getcode()
+                logger.info(f"[LINE] reply OK status={status} count={len(messages)}")
+                return True
+        except urllib.error.HTTPError as e:
+            try:
+                body = e.read().decode('utf-8', errors='replace')[:300]
+            except Exception:
+                body = ''
+            logger.error(f"[LINE] reply HTTP {e.code} {e.reason} body={body}")
+            return False
         except Exception as e:
-            logger.error(f"Reply failed: {e}")
+            logger.error(f"[LINE] reply failed: {e}")
+            return False
+
+    def _send_push_message(self, token: str, to_user_id: str, messages: list) -> bool:
+        """Push messages to a LINE user. Returns True on success."""
+        if not token:
+            logger.warning("[LINE] _send_push_message: missing token (set ESG_LINE_CHANNEL_ACCESS_TOKEN)")
+            return False
+        if not to_user_id:
+            logger.warning("[LINE] _send_push_message: missing to_user_id")
+            return False
+        if not messages:
+            return False
+        # Simulator mode
+        if to_user_id.startswith('simulator') or to_user_id == 'U' + '0' * 32:
+            logger.info(f"[SIMULATOR] Would push {len(messages)} message(s) to {to_user_id[:12]}")
+            for i, msg in enumerate(messages):
+                msg_type = msg.get('type', '?')
+                if msg_type == 'flex':
+                    logger.info(f"[SIMULATOR] Push[{i}]: FLEX alt={msg.get('altText', '')[:100]}")
+                else:
+                    logger.info(f"[SIMULATOR] Push[{i}]: {msg_type}")
+            return True
+        try:
+            import urllib.request
+            data = json.dumps({'to': to_user_id, 'messages': messages}).encode('utf-8')
+            req = urllib.request.Request(
+                'https://api.line.me/v2/bot/message/push',
+                data=data,
+                headers={
+                    'Content-Type': 'application/json',
+                    'Authorization': f'Bearer {token}',
+                },
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                status = resp.status if hasattr(resp, 'status') else resp.getcode()
+                logger.info(f"[LINE] push OK status={status} to={to_user_id[:12]} count={len(messages)}")
+                return True
+        except urllib.error.HTTPError as e:
+            try:
+                body = e.read().decode('utf-8', errors='replace')[:300]
+            except Exception:
+                body = ''
+            logger.error(f"[LINE] push HTTP {e.code} {e.reason} to={to_user_id[:12]} body={body}")
+            return False
+        except Exception as e:
+            logger.error(f"[LINE] push failed: {e}")
+            return False
