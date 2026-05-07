@@ -9,6 +9,7 @@ Desktop web users (email/password) remain in UserLocation — untouched.
 import json
 import urllib.request
 import urllib.error
+import urllib.parse
 import jwt
 import os
 import logging
@@ -27,6 +28,22 @@ JWT_AUTH_EXPIRY_DAYS = 1
 JWT_REFRESH_EXPIRY_DAYS = 7
 
 LINE_PROFILE_URL = 'https://api.line.me/v2/profile'
+LINE_VERIFY_URL = 'https://api.line.me/oauth2/v2.1/verify'
+
+# LINE Login channel ID for the ESG LIFF (e.g. 2009993849 from LIFF
+# 2009993849-GpYCVVmc). Used to reject access tokens issued by the
+# Reward LIFF (or any other channel) that might be sent to the ESG
+# /api/auth/liff endpoint by mistake.
+#
+# IMPORTANT: this is the LINE Login channel ID — the prefix of the LIFF
+# ID, NOT the LIFF ID itself. Set via env var so the same code can serve
+# multiple ESG channels (dev / prod) without rebuild.
+# ESG-prefixed so it doesn't collide with Reward's channel id env.
+# Backward compat: also accept the unprefixed LINE_LOGIN_CHANNEL_ID.
+ESG_LINE_CHANNEL_ID = (
+    os.environ.get('ESG_LINE_LOGIN_CHANNEL_ID')
+    or os.environ.get('LINE_LOGIN_CHANNEL_ID', '2009993849')
+)
 
 
 class LiffAuthService:
@@ -44,6 +61,10 @@ class LiffAuthService:
         Looks up EsgUser by (platform='line', platform_user_id=LINE_USER_ID).
         Must have organization_id to proceed.
         """
+        # Reject tokens issued by a different LIFF channel (e.g. Reward
+        # LIFF reusing the same browser session against the ESG backend).
+        self._assert_esg_channel(line_access_token)
+
         profile = self._get_line_profile(line_access_token)
         if not profile:
             raise ValueError('Failed to fetch LINE profile. Please check LIFF permissions.')
@@ -161,6 +182,10 @@ class LiffAuthService:
             raise ValueError('Invitation link หมดอายุแล้ว กรุณาขอลิงก์ใหม่จากผู้ดูแล')
         if invitation.used_at:
             raise ValueError('Invitation link นี้ถูกใช้งานแล้ว')
+
+        # Same channel-id check as login — reject tokens from the Reward
+        # LIFF (or any other channel) trying to accept an ESG invitation.
+        self._assert_esg_channel(line_access_token)
 
         profile = self._get_line_profile(line_access_token)
         if not profile:
@@ -319,6 +344,64 @@ class LiffAuthService:
         except Exception as e:
             logger.error(f"LINE profile fetch error: {e}")
             return None
+
+    def _verify_access_token_channel(self, access_token: str) -> dict | None:
+        """
+        Call LINE's verify endpoint to confirm WHICH channel issued the
+        access token.
+
+        Returns the LINE response: { "scope", "client_id", "expires_in" }
+        where `client_id` is the LINE Login channel ID. Returns None on
+        any error so callers can decide whether to fail closed.
+
+        Used by login_with_line + accept_invitation to make sure tokens
+        from the Reward LIFF (different channel id) can't authenticate
+        into the ESG backend.
+        """
+        try:
+            url = f'{LINE_VERIFY_URL}?access_token={urllib.parse.quote(access_token)}'
+            req = urllib.request.Request(url, method='GET')
+            with urllib.request.urlopen(req, timeout=10) as response:
+                if response.status == 200:
+                    return json.loads(response.read().decode('utf-8'))
+            return None
+        except urllib.error.HTTPError as e:
+            logger.warning(f"LINE token verify failed: {e.code} {e.reason}")
+            return None
+        except Exception as e:
+            logger.error(f"LINE token verify error: {e}")
+            return None
+
+    def _assert_esg_channel(self, access_token: str) -> None:
+        """
+        Reject login when the access token was issued by a different
+        LINE Login channel (e.g. someone reusing a Reward LIFF token
+        against the ESG backend). Raises ValueError with a clear,
+        user-facing message on mismatch.
+        """
+        if not ESG_LINE_CHANNEL_ID:
+            # Not configured — skip the check rather than fail open
+            # silently. Log a loud warning so this is visible in CloudWatch.
+            logger.warning(
+                'ESG_LINE_LOGIN_CHANNEL_ID is not set — skipping channel '
+                'verification. Tokens from any LIFF channel will be accepted.'
+            )
+            return
+        info = self._verify_access_token_channel(access_token)
+        if not info:
+            # Network / token already invalid — let the downstream profile
+            # call surface a more specific error.
+            return
+        client_id = str(info.get('client_id') or '').strip()
+        if client_id and client_id != str(ESG_LINE_CHANNEL_ID):
+            logger.warning(
+                'Token channel mismatch: got client_id=%s, expected=%s',
+                client_id, ESG_LINE_CHANNEL_ID,
+            )
+            raise ValueError(
+                'Access token นี้ออกมาจาก LIFF อื่น (ไม่ใช่ ESG LIFF) '
+                'กรุณาเปิดผ่าน ESG LIFF เพื่อเข้าสู่ระบบ'
+            )
 
     def _generate_tokens(self, user_id: int, organization_id: int | None, email: str) -> dict:
         now = datetime.now(timezone.utc)

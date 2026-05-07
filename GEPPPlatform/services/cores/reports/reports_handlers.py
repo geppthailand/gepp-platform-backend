@@ -609,7 +609,7 @@ def _handle_overview_report(
         'overall_charts': {
             'chart_stat_data': [
                 {'title': 'Total Recyclables', 'value': round(recyclable_waste * 100) / 100},
-                {'title': 'Number of Trees', 'value': round((recyclable_ghg_reduction / 9.5 * 100) * 100) / 100 if recyclable_ghg_reduction > 0 else 0.0},
+                {'title': 'Number of Trees', 'value': round((recyclable_ghg_reduction / 9.5) * 100) / 100 if recyclable_ghg_reduction > 0 else 0.0},
                 {'title': 'Plastic Saved', 'value': round(plastic_saved * 100) / 100},
             ],
             'chart_data': chart_data

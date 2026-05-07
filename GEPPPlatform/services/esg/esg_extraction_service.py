@@ -19,6 +19,7 @@ from ...prompts.esg_extract.prompts import (
     CATEGORY_CLASSIFY_PROMPT_SCOPE3,
     SUBCATEGORY_CLASSIFY_PROMPT_SCOPE3,
     DATAPOINT_EXTRACT_PROMPT_SCOPE3,
+    augment_categories_for_prompt,
 )
 
 logger = logging.getLogger(__name__)
@@ -231,24 +232,23 @@ class EsgExtractionService:
 
     def _classify_categories(self, input_content: str, categories: List[Dict], image_urls: List[str]) -> List[Dict]:
         """Step 1: Classify input into ESG categories"""
-        # Include scope3_category_id in the prompt menu when narrowed so the
-        # model sees stable GHG numbering (1..15) alongside the row id.
         is_scope3 = self._focus_mode == 'scope3_only'
-        categories_json = json.dumps(
-            [
+        if is_scope3:
+            # Merge canonical Scope 3 reference fields (definition, includes,
+            # excludes, typical_evidence, common_confusions) into each row so
+            # the LLM has the same disambiguation context an auditor has.
+            prompt_rows = augment_categories_for_prompt(categories)
+        else:
+            prompt_rows = [
                 {
                     'id': c['id'],
                     'pillar': c['pillar'],
                     'name': c['name'],
                     'description': c.get('description', ''),
-                    **({'scope3_category_id': c['scope3_category_id']}
-                       if is_scope3 and c.get('scope3_category_id')
-                       else {}),
                 }
                 for c in categories
-            ],
-            indent=2,
-        )
+            ]
+        categories_json = json.dumps(prompt_rows, indent=2, ensure_ascii=False)
 
         template = CATEGORY_CLASSIFY_PROMPT_SCOPE3 if is_scope3 else CATEGORY_CLASSIFY_PROMPT
         prompt = template.format(

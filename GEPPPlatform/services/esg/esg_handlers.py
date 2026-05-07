@@ -44,21 +44,32 @@ def handle_esg_routes(event: Dict[str, Any], data: Dict[str, Any], **params) -> 
 
     try:
         # ===== LIFF APIs (/api/esg/liff/*) =====
+        # Every LIFF endpoint is scoped to the current LINE user — they
+        # see their own dashboard / history / report only. The org-wide
+        # view stays on the desktop platform under /api/esg/* (no /liff
+        # prefix).
+        liff_user_id = int(current_user_id) if current_user_id else None
+
         if path == '/api/esg/liff/report' and method == 'GET':
             from .esg_report_service import EsgReportService
             report_svc = EsgReportService(db_session)
             year = int(query_params.get('year', 0)) or None
             view = query_params.get('view', 'executive')
-            return report_svc.get_report(current_user_org_id, year=year, view=view)
+            return report_svc.get_report(
+                current_user_org_id,
+                year=year,
+                view=view,
+                user_id=liff_user_id,
+            )
 
         elif path == '/api/esg/liff/summary' and method == 'GET':
             dash = EsgDashboardService(db_session)
-            return dash.get_summary(current_user_org_id)
+            return dash.get_summary(current_user_org_id, user_id=liff_user_id)
 
         elif path == '/api/esg/liff/charts' and method == 'GET':
             dash = EsgDashboardService(db_session)
             year = int(query_params.get('year', 0)) or None
-            return dash.get_charts(current_user_org_id, year)
+            return dash.get_charts(current_user_org_id, year, user_id=liff_user_id)
 
         elif path == '/api/esg/liff/entries' and method == 'GET':
             entry_service = EsgDataEntryService(db_session)
@@ -67,6 +78,7 @@ def handle_esg_routes(event: Dict[str, Any], data: Dict[str, Any], **params) -> 
                 page=int(query_params.get('page', 1)),
                 size=min(int(query_params.get('size', 10)), 100),
                 status=query_params.get('status'),
+                user_id=liff_user_id,
             )
 
         elif path == '/api/esg/liff/entries' and method == 'POST':

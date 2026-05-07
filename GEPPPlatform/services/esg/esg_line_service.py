@@ -25,11 +25,37 @@ logger = logging.getLogger(__name__)
 
 LIFF_BASE_URL = os.environ.get('LIFF_BASE_URL', 'https://esg.gepp.me')
 
-# Fallback LINE channel access token (long-lived) for replying when org settings are not configured
-LINE_FALLBACK_TOKEN = os.environ.get(
-    'LINE_CHANNEL_ACCESS_TOKEN',
-    'wyiQOUtCsDsHXQT8Iug8fk3mtPPIs54t52o/h6LKtVuNFryyaNcBLoZi6iona8TK0EyI/VBs5ntxXkGpDkQZZtt/99FM2dNF94ZdxmBle2vA4hTuqWz7Er6zBvnQUUi46BqxLwXk8hBsvw1EdMnw2gdB04t89/1O/w1cDnyilFU=',
+# Fallback LINE channel access token for the ESG Messaging API channel.
+# Per-org tokens stored in esg_organization_settings.line_channel_token
+# take precedence; this env is the fallback. ESG-prefixed so it doesn't
+# collide with the Reward LINE channel's env vars.
+# Backward compat: also accept the unprefixed LINE_CHANNEL_ACCESS_TOKEN.
+LINE_FALLBACK_TOKEN = (
+    os.environ.get('ESG_LINE_CHANNEL_ACCESS_TOKEN')
+    or os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '')
 )
+if not LINE_FALLBACK_TOKEN:
+    logger.warning(
+        'ESG_LINE_CHANNEL_ACCESS_TOKEN env var is not set. LINE webhook '
+        'replies will fail unless every org has its own '
+        'line_channel_token configured in esg_organization_settings.'
+    )
+
+# Fallback LINE channel secret for the ESG channel — used to verify
+# webhook X-Line-Signature (HMAC-SHA256) when an org has no per-row
+# secret in esg_organization_settings.line_channel_secret. ESG-prefixed
+# so it doesn't collide with the Reward channel.
+# Backward compat: also accept LINE_SECRET.
+LINE_FALLBACK_SECRET = (
+    os.environ.get('ESG_LINE_SECRET')
+    or os.environ.get('LINE_SECRET', '')
+)
+if not LINE_FALLBACK_SECRET:
+    logger.warning(
+        'ESG_LINE_SECRET env var is not set. Webhook signature verification '
+        'will be skipped for orgs that have no line_channel_secret '
+        'configured — replies will work but webhook source is not verified.'
+    )
 
 
 class EsgLineService:
@@ -220,13 +246,18 @@ class EsgLineService:
         # Determine reply token — use org settings or fallback
         channel_token = getattr(org, 'line_channel_token', None) or LINE_FALLBACK_TOKEN
 
-        # Signature verification (skip if no org settings — use fallback token flow)
-        if org and org.line_channel_secret:
-            if not self._verify_sig(raw_body, signature, org.line_channel_secret):
-                logger.warning(f"[MSG] Signature verification failed")
+        # Signature verification (HMAC-SHA256 of raw body using channel secret).
+        # Per-org secret takes precedence; falls back to ESG_LINE_SECRET env
+        # var so we still verify webhooks even when an org row has no secret
+        # yet. Only when neither is available do we skip (and log loudly).
+        secret_for_verify = (org.line_channel_secret if org and org.line_channel_secret
+                             else LINE_FALLBACK_SECRET)
+        if secret_for_verify:
+            if not self._verify_sig(raw_body, signature, secret_for_verify):
+                logger.warning(f"[MSG] Signature verification failed (secret source={'org' if org and org.line_channel_secret else 'env'})")
                 return {'status': 'error', 'reason': 'signature failed'}
         else:
-            logger.warning(f"[MSG] No org channel secret — skipping signature verification, using fallback token")
+            logger.warning(f"[MSG] No org channel secret AND ESG_LINE_SECRET env not set — skipping signature verification")
 
         # Check if this LINE user is linked to an org via esg_users
         esg_user = self.db.query(EsgUser).filter(
@@ -538,50 +569,124 @@ class EsgLineService:
     # ==========================================
 
     def _build_result_flex(self, entry: dict) -> dict:
-        """Build Flex Message with tCO2e result + ยืนยัน/แก้ไข buttons."""
+        """
+        Build Flex Message that explicitly tells the user:
+          - which Scope 3 category we assigned (1..15) + the canonical name
+          - what data we extracted (value + unit)
+          - the calculated tCO2e (or "needs more data" when NULL)
+          - which fields are still missing for an accurate calculation
+          - confirm / edit-in-LIFF buttons
+        """
+        from .scope3_assignment import (
+            assign_scope3_category,
+            missing_fields_for,
+            SCOPE3_LABELS,
+        )
+
         tco2e = entry.get('calculated_tco2e')
-        tco2e_text = f'{tco2e:.4f} tCO2e' if tco2e else 'ไม่สามารถคำนวณได้'
         category = entry.get('category', 'Unknown')
         value = entry.get('value', 0)
         unit = entry.get('unit', '')
         entry_id = entry.get('id', 0)
 
+        scope3_id, name_en, name_th, source = assign_scope3_category(
+            self.db,
+            category_name=category,
+            category_id=entry.get('category_id'),
+            unit=unit,
+            raw_input=entry.get('notes') or entry.get('raw_content'),
+        )
+        cat_label = name_th or name_en or 'Scope 3'
+        cat_chip = f'หมวด {scope3_id} · {cat_label}' if scope3_id else 'Scope 3'
+
+        tco2e_text = (
+            f'{float(tco2e):.4f} tCO₂e'
+            if tco2e is not None
+            else 'ต้องการข้อมูลเพิ่มเพื่อคำนวณ'
+        )
+
+        present = []
+        if value is not None:
+            present.append('amount' if (unit or '').lower() in ('thb', 'usd', 'baht') else 'value')
+        if unit:
+            present.append(unit.lower())
+        missing = missing_fields_for(scope3_id, present, lang='th') if scope3_id else []
+
+        body_contents = [
+            # Top: assigned category chip
+            {
+                'type': 'box', 'layout': 'vertical', 'cornerRadius': '8px',
+                'backgroundColor': '#ECFDF5', 'paddingAll': '8px',
+                'contents': [
+                    {'type': 'text', 'text': cat_chip,
+                     'size': 'sm', 'weight': 'bold', 'color': '#047857', 'wrap': True},
+                ],
+            },
+            # Extracted value
+            {'type': 'box', 'layout': 'horizontal', 'margin': 'md', 'contents': [
+                {'type': 'text', 'text': 'ค่าที่อ่านได้', 'size': 'sm', 'color': '#888', 'flex': 2},
+                {'type': 'text', 'text': f'{value} {unit}'.strip(),
+                 'size': 'sm', 'weight': 'bold', 'flex': 3, 'wrap': True},
+            ]},
+            # Original LLM category text (for transparency)
+            {'type': 'box', 'layout': 'horizontal', 'contents': [
+                {'type': 'text', 'text': 'อ่านได้เป็น', 'size': 'xs', 'color': '#888', 'flex': 2},
+                {'type': 'text', 'text': str(category)[:40],
+                 'size': 'xs', 'color': '#666', 'flex': 3, 'wrap': True},
+            ]},
+            {'type': 'separator', 'margin': 'md'},
+            # tCO2e
+            {'type': 'box', 'layout': 'horizontal', 'margin': 'md', 'contents': [
+                {'type': 'text', 'text': 'คาร์บอน', 'size': 'md',
+                 'color': '#10b981', 'weight': 'bold', 'flex': 2},
+                {'type': 'text', 'text': tco2e_text, 'size': 'md',
+                 'weight': 'bold', 'flex': 3, 'wrap': True},
+            ]},
+        ]
+
+        # Missing-fields hint
+        if missing:
+            body_contents.append({'type': 'separator', 'margin': 'md'})
+            body_contents.append({
+                'type': 'text', 'text': '🟠 ต้องการข้อมูลเพิ่ม:',
+                'size': 'xs', 'color': '#b45309', 'weight': 'bold', 'margin': 'md',
+            })
+            for m in missing[:4]:
+                body_contents.append({
+                    'type': 'text', 'text': f'  • {m}',
+                    'size': 'xs', 'color': '#92400e', 'wrap': True, 'margin': 'xs',
+                })
+
         return {
             'type': 'flex',
-            'altText': f'ESG: {category} {value} {unit} = {tco2e_text}',
+            'altText': f'{cat_chip} — {value} {unit} → {tco2e_text}',
             'contents': {
                 'type': 'bubble',
                 'header': {
                     'type': 'box', 'layout': 'vertical',
-                    'backgroundColor': '#76B900',
+                    'backgroundColor': '#0b1120', 'paddingAll': '16px',
                     'contents': [
-                        {'type': 'text', 'text': 'ESG Data Captured', 'color': '#FFFFFF', 'weight': 'bold', 'size': 'lg'},
+                        {'type': 'text', 'text': 'Carbon Scope 3',
+                         'color': '#a7f3d0', 'size': 'xs', 'weight': 'bold'},
+                        {'type': 'text', 'text': 'ได้รับข้อมูลแล้ว ✓',
+                         'color': '#FFFFFF', 'weight': 'bold', 'size': 'lg', 'margin': 'sm'},
                     ],
                 },
                 'body': {
-                    'type': 'box', 'layout': 'vertical', 'spacing': 'md',
-                    'contents': [
-                        {'type': 'box', 'layout': 'horizontal', 'contents': [
-                            {'type': 'text', 'text': 'หมวดหมู่', 'size': 'sm', 'color': '#888888', 'flex': 2},
-                            {'type': 'text', 'text': str(category), 'size': 'sm', 'weight': 'bold', 'flex': 3},
-                        ]},
-                        {'type': 'box', 'layout': 'horizontal', 'contents': [
-                            {'type': 'text', 'text': 'ปริมาณ', 'size': 'sm', 'color': '#888888', 'flex': 2},
-                            {'type': 'text', 'text': f'{value} {unit}', 'size': 'sm', 'weight': 'bold', 'flex': 3},
-                        ]},
-                        {'type': 'separator'},
-                        {'type': 'box', 'layout': 'horizontal', 'contents': [
-                            {'type': 'text', 'text': 'คาร์บอน', 'size': 'md', 'color': '#76B900', 'weight': 'bold', 'flex': 2},
-                            {'type': 'text', 'text': tco2e_text, 'size': 'md', 'weight': 'bold', 'flex': 3},
-                        ]},
-                        {'type': 'text', 'text': f'Scope: {entry.get("scope_tag", "-")}', 'size': 'xs', 'color': '#888888'},
-                    ],
+                    'type': 'box', 'layout': 'vertical', 'spacing': 'sm',
+                    'contents': body_contents,
                 },
                 'footer': {
-                    'type': 'box', 'layout': 'horizontal', 'spacing': 'md',
+                    'type': 'box', 'layout': 'horizontal', 'spacing': 'sm',
                     'contents': [
-                        {'type': 'button', 'action': {'type': 'postback', 'label': 'ยืนยัน', 'data': f'action=confirm&entry_id={entry_id}'}, 'style': 'primary', 'color': '#76B900'},
-                        {'type': 'button', 'action': {'type': 'postback', 'label': 'แก้ไขใน LIFF', 'data': f'action=edit&entry_id={entry_id}'}, 'style': 'secondary'},
+                        {'type': 'button',
+                         'action': {'type': 'postback', 'label': 'ยืนยัน',
+                                    'data': f'action=confirm&entry_id={entry_id}'},
+                         'style': 'primary', 'color': '#0b1120'},
+                        {'type': 'button',
+                         'action': {'type': 'postback', 'label': 'แก้ไขใน LIFF',
+                                    'data': f'action=edit&entry_id={entry_id}'},
+                         'style': 'secondary'},
                     ],
                 },
             },
@@ -603,21 +708,108 @@ class EsgLineService:
         if not value:
             return None
 
-        cat_name = extr.get('category_match', {}).get('name', '')
-        tco2e = self.carbon.calculate_tco2e(cat_name or 'unknown', float(value), unit) if value and unit else None
+        cat_match = extr.get('category_match') or {}
+        cat_name = cat_match.get('name') or cat_match.get('category_name') or ''
+        # The LLM cascade returns category_id (the DB row id). Persist it so
+        # the dashboard JOIN to esg_data_category works and the LIFF per-user
+        # filter (EsgDataEntry.user_id = current LIFF user) returns rows.
+        cat_id = cat_match.get('category_id') or cat_match.get('id')
+
+        # Force the category to one of the 15 specific Scope 3 rows. The
+        # LLM sometimes returns the legacy generic 'Carbon Emissions Scope 3'
+        # row, which has no scope3_category_id and prevents the dashboard
+        # JOIN + fallback EF from working. Resolve the proper Scope 3
+        # category here using a deterministic post-processor.
+        from .scope3_assignment import assign_scope3_category
+        scope3_id, name_en, _name_th, _src = assign_scope3_category(
+            self.db,
+            category_name=cat_name,
+            category_id=cat_id,
+            unit=unit,
+            raw_input=extraction.raw_content if hasattr(extraction, 'raw_content') else None,
+        )
+        if scope3_id:
+            try:
+                from ...models.esg.data_hierarchy import EsgDataCategory
+                row = (
+                    self.db.query(EsgDataCategory)
+                    .filter(
+                        EsgDataCategory.is_scope3 == True,
+                        EsgDataCategory.scope3_category_id == int(scope3_id),
+                        EsgDataCategory.deleted_date.is_(None),
+                    )
+                    .first()
+                )
+                if row:
+                    cat_id = int(row.id)
+                    cat_name = row.name or name_en or cat_name
+            except Exception:
+                logger.exception('scope3 category remap failed')
+
+        sub_match = extr.get('subcategory_match') or {}
+        sub_id = sub_match.get('subcategory_id') or sub_match.get('id')
+        dp_id = first.get('datapoint_id') or first.get('id')
+
+        # Resolve EsgUser.id from line_user_id so this entry attaches to the
+        # right LIFF user — without this, user_id=0 means the LIFF dashboard
+        # can never see entries created via the LINE webhook.
+        liff_user_id = self._resolve_liff_user_id(line_user_id, org_id)
+
+        tco2e = (
+            self.carbon.calculate_tco2e(
+                category=cat_name or 'unknown',
+                amount=float(value),
+                unit=unit,
+                category_id=cat_id,
+            )
+            if value and unit
+            else None
+        )
         scope = self.carbon.get_scope_for_category(cat_name) if cat_name else None
 
         entry = EsgDataEntry(
-            organization_id=org_id, user_id=0, line_user_id=line_user_id,
-            category=cat_name, value=value, unit=unit,
-            calculated_tco2e=tco2e, scope_tag=scope,
-            entry_source=EntrySource.LINE_CHAT, status=EntryStatus.PENDING_VERIFY,
+            organization_id=org_id,
+            user_id=liff_user_id or 0,
+            line_user_id=line_user_id,
+            category_id=cat_id,
+            subcategory_id=sub_id,
+            datapoint_id=dp_id,
+            category=cat_name,
+            value=value,
+            unit=unit,
+            calculated_tco2e=tco2e,
+            scope_tag=scope,
+            entry_source=EntrySource.LINE_CHAT,
+            status=EntryStatus.PENDING_VERIFY,
             entry_date=datetime.utcnow().date(),
         )
         self.db.add(entry)
         self.db.commit()
         self.db.refresh(entry)
         return entry.to_dict()
+
+    def _resolve_liff_user_id(self, line_user_id: str, org_id: int) -> int | None:
+        """
+        Look up EsgUser.id for the LINE user_id. Returns None when not
+        found (the user follows the OA but hasn't completed invitation yet).
+        """
+        if not line_user_id:
+            return None
+        try:
+            from ...models.esg.esg_users import EsgUser
+            row = (
+                self.db.query(EsgUser)
+                .filter(
+                    EsgUser.platform == 'line',
+                    EsgUser.platform_user_id == line_user_id,
+                    EsgUser.organization_id == org_id,
+                    EsgUser.is_active == True,
+                )
+                .first()
+            )
+            return int(row.id) if row else None
+        except Exception:
+            return None
 
     def _help_text(self) -> str:
         return (

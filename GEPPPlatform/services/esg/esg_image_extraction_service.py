@@ -492,6 +492,55 @@ Rules:
 
         body_contents = []
 
+        # ── Scope 3 category chip — explicitly tell the user which of the
+        # 15 GHG Protocol categories we assigned this evidence to. Picks
+        # the most-frequent assignment across all extracted entries.
+        from collections import Counter
+        from .scope3_assignment import (
+            assign_scope3_category,
+            missing_fields_for,
+            SCOPE3_LABELS,
+        )
+
+        cat_votes: Counter = Counter()
+        present_fields: set = set()
+        first_unit = ''
+        for e in entries:
+            ent_unit = (e.get('unit') or '').lower()
+            if ent_unit and not first_unit:
+                first_unit = ent_unit
+            cid, _, _, _ = assign_scope3_category(
+                self.db,
+                category_name=e.get('category'),
+                category_id=e.get('category_id'),
+                unit=ent_unit,
+                raw_input=document_summary or '',
+            )
+            if cid:
+                cat_votes[cid] += 1
+            for f_name in (e.get('field') or e.get('datapoint_name') or '',):
+                if f_name:
+                    present_fields.add(f_name.lower())
+            if ent_unit:
+                present_fields.add(ent_unit)
+
+        scope3_id = cat_votes.most_common(1)[0][0] if cat_votes else None
+        if scope3_id:
+            lbl = SCOPE3_LABELS.get(scope3_id, {})
+            chip_text = f'หมวด {scope3_id} · {lbl.get("th") or lbl.get("en") or "Scope 3"}'
+            body_contents.append({
+                'type': 'box', 'layout': 'vertical', 'cornerRadius': '8px',
+                'backgroundColor': '#ECFDF5', 'paddingAll': '8px',
+                'contents': [
+                    {'type': 'text', 'text': 'Carbon Scope 3',
+                     'size': 'xxs', 'color': '#047857', 'weight': 'bold'},
+                    {'type': 'text', 'text': chip_text,
+                     'size': 'sm', 'color': '#047857', 'weight': 'bold',
+                     'wrap': True, 'margin': 'xs'},
+                ],
+            })
+            body_contents.append({'type': 'separator', 'margin': 'md'})
+
         # ── Refs row ──
         refs_parts = []
         if refs.get('vendor'):
@@ -515,6 +564,10 @@ Rules:
 
         if refs_parts or document_summary:
             body_contents.append({'type': 'separator', 'margin': 'md'})
+
+        # Stash for the missing-fields footer (rendered after records)
+        _scope3_id_for_footer = scope3_id
+        _present_for_footer = list(present_fields)
 
         # ── Records as grouped cards ──
         shown_records = 0
@@ -610,10 +663,42 @@ Rules:
             body_contents.append({
                 'type': 'box', 'layout': 'horizontal', 'margin': 'md',
                 'contents': [
-                    {'type': 'text', 'text': 'รวม tCO₂e', 'size': 'sm', 'color': '#2d6a4f', 'weight': 'bold', 'flex': 3},
-                    {'type': 'text', 'text': f'{total_tco2e:.4f}', 'size': 'sm', 'weight': 'bold', 'color': '#2d6a4f', 'flex': 2, 'align': 'end'},
+                    {'type': 'text', 'text': 'รวม tCO₂e', 'size': 'sm', 'color': '#047857', 'weight': 'bold', 'flex': 3},
+                    {'type': 'text', 'text': f'{total_tco2e:.4f}', 'size': 'sm', 'weight': 'bold', 'color': '#047857', 'flex': 2, 'align': 'end'},
                 ],
             })
+        else:
+            # No factor matched — surface that explicitly so the user
+            # knows we read the data but didn't compute emissions yet.
+            body_contents.append({'type': 'separator', 'margin': 'lg'})
+            body_contents.append({
+                'type': 'text',
+                'text': 'ยังคำนวณ tCO₂e ไม่ได้ — ขาดข้อมูลด้านล่าง',
+                'size': 'xs', 'color': '#b45309', 'weight': 'bold',
+                'margin': 'md', 'wrap': True,
+            })
+
+        # ── Missing fields hint (per assigned Scope 3 category) ──
+        if _scope3_id_for_footer:
+            try:
+                missing = missing_fields_for(
+                    _scope3_id_for_footer, _present_for_footer, lang='th'
+                )
+            except Exception:
+                missing = []
+            if missing:
+                body_contents.append({'type': 'separator', 'margin': 'md'})
+                body_contents.append({
+                    'type': 'text', 'text': '🟠 ข้อมูลที่ยังขาด:',
+                    'size': 'xs', 'color': '#b45309',
+                    'weight': 'bold', 'margin': 'md',
+                })
+                for m in missing[:4]:
+                    body_contents.append({
+                        'type': 'text', 'text': f'  • {m}',
+                        'size': 'xs', 'color': '#92400e',
+                        'wrap': True, 'margin': 'xs',
+                    })
 
         return {
             'type': 'flex',

@@ -29,11 +29,37 @@ class EsgReportService:
     def __init__(self, db: Session):
         self.db = db
 
+    def _resolve_line_user_id(self, esg_user_id: int, organization_id: int = None):
+        """
+        OR-filter helper — returns LINE platform user id for an EsgUser.
+        Filters by organization_id when supplied to defend against the
+        (unlikely) case that a user_id from JWT belongs to a different org.
+        """
+        if not esg_user_id:
+            return None
+        try:
+            from ...models.esg.esg_users import EsgUser
+            q = (
+                self.db.query(EsgUser)
+                .filter(EsgUser.id == esg_user_id, EsgUser.platform == 'line')
+            )
+            if organization_id is not None:
+                q = q.filter(EsgUser.organization_id == organization_id)
+            row = q.first()
+            return row.platform_user_id if row else None
+        except Exception:
+            return None
+
     def get_report(self, organization_id: int, year: int = None,
-                   view: str = 'executive') -> Dict[str, Any]:
+                   view: str = 'executive', user_id: int = None) -> Dict[str, Any]:
         """
         Consolidated report endpoint. Returns all data needed for
         Dashboard, Report, and Share pages in a single call.
+
+        Args:
+            user_id: optional EsgUser.id. When set (LIFF /report endpoint),
+                every aggregate is scoped to that user's entries only.
+                Desktop callers leave this None for the org-wide view.
 
         view: 'executive' | 'manager' | 'operations'
         """
@@ -42,11 +68,22 @@ class EsgReportService:
 
         prev_year = year - 1
 
-        # Base query
+        # Base query — per-user filter ORs on user_id and line_user_id so
+        # legacy LINE-webhook entries with user_id=0 still surface.
         base = self.db.query(EsgDataEntry).filter(
             EsgDataEntry.organization_id == organization_id,
             EsgDataEntry.is_active == True,
         )
+        if user_id is not None:
+            line_uid = self._resolve_line_user_id(user_id, organization_id)
+            if line_uid:
+                from sqlalchemy import or_
+                base = base.filter(or_(
+                    EsgDataEntry.user_id == user_id,
+                    EsgDataEntry.line_user_id == line_uid,
+                ))
+            else:
+                base = base.filter(EsgDataEntry.user_id == user_id)
         base_year_q = base.filter(extract('year', EsgDataEntry.entry_date) == year)
         base_prev_q = base.filter(extract('year', EsgDataEntry.entry_date) == prev_year)
 
@@ -176,7 +213,12 @@ class EsgReportService:
         for s in scope_breakdown:
             s['percentage'] = round(s['tco2e'] / total_scope * 100, 1) if total_scope > 0 else 0
 
-        # Top categories
+        # Scope 3 categories (1..15) — used by every consumer when
+        # focus_mode='scope3_only'. Always returns 15 rows in stable order.
+        scope3_categories = self._get_scope3_categories(base, total_tco2e)
+
+        # Top categories — when scope3_only callers will use scope3_categories
+        # instead, but we keep this for legacy free-form text grouping.
         top_cats = (
             base
             .filter(EsgDataEntry.calculated_tco2e.isnot(None))
@@ -192,11 +234,56 @@ class EsgReportService:
             'verified_count': verified,
             'pending_count': pending,
             'scope_breakdown': scope_breakdown,
+            'scope3_categories': scope3_categories,
             'top_categories': [
                 {'category': r[0] or 'Unknown', 'tco2e': float(r[1] or 0)}
                 for r in top_cats
             ],
         }
+
+    def _get_scope3_categories(self, base, total_tco2e: float) -> List[Dict]:
+        """
+        Return SUM(tCO2e) per Scope 3 category 1..15 by JOIN'ing
+        esg_data_entries → esg_data_category. Always emits 15 rows
+        (zero where missing) so the dashboard / report can render a
+        stable bar/donut.
+        """
+        # Mirror the canonical labels from EsgDashboardService so we don't
+        # duplicate. Local import avoids a circular import at module load.
+        from .esg_dashboard_service import SCOPE3_CATEGORY_LABELS
+
+        rows = (
+            base
+            .with_entities(
+                EsgDataCategory.scope3_category_id.label('cat_id'),
+                EsgDataCategory.name.label('cat_name'),
+                func.coalesce(func.sum(EsgDataEntry.calculated_tco2e), 0).label('total'),
+                func.count(EsgDataEntry.id).label('cnt'),
+            )
+            .join(EsgDataCategory, EsgDataCategory.id == EsgDataEntry.category_id)
+            .filter(
+                EsgDataCategory.is_scope3 == True,
+                EsgDataCategory.scope3_category_id.isnot(None),
+            )
+            .group_by(EsgDataCategory.scope3_category_id, EsgDataCategory.name)
+            .all()
+        )
+        by_cat = {int(r.cat_id): r for r in rows if r.cat_id is not None}
+        out: List[Dict] = []
+        for cat_id in range(1, 16):
+            r = by_cat.get(cat_id)
+            label = SCOPE3_CATEGORY_LABELS.get(cat_id, {})
+            tco2e = float(r.total or 0) if r else 0.0
+            pct = round(tco2e / total_tco2e * 100, 1) if total_tco2e > 0 else 0
+            out.append({
+                'scope3_category_id': cat_id,
+                'name_en': label.get('en'),
+                'name_th': label.get('th'),
+                'tco2e': tco2e,
+                'entry_count': int(r.cnt or 0) if r else 0,
+                'percentage': pct,
+            })
+        return out
 
     def _get_yoy(self, curr_q, prev_q, year, prev_year) -> Dict:
         curr = float(curr_q.with_entities(
