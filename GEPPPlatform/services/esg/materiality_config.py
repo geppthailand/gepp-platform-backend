@@ -5,10 +5,19 @@ Mirrors the frontend implementation at:
   v3/frontend/gepp-esg/src/mat_filters/{questions,industries,scoring}.yaml
   v3/frontend/gepp-esg/src/mat_filters/scoring.ts
 
-The two implementations share the same YAML files (loaded directly from
-the frontend tree at module import time) and the same fixture set at
+The same YAML files are also bundled into the backend Lambda artifact at
+v3/backend/GEPPPlatform/assets/mat_filters/ so the function has them on
+disk at /var/task/GEPPPlatform/assets/mat_filters/*.yaml in production
+(it cannot reach `../../frontend/...` from inside Lambda's read-only
+runtime). Both copies must stay in lockstep — see the sync note below.
+
+The two implementations share the same fixture set at
 v3/frontend/gepp-esg/src/mat_filters/__tests__/scoring_fixtures.json,
 so they can never disagree on what counts as "material".
+
+SYNC RULE: when you edit any YAML in the frontend mat_filters/ tree,
+copy the same file into v3/backend/GEPPPlatform/assets/mat_filters/.
+A test or pre-commit hook should enforce byte-equality.
 
 DO NOT inline category weights or thresholds here — always read from
 the YAML so a single edit propagates to both sides.
@@ -16,6 +25,7 @@ the YAML so a single edit propagates to both sides.
 
 from __future__ import annotations
 
+import logging
 import os
 from functools import lru_cache
 from pathlib import Path
@@ -23,26 +33,59 @@ from typing import Any
 
 import yaml
 
+logger = logging.getLogger(__name__)
 
-# Resolve the frontend mat_filters/ directory relative to this file.
-# Layout: <repo>/v3/backend/GEPPPlatform/services/esg/materiality_config.py
-#         <repo>/v3/frontend/gepp-esg/src/mat_filters/*.yaml
-# parents[4] from this file is the v3/ directory.
+
+# Resolution order — try paths in this list and use the first one that
+# exists. The order matters:
+#   1. `GEPP_MAT_FILTERS_DIR` env override   — explicit deploy override
+#   2. Bundled backend assets/mat_filters/   — Lambda runtime layout
+#   3. Frontend mat_filters/ tree            — local dev / monorepo run
+#
+# The previous version of this module assumed `parents[4] / 'frontend'`
+# was reachable, which works in a monorepo checkout but fails in Lambda
+# because /var/task only contains the backend bundle. The new bundled
+# `backend/GEPPPlatform/assets/mat_filters/` directory ships with the
+# Lambda artifact and is the authoritative production source.
 _THIS = Path(__file__).resolve()
-_V3_DIR = _THIS.parents[4]
+_BACKEND_ASSETS = _THIS.parent.parent.parent / 'assets' / 'mat_filters'
+# parents[4] is the repo's v3/ in the source checkout. Used only when
+# the bundled copy is missing (i.e. running from a fresh checkout where
+# the assets/ directory hasn't been populated yet).
+_V3_DIR = _THIS.parents[4] if len(_THIS.parents) > 4 else _THIS.parent
 _FE_MAT_FILTERS = _V3_DIR / 'frontend' / 'gepp-esg' / 'src' / 'mat_filters'
 
 
+def _candidate_dirs() -> list[Path]:
+    """All directories the loader will try, in priority order."""
+    cands: list[Path] = []
+    override = os.environ.get('GEPP_MAT_FILTERS_DIR')
+    if override:
+        cands.append(Path(override))
+    cands.append(_BACKEND_ASSETS)
+    cands.append(_FE_MAT_FILTERS)
+    return cands
+
+
 def _load_yaml(name: str) -> Any:
-    path = _FE_MAT_FILTERS / name
-    if not path.exists():
-        # Allow override via env var for production deploys that bundle the
-        # YAMLs into the lambda artifact at a different path.
-        override = os.environ.get('GEPP_MAT_FILTERS_DIR')
-        if override:
-            path = Path(override) / name
-    with path.open('r', encoding='utf-8') as fh:
-        return yaml.safe_load(fh)
+    last_path: Path | None = None
+    for base in _candidate_dirs():
+        path = base / name
+        last_path = path
+        if path.exists():
+            with path.open('r', encoding='utf-8') as fh:
+                return yaml.safe_load(fh)
+    # Couldn't find the file in any candidate dir — surface a clear,
+    # actionable error rather than the cryptic FileNotFoundError on the
+    # last path we happened to check.
+    tried = ', '.join(str(b / name) for b in _candidate_dirs())
+    raise FileNotFoundError(
+        f'materiality_config: cannot find {name!r}. '
+        f'Tried: {tried}. '
+        f'Bundle the YAMLs into '
+        f'GEPPPlatform/assets/mat_filters/ or set '
+        f'GEPP_MAT_FILTERS_DIR to override. (last attempted: {last_path})'
+    )
 
 
 @lru_cache(maxsize=1)

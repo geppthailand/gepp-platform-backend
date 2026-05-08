@@ -25,6 +25,7 @@ from .condition_rules import EsgConditionRule
 from .xbrl import EsgXbrlTag, EsgXbrlReportValue
 from .user_materiality import EsgUserMateriality
 from .materiality_submission import EsgMaterialitySubmission
+from .line_chat_histories import EsgLineChatHistory
 
 __all__ = [
     'EsgOrganizationSettings',
@@ -50,4 +51,5 @@ __all__ = [
     'EsgXbrlTag', 'EsgXbrlReportValue',
     'EsgUserMateriality',
     'EsgMaterialitySubmission',
+    'EsgLineChatHistory',
 ]

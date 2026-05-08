@@ -140,65 +140,110 @@ class MaterialityService:
         wizard now collects before each run. We persist it on every
         submission row so an admin can see who answered which round
         even when one EsgUser id covers multiple LINE accounts.
+
+        Failure modes are explicit: we rollback + re-raise so the
+        handler returns a real error to the LIFF wizard. The wizard
+        no longer pretends success on failure, so users will see and
+        retry instead of believing their submission was saved.
         """
+        if not user_id or not org_id:
+            raise ValueError(
+                f'materiality.complete: missing user_id ({user_id}) or '
+                f'org_id ({org_id}) — cannot persist',
+            )
+
         result = materiality_config.compute_scores(answers or {})
         derived = list(result.get('derivedCategories') or [])
         scores = {str(k): v for k, v in (result.get('scores') or {}).items()}
 
-        # Upsert the per-user record (latest state).
-        rec = self._get_record(user_id, org_id)
-        if not rec:
-            rec = EsgUserMateriality(
+        logger.info(
+            'materiality.complete: start user_id=%s org_id=%s '
+            'derived=%s submitter=%r',
+            user_id, org_id, derived,
+            (submitter_name or '')[:60],
+        )
+
+        try:
+            # Upsert the per-user record (latest state).
+            rec = self._get_record(user_id, org_id)
+            if not rec:
+                rec = EsgUserMateriality(
+                    user_id=user_id,
+                    organization_id=org_id,
+                    questions_version=materiality_config.questions_version(),
+                )
+                self.db.add(rec)
+            rec.answers = answers or {}
+            rec.derived_categories = derived
+            rec.category_scores = scores
+            rec.completed_at = datetime.now(timezone.utc)
+
+            q1 = (answers or {}).get('q1_industry') or {}
+            industry_other = None
+            if q1.get('selected') == 'other' and q1.get('freeText'):
+                industry_other = q1.get('freeText')
+                rec.industry_other_text = industry_other
+
+            # Append-only history row. One per submission — no upsert.
+            line_user_id, line_display_name = self._lookup_line_identity(user_id)
+            submission = EsgMaterialitySubmission(
                 user_id=user_id,
                 organization_id=org_id,
-                questions_version=materiality_config.questions_version(),
+                submitter_name=(submitter_name or '').strip()[:255] or '(unspecified)',
+                line_user_id=line_user_id,
+                line_display_name=line_display_name,
+                questions_version=str(materiality_config.questions_version()),
+                answers=answers or {},
+                derived_categories=derived,
+                category_scores=scores,
+                industry_other_text=industry_other,
+                submitted_at=datetime.now(timezone.utc),
             )
-            self.db.add(rec)
-        rec.answers = answers or {}
-        rec.derived_categories = derived
-        rec.category_scores = scores
-        rec.completed_at = datetime.now(timezone.utc)
+            self.db.add(submission)
 
-        q1 = (answers or {}).get('q1_industry') or {}
-        industry_other = None
-        if q1.get('selected') == 'other' and q1.get('freeText'):
-            industry_other = q1.get('freeText')
-            rec.industry_other_text = industry_other
+            # Set-union into the org whitelist so any teammate's
+            # material categories are visible across the org.
+            settings = self._get_or_create_settings(org_id)
+            existing = set(int(x) for x in (settings.enabled_scope3_categories or []))
+            unioned = sorted(existing.union(int(x) for x in derived))
+            settings.enabled_scope3_categories = unioned
 
-        # Append-only history row. One per submission — no upsert.
-        line_user_id, line_display_name = self._lookup_line_identity(user_id)
-        submission = EsgMaterialitySubmission(
-            user_id=user_id,
-            organization_id=org_id,
-            submitter_name=(submitter_name or '').strip()[:255] or '(unspecified)',
-            line_user_id=line_user_id,
-            line_display_name=line_display_name,
-            questions_version=str(materiality_config.questions_version()),
-            answers=answers or {},
-            derived_categories=derived,
-            category_scores=scores,
-            industry_other_text=industry_other,
-            submitted_at=datetime.now(timezone.utc),
-        )
-        self.db.add(submission)
+            # Flush to surface FK / constraint violations BEFORE the
+            # commit so we can include the SQL error in the rollback
+            # log. Then commit transactionally.
+            self.db.flush()
+            self.db.commit()
 
-        # Set-union into the org whitelist so any teammate's material
-        # categories are visible across the org.
-        settings = self._get_or_create_settings(org_id)
-        existing = set(int(x) for x in (settings.enabled_scope3_categories or []))
-        unioned = sorted(existing.union(int(x) for x in derived))
-        settings.enabled_scope3_categories = unioned
+            logger.info(
+                'materiality.complete: ok user_mat_id=%s submission_id=%s '
+                'enabled=%s',
+                rec.id, submission.id, unioned,
+            )
 
-        self.db.commit()
-
-        return {
-            'success': True,
-            'derivedCategories': derived,
-            'enabledScope3Categories': unioned,
-            'scores': scores,
-            'focusMode': settings.focus_mode or 'scope3_only',
-            'submissionId': submission.id,
-        }
+            return {
+                'success': True,
+                'derivedCategories': derived,
+                'enabledScope3Categories': unioned,
+                'scores': scores,
+                'focusMode': settings.focus_mode or 'scope3_only',
+                'submissionId': submission.id,
+                'userMaterialityId': rec.id,
+            }
+        except Exception as e:
+            # Roll back the partially-staged session so the next
+            # request starts clean. Log the full SQL error so the
+            # on-call can see WHY the save failed (FK violation,
+            # missing column, schema drift, etc.).
+            try:
+                self.db.rollback()
+            except Exception:
+                pass
+            logger.exception(
+                'materiality.complete: FAILED user_id=%s org_id=%s '
+                '— rolled back. error=%s',
+                user_id, org_id, e,
+            )
+            raise
 
     # ─── helpers ────────────────────────────────────────────────────────
 

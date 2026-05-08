@@ -173,7 +173,20 @@ class LiffAuthService:
     def accept_invitation(self, invitation_token: str, line_access_token: str) -> dict:
         """
         Accept invitation via LINE.
-        Creates EsgUser(platform='line') linked to the invitation's org.
+
+        Three execution paths:
+          A) Idempotent re-scan — the LINE user is ALREADY a member
+             of the invitation's target org. Just issue fresh tokens
+             and drop them into the LIFF. The invitation row is NOT
+             marked as used, so the QR's single-use quota is
+             preserved for someone who actually needs it.
+          B) Standard accept — first time joining (or rebinding from
+             a previously-removed state). Validates expiry +
+             single-use slot, then links the user to the org and
+             consumes `used_at`.
+          C) Conflict — the LINE user is already in a DIFFERENT
+             org. Surface a clear error so the admin can remove
+             them from the existing org first.
         """
         invitation = (
             self.session.query(EsgExternalInvitationLink)
@@ -187,8 +200,6 @@ class LiffAuthService:
             raise ValueError('Invitation link ไม่ถูกต้องหรือหมดอายุ')
         if invitation.expires_at and invitation.expires_at < datetime.now(timezone.utc):
             raise ValueError('Invitation link หมดอายุแล้ว กรุณาขอลิงก์ใหม่จากผู้ดูแล')
-        if invitation.used_at:
-            raise ValueError('Invitation link นี้ถูกใช้งานแล้ว')
 
         # Same channel-id check as login — reject tokens from the Reward
         # LIFF (or any other channel) trying to accept an ESG invitation.
@@ -205,8 +216,55 @@ class LiffAuthService:
         # Check if this LINE user already exists
         user = self._find_esg_user('line', line_user_id)
 
-        if user and user.organization_id:
+        # ── PATH A: idempotent re-scan ───────────────────────────
+        # User is already a member of THIS invitation's org. Don't
+        # consume the QR slot, don't touch `used_at` — just log them
+        # in and let LIFF render the dashboard.
+        if user and user.organization_id == invitation.organization_id:
+            updated = False
+            if display_name and not user.display_name:
+                user.display_name = display_name
+                updated = True
+            if picture_url and not user.profile_image_url:
+                user.profile_image_url = picture_url
+                updated = True
+            if updated:
+                self.session.commit()
+                self.session.refresh(user)
+            logger.info(
+                "EsgUser %s (line:%s) re-scanned invitation for "
+                "already-joined org %s — idempotent, no quota consumed",
+                user.id, line_user_id, invitation.organization_id,
+            )
+            tokens = self._generate_tokens(user.id, user.organization_id, '')
+            materiality_state = self._get_materiality_state(user.id, user.organization_id)
+            return {
+                'success': True,
+                'already_member': True,
+                'auth_token': tokens['auth_token'],
+                'refresh_token': tokens['refresh_token'],
+                'token_type': 'Bearer',
+                'expires_in': 86400,
+                'user': {
+                    'id': user.id,
+                    'email': '',
+                    'displayName': user.display_name or display_name,
+                    'organizationId': user.organization_id,
+                    'pictureUrl': user.profile_image_url,
+                    **materiality_state,
+                },
+            }
+
+        # ── PATH C: conflict — user belongs to a different org ───
+        if user and user.organization_id and user.organization_id != invitation.organization_id:
             raise ValueError('LINE ID นี้เชื่อมต่อกับองค์กรอื่นอยู่แล้ว กรุณาให้ผู้ดูแลลบออกก่อน')
+
+        # ── PATH B: first-time accept (or rebind after removal) ──
+        # The single-use quota matters here. If somebody else
+        # already used this invitation, this user must get a fresh
+        # link from the admin.
+        if invitation.used_at:
+            raise ValueError('Invitation link นี้ถูกใช้งานแล้ว')
 
         if user:
             # Existing user without org — link
@@ -279,7 +337,25 @@ class LiffAuthService:
         }
 
     def remove_member(self, organization_id: int, member_id: int) -> dict:
-        """Remove an external user from the organization (unlink, not delete)."""
+        """
+        Remove an external user from the organization (unlink, not delete).
+
+        Contract — what "removed" means downstream:
+          • LIFF login (`login_with_line`) sees `user.organization_id is
+            None` and returns `needs_invitation: True` → the LIFF wizard
+            redirects them to the invite-code screen.
+          • LINE webhook (`_handle_message`) filters EsgUser rows by
+            `organization_id.isnot(None)`, so the removed user falls
+            through to the unregistered branch and gets the reply-only
+            "join organization" card. No proactive pushes.
+          • The user's row stays `is_active = True` so they CAN re-bind
+            via a fresh invitation later (`accept_invitation` updates
+            `organization_id` in place rather than creating a duplicate).
+
+        We don't soft-delete or hard-delete the row because the
+        org-level analytics + materiality history reference user_id and
+        we want those to remain readable after a member leaves.
+        """
         user = (
             self.session.query(EsgUser)
             .filter(
@@ -292,9 +368,14 @@ class LiffAuthService:
         if not user:
             raise ValueError('Member not found')
 
+        display = user.display_name or user.platform_user_id
         user.organization_id = None
         self.session.commit()
-        return {'success': True, 'message': f'Removed {user.display_name or user.platform_user_id}'}
+        logger.info(
+            "remove_member: unlinked EsgUser id=%s (line:%s) from org %s",
+            user.id, user.platform_user_id, organization_id,
+        )
+        return {'success': True, 'message': f'Removed {display}'}
 
     def list_invitations(self, organization_id: int) -> dict:
         """List all invitation links for an organization."""

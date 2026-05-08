@@ -337,16 +337,92 @@ Instructions:
 2. Extract ALL data that matches datapoints in the hierarchy — map EVERY column/field in the document to the closest matching datapoint
 3. One document can have MULTIPLE categories, subcategories, and datapoints
 
-3a. **EXTRACT EVERY ATOMIC FIELD PER RECORD — NOT JUST THE TOTAL.** A record's `fields[]` must include EVERY label-value pair you can read from the document for that record, not just the bottom-line amount. The hierarchy is intentionally sparse for some categories — when no canonical datapoint matches a field, set `datapoint_id: null` and put the *most specific* human-readable label in `datapoint_name` (NEVER the category name).
+3a. **EXTRACT EVERY ATOMIC FIELD PER RECORD — NOT JUST THE TOTAL.** A record's `fields[]` must include EVERY label-value pair you can read from the document for that record, not just the bottom-line amount.
 
-   • Hotel folio  → `[hotel_name, room_number, check_in_date, check_out_date, nights, room_rate_per_night, room_charge, vat, service_charge, total_amount]`
-   • Taxi receipt → `[origin, destination, distance_km, base_fare, toll_fee, surcharge, vehicle_registration, driver_name, total_fare]`
-   • Flight ticket → `[airline, flight_number, origin_airport, destination_airport, class, fare_basis, base_fare, taxes, total_fare]`
-   • Train/bus ticket → `[origin_station, destination_station, ticket_type, fare]`
-   • Utility bill  → `[meter_id, billing_period_start, billing_period_end, kwh_consumed, unit_rate, energy_charge, vat, total_amount]`
-   • Asset register row → `[asset_name, asset_type, useful_life_years, embodied_co2e_kg, purchase_cost]`
-   • Invoice line → `[sku, description, quantity, unit_price, total_price]`
-   • Waste manifest → `[waste_stream, weight_kg, hauler_name, disposal_method]`
+3a-i. **CANONICAL DATAPOINT KEYS — REQUIRED CONTRACT (read carefully).**
+The platform expects ONE canonical name per calculation-driving quantity. Use these EXACT keys whenever the data is present:
+
+   ┌─ Calculation-critical NUMERIC keys (value MUST be a number; unit is the canonical unit string; convert to canonical units yourself):
+   │   distance_km          (km — convert miles/m/yards to km)
+   │   weight_kg            (kg — convert lb/tonne/g to kg)
+   │   volume_litres        (litre — convert gallon/m³/ml to litre)
+   │   energy_kwh           (kWh — convert MWh/GJ/Btu to kWh)
+   │   energy_mwh           (MWh — only for very large org energy)
+   │   energy_per_use_kwh   (kWh per single product use; Cat 11)
+   │   floor_area_sqm       (sqm — convert sqft/rai/ngan to sqm)
+   │   refrigerant_kg       (kg — refrigerant charge)
+   │   nights               (integer — hotel/room-nights)
+   │   headcount            (integer — passengers / employees)
+   │   working_days         (integer — Cat 7 commute days)
+   │   flight_legs          (integer — number of flight segments)
+   │   units_sold           (integer — Cat 11/12 quantity)
+   │   lifetime_years       (number — Cat 11 product lifetime)
+   │   franchise_count      (integer — Cat 14)
+   │   tonne_km             (number — alternative to weight×distance)
+   │   passenger_km         (number — alternative to distance×headcount)
+   │   amount               (number — money; pair with `currency`)
+   │   unit_cost            (number — money per unit; pair with `currency`)
+   │   investee_emissions_tco2e  (number — Cat 15)
+   │   ownership_pct        (number 0-100; Cat 15)
+   │
+   ┌─ Calculation-critical CATEGORICAL keys (closed vocabulary, English lowercase):
+   │   currency             ('THB','USD','EUR','JPY','GBP','SGD','CNY','MYR',…)
+   │   transport_mode       ('taxi','car','motorbike','flight','train','bus','ship','truck','van','bicycle','walk','other')
+   │   flight_class         ('economy','premium_economy','business','first')
+   │   fuel_type            ('diesel','petrol','lpg','cng','biogas','jet_fuel','marine_diesel','heavy_oil','coal','natural_gas','biomass','electric','hybrid')
+   │   disposal_method      ('landfill','recycle','incinerate','compost','anaerobic_digestion','reuse','open_burning','energy_recovery','open_dump')
+   │   material_type        ('paper','plastic','metal','aluminum','steel','glass','wood','organic','textile','electronics','mixed','hazardous','concrete','rubber')
+   │   waste_type           ('msw','industrial','hazardous','organic','recyclable','construction','medical','electronic','sludge')
+   │   processing_method    ('machining','assembly','heat_treatment','coating','packaging','cutting','welding','molding','printing')
+   │   asset_type           ('building','vehicle','machinery','it_equipment','furniture','land','aircraft','ship')
+   │   refrigerant_type     ('r22','r32','r134a','r404a','r410a','r407c','r600a','co2','ammonia','hfc_blend')
+   │   country              (ISO-3166 alpha-2: 'TH', 'US', 'JP', …)
+   │   investment_type      ('equity','debt','project_finance','managed_fund')
+
+   HARD RULES — non-negotiable:
+   1. `value` is ALWAYS a NUMBER for canonical numeric keys. Never `"28.6 km"` — that's `value: 28.6, unit: "km"`.
+   2. CONVERT UNITS YOURSELF before writing the canonical row. Source says "17 miles"? Write `distance_km` with `value: 27.36`. "100 lbs"? Write `weight_kg` with `value: 45.36`. "5 MWh"? Write `energy_kwh` with `value: 5000`.
+   3. ALSO emit a `raw_<key>` sibling field whose `value` is the verbatim original string from the document (for audit). Examples:
+        {{"datapoint_name": "raw_distance_km", "value": "28.6 กม."}}
+        {{"datapoint_name": "raw_weight_kg",   "value": "100 lbs"}}
+        {{"datapoint_name": "raw_amount",      "value": "1,200.00 บาท"}}
+   4. If you cannot extract a numeric value (e.g. the field is blurred or worded ambiguously), OMIT the canonical key and emit ONLY the `raw_<key>` so the platform records the source was present but un-parseable.
+   5. Non-canonical names like `distance`, `weight`, `fare`, `base_fare`, `total_fare`, `kwh_consumed`, `mode`, `disposal`, `class`, `น้ำหนัก`, `ระยะทาง`, `ราคารวม` are FORBIDDEN — use the canonical key.
+   6. Preserve descriptive datapoints (vendor, sku, origin, destination, driver_name, hotel_name, flight_number, etc.) free-form — those are NOT calculation-critical and don't need canonical naming.
+
+3a-ii. **Per-doc-type expected canonical fields** (when present in the document):
+
+   • Cat 1, 2 — Purchased / capital goods (PO, invoice, receipt):
+       canonical: `amount`, `currency`, `weight_kg?`, `material_type?`, `raw_amount`, `raw_weight?`
+       descriptive: `vendor`, `sku`, `document_number`
+   • Cat 3 — Fuel / energy WTT (utility bill, fuel receipt):
+       canonical: `energy_kwh` OR (`volume_litres` + `fuel_type`); `raw_kwh`/`raw_volume_litres`
+       descriptive: `meter_id`, `billing_period_start`, `billing_period_end`
+   • Cat 4, 9 — Up/Down transport (freight bill, shipping invoice):
+       canonical: `weight_kg`, `distance_km`, `transport_mode`, `tonne_km?`, `volume_litres?` + `fuel_type?`, `raw_weight_kg`, `raw_distance_km`
+       descriptive: `hauler_name`, `origin`, `destination`, `vehicle_registration`
+   • Cat 5 — Waste in operations (waste manifest):
+       canonical: `weight_kg`, `disposal_method`, `waste_type?`, `raw_weight_kg`
+       descriptive: `hauler_name`, `manifest_number`
+   • Cat 6 — Business travel:
+       Taxi:    `distance_km`, `transport_mode='taxi'`, `amount`, `currency`, `raw_distance_km`, `raw_amount`; descriptive: `origin`, `destination`, `driver_name`
+       Flight:  `distance_km` (great-circle from origin→dest), `flight_legs`, `flight_class`, `transport_mode='flight'`, `amount`, `currency`, `headcount?`; descriptive: `airline`, `flight_number`, `origin_airport`, `destination_airport`
+       Train/bus: `distance_km`, `transport_mode`, `amount`, `currency`
+       Hotel:   `nights`, `amount`, `currency`, `country?`, `raw_nights`; descriptive: `hotel_name`, `room_number`, `check_in_date`, `check_out_date`
+   • Cat 7 — Commute (commute log, fuel allowance):
+       canonical: `distance_km`, `transport_mode`, `headcount`, `working_days?`, `volume_litres?` + `fuel_type?`, `passenger_km?`
+   • Cat 8, 13 — Leased assets (asset utility bill, lease invoice):
+       canonical: `energy_kwh?`, `volume_litres?` + `fuel_type?`, `floor_area_sqm?`, `asset_type`, `country?`
+   • Cat 10 — Processing of sold products:
+       canonical: `weight_kg`, `processing_method`, `energy_kwh?`, `volume_litres?` + `fuel_type?`, `material_type`
+   • Cat 11 — Use of sold products:
+       canonical: `units_sold`, `lifetime_years`, `energy_per_use_kwh`, `refrigerant_kg?` + `refrigerant_type?`, `fuel_type?` (for fuel-burning products)
+   • Cat 12 — End-of-life of sold products:
+       canonical: `weight_kg`, `disposal_method`, `material_type`, `units_sold?`
+   • Cat 14 — Franchises:
+       canonical: `franchise_count`, `floor_area_sqm?`, `energy_kwh?` per store, `country`, `amount?` + `currency?`
+   • Cat 15 — Investments:
+       canonical: `amount` + `currency`, `ownership_pct?` + `investee_emissions_tco2e?`, `investment_type`
 
    **NEVER reuse the category name** ("Business travel", "Employee commuting", "Capital goods", etc.) as a `datapoint_name` — those are too coarse for the data warehouse modal columns. Each field deserves its own specific label.
 
@@ -746,6 +822,15 @@ CRITICAL — DO NOT confuse these refs fields (common LLM errors with Thai recei
                     'confidence': f.get('confidence'),
                     'tags': tags,
                 })
+
+            # Canonical normalisation BEFORE GHG sufficiency. Folds
+            # any LLM drift (`distance` → `distance_km`,
+            # `"28.6 km"` → `28.6 + 'km'`, miles → km, etc.) and
+            # emits `raw_<key>` siblings for audit. This is the
+            # single defence-in-depth layer that makes the same
+            # receipt deterministically computable across runs.
+            from .datapoint_registry import normalize_datapoints
+            dp_array = normalize_datapoints(dp_array)
 
             # GHG sufficiency analysis — does this record have what we need?
             ghg = self.carbon.evaluate_record_ghg(

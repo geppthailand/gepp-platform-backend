@@ -1,0 +1,225 @@
+# Industry catalogue for Q1 of the materiality filter.
+#
+# Each industry has:
+#   id          — stable identifier referenced in scoring + show_when rules
+#   labels      — { en, th }
+#   default_category_seeds  — { category_id: weight } that pre-seeds the score
+#                             before any later question runs. Magnitudes are
+#                             roughly aligned with the sector materiality
+#                             guidance in
+#                             docs/Services/GEPP-ESG/mvp1.1/scope3_deep_dive.html
+#                             lines 863–903.
+#
+# "Other" is appended automatically by the renderer (it gets free_text: true);
+# don't define it here. When a user picks "Other", we apply *no* industry seed —
+# the later questions do all the categorisation work.
+
+industries:
+
+  - id: manufacturing
+    labels: { en: Manufacturing — General, th: การผลิต — ทั่วไป }
+    default_category_seeds:
+      1: 0.7
+      2: 0.4
+      3: 0.5
+      4: 0.5
+      5: 0.5
+      9: 0.4
+      11: 0.4
+      12: 0.4
+
+  - id: automotive
+    labels: { en: Automotive / Vehicle Manufacturing, th: ยานยนต์ / การผลิตยานพาหนะ }
+    default_category_seeds:
+      1: 0.7
+      2: 0.5
+      3: 0.5
+      4: 0.5
+      9: 0.4
+      11: 0.8
+      12: 0.5
+
+  - id: electronics
+    labels: { en: Electronics & Hardware, th: อิเล็กทรอนิกส์และฮาร์ดแวร์ }
+    default_category_seeds:
+      1: 0.7
+      2: 0.4
+      3: 0.4
+      4: 0.4
+      11: 0.6
+      12: 0.6
+
+  - id: textiles_apparel
+    labels: { en: Textiles & Apparel, th: สิ่งทอและเสื้อผ้า }
+    default_category_seeds:
+      1: 0.8
+      4: 0.5
+      5: 0.4
+      9: 0.4
+      12: 0.4
+
+  - id: chemicals
+    labels: { en: Chemicals, th: เคมีภัณฑ์ }
+    default_category_seeds:
+      1: 0.7
+      3: 0.5
+      4: 0.5
+      5: 0.5
+      10: 0.5
+      11: 0.4
+
+  - id: pharmaceuticals
+    labels: { en: Pharmaceuticals & Medical Devices, th: ยาและอุปกรณ์การแพทย์ }
+    default_category_seeds:
+      1: 0.6
+      4: 0.5
+      5: 0.4
+      11: 0.4
+      12: 0.5
+
+  - id: construction
+    labels: { en: Construction & Engineering, th: ก่อสร้างและวิศวกรรม }
+    default_category_seeds:
+      1: 0.7
+      2: 0.6
+      4: 0.4
+      5: 0.4
+      8: 0.4
+
+  - id: real_estate
+    labels: { en: Real Estate / Property Development, th: อสังหาริมทรัพย์ / พัฒนาทรัพย์สิน }
+    default_category_seeds:
+      2: 0.5
+      8: 0.5
+      11: 0.5
+      13: 0.6
+      15: 0.4
+
+  - id: retail_wholesale
+    labels: { en: Retail / Wholesale, th: ค้าปลีก / ค้าส่ง }
+    default_category_seeds:
+      1: 0.8
+      4: 0.5
+      5: 0.3
+      9: 0.5
+      12: 0.4
+
+  - id: ecommerce
+    labels: { en: E-commerce / Online Marketplace, th: อีคอมเมิร์ซ / ตลาดออนไลน์ }
+    default_category_seeds:
+      1: 0.7
+      4: 0.4
+      9: 0.7
+      12: 0.4
+
+  - id: agriculture
+    labels: { en: Agriculture / Farming, th: เกษตรกรรม / การทำฟาร์ม }
+    default_category_seeds:
+      1: 0.5
+      3: 0.5
+      4: 0.5
+      5: 0.6
+      9: 0.5
+
+  - id: food_processing
+    labels: { en: Food & Beverage Production, th: การผลิตอาหารและเครื่องดื่ม }
+    default_category_seeds:
+      1: 0.8
+      3: 0.5
+      4: 0.5
+      5: 0.6
+      9: 0.5
+      12: 0.4
+
+  - id: hospitality
+    labels: { en: Hospitality / Hotels / Restaurants, th: โรงแรม / ร้านอาหาร / การบริการ }
+    default_category_seeds:
+      1: 0.6
+      5: 0.6
+      6: 0.4
+      7: 0.4
+      14: 0.5
+
+  - id: logistics
+    labels: { en: Logistics / Transportation, th: โลจิสติกส์ / การขนส่ง }
+    default_category_seeds:
+      3: 0.7
+      4: 0.5
+      9: 0.7
+
+  - id: energy_utilities
+    labels: { en: Energy & Utilities, th: พลังงานและสาธารณูปโภค }
+    default_category_seeds:
+      1: 0.5
+      3: 0.6
+      11: 0.8
+      15: 0.4
+
+  - id: financial_services
+    labels: { en: Financial Services / Banking / Insurance, th: บริการทางการเงิน / ธนาคาร / ประกัน }
+    default_category_seeds:
+      1: 0.4
+      6: 0.4
+      7: 0.5
+      15: 0.9
+
+  - id: software_it
+    labels: { en: Software / IT / SaaS, th: ซอฟต์แวร์ / ไอที / SaaS }
+    default_category_seeds:
+      1: 0.6
+      5: 0.3
+      6: 0.4
+      7: 0.5
+
+  - id: telecom
+    labels: { en: Telecommunications, th: โทรคมนาคม }
+    default_category_seeds:
+      1: 0.5
+      2: 0.5
+      3: 0.5
+      11: 0.5
+
+  - id: professional_services
+    labels: { en: Professional Services (Consulting / Legal / Accounting), th: บริการวิชาชีพ (ที่ปรึกษา / กฎหมาย / บัญชี) }
+    default_category_seeds:
+      1: 0.5
+      6: 0.6
+      7: 0.5
+
+  - id: healthcare
+    labels: { en: Healthcare / Hospitals / Clinics, th: บริการสุขภาพ / โรงพยาบาล / คลินิก }
+    default_category_seeds:
+      1: 0.6
+      5: 0.5
+      7: 0.4
+      12: 0.5
+
+  - id: education
+    labels: { en: Education / Universities / Schools, th: การศึกษา / มหาวิทยาลัย / โรงเรียน }
+    default_category_seeds:
+      1: 0.5
+      6: 0.4
+      7: 0.6
+
+  - id: government_public
+    labels: { en: Government / Public Sector / NGO, th: หน่วยงานภาครัฐ / องค์กรไม่แสวงผลกำไร }
+    default_category_seeds:
+      1: 0.5
+      6: 0.4
+      7: 0.5
+
+  - id: mining_extraction
+    labels: { en: Mining / Extraction / Oil & Gas, th: เหมืองแร่ / การสกัด / น้ำมันและก๊าซ }
+    default_category_seeds:
+      1: 0.5
+      3: 0.6
+      4: 0.6
+      11: 0.9
+      12: 0.4
+
+  - id: media_entertainment
+    labels: { en: Media / Entertainment / Publishing, th: สื่อ / บันเทิง / สิ่งพิมพ์ }
+    default_category_seeds:
+      1: 0.5
+      6: 0.4
+      7: 0.4

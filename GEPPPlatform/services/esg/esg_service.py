@@ -1035,13 +1035,24 @@ class EsgService:
         def _resolve_field_name(d: dict) -> str:
             """
             Most-specific identity wins:
-              1. tags' last non-currency, non-generic entry  (LLM emits
+              1. `raw_*` audit siblings → empty string (skipped from the
+                 modal — the canonical row carries the same info as a
+                 number, the raw is for backend audit only).
+              2. tags' last non-currency, non-generic entry  (LLM emits
                  general → specific so reverse iteration finds the
                  most descriptive label, e.g. "base fare", "expressway fee").
-              2. canonical_name from EsgDatapoint table (when not generic).
-              3. datapoint_name (LLM-reported, when not generic).
-              4. 'Value' as last resort.
+              3. canonical_name from EsgDatapoint table (when not generic).
+              4. datapoint_name (LLM-reported, when not generic).
+              5. 'Value' as last resort.
             """
+            dn_raw = (d.get('datapoint_name') or '').strip()
+            # Audit siblings produced by the canonical normaliser stay
+            # in the JSONB row for backend retrieval but never appear
+            # as a separate column in the data-warehouse modal —
+            # otherwise auditors see "Distance Km" + "Raw Distance Km"
+            # paired columns which is just noise.
+            if dn_raw.lower().startswith('raw_'):
+                return ''
             tags = d.get('tags') or []
             for t in reversed(tags):
                 if not isinstance(t, str):
@@ -1057,9 +1068,8 @@ class EsgService:
             cn = (d.get('canonical_name') or '').strip()
             if cn and not _is_generic(cn):
                 return _humanize(cn)
-            dn = (d.get('datapoint_name') or '').strip()
-            if dn and not _is_generic(dn):
-                return _humanize(dn)
+            if dn_raw and not _is_generic(dn_raw):
+                return _humanize(dn_raw)
             return 'Value'
 
         # Real measurement units only — anything else (field labels

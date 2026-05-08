@@ -20,6 +20,7 @@ from ...models.esg.data_extraction import EsgOrganizationDataExtraction
 from ...models.esg.esg_users import EsgUser
 from .esg_document_service import EsgDocumentService
 from .esg_carbon_service import EsgCarbonService
+from .esg_chat_service import EsgChatService
 
 logger = logging.getLogger(__name__)
 
@@ -308,9 +309,64 @@ class EsgLineService:
             self.db.flush()
 
         if not esg_user:
-            # User not linked — reply with instruction to join org first
+            # User not linked to ANY org. This branch covers two cases:
+            #   (a) brand-new LINE user who never accepted an invite, and
+            #   (b) a previously-active member whose admin removed them
+            #       from the desktop dashboard (remove_member nulls
+            #       `organization_id`, so they no longer match the
+            #       `organization_id.isnot(None)` filter above).
+            #
+            # CONTRACT: REPLY-ONLY. Never push to unregistered users —
+            # they haven't consented to receive proactive messages, and
+            # the desktop "remove member" action means the org explicitly
+            # severed the relationship. We respond solely via the
+            # `replyToken` carried by this webhook event so the user
+            # sees a single, in-band response and nothing else. No
+            # `_send_push_message` calls anywhere downstream of this
+            # branch.
+            #
+            # CHAT EXCEPTION: free-text messages get routed to KhunGEPP
+            # (the LLM persona) so unregistered users can ask about
+            # GEPP / ESG without being forced to join an org first.
+            # Image / file remain gated to the join-org card because
+            # extraction writes data into `esg_records` and that
+            # requires an org to belong to.
+            if msg_type == 'text':
+                inbound = (message.get('text', '') or '').strip()
+                logger.info(
+                    "[MSG] unregistered user %s — routing text to "
+                    "KhunGEPP chat (lead capture, reply-only)",
+                    user_id[:12] if user_id else '?',
+                )
+                try:
+                    chat_svc = EsgChatService(self.db)
+                    reply_text = chat_svc.reply_to_text(
+                        line_user_id=user_id,
+                        organization_id=None,
+                        text=inbound,
+                    )
+                except Exception:
+                    logger.exception(
+                        "[CHAT] unregistered chat failed for %s",
+                        user_id[:12] if user_id else '?',
+                    )
+                    reply_text = (
+                        'ขออภัยครับ ระบบขัดข้องชั่วคราว '
+                        'ลองใหม่อีกครั้งนะครับ'
+                    )
+                self._send_text_reply(channel_token, reply_token, reply_text)
+                return {
+                    'status': 'chat_unregistered',
+                    'line_user_id': user_id,
+                }
+
+            logger.info(
+                "[MSG] unregistered/removed user %s — sending reply-only "
+                "needs_org card (msg_type=%s)",
+                user_id[:12] if user_id else '?', msg_type,
+            )
             join_url = _liff_url()
-            self._send_reply_raw(channel_token, reply_token, [{
+            replied = self._send_reply_raw(channel_token, reply_token, [{
                 'type': 'flex',
                 'altText': 'กรุณาเข้าร่วมองค์กรก่อนใช้งาน',
                 'contents': {
@@ -331,6 +387,18 @@ class EsgLineService:
                     },
                 },
             }])
+            # Reply-only fallback: if the Flex card couldn't be sent
+            # (expired reply token, malformed contents, etc.) we log
+            # but DO NOT fall back to push — the contract above is
+            # absolute. The user can simply send another message and
+            # the next webhook will re-emit the card with a fresh
+            # reply token.
+            if not replied:
+                logger.warning(
+                    "[MSG] needs_org reply failed for %s — NOT pushing "
+                    "(reply-only contract). User can resend to get a "
+                    "fresh reply token.", user_id[:12] if user_id else '?',
+                )
             return {'status': 'needs_org', 'line_user_id': user_id}
 
         line_msg = EsgLineMessage(
@@ -363,79 +431,49 @@ class EsgLineService:
             self._send_text_reply(channel_token, reply_token, 'ส่งรูปบิล, ไฟล์ PDF หรือพิมพ์ข้อมูลได้เลยครับ')
             return {'status': 'skipped'}
 
-    # ---- TEXT: AI Intent Extraction → tCO2e ----
+    # ---- TEXT → KhunGEPP chat (LLM-powered conversational reply) ----
+    # NOTE: text used to feed the Gemini extraction pipeline that wrote
+    # `EsgOrganizationDataExtraction` + `esg_records`. Per product
+    # direction, free text now ALWAYS routes to the KhunGEPP persona
+    # (deepseek/deepseek-v4-flash via OpenRouter). Image / file inputs
+    # remain on the extraction path. Help/status shortcuts were
+    # removed — KhunGEPP handles those questions naturally.
 
     def _process_text(self, line_msg, event: Dict, org_id: int, token: str) -> Dict:
-        text = event.get('message', {}).get('text', '').strip()
-        text_lower = text.lower()
-
-        if text_lower in ('help', 'ช่วย', 'วิธีใช้', '?'):
-            self._send_text_reply(token, line_msg.line_reply_token, self._help_text())
-            line_msg.processing_status = 'completed'
-            self.db.flush()
-            return {'status': 'success', 'type': 'help'}
-
-        if text_lower in ('status', 'สถานะ', 'สรุป', 'summary'):
-            self._send_text_reply(token, line_msg.line_reply_token,
-                                  f'ดูสรุปภาพรวม:\n{_liff_url("/app/esg")}')
-            line_msg.processing_status = 'completed'
-            self.db.flush()
-            return {'status': 'success', 'type': 'status'}
-
-        # ── 1. Reserve doc number FIRST so the immediate ack can quote it
-        extraction = EsgOrganizationDataExtraction(
-            organization_id=org_id,
-            channel='line', type='text',
-            source_user_id=line_msg.line_user_id,
-            source_message_id=line_msg.line_message_id,
-            raw_content=text, processing_status='pending',
-        )
-        self.db.add(extraction)
-        self.db.flush()
-        doc_no = extraction.id
-
-        # ── 2. Immediate PUSH "received" card (does NOT consume reply_token)
+        text = (event.get('message', {}) or {}).get('text', '') or ''
         try:
-            if line_msg.line_user_id:
-                self._send_push_message(
-                    token, line_msg.line_user_id,
-                    [self._build_received_flex(doc_no)],
-                )
-        except Exception as e:
-            logger.warning(f"[TEXT] Failed to push received card: {e}")
-
-        # ── 3. Run LLM cascade extraction (synchronous)
-        try:
-            from .esg_extraction_service import EsgExtractionService
-            svc = EsgExtractionService(self.db)
-            svc.process_extraction(extraction.id)
-            self.db.refresh(extraction)
-        except Exception as e:
-            logger.error(f"Text extraction failed: {e}")
-
-        entry = self._create_entry_from_extraction(extraction, org_id, line_msg.line_user_id)
-
-        # ── 4. + 5. Per-category PUSH + final REPLY
-        if entry:
-            self._dispatch_extraction_messages(
-                token=token,
+            chat_svc = EsgChatService(self.db)
+            reply_text = chat_svc.reply_to_text(
                 line_user_id=line_msg.line_user_id,
-                reply_token=line_msg.line_reply_token,
-                doc_id=doc_no,
-                entries=[entry],
                 organization_id=org_id,
-                refs={'document_date': str(entry.get('entry_date') or '')},
+                text=text,
             )
-        else:
-            err_card = self._build_error_flex(
-                doc_no,
-                'ได้รับข้อความแล้ว แต่ไม่สามารถสกัดตัวเลขได้ กรุณากรอกผ่าน LIFF',
+        except Exception:
+            logger.exception(
+                "[CHAT] registered-user chat failed for line_user=%s org=%s",
+                (line_msg.line_user_id or '')[:12], org_id,
             )
-            self._send_reply_raw(token, line_msg.line_reply_token, [err_card])
+            reply_text = (
+                'ขออภัยครับ ระบบขัดข้องชั่วคราว ลองใหม่อีกครั้งนะครับ'
+            )
 
-        line_msg.processing_status = extraction.processing_status
-        self.db.flush()
-        return {'status': 'success', 'type': 'text_extraction', 'entry_id': entry['id'] if entry else None}
+        # Reply via the inbound webhook's reply token (no push). This
+        # preserves the contract for unregistered users and keeps the
+        # chat in-band for registered ones.
+        self._send_text_reply(token, line_msg.line_reply_token, reply_text)
+
+        line_msg.processing_status = 'completed'
+        line_msg.reply_message = reply_text
+        line_msg.reply_sent = True
+        try:
+            self.db.commit()
+        except Exception:
+            logger.exception('[CHAT] failed to commit line_msg update')
+            try:
+                self.db.rollback()
+            except Exception:
+                pass
+        return {'status': 'success', 'type': 'chat'}
 
     # ---- IMAGE: OCR → tCO2e → Flex Message ----
 
