@@ -9,3 +9,4 @@ deploy_functions.zip
 migrations/.env
 migrations/.env.local
 .venv/
+.DS_Store
