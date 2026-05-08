@@ -690,6 +690,16 @@ def handle_reward_routes(event: Dict[str, Any], data: Dict[str, Any], **params) 
                 organization_id=org_id,
             )
 
+        if path == "/api/rewards/public/staff/pickup-queue" and method == "GET":
+            org_id = int(query_params.get("organization_id"))
+            _resolve_staff(org_id)  # auth: must be staff of this org
+            svc = HistoryService(db_session)
+            return svc.staff_pickup_queue(
+                organization_id=org_id,
+                campaign_id=int(query_params["campaign_id"]) if query_params.get("campaign_id") else None,
+                per_page=int(query_params.get("per_page", 50)),
+            )
+
         # No matching route
         raise NotFoundException(f"Route not found: {method} {path}")
 

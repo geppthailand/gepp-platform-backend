@@ -585,11 +585,11 @@ class OverviewService:
                 )
                 .join(
                     RewardActivityMaterial,
-                    RewardActivityMaterial.id == RewardPointTransaction.activity_material_id,
+                    RewardActivityMaterial.id == RewardPointTransaction.reward_activity_materials_id,
                     isouter=True,
                 )
                 .filter(
-                    RewardPointTransaction.campaign_id.in_(eligible_ids),
+                    RewardPointTransaction.reward_campaign_id.in_(eligible_ids),
                     RewardPointTransaction.reference_type == "claim",
                     RewardPointTransaction.deleted_date.is_(None),
                 )
@@ -601,7 +601,6 @@ class OverviewService:
                 .all()
             )
         else:
-            # activity: count of claims per droppoint × activity_material
             rows = (
                 self.db.query(
                     RewardPointTransaction.droppoint_id.label("droppoint_id"),
@@ -611,11 +610,11 @@ class OverviewService:
                 )
                 .join(
                     RewardActivityMaterial,
-                    RewardActivityMaterial.id == RewardPointTransaction.activity_material_id,
+                    RewardActivityMaterial.id == RewardPointTransaction.reward_activity_materials_id,
                     isouter=True,
                 )
                 .filter(
-                    RewardPointTransaction.campaign_id.in_(eligible_ids),
+                    RewardPointTransaction.reward_campaign_id.in_(eligible_ids),
                     RewardPointTransaction.reference_type == "claim",
                     RewardPointTransaction.deleted_date.is_(None),
                 )
