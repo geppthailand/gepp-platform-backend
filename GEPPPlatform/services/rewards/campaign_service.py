@@ -21,11 +21,14 @@ from ...models.rewards.management import (
     RewardCampaignCatalog,
     RewardCampaignDroppoint,
     RewardCampaignTarget,
+    RewardActivityType,
+    RewardCampaignActivityType,
 )
 from ...exceptions import NotFoundException, BadRequestException
 
 
 VALID_STATUSES = {"draft", "active", "paused", "archived"}
+VALID_METRIC_TYPES = {"material", "activity"}
 
 
 def _parse_dt(value):
@@ -74,6 +77,19 @@ class CampaignService:
         return val.isoformat() if hasattr(val, 'isoformat') else str(val)
 
     def _to_dict(self, item: RewardCampaign) -> dict:
+        # Phase 2: load activity_type ids if metric_type='activity'
+        activity_type_ids: list[int] = []
+        if getattr(item, "metric_type", "material") == "activity":
+            joins = (
+                self.db.query(RewardCampaignActivityType.activity_type_id)
+                .filter(
+                    RewardCampaignActivityType.campaign_id == item.id,
+                    RewardCampaignActivityType.deleted_date.is_(None),
+                )
+                .all()
+            )
+            activity_type_ids = [row.activity_type_id for row in joins]
+
         return {
             "id": item.id,
             "organization_id": item.organization_id,
@@ -88,6 +104,8 @@ class CampaignService:
             "points_per_day_limit": item.points_per_day_limit,
             "target_participants": item.target_participants,
             "budget_baht": float(item.budget_baht) if item.budget_baht is not None else None,
+            "metric_type": getattr(item, "metric_type", "material"),
+            "activity_type_ids": activity_type_ids,
             "created_date": self._safe_iso(item.created_date),
             "updated_date": self._safe_iso(item.updated_date),
         }
@@ -171,6 +189,15 @@ class CampaignService:
         if status not in VALID_STATUSES:
             raise BadRequestException(f"Invalid status '{status}'")
 
+        # Phase 2: validate metric_type + activity_types
+        metric_type = data.get("metric_type", "material")
+        if metric_type not in VALID_METRIC_TYPES:
+            raise BadRequestException(f"Invalid metric_type '{metric_type}'")
+        activity_type_ids = data.get("activity_type_ids") or []
+        if metric_type == "material" and activity_type_ids:
+            # Activity types only meaningful for activity campaigns; silently drop
+            activity_type_ids = []
+
         item = RewardCampaign(
             organization_id=organization_id,
             name=data["name"],
@@ -183,9 +210,19 @@ class CampaignService:
             points_per_day_limit=data.get("points_per_day_limit"),
             target_participants=data.get("target_participants"),
             budget_baht=data.get("budget_baht"),
+            metric_type=metric_type,
         )
         self.db.add(item)
         self.db.flush()
+
+        # Persist activity-type joins (Phase 2)
+        if activity_type_ids:
+            for at_id in activity_type_ids:
+                self.db.add(RewardCampaignActivityType(
+                    campaign_id=item.id,
+                    activity_type_id=at_id,
+                ))
+            self.db.flush()
 
         return self._to_dict(item)
 
@@ -214,6 +251,43 @@ class CampaignService:
             if field in data:
                 value = _parse_dt(data[field]) if field in date_fields else data[field]
                 setattr(item, field, value)
+
+        # Phase 2: metric_type + activity_type_ids editable on draft only (breaking on active)
+        if "metric_type" in data:
+            new_metric = data["metric_type"]
+            if new_metric not in VALID_METRIC_TYPES:
+                raise BadRequestException(f"Invalid metric_type '{new_metric}'")
+            if new_metric != item.metric_type:
+                assert_editable(item, breaking=True)
+                item.metric_type = new_metric
+                if new_metric == "material":
+                    # Drop activity-type joins when switching to material
+                    self.db.query(RewardCampaignActivityType).filter(
+                        RewardCampaignActivityType.campaign_id == item.id
+                    ).delete(synchronize_session=False)
+
+        if "activity_type_ids" in data and item.metric_type == "activity":
+            new_ids = set(data.get("activity_type_ids") or [])
+            existing = {
+                row.activity_type_id for row in
+                self.db.query(RewardCampaignActivityType.activity_type_id)
+                .filter(
+                    RewardCampaignActivityType.campaign_id == item.id,
+                    RewardCampaignActivityType.deleted_date.is_(None),
+                ).all()
+            }
+            to_add = new_ids - existing
+            to_remove = existing - new_ids
+            for at_id in to_add:
+                self.db.add(RewardCampaignActivityType(
+                    campaign_id=item.id,
+                    activity_type_id=at_id,
+                ))
+            if to_remove:
+                self.db.query(RewardCampaignActivityType).filter(
+                    RewardCampaignActivityType.campaign_id == item.id,
+                    RewardCampaignActivityType.activity_type_id.in_(to_remove),
+                ).delete(synchronize_session=False)
 
         self.db.flush()
         return self._to_dict(item)

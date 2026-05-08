@@ -3,7 +3,7 @@ Rewards management models
 Campaign setup, activity materials, claim rules, and campaign linking
 """
 
-from sqlalchemy import Column, String, Text, ForeignKey, BigInteger, DateTime, Integer
+from sqlalchemy import Column, String, Text, ForeignKey, BigInteger, DateTime, Integer, Boolean
 from sqlalchemy.types import DECIMAL
 from sqlalchemy.dialects.postgresql import JSONB
 from ..base import Base, BaseModel
@@ -26,6 +26,7 @@ class RewardSetup(Base, BaseModel):
     welcome_message = Column(Text, nullable=True)
     reward_budget_total = Column(DECIMAL(12, 2), nullable=True)  # org-level budget cap (THB)
     low_stock_threshold = Column(Integer, default=10)  # items below this count flagged as low
+    point_to_baht_rate = Column(DECIMAL(10, 4), nullable=True)  # Phase 2: 1 point = X baht (Cost Report ROI)
 
 
 class RewardCampaign(Base, BaseModel):
@@ -43,6 +44,7 @@ class RewardCampaign(Base, BaseModel):
     points_per_day_limit = Column(Integer, nullable=True)  # null = no limit
     target_participants = Column(Integer, nullable=True)
     budget_baht = Column(DECIMAL(12, 2), nullable=True)
+    metric_type = Column(String(20), nullable=False, default='material')  # Phase 2: 'material' | 'activity'
 
 
 class RewardActivityMaterial(Base, BaseModel):
@@ -113,3 +115,32 @@ class RewardCampaignTarget(Base, BaseModel):
     activity_material_id = Column(BigInteger, ForeignKey('reward_activity_materials.id'), nullable=True)
     target_amount = Column(DECIMAL(12, 2), nullable=False)  # weight (kg) or count (times)
     target_unit = Column(String(10), nullable=False, default='kg')  # 'kg' | 'times'
+
+
+class RewardActivityType(Base, BaseModel):
+    """Activity types tracked by activity-based campaigns.
+
+    organization_id NULL = system default (available to all orgs).
+    organization_id NOT NULL = org-specific custom type (admin CRUD).
+
+    Examples (system defaults seeded by migration 011):
+      BYO Bag · BYO Cup · Refuse Plastic · Clean Beach · Recycle Workshop · Training · Plant Tree
+    """
+    __tablename__ = 'reward_activity_types'
+
+    organization_id = Column(BigInteger, ForeignKey('organizations.id'), nullable=True)
+    name = Column(String(100), nullable=False)
+    name_local = Column(String(100), nullable=True)  # Thai display
+    emoji = Column(String(10), nullable=True)
+    color = Column(String(20), nullable=True)
+    description = Column(Text, nullable=True)
+    is_default = Column(Boolean, nullable=False, default=False)
+
+
+class RewardCampaignActivityType(Base, BaseModel):
+    """Many-to-many: which activity types each activity-based campaign tracks."""
+    __tablename__ = 'reward_campaign_activity_types'
+
+    campaign_id = Column(BigInteger, ForeignKey('reward_campaigns.id'), nullable=False)
+    activity_type_id = Column(BigInteger, ForeignKey('reward_activity_types.id'), nullable=False)
+    points_per_event = Column(DECIMAL(10, 2), nullable=True)  # optional override
