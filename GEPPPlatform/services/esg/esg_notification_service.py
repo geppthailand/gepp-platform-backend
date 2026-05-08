@@ -11,7 +11,7 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 
 from ...models.esg.settings import EsgOrganizationSettings
-from ...models.esg.data_entries import EsgDataEntry
+from ...models.esg.records import EsgRecord
 
 logger = logging.getLogger(__name__)
 
@@ -44,11 +44,11 @@ class EsgNotificationService:
 
             # Get distinct LINE user IDs who have entries for this org
             user_ids = (
-                self.db.query(EsgDataEntry.line_user_id)
+                self.db.query(EsgRecord.line_user_id)
                 .filter(
-                    EsgDataEntry.organization_id == org_id,
-                    EsgDataEntry.line_user_id.isnot(None),
-                    EsgDataEntry.is_active == True,
+                    EsgRecord.organization_id == org_id,
+                    EsgRecord.line_user_id.isnot(None),
+                    EsgRecord.is_active == True,
                 )
                 .distinct()
                 .all()
@@ -59,12 +59,12 @@ class EsgNotificationService:
                     continue
 
                 # Check if user has submitted this month
-                has_this_month = self.db.query(EsgDataEntry).filter(
-                    EsgDataEntry.line_user_id == line_user_id,
-                    EsgDataEntry.organization_id == org_id,
-                    EsgDataEntry.is_active == True,
+                has_this_month = self.db.query(EsgRecord).filter(
+                    EsgRecord.line_user_id == line_user_id,
+                    EsgRecord.organization_id == org_id,
+                    EsgRecord.is_active == True,
                 ).filter(
-                    EsgDataEntry.created_date >= datetime(current_year, current_month, 1),
+                    EsgRecord.created_date >= datetime(current_year, current_month, 1),
                 ).first()
 
                 if not has_this_month:

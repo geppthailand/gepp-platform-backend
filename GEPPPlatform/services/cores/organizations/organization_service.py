@@ -207,6 +207,11 @@ class OrganizationService:
         - Assigned nodes: kept as-is
         - Ancestor nodes: kept with is_ancestor=True annotation
         - Unseen nodes: pruned entirely
+
+        For sub-users in large orgs, this avoids sending the full org tree —
+        only the nodes the user is allowed to see are returned. Tier resolution
+        runs against a lightweight ``(id, members)`` projection so we don't
+        full-load every UserLocation row just to compute visibility.
         """
         setup = self.get_organization_setup(organization_id)
         if not setup:
@@ -214,11 +219,21 @@ class OrganizationService:
 
         # Get tiers from user_service
         from ..users.user_service import UserService
+        from types import SimpleNamespace
+
         user_service = UserService(self.db)
 
-        # We need locations to resolve tiers (membership check)
-        locations = user_service.crud.get_user_locations(organization_id=organization_id)
-        tiers = user_service._resolve_location_tiers(locations, organization_id, current_user_id)
+        # _resolve_location_tiers reads only `id` and `members` per location,
+        # so a 2-column projection is enough. This is the same pattern used by
+        # user_service.get_locations() to keep large orgs responsive.
+        light_rows = self.db.query(UserLocation.id, UserLocation.members).filter(
+            UserLocation.is_location == True,
+            UserLocation.is_active == True,
+            UserLocation.organization_id == organization_id,
+        ).all()
+        light_locs = [SimpleNamespace(id=r.id, members=r.members) for r in light_rows]
+
+        tiers = user_service._resolve_location_tiers(light_locs, organization_id, current_user_id)
 
         if tiers['is_owner']:
             return setup
@@ -255,14 +270,29 @@ class OrganizationService:
 
         return setup
 
-    def _merge_tree_nodes(self, full_nodes: list, partial_nodes: list) -> list:
+    def _merge_tree_nodes(self, full_nodes: list, partial_nodes: list,
+                          allow_new_siblings: bool = True) -> list:
         """
         Merge a partial tree (from a non-owner user) into the full existing tree.
         Nodes present in partial_nodes update the corresponding node in full_nodes.
         Nodes only in full_nodes (unseen by user) are preserved as-is.
         Nodes only in partial_nodes (newly created by user) are appended.
+
+        Args:
+            allow_new_siblings: when ``False``, partial-only nodes at THIS level
+                are rejected. Used at the outermost root_nodes merge for
+                non-owners — sub-users can add children under nodes they can
+                see, but they cannot create brand-new top-level branches.
+                Recursive calls always pass ``True`` because deeper levels are
+                where legitimate new-child additions live.
         """
         if not full_nodes:
+            # When the user has no full tree at this level, only allow the
+            # partial nodes through if they're permitted as siblings at this
+            # depth. For non-owners at the root this would normally be a
+            # corruption indicator (see merge call below) so we drop them.
+            if not allow_new_siblings:
+                return []
             return partial_nodes or []
         if not partial_nodes:
             return full_nodes
@@ -283,10 +313,14 @@ class OrganizationService:
                 # User can see this node — use user's version but recurse into children
                 user_node = partial_map[nid]
                 merged_node = dict(user_node)
-                # Recursively merge children
+                # Recursively merge children — deeper levels always allow new
+                # additions (that's how a sub-user adds a child under their
+                # assigned node).
                 full_children = full_node.get('children') or []
                 user_children = user_node.get('children') or []
-                merged_node['children'] = self._merge_tree_nodes(full_children, user_children)
+                merged_node['children'] = self._merge_tree_nodes(
+                    full_children, user_children, allow_new_siblings=True
+                )
                 merged.append(merged_node)
                 seen_ids.add(nid)
             else:
@@ -295,12 +329,110 @@ class OrganizationService:
                 seen_ids.add(nid)
 
         # Append any new nodes from partial that don't exist in full (newly created)
-        for node in partial_nodes:
-            nid = str(node.get('nodeId', ''))
-            if nid and nid not in seen_ids:
-                merged.append(node)
+        if allow_new_siblings:
+            for node in partial_nodes:
+                nid = str(node.get('nodeId', ''))
+                if nid and nid not in seen_ids:
+                    merged.append(node)
+        else:
+            # Drop any orphan top-level nodes the partial tree tried to inject.
+            # This is what was producing "Node-undefined" boxes at the root for
+            # sub-user submissions — the frontend was sending the new node at
+            # the wrong nesting depth, and the merge dutifully appended it
+            # next to the real branches.
+            for node in partial_nodes:
+                nid = str(node.get('nodeId', ''))
+                if nid and nid not in seen_ids:
+                    print(
+                        f"  Drop orphan partial root node nodeId={nid} "
+                        f"(non-owner cannot create root-level branches)"
+                    )
 
         return merged
+
+    def _splice_new_nodes_by_parent_ref(
+        self,
+        root_nodes: list,
+        locations_data: list,
+        id_mapping: Dict[str, str],
+    ) -> list:
+        """
+        For each newly-created location, ensure it sits under its declared
+        ``parentNodeId`` in the tree. Idempotent: nodes that are already
+        nested correctly are left alone. Newly-created locations whose
+        parent isn't anywhere in the tree are skipped (we don't invent
+        new top-level branches).
+        """
+        if not locations_data or not id_mapping:
+            return root_nodes
+
+        # Index the (possibly empty) tree by stringified nodeId.
+        nodes_by_id: Dict[str, Dict[str, Any]] = {}
+
+        def index_tree(nodes: Any):
+            if not isinstance(nodes, list):
+                return
+            for node in nodes:
+                if not isinstance(node, dict):
+                    continue
+                nid = node.get('nodeId')
+                if nid is not None:
+                    nodes_by_id[str(nid)] = node
+                children = node.get('children')
+                if children:
+                    index_tree(children)
+
+        index_tree(root_nodes)
+
+        for loc in locations_data:
+            if not isinstance(loc, dict):
+                continue
+
+            # Only splice nodes we just created (their original nodeId is in
+            # the temp→real mapping). Existing locations are already at
+            # whatever position the user dragged them to.
+            original_node_id = loc.get('nodeId')
+            mapped = id_mapping.get(str(original_node_id))
+            if mapped is None:
+                continue
+            try:
+                new_real_id = int(mapped)
+            except (ValueError, TypeError):
+                continue
+
+            # If the node is already in the tree somewhere, leave it.
+            if str(new_real_id) in nodes_by_id:
+                continue
+
+            parent_raw = loc.get('parentNodeId')
+            if parent_raw is None:
+                continue
+
+            # parentNodeId might be a real numeric ID or a temp string that
+            # was just mapped to a new ID in this same request.
+            mapped_parent = id_mapping.get(str(parent_raw))
+            try:
+                parent_real_id = int(mapped_parent) if mapped_parent is not None else int(parent_raw)
+            except (ValueError, TypeError):
+                continue
+
+            parent_node = nodes_by_id.get(str(parent_real_id))
+            if parent_node is None:
+                continue  # parent isn't in the visible/persisted tree
+
+            new_node_obj: Dict[str, Any] = {'nodeId': new_real_id}
+            children_from_loc = loc.get('children')
+            if isinstance(children_from_loc, list) and children_from_loc:
+                new_node_obj['children'] = children_from_loc
+
+            parent_node.setdefault('children', []).append(new_node_obj)
+            nodes_by_id[str(new_real_id)] = new_node_obj
+            print(
+                f"  Splice new node {new_real_id} under parent {parent_real_id} "
+                f"(reconciled from locations[].parentNodeId)"
+            )
+
+        return root_nodes
 
     def _count_tree_nodes(self, nodes: Any) -> int:
         """Count total nodes in a tree structure for sanity checking."""
@@ -384,15 +516,25 @@ class OrganizationService:
                 existing_root_count = self._count_tree_nodes(existing_root)
                 incoming_root_count = self._count_tree_nodes(updated_root_nodes)
 
-                # Merge root_nodes
+                # Merge root_nodes — non-owners cannot create new top-level
+                # branches, so partial-only nodes at the root are dropped.
+                # New nodes the user added under nodes they can see show up
+                # one level deeper and are merged normally there.
                 if updated_root_nodes is not None:
-                    updated_root_nodes = self._merge_tree_nodes(existing_root, updated_root_nodes)
+                    updated_root_nodes = self._merge_tree_nodes(
+                        existing_root, updated_root_nodes,
+                        allow_new_siblings=False,
+                    )
 
-                # Merge hub_node children
+                # Merge hub_node children — same root-level restriction:
+                # sub-users cannot mint new hub children, only edit ones they see.
                 if updated_hub_node and isinstance(updated_hub_node, dict):
                     existing_hub_children = (existing_hub.get('children') or []) if isinstance(existing_hub, dict) else []
                     incoming_hub_children = updated_hub_node.get('children') or []
-                    updated_hub_node['children'] = self._merge_tree_nodes(existing_hub_children, incoming_hub_children)
+                    updated_hub_node['children'] = self._merge_tree_nodes(
+                        existing_hub_children, incoming_hub_children,
+                        allow_new_siblings=False,
+                    )
                 elif existing_hub:
                     # User sent no hub data — preserve existing
                     updated_hub_node = existing_hub
@@ -417,6 +559,24 @@ class OrganizationService:
                         f"Save rejected: merged tree would lose {existing_total - merged_total} nodes. "
                         f"Please refresh and try again."
                     )
+
+        # --- Reconcile new nodes against parentNodeId from the flat locations array ---
+        # The frontend ships the tree in two parallel forms (nested rootNodes
+        # vs flat locations[] with parentNodeId). Sub-users sometimes end up
+        # with a nested form where a freshly-added node sits at the root
+        # instead of under the assigned parent — and the merge step (or our
+        # ``allow_new_siblings=False`` guard) then drops or mis-places it.
+        # The flat form is reliable, so we use parentNodeId here to splice
+        # any newly-created locations into the correct parent's children.
+        if location_id_mapping:
+            updated_root_nodes = self._splice_new_nodes_by_parent_ref(
+                updated_root_nodes or [], locations_data or [], location_id_mapping
+            )
+            if updated_hub_node and isinstance(updated_hub_node, dict):
+                hub_children = updated_hub_node.get('children') or []
+                updated_hub_node['children'] = self._splice_new_nodes_by_parent_ref(
+                    hub_children, locations_data or [], location_id_mapping
+                )
 
         # --- Enforce max_org_structure_nodes limit ---
         max_nodes = getattr(organization, 'max_org_structure_nodes', 50) or 50
@@ -695,9 +855,25 @@ class OrganizationService:
             # Check if nodeId is numeric (existing location) or string (new location)
             is_numeric_id = self._is_numeric_id(node_id)
 
+            # Cast to int up-front so SQLAlchemy compares ``id`` (bigint) against
+            # an int instead of letting Postgres cast the string itself and
+            # potentially overflow.
+            node_id_int = None
+            if is_numeric_id:
+                try:
+                    node_id_int = int(node_id)
+                    # bigint range guard — anything outside this can't possibly
+                    # match an existing row, so fall through to the create path.
+                    if node_id_int < 1 or node_id_int > 9_223_372_036_854_775_807:
+                        node_id_int = None
+                        is_numeric_id = False
+                except (ValueError, TypeError):
+                    node_id_int = None
+                    is_numeric_id = False
+
             if is_numeric_id:
                 # This is an existing location with numeric database ID - update if any changes provided
-                existing_location = self.db.query(UserLocation).filter(UserLocation.id == node_id).first()
+                existing_location = self.db.query(UserLocation).filter(UserLocation.id == node_id_int).first()
                 if existing_location:
                     updated = False
 
@@ -716,7 +892,7 @@ class OrganizationService:
                                 UserLocation.organization_id == organization_id,
                                 UserLocation.hub_type.isnot(None),
                                 UserLocation.deleted_date.is_(None),
-                                UserLocation.id != int(node_id),  # Exclude the current location
+                                UserLocation.id != node_id_int,  # Exclude the current location
                                 or_(
                                     UserLocation.display_name == display_name,
                                     UserLocation.name_en == display_name
@@ -744,6 +920,17 @@ class OrganizationService:
 
             # Only process string-based IDs (new locations)
             if to_create and not is_numeric_id:
+                # Reject placeholder/ghost rows up-front: a new location with no
+                # usable name field is almost certainly a UI affordance (an
+                # empty "+ add child" slot) that leaked into the locations
+                # array. Persisting it produces "Node-undefined" boxes that
+                # then attach to the wrong place via the merge path.
+                _name_th = location_data.get('name_th')
+                _name_en = location_data.get('name_en')
+                if not (display_name or _name_th or _name_en):
+                    print(f"  Skip placeholder location with no name: nodeId={node_id}")
+                    continue
+
                 # Check for duplicate destination names if this is a hub/destination
                 hub_type = location_data.get('hub_type')
                 if hub_type and display_name:
@@ -798,27 +985,49 @@ class OrganizationService:
     def _is_numeric_id(self, node_id) -> bool:
         """
         Check if a nodeId is numeric (existing location) or string-based (new location).
+
+        Note: must use a strict digits-only check rather than ``int(s)`` —
+        Python 3.6+ accepts ``_`` as a digit separator, so ``int("12933_1778147882242_12023")``
+        silently parses the frontend's temp ID format ``<parent>_<ts>_<rand>``
+        as a single huge integer, then later overflows Postgres' ``bigint``
+        in queries like ``WHERE user_locations.id = <temp_id>``.
         """
-        try:
-            if isinstance(node_id, (int, float)):
-                return True
-            if isinstance(node_id, str):
-                # Try to convert to int - if successful, it's numeric
-                int(node_id)
-                return True
-            return False
-        except (ValueError, TypeError):
-            return False
+        if isinstance(node_id, bool):
+            return False  # bool is a subclass of int; treat explicitly
+        if isinstance(node_id, int):
+            return True
+        if isinstance(node_id, float):
+            return float(node_id).is_integer()
+        if isinstance(node_id, str):
+            s = node_id.strip()
+            return bool(s) and s.isdigit()
+        return False
 
     def _update_node_ids_in_structure(self, structure: Any, id_mapping: Dict[str, str]) -> Any:
         """
         Recursively update nodeIds in tree structure with new database IDs.
         Only updates string-based nodeIds that are in the mapping. Leaves numeric nodeIds unchanged.
+
+        Drops any node whose ``nodeId`` is a non-numeric string AND not present
+        in ``id_mapping`` — those represent temp IDs whose corresponding
+        location row was rejected (e.g. placeholder rows skipped in
+        _process_locations). Persisting them would leave the tree referencing
+        non-existent IDs and produce "Node-undefined" stragglers.
         """
         if structure is None:
             return structure
 
         if isinstance(structure, dict):
+            # If this dict has a nodeId that's a string AND not in the mapping,
+            # drop the whole subtree so its (now non-existent) row doesn't stay
+            # referenced in the tree.
+            node_id_val = structure.get('nodeId')
+            if isinstance(node_id_val, str):
+                stripped = node_id_val.strip()
+                if stripped and not stripped.isdigit() and stripped not in id_mapping:
+                    print(f"  Drop unmapped tree node: nodeId={node_id_val} (location was skipped or never created)")
+                    return None
+
             updated_structure = {}
             for key, value in structure.items():
                 if key == 'nodeId':
@@ -846,8 +1055,14 @@ class OrganizationService:
             return updated_structure
 
         elif isinstance(structure, list):
-            # Process each item in the list
-            return [self._update_node_ids_in_structure(item, id_mapping) for item in structure]
+            # Process each item in the list, filtering out dropped (None) entries
+            # — see the "Drop unmapped tree node" branch above.
+            return [
+                processed
+                for item in structure
+                for processed in (self._update_node_ids_in_structure(item, id_mapping),)
+                if processed is not None
+            ]
 
         else:
             # Return primitive values as-is

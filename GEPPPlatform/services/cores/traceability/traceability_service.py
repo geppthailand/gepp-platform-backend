@@ -19,6 +19,25 @@ from ....models.transactions.transport_transaction import TransportTransaction
 from ....models.users.user_location import UserLocation
 
 
+def _emit_traceability_event(db: Session, event_type: str, organization_id=None, user_id=None, properties: dict = None):
+    """Fire-and-forget CRM event emission for traceability events."""
+    try:
+        from GEPPPlatform.services.admin.crm.crm_service import emit_event
+        emit_event(
+            db,
+            event_type=event_type,
+            event_category='traceability',
+            organization_id=organization_id,
+            user_location_id=user_id,
+            properties=properties or {},
+            event_source='server',
+            commit=False,
+        )
+    except Exception as _exc:
+        import logging as _log
+        _log.getLogger(__name__).warning("CRM emit_event non-fatal (traceability): %s", _exc)
+
+
 class TraceabilityService:
     """
     Service for traceability operations.
@@ -1572,6 +1591,14 @@ class TraceabilityService:
         record.destination_id = destination_id
         self.db.flush()
 
+        # ── CRM: emit traceability_created ──
+        _emit_traceability_event(
+            self.db, 'traceability_created',
+            organization_id=organization_id,
+            user_id=created_by_id,
+            properties={'transaction_id': transaction.id, 'record_id': record_id},
+        )
+
         return {
             "success": True,
             "message": "Transport transaction created",
@@ -1788,6 +1815,16 @@ class TraceabilityService:
 
             if "disposal_method" in item:
                 row.disposal_method = (item["disposal_method"] or "").strip() or None
+                # ── CRM: emit disposal_recorded when a disposal method is set ──
+                if row.disposal_method:
+                    _emit_traceability_event(
+                        self.db, 'disposal_recorded',
+                        organization_id=organization_id,
+                        properties={
+                            'transaction_id': tt_id,
+                            'disposal_method': row.disposal_method,
+                        },
+                    )
 
             # Update meta_data for vehicle_info / messenger_info
             meta_data = dict(row.meta_data) if row.meta_data else {}
@@ -1928,6 +1965,14 @@ class TraceabilityService:
         row.status = "arrived"
         row.updated_date = now
         self.db.flush()
+
+        # ── CRM: emit transport_confirmed ──
+        _emit_traceability_event(
+            self.db, 'transport_confirmed',
+            organization_id=organization_id,
+            properties={'transaction_id': transaction_id},
+        )
+
         return {
             "success": True,
             "message": "Arrival confirmed",

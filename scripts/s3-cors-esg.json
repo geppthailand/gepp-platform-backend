@@ -1,0 +1,19 @@
+{
+  "CORSRules": [
+    {
+      "AllowedOrigins": [
+        "https://esg.geppdata.com",
+        "https://dev-esg.geppdata.com",
+        "https://platform.geppdata.com",
+        "https://dev-platform.geppdata.com",
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "http://localhost:5174"
+      ],
+      "AllowedMethods": ["PUT", "POST", "GET", "HEAD"],
+      "AllowedHeaders": ["*"],
+      "ExposeHeaders": ["ETag", "x-amz-request-id", "x-amz-version-id"],
+      "MaxAgeSeconds": 3000
+    }
+  ]
+}
