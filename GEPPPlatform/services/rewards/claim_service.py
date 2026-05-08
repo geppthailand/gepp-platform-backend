@@ -305,17 +305,6 @@ class ClaimService:
             )
             .first()
         )
-<<<<<<< HEAD
-        _is_new_member = not existing_membership
-        if _is_new_member:
-            new_membership = OrganizationRewardUser(
-                reward_user_id=reward_user_id,
-                organization_id=campaign.organization_id,
-                role="user",
-            )
-            self.db.add(new_membership)
-            self.db.flush()
-=======
         if not existing_membership:
             try:
                 nested = self.db.begin_nested()  # SAVEPOINT
@@ -329,7 +318,6 @@ class ClaimService:
             except Exception:
                 # Unique constraint violation = another concurrent request created it first
                 nested.rollback()  # rollback only the savepoint, not the whole transaction
->>>>>>> b68bbeeb4b746f199c6ea0afa51d85295d7ef596
 
         # ── CRM: emit reward_claimed + points_earned (+ campaign_joined on first claim) ──
         try:
