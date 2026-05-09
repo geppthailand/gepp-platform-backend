@@ -110,20 +110,35 @@ _HYPERLINK_FONT_KW = {
 # `datapoints` array can be looked up by canonical key from the YAML
 # (e.g. `datapoint:disposal_method` → search for "disposal method"
 # / "disposal_method" / "วิธีกำจัด").
+# Post-canonicalisation (migration 065 + datapoint_registry), every
+# `esg_records.datapoints` entry uses canonical keys directly, so the
+# YAML template's `key:` field already matches the row's
+# `datapoint_name`. The alias list below is kept as a DEFENSIVE
+# fallback — covers legacy rows on environments where migration 065
+# hasn't run yet, and bridges descriptive keys (vendor, purchase_date)
+# that aren't part of the canonical registry.
+#
+# When extending: prefer adding aliases to
+# `services/esg/datapoint_registry.py:ALIAS_MAP` so the normaliser
+# folds them at write-time. Only add entries here when the alias
+# names a descriptive (non-calculated) field.
 _DP_ALIASES = {
+    # Calculation-critical canonicals (defensive — should match
+    # directly post-migration; aliases only help legacy rows).
     'disposal_method': ['disposal method', 'disposal', 'วิธีกำจัด'],
-    'supplier':        ['supplier', 'vendor', 'ผู้ขาย'],
     'transport_mode':  ['transport mode', 'mode', 'รูปแบบขนส่ง'],
     'weight_kg':       ['weight', 'weight (kg)', 'cargo weight', 'น้ำหนัก'],
     'distance_km':     ['distance', 'distance (km)', 'travel distance', 'ระยะทาง'],
     'nights':          ['nights', 'จำนวนคืน', 'room nights'],
+    'unit_cost':       ['unit cost', 'unit price', 'price per unit', 'ราคาต่อหน่วย'],
+    'amount':          ['total cost', 'total_cost', 'amount', 'ราคารวม', 'มูลค่ารวม'],
+    # Descriptive (non-canonical) fields the export resolves directly.
     'asset_type':      ['asset type', 'type', 'ประเภท'],
     'purchase_date':   ['purchase date', 'date', 'วันที่ซื้อ'],
     'quantity':        ['quantity', 'qty', 'จำนวน'],
-    'unit_cost':       ['unit cost', 'unit price', 'price per unit', 'ราคาต่อหน่วย'],
-    'total_cost':      ['total cost', 'amount', 'ราคารวม', 'มูลค่ารวม'],
     'material_group':  ['material group'],
     'plant':           ['plant'],
+    'supplier':        ['supplier', 'vendor', 'ผู้ขาย'],
     'vendor':          ['vendor', 'supplier', 'supplier/supplying plant', 'ผู้ขาย'],
 }
 

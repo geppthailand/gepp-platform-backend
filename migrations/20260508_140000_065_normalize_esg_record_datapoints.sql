@@ -1,0 +1,31 @@
+-- ============================================================
+-- Migration 065 — Normalise esg_records.datapoints to canonical keys
+-- ============================================================
+-- Date: 2026-05-08
+-- Description: Marker migration. The actual JSONB transformation
+--              runs in a Python helper at
+--              migrations/normalize_datapoints_065.py
+--              which reuses
+--              GEPPPlatform.services.esg.datapoint_registry
+--              for alias resolution + unit conversion + raw_<key>
+--              sibling emission.
+--
+-- The Python helper is idempotent + restartable. Running it twice
+-- is a no-op on already-normalised rows.
+--
+-- Run order:
+--   1. Apply this SQL via run_local.sh / run_migrations.sh (this
+--      file is just a marker that records the version was applied).
+--   2. Run the Python helper:
+--        cd v3/backend && .venv/bin/python migrations/normalize_datapoints_065.py
+--
+-- The SQL marker exists so the migration runner (which only knows
+-- about .sql files matching the YYYYMMDD_HHMMSS_NNN pattern)
+-- records that the canonical-keys normalisation was applied. The
+-- helper is intentionally separate so we can re-run it without
+-- needing to re-apply schema migrations.
+-- ============================================================
+
+-- Bump a column comment so the schema reflects the new contract.
+COMMENT ON COLUMN esg_records.datapoints IS
+'Per-record JSONB array of datapoints. POST migration 065: keys are CANONICAL (`distance_km`, `weight_kg`, `volume_litres`, `energy_kwh`, `nights`, `headcount`, `amount`, `currency`, `transport_mode`, `disposal_method`, …) with numeric values + canonical units. The original verbatim string from the source document is preserved in a `raw_<canonical>` sibling row. See `services/esg/datapoint_registry.py` for the full registry.';

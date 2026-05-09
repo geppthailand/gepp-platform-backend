@@ -109,25 +109,79 @@ CURRENCY_UNITS = {
 }
 
 # What activity-data is required to compute a real (non-spend-based)
-# kgCO2e for each Scope 3 category. The first list of any tuple that
-# is fully satisfied = sufficient. Values are normalized field names
-# (lower, snake-style) checked against the LLM-emitted `datapoint_name`.
+# kgCO2e for each Scope 3 category. The first tuple that is fully
+# satisfied = sufficient. Values are CANONICAL keys from
+# `datapoint_registry.CANONICAL_NUMERIC_KEYS` /
+# `CANONICAL_CATEGORICAL_KEYS`, NOT free-form names — every datapoint
+# is normalised at the persist boundary in
+# `EsgImageExtractionService` / `EsgExtractionService` before the
+# resolver ever sees it.
 SCOPE3_REQUIRED_FIELDS = {
-    1:  [],                                 # spend-based legitimate
-    2:  [],                                 # spend-based legitimate
-    3:  [['kwh'], ['mwh'], ['litre']],
-    4:  [['weight', 'distance'], ['tonne_km'], ['tkm']],
-    5:  [['weight'], ['mass'], ['kg']],
-    6:  [['distance'], ['nights'], ['flight_legs', 'class'], ['flight']],
-    7:  [['distance'], ['passenger_km']],
-    8:  [['kwh'], ['floor_area']],
-    9:  [['weight', 'distance'], ['tonne_km']],
-    10: [['weight']],
-    11: [['kwh'], ['litre'], ['unit_year']],
-    12: [['weight']],
-    13: [['kwh'], ['floor_area']],
-    14: [['kwh'], ['stores']],              # franchises spend-based fallback
-    15: [],                                 # spend-based legitimate (financed)
+    # Cat 1, 2: spend-based legitimate (TGO accepts amount + currency)
+    1:  [['amount', 'currency'], ['weight_kg', 'material_type']],
+    2:  [['amount', 'currency'], ['weight_kg', 'material_type']],
+
+    # Cat 3: WTT + T&D — energy or fuel
+    3:  [['energy_kwh'], ['energy_mwh'], ['volume_litres', 'fuel_type']],
+
+    # Cat 4: Upstream transport — weight×distance×mode, OR tonne_km, OR fuel
+    4:  [['weight_kg', 'distance_km', 'transport_mode'],
+         ['tonne_km', 'transport_mode'],
+         ['volume_litres', 'fuel_type']],
+
+    # Cat 5: Waste in operations — weight × disposal × waste_type
+    5:  [['weight_kg', 'disposal_method']],
+
+    # Cat 6: Business travel — multiple methods
+    6:  [['distance_km', 'transport_mode'],
+         ['distance_km', 'transport_mode', 'flight_class'],
+         ['flight_legs', 'flight_class'],
+         ['nights'],
+         ['amount', 'currency']],
+
+    # Cat 7: Employee commute — distance + mode + headcount, OR fuel
+    7:  [['distance_km', 'transport_mode', 'headcount'],
+         ['passenger_km'],
+         ['volume_litres', 'fuel_type']],
+
+    # Cat 8: Upstream leased assets — energy / fuel / area-based
+    8:  [['energy_kwh'],
+         ['volume_litres', 'fuel_type'],
+         ['floor_area_sqm']],
+
+    # Cat 9: Downstream transport — same shape as Cat 4
+    9:  [['weight_kg', 'distance_km', 'transport_mode'],
+         ['tonne_km', 'transport_mode'],
+         ['volume_litres', 'fuel_type']],
+
+    # Cat 10: Processing of sold products
+    10: [['weight_kg'],
+         ['energy_kwh'],
+         ['volume_litres', 'fuel_type']],
+
+    # Cat 11: Use of sold products — direct, indirect, or refrigerant
+    11: [['units_sold', 'lifetime_years', 'energy_per_use_kwh'],
+         ['energy_kwh'],
+         ['volume_litres', 'fuel_type'],
+         ['refrigerant_kg', 'refrigerant_type']],
+
+    # Cat 12: End-of-life — weight + disposal + material
+    12: [['weight_kg', 'disposal_method'],
+         ['units_sold', 'material_type', 'disposal_method']],
+
+    # Cat 13: Downstream leased assets — same as Cat 8
+    13: [['energy_kwh'],
+         ['volume_litres', 'fuel_type'],
+         ['floor_area_sqm']],
+
+    # Cat 14: Franchises — store-count or per-store energy
+    14: [['franchise_count', 'floor_area_sqm'],
+         ['energy_kwh'],
+         ['amount', 'currency']],
+
+    # Cat 15: Investments — equity or debt-based
+    15: [['ownership_pct', 'investee_emissions_tco2e'],
+         ['amount', 'currency']],
 }
 
 

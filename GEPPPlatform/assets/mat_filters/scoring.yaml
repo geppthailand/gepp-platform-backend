@@ -1,0 +1,46 @@
+# Scoring thresholds for the materiality filter.
+# Tunable without code changes. Bump questions.yaml `version:` if you change
+# these meaningfully so existing answers can be re-evaluated.
+
+version: 1
+
+# A category's final score is the sum of:
+#   - the industry-seed weight (from industries.yaml.default_category_seeds)
+#   - the per-option weights (from questions.yaml.options[].category_weights)
+#     across every option the user picked
+#
+# Buckets:
+#   material        — surfaced as primary cards on the For You page
+#   consider        — collapsed accordion, "you may want to add this later"
+#   skip            — hidden by default, only visible via "View all 15" toggle
+thresholds:
+  material: 0.8
+  consider: 0.4
+
+# Caps to keep one outlier weight from dominating.
+# After summing, each category score is min'd against this value.
+score_cap: 2.5
+
+# If the sum of all category scores is below this floor (e.g. user picked
+# almost nothing), promote ALL of them to at least "consider" so the For You
+# page isn't empty. Saves us from showing a blank state.
+min_total_score_for_normal_bucketing: 1.5
+
+# Universally material — even if scoring puts them below threshold, these
+# categories are always promoted to at least "consider". Almost every business
+# has SOME purchased goods, employee commuting, and operational waste, so
+# excluding them entirely is usually wrong.
+universal_floor:
+  - 1   # Purchased goods and services
+  - 5   # Waste generated in operations
+  - 7   # Employee commuting
+
+# When a brand-new org has not yet completed materiality (so
+# enabled_scope3_categories is empty), the platform falls back to this default
+# set instead of "all 15". Picked to cover the typical first-week onboarding
+# user without overwhelming them.
+default_categories_pre_materiality:
+  - 1   # Purchased goods and services
+  - 5   # Waste generated in operations
+  - 6   # Business travel
+  - 7   # Employee commuting
