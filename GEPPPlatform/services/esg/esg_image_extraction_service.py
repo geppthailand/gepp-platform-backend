@@ -768,13 +768,27 @@ CRITICAL — DO NOT confuse these refs fields (common LLM errors with Thai recei
             except (ValueError, TypeError):
                 doc_date = datetime.now(timezone.utc).date()
 
+        # The LLM occasionally emits 0 / "" / "0" as a sentinel for
+        # "no specific subcategory" instead of null. Coerce those
+        # to None so the FK constraints stay happy — the columns
+        # are nullable on purpose for exactly this case (records
+        # with a known cat but no specific sub-cat are valid).
+        def _safe_id(value: object) -> int | None:
+            if value is None:
+                return None
+            try:
+                n = int(value)
+            except (TypeError, ValueError):
+                return None
+            return n if n > 0 else None
+
         for rec in records:
             if rec.get('_is_total'):
                 continue
 
-            cat_id = rec.get('category_id')
+            cat_id = _safe_id(rec.get('category_id'))
             cat_name = rec.get('category_name', '') or 'Unknown'
-            sub_id = rec.get('subcategory_id')
+            sub_id = _safe_id(rec.get('subcategory_id'))
             rec_label = (rec.get('record_label') or '').strip() or 'รายการ'
 
             # Resolve scope3_category_id + pillar from the DB.
@@ -788,8 +802,37 @@ CRITICAL — DO NOT confuse these refs fields (common LLM errors with Thai recei
                     if cat_row:
                         scope3_id = int(cat_row.scope3_category_id) if cat_row.scope3_category_id else None
                         pillar = cat_row.pillar
+                    else:
+                        # LLM hallucinated a non-existent category_id.
+                        # Drop it so we don't emit an FK violation.
+                        logger.warning(
+                            "extract: cat_id=%s not found in esg_data_category — dropping",
+                            cat_id,
+                        )
+                        cat_id = None
                 except Exception:
                     logger.exception('cat lookup failed for cat_id=%s', cat_id)
+                    cat_id = None
+
+            # Verify sub_id actually exists. The LLM may pick a sub_id
+            # from a different category or invent one; either way an
+            # invalid id triggers the same FK violation we just hit
+            # in production. Cheap lookup-and-drop here is much safer
+            # than letting psycopg2 abort the whole transaction.
+            if sub_id:
+                try:
+                    sub_exists = self.db.query(EsgDataSubcategory.id).filter(
+                        EsgDataSubcategory.id == sub_id,
+                    ).first()
+                    if not sub_exists:
+                        logger.warning(
+                            "extract: sub_id=%s not found in esg_data_subcategory — dropping",
+                            sub_id,
+                        )
+                        sub_id = None
+                except Exception:
+                    logger.exception('subcat lookup failed for sub_id=%s', sub_id)
+                    sub_id = None
 
             fields = rec.get('fields') or []
             fields = self._validate_datapoints_against_db(fields, cat_id)
