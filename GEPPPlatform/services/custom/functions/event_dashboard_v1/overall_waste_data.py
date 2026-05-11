@@ -16,6 +16,11 @@ from collections import defaultdict
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_
 
+from GEPPPlatform.services.cores.reports.ghg_equivalents import (
+    kg_co2_to_trees,
+    kg_co2_to_forest_rai,
+)
+
 logger = logging.getLogger(__name__)
 
 _RECYCLABLE_CATEGORIES = {1, 3}
@@ -65,6 +70,7 @@ def handle_overall_waste_data(
         "recycling_rate": 0,
         "ghg_reduction_kg": 0,
         "tree_equivalent": 0,
+        "forest_rai_equivalent": 0,
         "material_breakdown": [],
         "timeseries": {"timestamp": [], "sum_weight": [], "recycling_rate": []},
         "tenant_split": [],
@@ -205,7 +211,8 @@ def handle_overall_waste_data(
                 tenant_data[tenant_id]["recyclable"] += weight
 
     recycling_rate = (recyclable_weight_kg / total_weight_kg) if total_weight_kg > 0 else 0.0
-    tree_equivalent = total_ghg_kg / 9.5 if total_ghg_kg > 0 else 0.0
+    tree_equivalent = kg_co2_to_trees(total_ghg_kg)
+    forest_rai_equivalent = kg_co2_to_forest_rai(total_ghg_kg)
 
     # --- Build material breakdown response ---
     material_breakdown = []
@@ -275,6 +282,7 @@ def handle_overall_waste_data(
         "recycling_rate": round(recycling_rate, 6),
         "ghg_reduction_kg": round(total_ghg_kg, 4),
         "tree_equivalent": round(tree_equivalent, 2),
+        "forest_rai_equivalent": round(forest_rai_equivalent, 4),
         "material_breakdown": material_breakdown,
         "timeseries": {
             "timestamp": timestamps,
