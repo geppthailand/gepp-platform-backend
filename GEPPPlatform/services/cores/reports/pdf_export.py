@@ -564,36 +564,51 @@ def _footer(pdf, page_width_points: float, data: dict = None):
 
 def _parse_date_to_date(value) -> datetime.date | None:
     """
-    Parse various incoming date strings to a date (no timezone effects).
+    Parse various incoming date strings to a date **in the user's locale (Asia/Bangkok)**.
+
+    Why locale-aware: filter boundaries arrive as ISO strings already converted to UTC
+    by the reports handler (e.g. "April 1 Bangkok" -> "2026-03-31T17:00:00+00:00").
+    A naive 10-char truncation would yield "2026-03-31" -> month=3, leaking March
+    into chart-month allow-lists when the actual filter is April-only. Convert to
+    Bangkok TZ before extracting the date to match how data is bucketed elsewhere.
+
     Supports:
       - '01 Jan 2025' (d Mon YYYY)
-      - '2025-01-01' (ISO date)
+      - '2025-01-01' (ISO date, locale-neutral)
       - '2025/01/01'
       - '01/01/2025'
       - ISO datetime variants, e.g. '2025-01-01T00:00:00Z' or with offsets
+
     Returns None if parsing fails.
     """
+    from zoneinfo import ZoneInfo
+    _BKK = ZoneInfo("Asia/Bangkok")
+
     try:
         if isinstance(value, datetime):
+            if value.tzinfo is not None:
+                return value.astimezone(_BKK).date()
             return value.date()
     except Exception:
         pass
     s = str(value or "").strip()
     if not s:
         return None
-    # Fast-path: ISO date in first 10 chars
-    try:
-        if len(s) >= 10 and s[4] == "-" and s[7] == "-":
-            ymd = s[:10]
-            # datetime.fromisoformat accepts 'YYYY-MM-DD'
-            return datetime.fromisoformat(ymd).date()
-    except Exception:
-        pass
-    # ISO datetime variants
+    # ISO datetime variants — convert TZ-aware values to Bangkok before taking date
     try:
         iso_norm = s.replace("Z", "+00:00")
-        dt = datetime.fromisoformat(iso_norm)
-        return dt.date()
+        # If the string contains a time component, parse the full ISO
+        if "T" in iso_norm or " " in iso_norm:
+            dt = datetime.fromisoformat(iso_norm)
+            if dt.tzinfo is not None:
+                return dt.astimezone(_BKK).date()
+            return dt.date()
+    except Exception:
+        pass
+    # Date-only fast path (no time component, no TZ confusion)
+    try:
+        if len(s) >= 10 and s[4] == "-" and s[7] == "-":
+            return datetime.fromisoformat(s[:10]).date()
     except Exception:
         pass
     # Common explicit formats
