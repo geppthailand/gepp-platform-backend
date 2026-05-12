@@ -71,6 +71,18 @@ ALLOWED_FIELDS: Dict[str, Set[str]] = {
         "org_emails_clicked_30d",
         "org_last_email_opened_at",
     },
+    # Sprint 9 — lead scope fields (map onto crm_leads columns)
+    "lead": {
+        "lead_status",          # column: status
+        "lead_score",           # column: lead_score
+        "lead_source",          # column: source
+        "lead_country",         # column: country
+        "lead_owner_user_id",   # column: owner_user_id
+        "lead_company",         # column: company
+        "days_since_created",   # computed: EXTRACT(DAY FROM NOW() - created_date)
+        "days_since_last_activity",  # computed: EXTRACT(DAY FROM NOW() - last_activity_at) NULL safe
+        "converted",            # computed: (converted_user_id IS NOT NULL)
+    },
 }
 
 # These are the ONLY operators that may appear in rule conditions.
@@ -79,16 +91,34 @@ ALLOWED_OPERATORS: Set[str] = {
     "IN", "NOT IN", "BETWEEN",
     # Sprint 4: nullable datetime fields (last_email_opened_at etc.)
     "IS NULL", "IS NOT NULL",
+    # Sprint 9: case-insensitive LIKE for lead string fields
+    "ILIKE",
 }
 
 _SCOPE_TABLE = {
     "user":         "crm_user_profiles",
     "organization": "crm_org_profiles",
+    "lead":         "crm_leads",
 }
 
 _SCOPE_PK = {
     "user":         "user_location_id",
     "organization": "organization_id",
+    "lead":         "id",
+}
+
+# Sprint 9 — lead field → SQL expression mapping.
+# Fields whose names don't match the column name directly need a translation.
+_LEAD_FIELD_EXPR: Dict[str, str] = {
+    "lead_status":               "status",
+    "lead_score":                "lead_score",
+    "lead_source":               "source",
+    "lead_country":              "country",
+    "lead_owner_user_id":        "owner_user_id",
+    "lead_company":              "company",
+    "days_since_created":        "EXTRACT(DAY FROM NOW() - created_date)",
+    "days_since_last_activity":  "EXTRACT(DAY FROM NOW() - last_activity_at)",
+    "converted":                 "(converted_user_id IS NOT NULL)",
 }
 
 # ---------------------------------------------------------------------------
@@ -195,6 +225,68 @@ _FIELD_DEFINITIONS: Dict[str, List[Dict[str, Any]]] = {
             "operators": ["=", "!=", ">", "<", "IS NULL", "IS NOT NULL"],
         },
     ],
+    # Sprint 9 — lead scope fields
+    "leadFields": [
+        {
+            "name": "lead_status",
+            "label": "Lead status",
+            "type": "enum",
+            "operators": ["=", "!=", "IN", "NOT IN"],
+            "options": ["new", "contacted", "qualified", "proposal", "won", "lost"],
+        },
+        {
+            "name": "lead_score",
+            "label": "Lead score",
+            "type": "number",
+            "operators": ["=", "!=", ">", "<", ">=", "<=", "BETWEEN"],
+        },
+        {
+            "name": "lead_source",
+            "label": "Lead source",
+            "type": "enum",
+            "operators": ["=", "!=", "IN", "NOT IN"],
+            "options": ["website", "referral", "campaign", "cold_outreach", "event", "other"],
+        },
+        {
+            "name": "lead_country",
+            "label": "Country",
+            "type": "string",
+            "operators": ["=", "!=", "IN", "NOT IN", "ILIKE"],
+        },
+        {
+            "name": "lead_owner_user_id",
+            "label": "Owner (user ID)",
+            "type": "number",
+            "operators": ["=", "!=", "IN", "NOT IN", "IS NULL", "IS NOT NULL"],
+        },
+        {
+            "name": "lead_company",
+            "label": "Company",
+            "type": "string",
+            "operators": ["=", "ILIKE"],
+        },
+        {
+            "name": "days_since_created",
+            "label": "Days since created",
+            "type": "number",
+            "description": "Number of days elapsed since the lead was created.",
+            "operators": ["=", "!=", ">", "<", ">=", "<=", "BETWEEN"],
+        },
+        {
+            "name": "days_since_last_activity",
+            "label": "Days since last activity",
+            "type": "number",
+            "description": "Number of days elapsed since the most recent lead activity (NULL-safe).",
+            "operators": ["=", "!=", ">", "<", ">=", "<=", "BETWEEN", "IS NULL", "IS NOT NULL"],
+        },
+        {
+            "name": "converted",
+            "label": "Converted",
+            "type": "boolean",
+            "description": "Whether the lead has been converted to a user (converted_user_id IS NOT NULL).",
+            "operators": ["="],
+        },
+    ],
 }
 
 
@@ -253,7 +345,11 @@ def _compile_condition(
     _validate_operator(operator)
 
     # Column name is now safe (validated against whitelist — no user-supplied text in SQL).
-    col = field
+    # For lead scope, some fields map to SQL expressions rather than bare column names.
+    if scope == "lead" and field in _LEAD_FIELD_EXPR:
+        col = _LEAD_FIELD_EXPR[field]
+    else:
+        col = field
 
     # IS NULL / IS NOT NULL take no value — just emit the keyword clause.
     if operator in ("IS NULL", "IS NOT NULL"):
@@ -353,7 +449,7 @@ def compile_rules(
     """
     if scope not in ALLOWED_FIELDS:
         raise BadRequestException(
-            f"Unknown scope '{scope}'. Must be 'user' or 'organization'."
+            f"Unknown scope '{scope}'. Must be 'user', 'organization', or 'lead'."
         )
 
     params: Dict[str, Any] = {}
@@ -390,20 +486,41 @@ def preview_segment(
     pk    = _SCOPE_PK[scope]
 
     org_filter = ""
-    if organization_id is not None:
+    if organization_id is not None and scope != "lead":
         org_filter = " AND organization_id = :_org_id"
         params["_org_id"] = organization_id
 
-    count_sql = text(
-        f"SELECT COUNT(*) FROM {table} WHERE {where_clause}{org_filter}"
-    )
-    sample_sql = text(
-        f"SELECT * FROM {table} WHERE {where_clause}{org_filter} LIMIT 20"
-    )
-
-    count_result  = db_session.execute(count_sql,  params).scalar() or 0
-    sample_rows   = db_session.execute(sample_sql, params).mappings().all()
-    sample        = [dict(row) for row in sample_rows]
+    if scope == "lead":
+        count_sql = text(
+            f"SELECT COUNT(*) FROM {table} WHERE {where_clause}"
+        )
+        sample_sql = text(
+            f"""SELECT id, email, first_name, last_name, status, lead_score
+                FROM {table} WHERE {where_clause} LIMIT 20"""
+        )
+        count_result = db_session.execute(count_sql, params).scalar() or 0
+        sample_rows  = db_session.execute(sample_sql, params).mappings().all()
+        sample = [
+            {
+                "id":         row["id"],
+                "email":      row["email"],
+                "firstName":  row["first_name"],
+                "lastName":   row["last_name"],
+                "status":     row["status"],
+                "leadScore":  row["lead_score"],
+            }
+            for row in sample_rows
+        ]
+    else:
+        count_sql = text(
+            f"SELECT COUNT(*) FROM {table} WHERE {where_clause}{org_filter}"
+        )
+        sample_sql = text(
+            f"SELECT * FROM {table} WHERE {where_clause}{org_filter} LIMIT 20"
+        )
+        count_result  = db_session.execute(count_sql,  params).scalar() or 0
+        sample_rows   = db_session.execute(sample_sql, params).mappings().all()
+        sample        = [dict(row) for row in sample_rows]
 
     return {"count": count_result, "sample": sample}
 
@@ -439,9 +556,10 @@ def evaluate_segment(db_session: Session, segment_id: int) -> int:
 
     where_clause, params = compile_rules(rule_tree, scope)
 
-    # Restrict to the segment's org if specified.
+    # Restrict to the segment's org if specified (not applicable for lead scope
+    # since crm_leads are platform-wide, not per-org-profile).
     org_filter = ""
-    if segment.organization_id:
+    if segment.organization_id and scope != "lead":
         org_filter = " AND organization_id = :_seg_org_id"
         params["_seg_org_id"] = segment.organization_id
 

@@ -17,6 +17,8 @@ import datetime as _dt
 import unittest
 from unittest.mock import MagicMock
 
+_OWNS_EXCEPTION_BINDING = True  # opt out of conftest exception rebinding (see tests/conftest.py)
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(os.path.dirname(_HERE))  # v3/backend/
 if _ROOT not in sys.path:
@@ -68,6 +70,8 @@ _handlers = _load_module(
     "GEPPPlatform/services/admin/crm/crm_handlers.py",
     "GEPPPlatform.services.admin.crm.crm_handlers_list_filter_test",
 )
+# Tell conftest.py NOT to rebind exception names — we own them.
+_handlers._OWNS_EXCEPTION_BINDING = True
 list_crm_deliveries = _handlers.list_crm_deliveries
 
 

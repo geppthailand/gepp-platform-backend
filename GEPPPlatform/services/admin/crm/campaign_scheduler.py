@@ -101,9 +101,19 @@ def tick(
             except Exception:
                 pass
 
+    # ── Drip sequence enrollments ─────────────────────────────────────────
+    try:
+        from . import drip_service as _drip
+        drip_result = _drip.tick_enrollments(db, batch_size=200)
+        summary["dripEnrollments"] = drip_result
+    except Exception as exc:
+        logger.error("campaign_scheduler.tick: drip tick failed (non-fatal): %s", exc, exc_info=True)
+        summary["dripEnrollments"] = {"error": str(exc)}
+
     crm_log("scheduler.tick.done",
             deliveries_enqueued=summary["deliveries_enqueued"],
             campaigns_processed=summary["campaigns_processed"],
+            drip_processed=summary.get("dripEnrollments", {}).get("processed", 0),
             latency_ms=int((time.monotonic() - _t0) * 1000),
             correlation_id=_cid)
 

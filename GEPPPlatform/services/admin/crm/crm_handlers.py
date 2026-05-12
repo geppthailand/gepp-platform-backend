@@ -76,7 +76,7 @@ def list_crm_segments(db_session: Session, query_params: dict) -> Dict[str, Any]
     if name_filter:
         where_clauses.append("name ILIKE :name_q")
         params['name_q'] = f"%{name_filter}%"
-    if scope_filter in ('user', 'organization'):
+    if scope_filter in ('user', 'organization', 'lead'):
         where_clauses.append("scope = :scope")
         params['scope'] = scope_filter
     if org_filter:
@@ -166,8 +166,8 @@ def create_crm_segment(db_session: Session, data: dict) -> Dict[str, Any]:
         raise BadRequestException("name is required")
 
     scope = data.get('scope', 'user')
-    if scope not in ('user', 'organization'):
-        raise BadRequestException("scope must be 'user' or 'organization'")
+    if scope not in ('user', 'organization', 'lead'):
+        raise BadRequestException("scope must be 'user', 'organization', or 'lead'")
 
     rules = data.get('rules')
     if not rules:
@@ -268,6 +268,11 @@ def list_crm_templates(db_session: Session, query_params: dict) -> Dict[str, Any
     generated_by = (query_params.get('generatedBy') or '').strip()
     include_all_versions = (query_params.get('includeAllVersions') or '').lower() in ('1', 'true', 'yes')
 
+    # Sprint 7 — gallery filters
+    category_filter = (query_params.get('category') or '').strip()
+    is_system_filter = (query_params.get('isSystem') or '').strip().lower()  # '' | 'true' | 'false'
+    org_filter_raw = query_params.get('organizationId')
+
     where = ["deleted_date IS NULL"]
     params: Dict[str, Any] = {}
     if not include_all_versions:
@@ -280,6 +285,21 @@ def list_crm_templates(db_session: Session, query_params: dict) -> Dict[str, Any
     if generated_by in ('human', 'ai'):
         where.append("generated_by = :gen")
         params['gen'] = generated_by
+    if category_filter in ('lead-lifecycle', 'client-engagement', 'marketing', 'admin', 'transactional'):
+        where.append("category = :cat")
+        params['cat'] = category_filter
+    if is_system_filter in ('true', '1', 'yes'):
+        where.append("is_system = TRUE")
+    elif is_system_filter in ('false', '0', 'no'):
+        where.append("is_system = FALSE")
+    if org_filter_raw:
+        try:
+            params['org_id'] = int(org_filter_raw)
+            # Org-scoped query: own org + platform defaults (NULL).
+            where.append("(organization_id = :org_id OR organization_id IS NULL)")
+        except (TypeError, ValueError):
+            pass
+
     where_sql = " AND ".join(where)
     offset = (page - 1) * page_size
     total = int(db_session.execute(
@@ -290,7 +310,9 @@ def list_crm_templates(db_session: Session, query_params: dict) -> Dict[str, Any
             SELECT id, name, subject, preview_text, generated_by, version,
                    organization_id, created_date, updated_date,
                    COALESCE(is_current, TRUE) AS is_current,
-                   parent_template_id
+                   parent_template_id,
+                   category, icon, COALESCE(is_system, FALSE) AS is_system,
+                   suggested_subject
             FROM crm_email_templates
             WHERE {where_sql}
             ORDER BY id DESC LIMIT :lim OFFSET :off
@@ -305,10 +327,75 @@ def list_crm_templates(db_session: Session, query_params: dict) -> Dict[str, Any
             'updatedDate': r[8].isoformat() if r[8] else None,
             'isCurrent': r[9],
             'parentTemplateId': r[10],
+            # Sprint 7 fields
+            'category': r[11],
+            'icon': r[12],
+            'isSystem': r[13],
+            'suggestedSubject': r[14],
         }
         for r in rows
     ]
     return {"items": items, "total": total, "page": page, "pageSize": page_size}
+
+
+def clone_template_to_org(
+    db_session: Session,
+    resource_id: int,
+    data: dict,
+    current_user: Optional[dict] = None,
+) -> Dict[str, Any]:
+    """
+    POST /admin/crm-templates/{id}/clone — copy a (typically system) template into the caller's
+    organization scope. Produces an editable per-org row (is_system=FALSE, organization_id=org).
+
+    Body: { "name": "<optional new name>", "organizationId": <optional override for super-admin> }
+    """
+    from ....models.crm import CrmEmailTemplate
+
+    src = get_crm_template(db_session, resource_id)  # raises NotFound if missing
+
+    current_user = current_user or {}
+    admin_role = current_user.get('admin_role') or current_user.get('platform_role') or ''
+    target_org_id = data.get('organizationId') or current_user.get('organization_id')
+
+    if not target_org_id and admin_role not in ('super-admin', 'gepp-admin'):
+        raise BadRequestException("organizationId required for non-super-admin callers")
+    if target_org_id:
+        try:
+            target_org_id = int(target_org_id)
+        except (TypeError, ValueError):
+            raise BadRequestException("organizationId must be an integer")
+
+    new_name = (data.get('name') or f"{src['name']} (Copy)").strip()
+    if not new_name:
+        new_name = f"{src['name']} (Copy)"
+
+    new_tpl = CrmEmailTemplate(
+        organization_id=target_org_id,
+        name=new_name,
+        subject=src['subject'],
+        preview_text=src['previewText'],
+        body_html=src['bodyHtml'],
+        body_plain=src.get('bodyPlain'),
+        variables=src.get('variables') or [],
+        generated_by='human',  # cloned templates lose AI-generation provenance
+        version=1,
+        is_active=True,
+    )
+    # Copy gallery metadata if present
+    if src.get('category'):
+        new_tpl.category = src['category']
+    if src.get('icon'):
+        new_tpl.icon = src['icon']
+    if src.get('suggestedSubject'):
+        new_tpl.suggested_subject = src['suggestedSubject']
+    new_tpl.is_system = False  # always a per-org copy
+
+    db_session.add(new_tpl)
+    db_session.flush()
+    db_session.commit()
+
+    return get_crm_template(db_session, new_tpl.id)
 
 
 def get_crm_template(db_session: Session, resource_id: int) -> Dict[str, Any]:
@@ -341,17 +428,44 @@ def get_crm_template(db_session: Session, resource_id: int) -> Dict[str, Any]:
     }
 
 
+def _resolve_body_html_from_block_tree(db_session: Session, data: dict, org_id) -> str:
+    """
+    If data contains a blockTree, render it to HTML via email_blocks and return.
+    Otherwise return data['bodyHtml'] (raw).  Raises BadRequestException when
+    neither blockTree nor bodyHtml is provided.
+    """
+    block_tree = data.get('blockTree')
+    if block_tree:
+        try:
+            from .email_blocks import render_block_tree, _DEFAULT_BRAND
+            from .brand_assets import get_brand_context
+            brand = get_brand_context(db_session, org_id) if db_session else dict(_DEFAULT_BRAND)
+            return render_block_tree(block_tree, brand)
+        except Exception as exc:
+            logger.warning("create/update_crm_template: block_tree render failed: %s", exc)
+            # Fall through to check bodyHtml
+
+    body_html = (data.get('bodyHtml') or '').strip()
+    return body_html
+
+
 def create_crm_template(db_session: Session, data: dict) -> Dict[str, Any]:
     from ....models.crm import CrmEmailTemplate
     name = (data.get('name') or '').strip()
     subject = (data.get('subject') or '').strip()
-    body_html = (data.get('bodyHtml') or '').strip()
     if not name:
         raise BadRequestException("name is required")
     if not subject:
         raise BadRequestException("subject is required")
-    if not body_html:
+
+    org_id = data.get('organizationId')
+    block_tree = data.get('blockTree') or None
+
+    # Derive body_html: block-tree path takes precedence over raw bodyHtml
+    body_html = _resolve_body_html_from_block_tree(db_session, data, org_id)
+    if not body_html and not block_tree:
         raise BadRequestException("bodyHtml is required")
+
     tpl = CrmEmailTemplate(
         name=name,
         subject=subject,
@@ -363,8 +477,9 @@ def create_crm_template(db_session: Session, data: dict) -> Dict[str, Any]:
         ai_prompt=data.get('aiPrompt'),
         ai_model=data.get('aiModel'),
         ai_token_usage=data.get('aiTokenUsage'),
-        organization_id=data.get('organizationId'),
+        organization_id=org_id,
         version=1,
+        block_tree=block_tree,
     )
     db_session.add(tpl)
     db_session.flush()
@@ -388,7 +503,7 @@ def update_crm_template(db_session: Session, resource_id: int, data: dict) -> Di
         text("""
             SELECT id, name, subject, preview_text, body_html, body_plain,
                    variables, generated_by, ai_prompt, ai_model, ai_token_usage,
-                   version, organization_id
+                   version, organization_id, block_tree
             FROM crm_email_templates
             WHERE id = :id AND deleted_date IS NULL
         """),
@@ -399,15 +514,29 @@ def update_crm_template(db_session: Session, resource_id: int, data: dict) -> Di
 
     (old_id, old_name, old_subject, old_preview, old_html, old_plain,
      old_vars, old_gen_by, old_prompt, old_model, old_token_usage,
-     old_version, old_org_id) = old_row
+     old_version, old_org_id, old_block_tree) = old_row
 
     # No real changes? Return current row unchanged (early exit keeps versions clean).
     has_changes = any(k in data for k in (
         'name', 'subject', 'previewText', 'bodyHtml', 'bodyPlain',
-        'variables', 'aiPrompt', 'aiModel', 'aiTokenUsage',
+        'variables', 'aiPrompt', 'aiModel', 'aiTokenUsage', 'blockTree',
     ))
     if not has_changes:
         return get_crm_template(db_session, resource_id)
+
+    new_block_tree = data.get('blockTree', old_block_tree)
+
+    # Derive new body_html from block_tree if present; otherwise inherit
+    if 'blockTree' in data or 'bodyHtml' in data:
+        new_html = _resolve_body_html_from_block_tree(
+            db_session,
+            data if ('blockTree' in data or 'bodyHtml' in data) else {'bodyHtml': old_html},
+            data.get('organizationId', old_org_id),
+        )
+        if not new_html:
+            new_html = old_html
+    else:
+        new_html = old_html
 
     # Step 1 — retire old row
     db_session.execute(
@@ -420,7 +549,7 @@ def update_crm_template(db_session: Session, resource_id: int, data: dict) -> Di
         name=data.get('name', old_name),
         subject=data.get('subject', old_subject),
         preview_text=data.get('previewText', old_preview),
-        body_html=data.get('bodyHtml', old_html),
+        body_html=new_html,
         body_plain=data.get('bodyPlain', old_plain),
         variables=data.get('variables', old_vars) or [],
         generated_by=old_gen_by,                          # provenance doesn't change on edit
@@ -431,6 +560,7 @@ def update_crm_template(db_session: Session, resource_id: int, data: dict) -> Di
         version=old_version + 1,
         parent_template_id=resource_id,
         is_current=True,
+        block_tree=new_block_tree,
     )
     db_session.add(new_tpl)
     db_session.flush()
@@ -520,7 +650,8 @@ def get_crm_campaign(db_session: Session, resource_id: int) -> Dict[str, Any]:
                    c.trigger_config, c.segment_id, c.template_id, c.status,
                    c.scheduled_at, c.started_at, c.ended_at,
                    c.send_from_name, c.send_from_email, c.reply_to, c.cc_list_id,
-                   c.organization_id, c.created_date, c.metrics_cache
+                   c.organization_id, c.created_date, c.metrics_cache,
+                   COALESCE(c.target_type, 'user') AS target_type
             FROM crm_campaigns c
             WHERE c.id = :id AND c.deleted_date IS NULL
         """),
@@ -539,6 +670,7 @@ def get_crm_campaign(db_session: Session, resource_id: int) -> Dict[str, Any]:
         'ccListId': row[15], 'organizationId': row[16],
         'createdDate': row[17].isoformat() if row[17] else None,
         'metricsCache': row[18] or {},
+        'targetType': row[19],
     }
 
 
@@ -547,12 +679,15 @@ def create_crm_campaign(db_session: Session, data: dict) -> Dict[str, Any]:
     name = (data.get('name') or '').strip()
     template_id = data.get('templateId') or data.get('template_id')
     campaign_type = data.get('campaignType', 'blast')
+    target_type = data.get('targetType', 'user')
     if not name:
         raise BadRequestException("name is required")
     if not template_id:
         raise BadRequestException("templateId is required")
     if campaign_type not in ('trigger', 'blast'):
         raise BadRequestException("campaignType must be 'trigger' or 'blast'")
+    if target_type not in ('user', 'lead', 'mixed'):
+        raise BadRequestException("targetType must be 'user', 'lead', or 'mixed'")
     camp = CrmCampaign(
         name=name,
         description=data.get('description'),
@@ -569,8 +704,14 @@ def create_crm_campaign(db_session: Session, data: dict) -> Dict[str, Any]:
         cc_list_id=data.get('ccListId'),
         organization_id=data.get('organizationId'),
     )
+    # target_type is set via raw SQL after flush to avoid ORM model mismatch
+    # during the migration rollout period (column may not yet exist in some envs).
     db_session.add(camp)
     db_session.flush()
+    db_session.execute(
+        text("UPDATE crm_campaigns SET target_type = :tt WHERE id = :id"),
+        {"tt": target_type, "id": camp.id},
+    )
     db_session.commit()
     return get_crm_campaign(db_session, camp.id)
 
@@ -582,12 +723,16 @@ def update_crm_campaign(db_session: Session, resource_id: int, data: dict) -> Di
     ).fetchone()
     if not existing:
         raise NotFoundException(f"Campaign {resource_id} not found")
+    # Validate targetType if present
+    if 'targetType' in data and data['targetType'] not in ('user', 'lead', 'mixed'):
+        raise BadRequestException("targetType must be 'user', 'lead', or 'mixed'")
     col_map = [
         ('name', 'name'), ('description', 'description'), ('segment_id', 'segmentId'),
         ('template_id', 'templateId'), ('trigger_event', 'triggerEvent'),
         ('trigger_config', 'triggerConfig'), ('scheduled_at', 'scheduledAt'),
         ('send_from_name', 'sendFromName'), ('send_from_email', 'sendFromEmail'),
         ('reply_to', 'replyTo'), ('cc_list_id', 'ccListId'),
+        ('target_type', 'targetType'),
     ]
     updates = []
     params: Dict[str, Any] = {'id': resource_id}

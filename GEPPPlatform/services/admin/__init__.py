@@ -41,11 +41,11 @@ def handle_admin_routes(path: str, data: dict, **commonParams):
         ):
             return admin_handler.admin_service.aggregate_health_snapshot()
 
-        # IoT hardwares: POST /admin/iot-hardwares/{id}/{pair|unpair}
+        # IoT hardwares: POST /admin/iot-hardwares/{id}/{pair|unpair|tags}
         if (
             len(path_parts) == 3
             and path_parts[0] == 'iot-hardwares'
-            and path_parts[2] in ('pair', 'unpair')
+            and path_parts[2] in ('pair', 'unpair', 'tags')
         ):
             try:
                 hardware_id = int(path_parts[1])
@@ -56,15 +56,19 @@ def handle_admin_routes(path: str, data: dict, **commonParams):
                 return admin_handler.admin_service.pair_iot_hardware(
                     hardware_id, data, current_user=current_user
                 )
+            if path_parts[2] == 'tags':
+                return admin_handler.admin_service.update_iot_hardware_tags(
+                    hardware_id, data
+                )
             return admin_handler.admin_service.unpair_iot_hardware(
                 hardware_id, current_user=current_user
             )
 
-        # IoT devices: POST /admin/iot-devices/{id}/{commands|tags|maintenance}
+        # IoT devices: POST /admin/iot-devices/{id}/{commands|tags|maintenance|debug-log|settings}
         if (
             len(path_parts) == 3
             and path_parts[0] == 'iot-devices'
-            and path_parts[2] in ('commands', 'tags', 'maintenance')
+            and path_parts[2] in ('commands', 'tags', 'maintenance', 'debug-log', 'settings')
         ):
             try:
                 device_id = int(path_parts[1])
@@ -81,6 +85,14 @@ def handle_admin_routes(path: str, data: dict, **commonParams):
                 )
             if sub == 'maintenance':
                 return admin_handler.admin_service.update_device_maintenance(
+                    device_id, data
+                )
+            if sub == 'debug-log':
+                return admin_handler.admin_service.set_iot_device_debug_log_mode(
+                    device_id, data
+                )
+            if sub == 'settings':
+                return admin_handler.admin_service.update_iot_device_settings(
                     device_id, data
                 )
 
@@ -167,13 +179,19 @@ def handle_admin_routes(path: str, data: dict, **commonParams):
             if sub == 'status':
                 return admin_handler.admin_service.get_device_status(device_id)
             if sub == 'events':
-                return admin_handler.admin_service.list_device_events(device_id, query_params)
+                return admin_handler.admin_service.list_iot_device_events(device_id, query_params)
             if sub == 'commands':
-                return admin_handler.admin_service.list_device_commands(device_id, query_params)
+                return admin_handler.admin_service.list_iot_device_commands(device_id, query_params)
             if sub == 'health-history':
-                return admin_handler.admin_service.list_device_health_history(
+                return admin_handler.admin_service.list_iot_device_health_history(
                     device_id, query_params
                 )
+            if sub == 'screenshots':
+                return admin_handler.admin_service.list_iot_device_screenshots(
+                    device_id, query_params
+                )
+            if sub == 'settings':
+                return admin_handler.admin_service.get_iot_device_settings(device_id)
             raise NotFoundException(f"GET endpoint not found: {internal_path}")
 
         # GET /admin/crm-deliveries.csv — Sprint 4 CSV export (special path with dot extension)

@@ -24,3 +24,7 @@ class CrmEmailTemplate(Base, BaseModel):
     parent_template_id = Column(BigInteger, ForeignKey('crm_email_templates.id'), nullable=True)
     is_current = Column(Boolean, nullable=False, default=True)
     created_by = Column(BigInteger, ForeignKey('user_locations.id'))
+    # Block builder (Sprint 8) — added by migration 047
+    # When set, body_html is derived from block_tree at render time.
+    # NULL means the template uses body_html directly (legacy + AI-generated).
+    block_tree = Column(JSON, nullable=True)

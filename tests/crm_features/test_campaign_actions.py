@@ -17,6 +17,8 @@ import unittest
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
+_OWNS_EXCEPTION_BINDING = True  # opt out of conftest exception rebinding (see tests/conftest.py)
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(os.path.dirname(_HERE))
 if _ROOT not in sys.path:
@@ -140,6 +142,8 @@ _init_mod.APIException = _APIExc
 _init_mod.NotFoundException = _NotFoundExc
 _init_mod.BadRequestException = _BadReqExc
 _init_mod.crm_service = _crm_service_mod
+# Tell conftest.py NOT to rebind these exception names — we own them.
+_init_mod._OWNS_EXCEPTION_BINDING = True
 
 _start_campaign  = _init_mod._start_campaign
 _pause_campaign  = _init_mod._pause_campaign
@@ -164,12 +168,13 @@ def _campaign_row(
     trigger_event=None, trigger_config=None, segment_id=None,
     recipient_list_id=5, template_id=3, status="draft",
     started_at=None, from_name=None, from_email=None, reply_to=None,
+    target_type="user",
 ):
     return _row(
         camp_id, org_id, name, camp_type,
         trigger_event, trigger_config or {}, segment_id,
         recipient_list_id, template_id, status,
-        started_at, from_name, from_email, reply_to,
+        started_at, from_name, from_email, reply_to, target_type,
     )
 
 

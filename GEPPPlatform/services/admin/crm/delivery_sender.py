@@ -2,12 +2,13 @@
 CRM delivery sender — the single path from campaign to Mandrill.
 
 Public API:
-    enqueue_delivery(db, campaign, user_location_id, recipient_email, render_context) -> dict
+    enqueue_delivery(db, campaign, *, user_location_id=None, lead_id=None,
+                     recipient_email, render_context) -> dict
 
 Steps (per-delivery, committed independently):
   1. Unsub check — skip if email in crm_unsubscribes
-  2. Cooldown check — skip if sent within cooldown_days
-  3. Lookup template, user, org
+  2. Cooldown check — skip if sent within cooldown_days (user path only)
+  3. Lookup template, user/lead, org
   4. Render subject/html/plain via email_renderer
   5. INSERT crm_campaign_deliveries (status='pending')
   6. Invoke Mandrill via crm_service.send_via_email_lambda
@@ -40,10 +41,12 @@ _DEFAULT_COOLDOWN_DAYS = 7
 def enqueue_delivery(
     db: Session,
     campaign,
-    user_location_id: Optional[int],
-    recipient_email: str,
+    user_location_id: Optional[int] = None,
+    recipient_email: str = "",
     render_context: Optional[Dict[str, Any]] = None,
     existing_delivery_id: Optional[int] = None,
+    *,
+    lead_id: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Enqueue and send one email delivery for *campaign* to *recipient_email*.
@@ -51,12 +54,15 @@ def enqueue_delivery(
     Args:
         db:                   SQLAlchemy session (committed per delivery).
         campaign:             CrmCampaign ORM object (or dict with same keys).
-        user_location_id:     ID in user_locations for per-user sends; None for list-only sends.
+        user_location_id:     ID in user_locations for per-user sends; None for list-only or
+                              lead-targeted sends.
         recipient_email:      TO address.
         render_context:       Extra Mustache vars merged into the template render context.
         existing_delivery_id: If set (for retries), UPDATE the existing delivery row instead of
                               INSERTing a new one. The existing row's retry_count is incremented
                               and next_retry_at is cleared on success or exhaustion.
+        lead_id:              ID in crm_leads for lead-targeted sends.  Mutually exclusive with
+                              user_location_id (pass one or the other, not both).
 
     Returns:
         Delivery row dict on success/unsub/failure.
@@ -64,6 +70,9 @@ def enqueue_delivery(
 
     Never raises — failures are captured in the delivery row and logged.
     """
+    if not user_location_id and not lead_id and not recipient_email:
+        from ....exceptions import BadRequestException as _BadReq
+        raise _BadReq("Either user_location_id or lead_id (plus recipient_email) is required")
     render_context = render_context or {}
     _t0 = time.monotonic()
     _cid = new_correlation_id()
@@ -80,8 +89,8 @@ def enqueue_delivery(
     org_id_hint    = _attr(campaign, 'organization_id')
 
     crm_log("delivery.start", campaign_id=campaign_id,
-            user_location_id=user_location_id, recipient_email=recipient_email,
-            correlation_id=_cid)
+            user_location_id=user_location_id, lead_id=lead_id,
+            recipient_email=recipient_email, correlation_id=_cid)
 
     # ── 1. Unsubscribe check ─────────────────────────────────────────────
     unsub_row = db.execute(
@@ -102,15 +111,16 @@ def enqueue_delivery(
         logger.info("delivery_sender: skipped unsubscribed email=%s", recipient_email)
         return _row_to_dict(delivery)
 
-    # ── 2. Cooldown check (delegates to cooldown.check_cooldown) ────────────
+    # ── 2. Cooldown check (user path only — lead sends skip cooldown) ───────
     cooldown_days = int(trigger_config.get("cooldown_days") or _DEFAULT_COOLDOWN_DAYS)
-    is_blocked, last_sent = check_cooldown(db, campaign_id, user_location_id, cooldown_days)
-    if is_blocked:
-        logger.info(
-            "delivery_sender: cooldown active for campaign=%s user=%s (last_sent=%s, cooldown=%sd)",
-            campaign_id, user_location_id, last_sent, cooldown_days,
-        )
-        return {"skipped": True, "reason": "cooldown"}
+    if user_location_id and not lead_id:
+        is_blocked, last_sent = check_cooldown(db, campaign_id, user_location_id, cooldown_days)
+        if is_blocked:
+            logger.info(
+                "delivery_sender: cooldown active for campaign=%s user=%s (last_sent=%s, cooldown=%sd)",
+                campaign_id, user_location_id, last_sent, cooldown_days,
+            )
+            return {"skipped": True, "reason": "cooldown"}
 
     # ── 3. Lookup template ───────────────────────────────────────────────
     template_row = db.execute(
@@ -129,12 +139,31 @@ def enqueue_delivery(
         "body_plain": template_row[3] or "",
     }
 
-    # ── 4. Lookup user + org ─────────────────────────────────────────────
+    # ── 4. Lookup user / lead + org ──────────────────────────────────────────
     user_data: Dict[str, Any] = {}
     org_data:  Dict[str, Any] = {}
     organization_id = org_id_hint
 
-    if user_location_id:
+    if lead_id:
+        # Lead-targeted send — fetch lead details for template rendering
+        lead_row = db.execute(
+            text("""
+                SELECT id, email, first_name, last_name
+                FROM crm_leads
+                WHERE id = :lid AND deleted_date IS NULL
+                LIMIT 1
+            """),
+            {"lid": lead_id},
+        ).fetchone()
+        if lead_row:
+            user_data = {
+                "id": lead_row[0],
+                "email": lead_row[1] or recipient_email,
+                "firstname": lead_row[2] or "",
+                "lastname": lead_row[3] or "",
+            }
+        # Org stays as campaign org_id_hint (leads aren't per-org profile)
+    elif user_location_id:
         user_row = db.execute(
             text("""
                 SELECT ul.id, ul.email, ul.firstname, ul.lastname,
@@ -200,6 +229,7 @@ def enqueue_delivery(
         delivery = CrmCampaignDelivery(
             campaign_id=campaign_id,
             user_location_id=user_location_id,
+            lead_id=lead_id,
             organization_id=organization_id,
             recipient_email=recipient_email,
             status="pending",
@@ -208,6 +238,29 @@ def enqueue_delivery(
         )
         db.add(delivery)
         db.flush()  # get delivery.id without full commit
+
+    # ── 7b. Seed conversation thread for inbox routing ───────────────────
+    # Each delivery gets a unique reply+<token>@gepp.me so recipient replies
+    # route back into a CRM conversation. Errors here are non-fatal — if the
+    # inbox seed fails, we still send the email (just without reply routing).
+    thread_reply_to: Optional[str] = None
+    try:
+        from . import inbox_service
+        conv = inbox_service.ensure_conversation_for_delivery(
+            db,
+            delivery_id=delivery.id,
+            organization_id=organization_id,
+            user_location_id=user_location_id,
+            lead_id=lead_id,
+            recipient_email=recipient_email,
+            subject=subject,
+        )
+        thread_reply_to = conv.get("reply_to")
+        db.flush()
+    except Exception as conv_exc:
+        logger.warning(
+            "delivery_sender: failed to seed conversation thread (non-fatal): %s", conv_exc,
+        )
 
     # ── 8. Invoke Mandrill ───────────────────────────────────────────────
     try:
@@ -218,7 +271,7 @@ def enqueue_delivery(
             text_content=plain or None,
             from_name=_attr(campaign, "send_from_name"),
             from_email=_attr(campaign, "send_from_email"),
-            reply_to=_attr(campaign, "reply_to"),
+            reply_to=thread_reply_to or _attr(campaign, "reply_to"),
             metadata={
                 "delivery_id": str(delivery.id),
                 "campaign_id": str(campaign_id),
@@ -248,19 +301,22 @@ def enqueue_delivery(
         delivery.mandrill_response = result.get("raw_response")
         db.commit()
 
+        _event_props: Dict[str, Any] = {
+            "delivery_id": delivery.id,
+            "campaign_id": campaign_id,
+            "subject": subject,
+            "mandrill_message_id": mandrill_id,
+        }
+        if lead_id:
+            _event_props["lead_id"] = lead_id
         crm_service.emit_event(
             db,
             event_type="email_sent",
             event_category="email",
             event_source="internal",
             organization_id=organization_id,
-            user_location_id=user_location_id,
-            properties={
-                "delivery_id": delivery.id,
-                "campaign_id": campaign_id,
-                "subject": subject,
-                "mandrill_message_id": mandrill_id,
-            },
+            user_location_id=user_location_id if not lead_id else None,
+            properties=_event_props,
             commit=True,
         )
         logger.info(
@@ -300,6 +356,7 @@ def _row_to_dict(delivery: CrmCampaignDelivery) -> Dict[str, Any]:
         "id": delivery.id,
         "campaign_id": delivery.campaign_id,
         "user_location_id": delivery.user_location_id,
+        "lead_id": getattr(delivery, "lead_id", None),
         "organization_id": delivery.organization_id,
         "recipient_email": delivery.recipient_email,
         "status": delivery.status,

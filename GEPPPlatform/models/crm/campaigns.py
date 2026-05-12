@@ -25,6 +25,7 @@ class CrmCampaign(Base, BaseModel):
     reply_to = Column(String(255))
     cc_list_id = Column(BigInteger)  # FK to crm_email_lists added in migration 035
     recipient_list_id = Column(BigInteger, ForeignKey('crm_email_lists.id', ondelete='SET NULL'))
+    target_type = Column(String(16), nullable=False, default='user')  # Sprint 9
     metrics_cache = Column(JSON)
     last_trigger_eval_at = Column(DateTime(timezone=True))
     created_by = Column(BigInteger, ForeignKey('user_locations.id'))
@@ -36,6 +37,7 @@ class CrmCampaignDelivery(Base):
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     campaign_id = Column(BigInteger, ForeignKey('crm_campaigns.id', ondelete='CASCADE'), nullable=False)
     user_location_id = Column(BigInteger, ForeignKey('user_locations.id'))
+    lead_id = Column(BigInteger, ForeignKey('crm_leads.id'))  # Sprint 9
     organization_id = Column(BigInteger, ForeignKey('organizations.id'))
     recipient_email = Column(String(255), nullable=False)
     status = Column(String(16), nullable=False, default='pending')
