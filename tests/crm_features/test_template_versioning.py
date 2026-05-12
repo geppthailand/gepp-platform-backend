@@ -53,11 +53,12 @@ class TestUpdateCrmTemplateVersioning(unittest.TestCase):
             None,                     # ai_token_usage
             version,                  # version
             None,                     # organization_id
+            None,                     # block_tree  (added by Sprint 8 email-block builder)
         ])
         # Index-based access
         values = [1, 'Welcome Email', 'Welcome!', None,
                   '<p>Hello {{user.name}}</p>', 'Hello {{user.name}}',
-                  [], 'human', None, None, None, version, None]
+                  [], 'human', None, None, None, version, None, None]
         row.__getitem__ = lambda self, i: values[i]
         return row
 

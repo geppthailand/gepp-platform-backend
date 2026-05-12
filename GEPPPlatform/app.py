@@ -182,8 +182,13 @@ def main(event, context):
                 # Health check endpoint (no authorization required)
                 results = {"status": "healthy", "timestamp": datetime.now().isoformat(), "method": http_method}
 
+            elif "/api/webhooks/mailchimp/inbound" in path and http_method == "POST":
+                # Mailchimp Transactional INBOUND reply webhook (Sprint 10 P1 inbox)
+                from GEPPPlatform.services.webhooks.mailchimp_inbound_handler import handle_mailchimp_inbound_webhook
+                return handle_mailchimp_inbound_webhook(event, session)
+
             elif "/api/webhooks/mailchimp" in path and http_method == "POST":
-                # Mailchimp Transactional webhook (public, HMAC-signed)
+                # Mailchimp Transactional activity webhook (public, HMAC-signed)
                 from GEPPPlatform.services.webhooks.mailchimp_handler import handle_mailchimp_webhook
                 return handle_mailchimp_webhook(event, session)
 
@@ -192,6 +197,17 @@ def main(event, context):
                 from GEPPPlatform.services.public.crm_unsubscribe_handler import handle_unsubscribe
                 token = path.split('/api/crm/unsubscribe/')[1].split('/')[0].split('?')[0]
                 return handle_unsubscribe(token, session)
+
+            elif "/api/public/leads" in path and http_method == "POST":
+                # Public lead capture — no auth required.
+                # Accepts form submissions from embedded widgets.
+                from GEPPPlatform.services.public.leads_capture_handler import handle_public_lead_capture
+                request_meta = {
+                    "ip_address": (event.get("requestContext", {}).get("http", {}) or {}).get("sourceIp"),
+                    "user_agent": (event.get("headers") or {}).get("user-agent"),
+                }
+                lead_result = handle_public_lead_capture(body, session, request_meta=request_meta)
+                results = {"success": True, "data": lead_result}
 
             elif "/api/userapi/documents/" in path:
                 # PUBLIC: Handle API documentation routes (no authentication required)

@@ -62,6 +62,24 @@ def handle_crm_admin_subroute(
     if resource == 'crm-campaigns':
         return _dispatch_campaigns(resource_id, sub_path, method, db_session, data, query_params, current_user)
 
+    if resource == 'crm-leads':
+        from .lead_handlers import dispatch_lead_subroute
+        return dispatch_lead_subroute(
+            resource_id, sub_path, method, db_session, data, query_params, current_user
+        )
+
+    if resource == 'crm-drip-sequences':
+        from .drip_handlers import dispatch_drip_subroute
+        return dispatch_drip_subroute(
+            resource_id, sub_path, method, db_session, data, query_params, current_user
+        )
+
+    if resource == 'crm-conversations':
+        from .inbox_handlers import dispatch_inbox_subroute
+        return dispatch_inbox_subroute(
+            resource_id, sub_path, method, db_session, data, query_params, current_user
+        )
+
     raise NotFoundException(
         f"CRM sub-route not found: {method} /{resource}/{resource_id or ''}/{sub_path}"
     )
@@ -331,6 +349,12 @@ def _dispatch_templates(resource_id, sub_path, method, db_session, data, query_p
             extra['unsubscribe_url'] = make_unsub_url('preview@example.com')
         subject, html, plain = render_template(template_row, user_data, org_data, extra)
         return {"subject": subject, "html": html, "plain": plain}
+
+    # POST /crm-templates/{id}/clone  →  Sprint 7: clone a (typically system) template
+    # into the caller's org so it becomes editable.
+    if resource_id and parts == ['clone'] and method == 'POST':
+        from .crm_handlers import clone_template_to_org
+        return clone_template_to_org(db_session, resource_id, data or {}, current_user=current_user)
 
     # GET /crm-templates/{id}/versions  →  version history chain (Task 1)
     if resource_id and parts == ['versions'] and method == 'GET':
@@ -746,14 +770,15 @@ def _derive_recipients(db_session, campaign_id, kind):
 # ─── Campaign action implementations ─────────────────────────────────────────
 
 def _load_campaign_row(db_session, campaign_id):
-    """Fetch one campaign row (14 cols) or raise NotFoundException."""
+    """Fetch one campaign row (15 cols) or raise NotFoundException."""
     from sqlalchemy import text as _t
     row = db_session.execute(
         _t("""
             SELECT id, organization_id, name, campaign_type,
                    trigger_event, trigger_config, segment_id,
                    recipient_list_id, template_id, status,
-                   started_at, send_from_name, send_from_email, reply_to
+                   started_at, send_from_name, send_from_email, reply_to,
+                   COALESCE(target_type, 'user') AS target_type
             FROM crm_campaigns
             WHERE id = :id AND deleted_date IS NULL
         """),
@@ -780,7 +805,7 @@ def _start_campaign(db_session, campaign_id):
     row = _load_campaign_row(db_session, campaign_id)
     (camp_id, org_id, _name, camp_type, trigger_event, trigger_config,
      segment_id, recipient_list_id, template_id, status,
-     started_at, from_name, from_email, reply_to) = row
+     started_at, from_name, from_email, reply_to, target_type) = row
 
     if status not in ('draft', 'paused'):
         raise APIException(
@@ -808,7 +833,20 @@ def _start_campaign(db_session, campaign_id):
         return {"status": "running", "recipientCount": 0, "enqueuedAt": now_utc.isoformat()}
 
     # ── Blast: resolve recipients ─────────────────────────────────────────
-    recipients = []  # [(email, user_location_id | None)]
+    recipients = []  # [(email, user_location_id | None, lead_id | None)]
+
+    # Validate lead-scoped campaign has a lead segment
+    if target_type == 'lead' and segment_id:
+        seg_scope_row = db_session.execute(
+            _t("SELECT scope FROM crm_segments WHERE id=:sid AND deleted_date IS NULL"),
+            {'sid': segment_id},
+        ).fetchone()
+        if seg_scope_row and seg_scope_row[0] != 'lead':
+            raise BadRequestException(
+                f"Campaign target_type='lead' but segment scope='{seg_scope_row[0]}'. "
+                f"Assign a lead-scoped segment or change target_type."
+            )
+
     if recipient_list_id:
         lr = db_session.execute(
             _t("SELECT emails FROM crm_email_lists WHERE id=:id AND deleted_date IS NULL"),
@@ -818,7 +856,18 @@ def _start_campaign(db_session, campaign_id):
             for entry in (lr[0] or []):
                 email = entry.get('email') if isinstance(entry, dict) else str(entry)
                 if email:
-                    recipients.append((email, None))
+                    recipients.append((email, None, None))
+    elif segment_id and target_type == 'lead':
+        # Lead-targeted blast: join crm_leads instead of user_locations
+        for seg_row in db_session.execute(
+            _t("""SELECT l.id, l.email
+                  FROM crm_segment_members sm
+                  JOIN crm_leads l ON l.id=sm.member_id AND l.deleted_date IS NULL
+                  WHERE sm.segment_id=:sid AND sm.member_type='lead'"""),
+            {'sid': segment_id},
+        ).fetchall():
+            if seg_row[1]:
+                recipients.append((seg_row[1], None, seg_row[0]))
     elif segment_id:
         for seg_row in db_session.execute(
             _t("""SELECT ul.id, ul.email
@@ -828,7 +877,7 @@ def _start_campaign(db_session, campaign_id):
             {'sid': segment_id},
         ).fetchall():
             if seg_row[1]:
-                recipients.append((seg_row[1], seg_row[0]))
+                recipients.append((seg_row[1], seg_row[0], None))
 
     # Flip to running immediately
     db_session.execute(
@@ -865,9 +914,13 @@ def _start_campaign(db_session, campaign_id):
     }
     enqueued = 0
     for i in range(0, len(recipients), 50):
-        for email, uid in recipients[i:i + 50]:
-            if not _ds.enqueue_delivery(db_session, campaign_obj, user_location_id=uid,
-                                        recipient_email=email).get('skipped'):
+        for email, uid, lid in recipients[i:i + 50]:
+            if not _ds.enqueue_delivery(
+                db_session, campaign_obj,
+                user_location_id=uid,
+                recipient_email=email,
+                lead_id=lid,
+            ).get('skipped'):
                 enqueued += 1
         db_session.commit()
 
@@ -951,7 +1004,7 @@ def _test_campaign(db_session, campaign_id, data, current_user):
     row = _load_campaign_row(db_session, campaign_id)
     (camp_id, org_id, _name, _ct, _te, _tc,
      _sid, _rlid, template_id, _status,
-     _started, from_name, from_email, reply_to) = row
+     _started, from_name, from_email, reply_to, _target_type) = row
 
     if not template_id:
         raise BadRequestException("Campaign has no template_id — set a template before testing")

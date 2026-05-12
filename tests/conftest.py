@@ -47,6 +47,8 @@ _PRE_IMPORTS = (
     "GEPPPlatform.services.admin.crm.campaign_impact",
     "GEPPPlatform.services.admin.crm.crm_health",
     "GEPPPlatform.services.admin.crm.logger",
+    "GEPPPlatform.services.admin.crm.inbox_service",
+    "GEPPPlatform.services.admin.crm.inbox_handlers",
     # Models referenced by stubbing tests
     "GEPPPlatform.models.crm.events",
     "GEPPPlatform.models.crm.campaigns",
@@ -54,6 +56,7 @@ _PRE_IMPORTS = (
     "GEPPPlatform.models.crm.segments",
     "GEPPPlatform.models.crm.templates",
     "GEPPPlatform.models.crm.lists",
+    "GEPPPlatform.models.crm.conversations",
 )
 
 for _name in _PRE_IMPORTS:
@@ -147,6 +150,13 @@ def _rebind_exception_names_in_test_modules():
             and not _mod_name.startswith("GEPPPlatform.services.admin.crm")
             and _mod_name != "GEPPPlatform.exceptions"
         ):
+            continue
+        # Opt-out marker: if a test (or test-loaded production copy) has set
+        # `_OWNS_EXCEPTION_BINDING = True`, we must not rebind — it has its own
+        # exception-class scheme deliberately set up (see crm_features/test_lead_service.py).
+        # We also skip rebinding into the test's loaded copy of lead_service since the
+        # test rebinds it manually at module load.
+        if getattr(_mod, "_OWNS_EXCEPTION_BINDING", False):
             continue
         for _attr, real_attr in real_classes.items():
             if real_attr is None:

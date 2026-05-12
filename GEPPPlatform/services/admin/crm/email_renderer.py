@@ -153,21 +153,28 @@ def render(
     user_location: Optional[Dict[str, Any]],
     org: Optional[Dict[str, Any]],
     extra_vars: Optional[Dict[str, Any]] = None,
+    db_session=None,
 ) -> Tuple[str, str, str]:
     """
     Render a CRM email template into (subject, html, plain).
 
     Args:
-        template_row:   Dict with keys: subject, body_html, body_plain
-                        (matches crm_templates model columns).
+        template_row:   Dict with keys: subject, body_html, body_plain,
+                        and optionally block_tree (JSONB).
+                        When block_tree is present the HTML body is generated
+                        from the block tree via email_blocks.render_block_tree()
+                        rather than taken from body_html directly.
         user_location:  Dict with user fields (firstname, lastname, email, etc.)
-                        and optionally pre-computed profile fields
-                        (days_since_last_login, transaction_count_30d, …).
+                        and optionally pre-computed profile fields.
                         May be None for broadcast/org-scoped sends.
         org:            Dict with organisation fields (name, …).
                         May be None for user-scoped sends.
         extra_vars:     Additional variables to inject (override anything).
                         Supports 'custom.<key>' keys and 'unsubscribe_url'.
+        db_session:     Optional SQLAlchemy session.  Required when block_tree
+                        is present so that brand assets can be resolved.
+                        When None and block_tree is set, the default brand
+                        values from email_blocks._DEFAULT_BRAND are used.
 
     Returns:
         (subject, html, plain) — all variables substituted.
@@ -180,8 +187,34 @@ def render(
 
     context = _build_context(template_row, user_location, org, extra_vars)
 
-    subject_raw  = template_row.get("subject", "")
-    html_raw     = template_row.get("body_html", "")
+    subject_raw = template_row.get("subject", "")
+
+    # ── Block-tree path ──────────────────────────────────────────────────────
+    # When the template was built via the Block Builder, body_html is derived
+    # from block_tree at render time so it is always up-to-date with the latest
+    # brand assets.
+    block_tree = template_row.get("block_tree")
+    if block_tree:
+        try:
+            from .email_blocks import render_block_tree, _DEFAULT_BRAND
+            from .brand_assets import get_brand_context
+
+            # Resolve brand: use DB if session available, else fallback to defaults
+            if db_session is not None:
+                org_id = (org or {}).get("id") or (org or {}).get("organization_id")
+                brand = get_brand_context(db_session, org_id)
+            else:
+                brand = dict(_DEFAULT_BRAND)
+
+            html_raw = render_block_tree(block_tree, brand)
+        except Exception as exc:
+            logger.warning(
+                "email_renderer: block_tree render failed, falling back to body_html: %s",
+                exc,
+            )
+            html_raw = template_row.get("body_html", "")
+    else:
+        html_raw = template_row.get("body_html", "")
     plain_raw    = template_row.get("body_plain", "")
 
     # Ensure unsubscribe_url is in context — fill lazily from token utility if missing

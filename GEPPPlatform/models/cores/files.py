@@ -17,6 +17,7 @@ class FileType(enum.Enum):
     transaction_record_image = 'transaction_record_image'
     profile_image = 'profile_image'
     document = 'document'
+    iot_screenshot = 'iot_screenshot'
     other = 'other'
 
 

@@ -6,6 +6,10 @@ from .segments import CrmSegment, CrmSegmentMember
 from .templates import CrmEmailTemplate
 from .campaigns import CrmCampaign, CrmCampaignDelivery
 from .lists import CrmEmailList, CrmUnsubscribe
+from .brand_assets import CrmBrandAsset
+from .leads import CrmLead, CrmLeadActivity
+from .drip import CrmDripSequence, CrmDripStep, CrmDripEnrollment
+from .conversations import CrmConversation, CrmConversationMessage
 
 __all__ = [
     "CrmEvent",
@@ -18,4 +22,12 @@ __all__ = [
     "CrmCampaignDelivery",
     "CrmEmailList",
     "CrmUnsubscribe",
+    "CrmBrandAsset",
+    "CrmLead",
+    "CrmLeadActivity",
+    "CrmDripSequence",
+    "CrmDripStep",
+    "CrmDripEnrollment",
+    "CrmConversation",
+    "CrmConversationMessage",
 ]

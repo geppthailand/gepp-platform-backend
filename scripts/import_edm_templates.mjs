@@ -1,0 +1,164 @@
+/**
+ * import_edm_templates.mjs — One-time script (Phase 2 Sprint 7).
+ *
+ * Reads the 12 GEPP email templates from /Users/geppsa-ard/Documents/Workspace/gepp-edm-main/,
+ * invokes each template's render() with its default field values, and emits a SQL migration
+ * file at /Users/geppsa-ard/Documents/Workspace/platforms/v3/backend/migrations/
+ *   20260512_100200_048_seed_edm_template_library.sql
+ *
+ * Each template becomes one INSERT row in crm_email_templates with:
+ *   organization_id = NULL  (platform-owned)
+ *   is_system       = TRUE
+ *   category        = template.category
+ *   icon            = template.icon
+ *   suggested_subject = template.suggestedSubject (rendered with merge tags)
+ *   name            = template.name
+ *   subject         = template.suggestedSubject
+ *   body_html       = template.render(defaultFieldValues)
+ *   variables       = JSON array of merge-tag variable names detected
+ *   generated_by    = 'human'
+ *
+ * Usage:
+ *   cd v3/backend && node scripts/import_edm_templates.mjs
+ *
+ * Idempotent: ON CONFLICT (...) DO UPDATE — re-run anytime.
+ */
+
+import { promises as fs } from "node:fs";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+
+const EDM_ROOT = "/Users/geppsa-ard/Documents/Workspace/gepp-edm-main";
+const OUT_PATH = path.resolve(
+    path.dirname(new URL(import.meta.url).pathname),
+    "..",
+    "migrations",
+    "20260512_100200_048_seed_edm_template_library.sql"
+);
+
+// ───────────────────────────────────────────────────────────────────────
+// Helpers
+// ───────────────────────────────────────────────────────────────────────
+
+/** Escape a JS string into a PG single-quoted literal (doubles single quotes). */
+function sqlEscape(s) {
+    return String(s).replaceAll("'", "''");
+}
+
+/** Detect Mailchimp merge tags + GEPP {{var}} variables in a string. */
+function detectVariables(...texts) {
+    const found = new Set();
+    const joined = texts.filter(Boolean).join("\n");
+    // Mailchimp tags: *|TAG|*
+    for (const m of joined.matchAll(/\*\|([A-Z0-9_:]+)\|\*/g)) {
+        found.add(`mc:${m[1]}`);
+    }
+    // GEPP-style {{var}}
+    for (const m of joined.matchAll(/\{\{\s*([a-zA-Z0-9_.]+)\s*\}\}/g)) {
+        found.add(m[1]);
+    }
+    return [...found];
+}
+
+/** Materialise default field values from a template definition. */
+function buildDefaultValues(template) {
+    const out = {};
+    for (const field of template.fields || []) {
+        if (field.type === "array") {
+            // Field has itemFields[] — emit an array with one default item
+            const item = {};
+            for (const sub of field.itemFields || []) {
+                item[sub.key] = sub.default ?? "";
+            }
+            out[field.key] = [item];
+        } else {
+            out[field.key] = field.default ?? "";
+        }
+    }
+    return out;
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// Main
+// ───────────────────────────────────────────────────────────────────────
+
+async function main() {
+    // Dynamic import of the registry — it imports brand.js + all templates + renderer.js
+    const registryUrl = pathToFileURL(
+        path.join(EDM_ROOT, "js", "templates", "registry.js")
+    ).href;
+    const { templates } = await import(registryUrl);
+
+    if (!Array.isArray(templates) || templates.length === 0) {
+        throw new Error("No templates found in registry.");
+    }
+
+    console.log(`Loading ${templates.length} templates from ${EDM_ROOT}/js/templates/...`);
+
+    const inserts = [];
+
+    for (const tmpl of templates) {
+        const defaults = buildDefaultValues(tmpl);
+        const renderedHtml = tmpl.render(defaults);
+        const subject = tmpl.suggestedSubject || `${tmpl.name}`;
+        const previewText = defaults.preheader || "";
+        const variables = detectVariables(
+            subject,
+            renderedHtml,
+            ...Object.values(defaults).filter((v) => typeof v === "string")
+        );
+
+        const sql = `
+INSERT INTO crm_email_templates (
+    organization_id, name, subject, preview_text, body_html, body_plain,
+    variables, generated_by, version, is_active, is_system, category, icon,
+    suggested_subject, created_date, updated_date
+) VALUES (
+    NULL,
+    '${sqlEscape(tmpl.name)}',
+    '${sqlEscape(subject)}',
+    '${sqlEscape(previewText)}',
+    E'${sqlEscape(renderedHtml)}',
+    NULL,
+    '${sqlEscape(JSON.stringify(variables))}'::jsonb,
+    'human',
+    1,
+    TRUE,
+    TRUE,
+    '${sqlEscape(tmpl.category)}',
+    '${sqlEscape(tmpl.icon || "")}',
+    '${sqlEscape(subject)}',
+    NOW(),
+    NOW()
+)
+ON CONFLICT DO NOTHING;`;
+        inserts.push({ id: tmpl.id, sql, sizeKb: Math.round(renderedHtml.length / 1024) });
+        console.log(`  ✓ ${tmpl.id.padEnd(28)} ${(renderedHtml.length / 1024).toFixed(1)} KB`);
+    }
+
+    const header = `-- Sprint 7: seed ${templates.length} GEPP-branded email templates lifted from gepp-edm-main.
+-- Generated by v3/backend/scripts/import_edm_templates.mjs on ${new Date().toISOString().slice(0, 10)}.
+--
+-- Re-run the script and re-apply this migration to refresh the rendered HTML if
+-- the source templates in gepp-edm-main/js/templates/* change.
+--
+-- All rows have organization_id = NULL (platform-owned, gallery-visible to every admin)
+-- and is_system = TRUE so the gallery UI can distinguish them from per-org templates.
+
+-- Idempotency: we delete is_system rows first so re-runs don't accumulate duplicates.
+-- (Per-org templates clone these — those rows have is_system = FALSE and are preserved.)
+DELETE FROM crm_email_templates WHERE is_system = TRUE;
+`;
+
+    const body = inserts.map((r) => r.sql).join("\n");
+    const footer = `\n\n-- Total templates seeded: ${inserts.length}\n`;
+
+    await fs.writeFile(OUT_PATH, header + body + footer, "utf8");
+    console.log(`\nWrote ${OUT_PATH}`);
+    console.log(`  ${inserts.length} templates, ${Math.round(body.length / 1024)} KB SQL.`);
+}
+
+main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+});

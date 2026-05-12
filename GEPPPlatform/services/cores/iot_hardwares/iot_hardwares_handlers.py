@@ -118,6 +118,23 @@ def handle_iot_hardware_checkin(event: Dict[str, Any], data: Dict[str, Any], **k
         'hardware_id': hardware_id,
         'server_time': datetime.now(timezone.utc).isoformat(),
         'next_interval_s': 5,
+        # EXPLICIT pairing-state signal. The tablet uses this to detect
+        # admin-initiated unpair from the backoffice — without an
+        # explicit flag the tablet has no way to know "I used to be
+        # paired, but my hardware row no longer has paired_iot_device_id"
+        # versus "I just haven't been paired yet". Both cases produced
+        # an identical response body before this field existed.
+        #
+        # Tablet handling:
+        #   paired=true  → keep flowing (force_login below carries new
+        #                   tokens iff the tablet doesn't have them yet);
+        #   paired=false → if tablet is `setupComplete=true` locally,
+        #                   that means the admin unpaired since the last
+        #                   pair. Tablet wipes credentials, flips
+        #                   setupComplete=false, and drops to
+        #                   /device-setup.
+        'paired': paired_device_id is not None,
+        'paired_device_id': paired_device_id,
     }
 
     # Pair-pending → return force_login directive with a freshly-minted JWT.

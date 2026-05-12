@@ -1509,8 +1509,16 @@ def handle_get_location_allowed_materials(
         ).order_by(MainMaterial.display_order).all() if used_main_material_ids else []
 
         return {
+            # Each row exposes BOTH `id` (legacy) and `material_id` (matches
+            # the Flutter MaterialModel's @JsonKey('material_id') —
+            # without it the tablet's fromJson throws
+            # "Null is not a subtype of num" on the first parse).
+            # `/iot-devices/my-memberships` already returns `material_id`;
+            # this endpoint was the odd one out.
             'materials': [{
-                'id': m.id, 'name_th': m.name_th or '', 'name_en': m.name_en or '',
+                'id': m.id,
+                'material_id': m.id,
+                'name_th': m.name_th or '', 'name_en': m.name_en or '',
                 'unit_name_th': m.unit_name_th or '', 'unit_name_en': m.unit_name_en or '',
                 'category_id': m.category_id or 0,
                 'main_material_id': m.main_material_id or 0,

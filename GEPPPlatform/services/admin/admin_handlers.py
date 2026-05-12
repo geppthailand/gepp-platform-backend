@@ -19,6 +19,33 @@ from GEPPPlatform.exceptions import (
 from .admin_service import AdminService
 from . import crm as _crm  # noqa: F401  (sub-route dispatcher)
 from .crm import crm_handlers as crm
+from .crm import brand_assets as crm_brand
+from .crm import lead_handlers as crm_leads
+from .crm import drip_handlers as crm_drip
+from .crm import inbox_handlers as crm_inbox
+
+
+def _list_crm_brand_assets(db_session, query_params, current_user):
+    """
+    GET /admin/crm-brand-assets — returns the resolved (platform default + per-org override)
+    brand context as a list of {key, platformDefault, orgOverride, resolvedValue, isOverridden}.
+
+    Scope: super-admin/gepp-admin can specify ?organizationId=X; otherwise the caller's own org.
+    """
+    admin_role = (current_user or {}).get('admin_role') or ''
+    org_id = None
+    if admin_role in ('super-admin', 'gepp-admin'):
+        raw = query_params.get('organizationId')
+        if raw:
+            try:
+                org_id = int(raw)
+            except (TypeError, ValueError):
+                org_id = None
+    else:
+        org_id = (current_user or {}).get('organization_id')
+
+    items = crm_brand.list_brand_assets(db_session, org_id)
+    return {"items": items, "total": len(items), "page": 1, "pageSize": len(items)}
 
 
 class AdminHandlers:
@@ -124,6 +151,10 @@ class AdminHandlers:
             'crm-deliveries': lambda qp: crm.list_crm_deliveries(self.db_session, qp),
             'crm-unsubscribes': lambda qp: crm.list_crm_unsubscribes(self.db_session, qp),
             'crm-analytics': lambda qp: crm.list_crm_analytics(self.db_session, qp),
+            'crm-brand-assets': lambda qp: _list_crm_brand_assets(self.db_session, qp, self.current_user),
+            'crm-leads': lambda qp: crm_leads.list_crm_leads(self.db_session, qp),
+            'crm-drip-sequences': lambda qp: crm_drip.list_crm_drip_sequences(self.db_session, qp, current_user=self.current_user),
+            'crm-conversations': lambda qp: crm_inbox.list_crm_conversations(self.db_session, qp, current_user=self.current_user),
         }
         handler = handler_map.get(resource)
         if not handler:
@@ -143,6 +174,9 @@ class AdminHandlers:
             'crm-templates': lambda rid: crm.get_crm_template(self.db_session, rid),
             'crm-campaigns': lambda rid: crm.get_crm_campaign(self.db_session, rid),
             'crm-email-lists': lambda rid: crm.get_crm_email_list(self.db_session, rid, current_user=self.current_user),
+            'crm-leads': lambda rid: crm_leads.get_crm_lead(self.db_session, rid, current_user=self.current_user),
+            'crm-drip-sequences': lambda rid: crm_drip.get_crm_drip_sequence(self.db_session, rid, current_user=self.current_user),
+            'crm-conversations': lambda rid: crm_inbox.get_crm_conversation(self.db_session, rid, current_user=self.current_user),
         }
         handler = handler_map.get(resource)
         if not handler:
@@ -161,6 +195,8 @@ class AdminHandlers:
             'crm-templates': lambda d: crm.create_crm_template(self.db_session, d),
             'crm-campaigns': lambda d: crm.create_crm_campaign(self.db_session, d),
             'crm-email-lists': lambda d: crm.create_crm_email_list(self.db_session, d, current_user=self.current_user),
+            'crm-leads': lambda d: crm_leads.create_crm_lead(self.db_session, d, current_user=self.current_user),
+            'crm-drip-sequences': lambda d: crm_drip.create_crm_drip_sequence(self.db_session, d, current_user=self.current_user),
         }
         handler = handler_map.get(resource)
         if not handler:
@@ -181,6 +217,8 @@ class AdminHandlers:
             'crm-templates': lambda rid, d: crm.update_crm_template(self.db_session, rid, d),
             'crm-campaigns': lambda rid, d: crm.update_crm_campaign(self.db_session, rid, d),
             'crm-email-lists': lambda rid, d: crm.update_crm_email_list(self.db_session, rid, d, current_user=self.current_user),
+            'crm-leads': lambda rid, d: crm_leads.update_crm_lead(self.db_session, rid, d, current_user=self.current_user),
+            'crm-drip-sequences': lambda rid, d: crm_drip.update_crm_drip_sequence(self.db_session, rid, d, current_user=self.current_user),
         }
         handler = handler_map.get(resource)
         if not handler:
@@ -199,6 +237,9 @@ class AdminHandlers:
             'crm-templates': lambda rid: crm.delete_crm_template(self.db_session, rid),
             'crm-campaigns': lambda rid: crm.delete_crm_campaign(self.db_session, rid),
             'crm-email-lists': lambda rid: crm.delete_crm_email_list(self.db_session, rid, current_user=self.current_user),
+            'crm-leads': lambda rid: crm_leads.delete_crm_lead(self.db_session, rid, current_user=self.current_user),
+            'crm-drip-sequences': lambda rid: crm_drip.delete_crm_drip_sequence(self.db_session, rid, current_user=self.current_user),
+            'crm-conversations': lambda rid: crm_inbox.delete_crm_conversation(self.db_session, rid, current_user=self.current_user),
         }
         handler = handler_map.get(resource)
         if not handler:
