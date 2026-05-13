@@ -5,7 +5,7 @@ Supports both single-item hash (backward compat) and group hash (cart)
 
 from datetime import datetime, timezone
 
-from sqlalchemy import func, update
+from sqlalchemy import func, update, or_
 from sqlalchemy.orm import Session
 
 from ...models.rewards.redemptions import RewardRedemption, RewardUser, OrganizationRewardUser
@@ -20,13 +20,17 @@ class ConfirmService:
     def __init__(self, db: Session):
         self.db = db
 
-    def lookup_redemption(self, hash: str) -> dict:
-        """Look up redemption(s) by hash or group_hash — preview only, no confirm."""
+    def lookup_redemption(self, hash: str, organization_id: int) -> dict:
+        """Look up redemption(s) by hash or group_hash — preview only, no confirm.
+
+        Scoped to organization_id so staff cannot lookup another org's coupons.
+        """
         # Try group_hash first
         redemptions = (
             self.db.query(RewardRedemption)
             .filter(
                 RewardRedemption.redemption_group_hash == hash,
+                RewardRedemption.organization_id == organization_id,
                 RewardRedemption.deleted_date.is_(None),
             )
             .all()
@@ -37,6 +41,7 @@ class ConfirmService:
                 self.db.query(RewardRedemption)
                 .filter(
                     RewardRedemption.hash == hash,
+                    RewardRedemption.organization_id == organization_id,
                     RewardRedemption.deleted_date.is_(None),
                 )
                 .first()
@@ -91,35 +96,43 @@ class ConfirmService:
         hash: str = None,
         group_hash: str = None,
         staff_org_user_id: int = None,
+        organization_id: int = None,
     ) -> dict:
         """Confirm redemption(s) by hash or group_hash.
-        Stock is deducted here (not at redeem time)."""
+        Stock is deducted here (not at redeem time).
+
+        organization_id must match the redemption's org — prevents cross-org confirms.
+        """
+        if organization_id is None:
+            raise BadRequestException("organization_id is required")
 
         # Try group_hash first, then fall back to per-item hash
         if group_hash:
-            # Check if group exists
+            # Check if group exists in this org
             group_exists = (
                 self.db.query(RewardRedemption)
                 .filter(
                     RewardRedemption.redemption_group_hash == group_hash,
+                    RewardRedemption.organization_id == organization_id,
                     RewardRedemption.deleted_date.is_(None),
                 )
                 .first()
             )
             if group_exists:
-                return self._confirm_group(group_hash, staff_org_user_id)
+                return self._confirm_group(group_hash, staff_org_user_id, organization_id)
 
         if hash:
-            return self._confirm_single(hash, staff_org_user_id)
+            return self._confirm_single(hash, staff_org_user_id, organization_id)
 
         raise BadRequestException("Either hash or group_hash is required")
 
-    def _confirm_single(self, hash: str, staff_org_user_id: int) -> dict:
+    def _confirm_single(self, hash: str, staff_org_user_id: int, organization_id: int) -> dict:
         """Confirm a single redemption by its per-item hash."""
         redemption = (
             self.db.query(RewardRedemption)
             .filter(
                 RewardRedemption.hash == hash,
+                RewardRedemption.organization_id == organization_id,
                 RewardRedemption.deleted_date.is_(None),
             )
             .first()
@@ -151,12 +164,13 @@ class ConfirmService:
             "confirmed_items": [self._item_dict(redemption)],
         }
 
-    def _confirm_group(self, group_hash: str, staff_org_user_id: int) -> dict:
+    def _confirm_group(self, group_hash: str, staff_org_user_id: int, organization_id: int) -> dict:
         """Confirm all redemptions in a cart group."""
         redemptions = (
             self.db.query(RewardRedemption)
             .filter(
                 RewardRedemption.redemption_group_hash == group_hash,
+                RewardRedemption.organization_id == organization_id,
                 RewardRedemption.deleted_date.is_(None),
             )
             .all()
@@ -225,7 +239,6 @@ class ConfirmService:
 
     def _deduct_stock(self, redemption: RewardRedemption):
         """Deduct stock for a single redemption item (status already set to completed)."""
-        from sqlalchemy import or_
         current_stock = (
             self.db.query(func.coalesce(func.sum(RewardStock.values), 0))
             .filter(

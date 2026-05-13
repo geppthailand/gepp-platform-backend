@@ -106,7 +106,6 @@ class RedeemService:
             total_cost += item_cost
 
             # 2c. Check stock (campaign-specific + global)
-            from sqlalchemy import or_
             current_stock = (
                 self.db.query(func.coalesce(func.sum(RewardStock.values), 0))
                 .filter(
@@ -320,7 +319,12 @@ class RedeemService:
     def get_user_campaigns_for_redeem(
         self, reward_user_id: int, organization_id: int
     ) -> list[dict]:
-        """Get campaigns the user has points in, with available balances."""
+        """Get campaigns the user has points in, with available balances.
+
+        Only returns campaigns that are still redeemable — active status and
+        not past their end_date — so the LIFF picker matches submit_redemption
+        validation.
+        """
         rows = (
             self.db.query(
                 RewardPointTransaction.reward_campaign_id,
@@ -336,6 +340,7 @@ class RedeemService:
             .all()
         )
 
+        now = datetime.now(timezone.utc)
         result = []
         for row in rows:
             available = float(row.available_points)
@@ -344,12 +349,19 @@ class RedeemService:
 
             campaign = (
                 self.db.query(RewardCampaign)
-                .filter(RewardCampaign.id == row.reward_campaign_id)
+                .filter(
+                    RewardCampaign.id == row.reward_campaign_id,
+                    RewardCampaign.status == "active",
+                    or_(RewardCampaign.end_date.is_(None), RewardCampaign.end_date >= now),
+                    RewardCampaign.deleted_date.is_(None),
+                )
                 .first()
             )
+            if not campaign:
+                continue
             result.append({
                 "campaign_id": row.reward_campaign_id,
-                "name": campaign.name if campaign else None,
+                "name": campaign.name,
                 "available_points": available,
             })
 
@@ -359,6 +371,21 @@ class RedeemService:
         self, campaign_id: int, reward_user_id: int
     ) -> dict:
         """Get redeemable catalog items for a campaign with stock and user balance."""
+        # Validate campaign is still redeemable — same check as submit_redemption
+        now = datetime.now(timezone.utc)
+        campaign = (
+            self.db.query(RewardCampaign)
+            .filter(
+                RewardCampaign.id == campaign_id,
+                RewardCampaign.status == "active",
+                or_(RewardCampaign.end_date.is_(None), RewardCampaign.end_date >= now),
+                RewardCampaign.deleted_date.is_(None),
+            )
+            .first()
+        )
+        if not campaign:
+            raise BadRequestException("Campaign not active, ended, or not found")
+
         # User available points for this campaign
         available_points = (
             self.db.query(func.coalesce(func.sum(RewardPointTransaction.points), 0))
@@ -395,7 +422,6 @@ class RedeemService:
                 continue
 
             # Stock = campaign-specific + global (campaign_id=NULL)
-            from sqlalchemy import or_
             stock_remaining = (
                 self.db.query(func.coalesce(func.sum(RewardStock.values), 0))
                 .filter(

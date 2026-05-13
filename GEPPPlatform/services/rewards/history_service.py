@@ -8,7 +8,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ...models.rewards.points import RewardPointTransaction
-from ...models.rewards.redemptions import RewardRedemption
+from ...models.rewards.redemptions import RewardRedemption, RewardUser
 from ...models.rewards.catalog import RewardCatalog
 from ...models.rewards.management import RewardCampaign, RewardActivityMaterial
 from ...exceptions import APIException
@@ -145,8 +145,6 @@ class HistoryService:
         per_page: int = 20,
     ) -> dict:
         """Paginated claim history for a staff member."""
-        from ...models.rewards.users import RewardUser
-
         query = (
             self.db.query(
                 RewardPointTransaction,
@@ -215,9 +213,12 @@ class HistoryService:
                 RewardRedemption,
                 RewardCatalog.name.label("catalog_name"),
                 RewardCampaign.name.label("campaign_name"),
+                RewardUser.display_name.label("member_name"),
+                RewardUser.line_picture_url.label("member_avatar"),
             )
             .join(RewardCatalog, RewardCatalog.id == RewardRedemption.catalog_id)
             .join(RewardCampaign, RewardCampaign.id == RewardRedemption.reward_campaign_id)
+            .outerjoin(RewardUser, RewardUser.id == RewardRedemption.reward_user_id)
             .filter(
                 RewardRedemption.staff_id == staff_org_user_id,
                 RewardRedemption.organization_id == organization_id,
@@ -228,14 +229,17 @@ class HistoryService:
         if campaign_id is not None:
             query = query.filter(RewardRedemption.reward_campaign_id == campaign_id)
 
-        query = query.order_by(RewardRedemption.created_date.desc())
+        query = query.order_by(RewardRedemption.updated_date.desc().nullslast())
         rows, pagination = self._paginate(query, page, per_page)
 
         items = [
             {
                 "id": r.id,
                 "hash": r.hash,
+                "group_hash": getattr(r, "redemption_group_hash", None),
                 "reward_user_id": r.reward_user_id,
+                "member_name": member_name,
+                "member_avatar": member_avatar,
                 "catalog_id": r.catalog_id,
                 "catalog_name": catalog_name,
                 "campaign_id": r.reward_campaign_id,
@@ -246,7 +250,7 @@ class HistoryService:
                 "created_date": r.created_date.isoformat() if r.created_date else None,
                 "updated_date": r.updated_date.isoformat() if r.updated_date else None,
             }
-            for r, catalog_name, campaign_name in rows
+            for r, catalog_name, campaign_name, member_name, member_avatar in rows
         ]
 
         return {"items": items, "pagination": pagination}
@@ -262,8 +266,6 @@ class HistoryService:
         Used by Staff LIFF mode — pickup queue surface. Returns the most recent
         pending redemptions with member info so staff can preview before scanning.
         """
-        from ...models.rewards.users import RewardUser
-
         query = (
             self.db.query(
                 RewardRedemption,
@@ -285,7 +287,8 @@ class HistoryService:
         if campaign_id is not None:
             query = query.filter(RewardRedemption.reward_campaign_id == campaign_id)
 
-        rows = query.order_by(RewardRedemption.created_date.desc()).limit(per_page).all()
+        # FIFO order — oldest pending pickups appear first (fair-queue)
+        rows = query.order_by(RewardRedemption.created_date.asc()).limit(per_page).all()
 
         # Group by redemption_group_hash (multiple items in one checkout share a hash)
         groups: dict = {}
