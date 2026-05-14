@@ -343,10 +343,14 @@ class AuthHandlers:
                 session.flush()  # Get the ID
 
                 # 2. Create organization
+                #    public_form_key is NOT NULL + UNIQUE (added by migration
+                #    050 for the CRM public-form feature). Generate a 32-char
+                #    hex up front so the INSERT doesn't trip a NotNullViolation.
                 organization = Organization(
                     name=display_name,
                     description=f"Organization for {display_name}",
-                    organization_info_id=org_info.id
+                    organization_info_id=org_info.id,
+                    public_form_key=secrets.token_hex(16),
                 )
                 session.add(organization)
                 session.flush()  # Get the ID

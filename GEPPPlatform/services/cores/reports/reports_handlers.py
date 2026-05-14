@@ -610,8 +610,8 @@ def _handle_overview_report(
         'overall_charts': {
             'chart_stat_data': [
                 {'title': 'Total Recyclables', 'value': round(recyclable_waste * 100) / 100},
-                {'title': 'Number of Trees', 'value': round(kg_co2_to_trees(recyclable_ghg_reduction) * 100) / 100},
-                {'title': 'Forest (rai)', 'value': round(kg_co2_to_forest_rai(recyclable_ghg_reduction) * 100) / 100},
+                {'title': 'Number of Trees', 'value': int(round(kg_co2_to_trees(recyclable_ghg_reduction) * 100 / 100))},
+                # {'title': 'Forest (rai)', 'value': round(kg_co2_to_forest_rai(recyclable_ghg_reduction) * 100) / 100},
                 {'title': 'Plastic Saved', 'value': round(plastic_saved * 100) / 100},
             ],
             'chart_data': chart_data
