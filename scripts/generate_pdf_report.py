@@ -2642,14 +2642,14 @@ def draw_overview(pdf, page_width_points: float, page_height_points: float, data
     _label_progress(pdf, row_x, row_y - 58, row_w, "Recycling rate (%)", f"{rr:,.2f}", rr / 100.0, colors.HexColor("#8fcfc6"), colors.HexColor("#e1e7ef"), bar_h=6)
     _label_progress(pdf, row_x, row_y - 92, row_w, "GHG Reduction (kgCO2e)", _format_number(ghg), ghg / norm_base, colors.HexColor("#77b9d8"), colors.HexColor("#e1e7ef"), bar_h=6)
 
-    # Top Recyclables
+    # Top Recycling Sources
     tr_h = 2.15 * inch
     tr_y = ki_y - 18 - tr_h
     _rounded_card(pdf, margin, tr_y, left_col_w, tr_h, radius=8)
 
     pdf.setFillColor(TEXT)
     pdf.setFont("Poppins-Medium", 12)
-    pdf.drawString(margin + pad, tr_y + tr_h - 30, "Top Recyclables")
+    pdf.drawString(margin + pad, tr_y + tr_h - 30, "Top Recycling Sources")
     items = data["overview_data"].get("top_recyclables", [])[:3]
     if items:
         max_val = max(float(it.get("total_waste", 0) or 0) for it in items) or 1.0
