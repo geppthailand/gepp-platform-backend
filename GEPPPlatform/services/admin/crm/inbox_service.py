@@ -113,10 +113,14 @@ def ensure_conversation_for_delivery(
 # ── List ─────────────────────────────────────────────────────────────────────
 
 def list_conversations(
-    db: Session, org_id: int, filters: Dict[str, Any], page: int, page_size: int,
+    db: Session, org_id: Optional[int], filters: Dict[str, Any], page: int, page_size: int,
 ) -> Dict[str, Any]:
-    where = ["c.organization_id = :org"]
-    params: Dict[str, Any] = {'org': org_id}
+    """org_id=None bypasses the org filter (super-admin only — enforced in handler)."""
+    where: List[str] = []
+    params: Dict[str, Any] = {}
+    if org_id is not None:
+        where.append("c.organization_id = :org")
+        params['org'] = org_id
 
     status = (filters.get('status') or '').strip().lower()
     if status in ('open', 'closed', 'spam'):
@@ -144,7 +148,7 @@ def list_conversations(
         except (TypeError, ValueError):
             pass
 
-    where_sql = " AND ".join(where)
+    where_sql = " AND ".join(where) if where else "TRUE"
     total = db.execute(
         text(f"SELECT COUNT(*) FROM crm_conversations c WHERE {where_sql}"),
         params,

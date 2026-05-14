@@ -77,13 +77,16 @@ def _serialize_lead(row) -> Dict[str, Any]:
 
 def list_leads(
     db: Session,
-    org_id: int,
+    org_id: Optional[int],
     filters: Dict[str, Any],
     page: int = 1,
     page_size: int = 25,
 ) -> Dict[str, Any]:
     """
     Paginated lead list with multi-dimensional filtering.
+
+    org_id=None bypasses the per-organization filter (super-admin only —
+    enforcement happens in the handler).
 
     Supported filter keys:
       status, owner_user_id, source, country, tag (single tag from JSONB array),
@@ -94,11 +97,11 @@ def list_leads(
     page_size = max(1, min(200, page_size))
     offset   = (page - 1) * page_size
 
-    where_clauses: List[str] = [
-        "organization_id = :org_id",
-        "deleted_date IS NULL",
-    ]
-    params: Dict[str, Any] = {'org_id': org_id}
+    where_clauses: List[str] = ["deleted_date IS NULL"]
+    params: Dict[str, Any] = {}
+    if org_id is not None:
+        where_clauses.append("organization_id = :org_id")
+        params['org_id'] = org_id
 
     if filters.get('status') and filters['status'] in VALID_STATUSES:
         where_clauses.append("status = :status")

@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 # ─── Standard CRUD ─────────────────────────────────────────────────────────
 
-def list_crm_leads(db: Session, query_params: dict) -> Dict[str, Any]:
+def list_crm_leads(db: Session, query_params: dict, current_user: Optional[dict] = None) -> Dict[str, Any]:
     try:
         page = max(1, int(query_params.get('page', 1) or 1))
     except (TypeError, ValueError):
@@ -33,7 +33,9 @@ def list_crm_leads(db: Session, query_params: dict) -> Dict[str, Any]:
     except (TypeError, ValueError):
         page_size = 25
 
-    org_id = _require_org_id(query_params)
+    # Super-admin / gepp-admin can list across all orgs (or filter by ?organizationId=X).
+    # Non-admin callers must have organization_id resolved from their token.
+    org_id = _resolve_list_org_id(query_params, current_user)
 
     filters = {
         'status':             query_params.get('status'),
@@ -180,6 +182,34 @@ def dispatch_lead_subroute(
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
+
+def _is_super_admin(user: Optional[dict]) -> bool:
+    if not user:
+        return False
+    role = (user.get('admin_role') or user.get('platform_role') or '').strip()
+    return role in ('super-admin', 'gepp-admin')
+
+
+def _resolve_list_org_id(source: dict, user: Optional[dict] = None) -> Optional[int]:
+    """
+    For list endpoints:
+      - super-admin: optional ?organizationId=X filter, otherwise return None (see all orgs)
+      - non-admin: must have organization_id from their token, else BadRequest
+    """
+    raw = (source or {}).get('organizationId') or (source or {}).get('organization_id')
+    if raw is not None:
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            pass
+    if _is_super_admin(user):
+        return None
+    user_org = (user or {}).get('organization_id')
+    try:
+        return int(user_org)
+    except (TypeError, ValueError):
+        raise BadRequestException("organizationId is required")
+
 
 def _require_org_id(source: dict, user: Optional[dict] = None) -> int:
     """Extract and return org_id from body/query, falling back to current_user."""
