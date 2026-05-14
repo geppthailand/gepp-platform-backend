@@ -229,6 +229,7 @@ class OrganizationService:
         light_rows = self.db.query(UserLocation.id, UserLocation.members).filter(
             UserLocation.is_location == True,
             UserLocation.is_active == True,
+            UserLocation.deleted_date.is_(None),  # skip soft-deleted rows
             UserLocation.organization_id == organization_id,
         ).all()
         light_locs = [SimpleNamespace(id=r.id, members=r.members) for r in light_rows]

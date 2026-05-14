@@ -478,6 +478,7 @@ class AdminService:
                 'maxStorageGb': plan.max_storage_gb,
                 'maxApiCallsDaily': plan.max_api_calls_daily,
                 'features': plan.features,
+                'isDefault': bool(plan.is_default),
                 'createdDate': plan.created_date.isoformat() if plan.created_date else None,
             })
 
@@ -514,6 +515,7 @@ class AdminService:
             'maxStorageGb': plan.max_storage_gb,
             'maxApiCallsDaily': plan.max_api_calls_daily,
             'features': plan.features,
+            'isDefault': bool(plan.is_default),
             'permissions': [
                 {'id': p.id, 'code': p.code, 'name': p.name, 'category': p.category}
                 for p in all_permissions if p.id in assigned_ids
@@ -555,6 +557,13 @@ class AdminService:
         if not plan:
             raise NotFoundException(f'Subscription plan {plan_id} not found')
 
+        # Promote-to-default is a global op (clears any other default first),
+        # so route it through the dedicated helper rather than a straight
+        # setattr that would race against the partial unique index.
+        if 'isDefault' in data and bool(data['isDefault']) and not plan.is_default:
+            self.set_default_subscription_plan(plan_id)
+            plan = self.db_session.query(SubscriptionPlan).get(plan_id)
+
         # name is immutable — only display_name and other fields can be changed
         for field in ['display_name', 'description', 'price_monthly', 'price_yearly',
                       'max_users', 'max_transactions_monthly', 'max_storage_gb', 'max_api_calls_daily', 'features']:
@@ -566,7 +575,17 @@ class AdminService:
         return {'id': plan.id, 'message': 'Subscription plan updated'}
 
     def _create_plan_version(self, old_plan: 'SubscriptionPlan', new_permission_ids: list) -> 'SubscriptionPlan':
-        """Create a new plan version with updated permissions, deactivate the old one, and migrate subscriptions."""
+        """Create a new plan version with updated permissions, deactivate the old one, and migrate subscriptions.
+
+        Carries forward ``is_default`` so that editing permissions on the
+        default plan doesn't silently strip the flag — that would point
+        register/login auto-assign at a stale row on the next request.
+        Because the partial unique index only fires when ``is_default = TRUE``,
+        we deactivate the old row first (it stays at TRUE but on an
+        is_active=FALSE row, which is ignored), then flush the new TRUE row.
+        """
+        was_default = bool(old_plan.is_default)
+
         new_plan = SubscriptionPlan(
             name=old_plan.name,
             display_name=old_plan.display_name,
@@ -579,12 +598,21 @@ class AdminService:
             max_api_calls_daily=old_plan.max_api_calls_daily,
             features=old_plan.features,
             permission_ids=new_permission_ids,
+            is_default=False,  # set after old row is_default cleared, below
         )
         self.db_session.add(new_plan)
 
-        # Deactivate old plan
+        # Deactivate old plan and clear its default flag so the partial unique
+        # index won't conflict when we set the new row to default below.
         old_plan.is_active = False
+        if was_default:
+            old_plan.is_default = False
         self.db_session.flush()
+
+        # Promote the new row to default if the old one was the default.
+        if was_default:
+            new_plan.is_default = True
+            self.db_session.flush()
 
         # Migrate active subscriptions to the new plan version
         self.db_session.query(Subscription).filter(
@@ -595,6 +623,33 @@ class AdminService:
         self.db_session.flush()
 
         return new_plan
+
+    def set_default_subscription_plan(self, plan_id: int) -> Dict[str, Any]:
+        """Flip the is_default flag to the given plan.
+
+        Clears the current default first so the partial unique index won't
+        fire mid-transaction, then sets the target.
+        """
+        target = self.db_session.query(SubscriptionPlan).filter(
+            SubscriptionPlan.id == plan_id,
+            SubscriptionPlan.is_active == True,
+        ).first()
+        if not target:
+            raise NotFoundException(f'Subscription plan {plan_id} not found')
+
+        if target.is_default:
+            return {'id': target.id, 'message': 'Plan is already the default'}
+
+        self.db_session.query(SubscriptionPlan).filter(
+            SubscriptionPlan.is_default == True,
+            SubscriptionPlan.id != plan_id,
+        ).update({SubscriptionPlan.is_default: False}, synchronize_session='fetch')
+        self.db_session.flush()
+
+        target.is_default = True
+        self.db_session.flush()
+
+        return {'id': target.id, 'message': f'Plan {target.name} marked as default'}
 
     def toggle_plan_permission(self, plan_id: int, data: dict) -> Dict[str, Any]:
         """Toggle a system permission — creates a new plan version for historical tracking"""
@@ -1022,15 +1077,94 @@ class AdminService:
         return {'id': device.id, 'message': 'IoT device updated'}
 
     def delete_iot_device(self, device_id: int) -> Dict[str, Any]:
+        """Soft-delete an iot_device AND unpair any paired hardware.
+
+        Without the unpair step a deleted iot_device leaves its
+        iot_hardwares row with `paired_iot_device_id` pointing at a
+        ghost: future /checkin responses from that tablet still see
+        `paired=true` and try to refresh tokens that no longer have
+        a backing device. The tablet would never recover until an
+        admin manually unpaired the hardware row separately.
+
+        We mirror what `unpair_iot_hardware` does (clear the pairing
+        pointer + queue `force_logout {unpair:true}`) so that within
+        one /sync cycle (~5–15 s) the tablet self-cleans and drops
+        back to /device-setup, ready for a fresh pair.
+        """
+        from sqlalchemy import text as _t
+        import json as _json
+
         device = self.db_session.query(IoTDevice).filter(
             IoTDevice.id == device_id, IoTDevice.deleted_date.is_(None)
         ).first()
         if not device:
             raise NotFoundException(f'IoT device {device_id} not found')
+
+        # 1. Find paired hardware BEFORE soft-deleting (the hardware
+        # row may reference device_id; clearing it now keeps FK
+        # integrity if a check exists, and avoids orphans either way).
+        hardware_row = self.db_session.execute(_t(
+            "SELECT id FROM iot_hardwares "
+            "WHERE paired_iot_device_id = :device_id "
+            "  AND deleted_date IS NULL"
+        ), {'device_id': device_id}).fetchone()
+        unpaired_hardware_id = int(hardware_row[0]) if hardware_row else None
+
+        if unpaired_hardware_id is not None:
+            self.db_session.execute(_t(
+                "UPDATE iot_hardwares SET "
+                "  paired_iot_device_id = NULL, "
+                "  pending_pin = NULL, "
+                "  updated_date = NOW() "
+                "WHERE id = :hardware_id"
+            ), {'hardware_id': unpaired_hardware_id})
+
+        # 2. Queue force_logout {unpair:true} so a tablet that's
+        # currently syncing the soon-to-be-deleted iot_device picks
+        # up the cleanup directive on its very next /sync cycle.
+        # Idempotent with the MAC-mismatch path that fires on
+        # subsequent syncs.
+        # Dedup: don't pile up if an unpair command is already pending.
+        existing = self.db_session.execute(_t(
+            "SELECT 1 FROM iot_device_commands "
+            "WHERE device_id = :device_id "
+            "  AND command_type = 'force_logout' "
+            "  AND status IN ('pending', 'delivered') "
+            "  AND payload @> '{\"unpair\": true}'::jsonb "
+            "LIMIT 1"
+        ), {'device_id': device_id}).fetchone()
+        if not existing:
+            self.db_session.execute(_t(
+                "INSERT INTO iot_device_commands "
+                "(device_id, command_type, payload, status, issued_by) "
+                "VALUES (:device_id, 'force_logout', "
+                "        CAST(:pl AS JSONB), 'pending', NULL)"
+            ), {
+                'device_id': device_id,
+                'pl': _json.dumps({
+                    'unpair': True,
+                    'reason': 'iot_device_deleted',
+                }),
+            })
+
+        # 3. Bump admin_watching_until so the tablet long-polls
+        # eagerly and grabs the unpair command within ~1 s.
+        try:
+            self._bump_admin_watching_until(device_id, minutes=2)
+        except Exception:
+            # Older deployments may not have the helper yet — non-fatal.
+            pass
+
+        # 4. Soft-delete the iot_device row.
         device.deleted_date = datetime.now(timezone.utc)
         device.is_active = False
         self.db_session.flush()
-        return {'id': device.id, 'message': 'IoT device deleted'}
+
+        return {
+            'id': device.id,
+            'message': 'IoT device deleted',
+            'unpaired_hardware_id': unpaired_hardware_id,
+        }
 
     # ── Debug-log mode toggle ────────────────────────────────────────────
     # Admin clicks "Debug Log Mode" in the device's Quick Templates panel

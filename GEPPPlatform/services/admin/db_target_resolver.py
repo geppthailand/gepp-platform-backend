@@ -20,11 +20,18 @@ import os
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
-from dotenv import dotenv_values
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import QueuePool
+
+# `dotenv` is a local-dev convenience (used only when target != 'local'
+# to read migrations/.env.development or .env). Lambda deployments ship
+# without python-dotenv to keep the layer small AND only ever resolve
+# target='local' (the request's existing session). Importing at module
+# top crashed every admin route — ModuleNotFoundError raised before
+# any code ran — even for endpoints that never touched the resolver.
+# Defer the import to the one function that actually needs it.
 
 
 SUPPORTED_TARGETS = ('local', 'dev', 'prd')
@@ -52,6 +59,19 @@ def _conn_creds_for_target(target: str) -> Optional[Dict[str, str]]:
     if not env_path or not env_path.exists():
         raise FileNotFoundError(
             f"DB target '{target}' requested but env file not found: {env_path}"
+        )
+    try:
+        from dotenv import dotenv_values
+    except ModuleNotFoundError as e:
+        # python-dotenv isn't installed in this environment (typical for
+        # Lambda). Cross-DB export was always a local-dev tool — surface
+        # a clean error instead of a hard 500 if the admin somehow
+        # triggers it from a deployed environment.
+        raise PermissionError(
+            f"DB target '{target}' requires python-dotenv, which is not "
+            f"installed in this environment. Cross-DB exports are local-dev "
+            f"only — use target='local' against the deployment's own DB. "
+            f"(original error: {e})"
         )
     raw = dotenv_values(env_path)
     if not raw:

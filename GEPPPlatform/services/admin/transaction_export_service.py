@@ -320,7 +320,18 @@ class AdminTransactionExportService:
             .filter(Transaction.deleted_date.is_(None))
         )
         if origin_id is not None:
-            q = q.filter(Transaction.origin_id == origin_id)
+            # Expand the origin filter to the node's whole subtree in
+            # `root_nodes`. A node X's descendants are exactly the nodes
+            # whose ancestor chain *contains* X — `path_by_node_id` already
+            # has those chains keyed by nodeId, so one O(N) sweep gives us
+            # the full subtree. If the selected origin isn't in the tree
+            # (legacy / orphan location), we keep the original exact match.
+            subtree_ids = [
+                nid for nid, path in path_by_node_id.items() if origin_id in path
+            ]
+            if not subtree_ids:
+                subtree_ids = [origin_id]
+            q = q.filter(Transaction.origin_id.in_(subtree_ids))
         if date_from is not None:
             q = q.filter(Transaction.transaction_date >= date_from)
         if date_to is not None:

@@ -1052,6 +1052,7 @@ class UserService:
         light_query = self.db.query(UserLocation.id, UserLocation.members).filter(
             UserLocation.is_location == True,
             UserLocation.is_active == True,
+            UserLocation.deleted_date.is_(None),  # skip soft-deleted rows
             UserLocation.organization_id == organization_id,
         )
         setup_location_ids: Optional[List[int]] = None

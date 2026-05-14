@@ -29,6 +29,13 @@ class Organization(Base, BaseModel):
     # LIFF onboarding code
     joining_code = Column(String(20), unique=True, nullable=True, index=True)
 
+    # CRM public form key (32-char) — added by migration 050. NOT NULL +
+    # UNIQUE in the schema, so we must set this on every INSERT. Callers
+    # that create an Organization should generate one (see auth_handlers
+    # register flow) — leaving the column unmapped in the ORM was the
+    # cause of the NotNullViolation at registration time.
+    public_form_key = Column(String(32), unique=True, nullable=False)
+
     # Organization structure limits
     max_org_structure_nodes = Column(Integer, nullable=False, default=50)
 

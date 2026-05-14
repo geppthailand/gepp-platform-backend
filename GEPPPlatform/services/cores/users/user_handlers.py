@@ -1015,32 +1015,13 @@ def handle_get_locations(db_session, user_service: UserService, query_params: Di
         manageable_user_ids = result.get('manageable_user_ids', [])
         full_total = int(result.get('total_assigned', len(locations)))
 
-        # Optional pagination — clients (e.g. gepp-business-v3 frontend) page through
-        # large orgs in chunks of 50 to avoid oversized response bodies. When neither
-        # `page` nor `page_size` is supplied, return the full list (legacy behavior).
-        try:
-            req_page = int(query_params.get('page', 0) or 0)
-        except (TypeError, ValueError):
-            req_page = 0
-        try:
-            req_page_size = int(query_params.get('page_size', 0) or 0)
-        except (TypeError, ValueError):
-            req_page_size = 0
-
-        full_total = len(locations)
-        paginate = req_page > 0 or req_page_size > 0
-
-        if paginate:
-            page = req_page if req_page > 0 else 1
-            page_size = req_page_size if req_page_size > 0 else 50
-            if page_size > 200:
-                page_size = 200
-            offset = (page - 1) * page_size
-            locations_page = locations[offset:offset + page_size]
-        else:
-            page = 1
-            page_size = full_total
-            locations_page = locations
+        # The service already returned the page slice — DO NOT slice again.
+        # An earlier iteration of this handler did its own offset/limit on
+        # top of `locations`, which clobbered full_total down to the page
+        # size (e.g. 50) and produced empty page-2 responses for owners
+        # who actually have 282 visible rows. The service is the single
+        # source of pagination truth now.
+        locations_page = locations
 
         # Enrich each assigned location with tag and tenant info (id, name, start_date, end_date, members)
         def _trim_tag_or_tenant(item: Dict[str, Any]) -> Dict[str, Any]:
