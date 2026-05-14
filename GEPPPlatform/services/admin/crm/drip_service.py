@@ -60,17 +60,21 @@ def _serialize(row) -> Dict[str, Any]:
 
 def list_sequences(
     db: Session,
-    org_id: int,
+    org_id: Optional[int],
     filters: Dict[str, Any],
     page: int = 1,
     page_size: int = 25,
 ) -> Dict[str, Any]:
+    """org_id=None bypasses org filter (super-admin only — enforced in handler)."""
     page = max(1, page)
     page_size = max(1, min(200, page_size))
     offset = (page - 1) * page_size
 
-    where = ["organization_id = :org_id", "deleted_date IS NULL"]
-    params: Dict[str, Any] = {"org_id": org_id}
+    where = ["deleted_date IS NULL"]
+    params: Dict[str, Any] = {}
+    if org_id is not None:
+        where.append("organization_id = :org_id")
+        params["org_id"] = org_id
 
     if filters.get("status"):
         where.append("status = :status")

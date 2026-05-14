@@ -152,7 +152,7 @@ class AdminHandlers:
             'crm-unsubscribes': lambda qp: crm.list_crm_unsubscribes(self.db_session, qp),
             'crm-analytics': lambda qp: crm.list_crm_analytics(self.db_session, qp),
             'crm-brand-assets': lambda qp: _list_crm_brand_assets(self.db_session, qp, self.current_user),
-            'crm-leads': lambda qp: crm_leads.list_crm_leads(self.db_session, qp),
+            'crm-leads': lambda qp: crm_leads.list_crm_leads(self.db_session, qp, current_user=self.current_user),
             'crm-drip-sequences': lambda qp: crm_drip.list_crm_drip_sequences(self.db_session, qp, current_user=self.current_user),
             'crm-conversations': lambda qp: crm_inbox.list_crm_conversations(self.db_session, qp, current_user=self.current_user),
         }
@@ -230,7 +230,7 @@ class AdminHandlers:
             'subscription-plans': self.admin_service.delete_subscription_plan,
             'subscriptions': self.admin_service.delete_subscription,
             'system-permissions': self.admin_service.delete_system_permission,
-            'iot-devices': self.admin_service.delete_iot_device,
+            'iot-devices': lambda rid: self.admin_service.delete_iot_device(rid, current_user=self.current_user),
             'iot-scales': self.admin_service.delete_iot_scale,
             # CRM / Marketing
             'crm-segments': lambda rid: crm.delete_crm_segment(self.db_session, rid),

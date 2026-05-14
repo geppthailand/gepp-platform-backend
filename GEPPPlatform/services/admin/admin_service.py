@@ -153,12 +153,14 @@ class AdminService:
             'subscriptions': [
                 {
                     'id': sub.id,
+                    'planId': sub.plan_id,
                     'planName': sub.plan.display_name if sub.plan else sub.plan_id,
                     'status': sub.status,
                     'currentPeriodEndsAt': sub.current_period_ends_at,
                 }
                 for sub in (org.subscriptions or [])
             ],
+            'currentSubscriptionId': org.subscription_id,
             'allowAiAudit': org.allow_ai_audit,
             'maxOrgStructureNodes': org.max_org_structure_nodes if hasattr(org, 'max_org_structure_nodes') else 50,
             'isActive': org.is_active,
@@ -166,20 +168,107 @@ class AdminService:
         }
 
     def update_organization(self, org_id: int, data: dict) -> Dict[str, Any]:
-        org = self.db_session.query(Organization).filter(
-            Organization.id == org_id, Organization.is_active == True
-        ).first()
+        """Update org-level fields **and** nested OrganizationInfo in one
+        PATCH. The backoffice show page sends a flat object that may
+        include any subset of:
+          - top-level org: name, description, allowAiAudit,
+                           maxOrgStructureNodes, isActive
+          - nested company info (`organizationInfo: {...}`):
+                companyName, companyNameTh, companyNameEn,
+                displayName, businessType, businessIndustry, taxId,
+                companyEmail, phoneNumber, companyPhone, address
+        Only keys actually present in the payload are written, so the
+        same endpoint serves both small inline edits and the full Edit
+        tab form."""
+        org = self.db_session.query(Organization).options(
+            joinedload(Organization.organization_info)
+        ).filter(Organization.id == org_id).first()
         if not org:
             raise NotFoundException(f'Organization {org_id} not found')
 
+        # ── Org-level scalars ────────────────────────────────────────
         if 'name' in data:
             org.name = data['name']
         if 'description' in data:
             org.description = data['description']
         if 'allowAiAudit' in data:
-            org.allow_ai_audit = data['allowAiAudit']
+            org.allow_ai_audit = bool(data['allowAiAudit'])
+        if 'isActive' in data:
+            org.is_active = bool(data['isActive'])
         if 'maxOrgStructureNodes' in data:
             org.max_org_structure_nodes = int(data['maxOrgStructureNodes'])
+
+        # ── Company info (OrganizationInfo row) ─────────────────────
+        # Accept BOTH nested `{organizationInfo: {...}}` and flat
+        # camelCase keys at the top level, so simple inline edits don't
+        # need a wrapper object.
+        info_patch = data.get('organizationInfo') or {}
+        info_field_map = {
+            'companyName':       'company_name',
+            'companyNameTh':     'company_name_th',
+            'companyNameEn':     'company_name_en',
+            'displayName':       'display_name',
+            'businessType':      'business_type',
+            'businessIndustry':  'business_industry',
+            'taxId':             'tax_id',
+            'companyEmail':      'company_email',
+            'phoneNumber':       'phone_number',
+            'companyPhone':      'company_phone',
+            'address':           'address',
+        }
+        # Also pull any of the same keys from the top level.
+        flat_info_patch = {k: data[k] for k in info_field_map if k in data}
+        merged_info = {**info_patch, **flat_info_patch}
+
+        if merged_info:
+            info = org.organization_info
+            if not info:
+                # Lazy-create the row the first time admin fills it in.
+                info = OrganizationInfo()
+                self.db_session.add(info)
+                self.db_session.flush()
+                org.organization_info_id = info.id
+                org.organization_info = info
+            for camel, snake in info_field_map.items():
+                if camel in merged_info:
+                    val = merged_info[camel]
+                    # Treat empty strings as NULL so we don't pollute
+                    # NOT-NULL-tolerant columns with whitespace.
+                    setattr(info, snake, val if val != '' else None)
+
+        # ── Subscription plan switch ────────────────────────────────
+        # If `planId` is supplied, change the org's current subscription
+        # to that plan. If the org has no subscription yet, create one.
+        # We do this here (instead of forcing the FE to call a second
+        # endpoint) so the admin "Save" button is one atomic action.
+        if 'planId' in data and data['planId'] is not None:
+            new_plan_id = int(data['planId'])
+            plan_exists = self.db_session.query(SubscriptionPlan).filter(
+                SubscriptionPlan.id == new_plan_id,
+                SubscriptionPlan.is_active == True,  # noqa: E712
+            ).first()
+            if not plan_exists:
+                raise NotFoundException(f'Subscription plan {new_plan_id} not found')
+
+            sub = None
+            if org.subscription_id:
+                sub = self.db_session.query(Subscription).filter(
+                    Subscription.id == org.subscription_id
+                ).first()
+            if sub:
+                sub.plan_id = new_plan_id
+                if sub.status != 'active':
+                    sub.status = 'active'
+            else:
+                # No subscription yet — mint one and point the org at it.
+                sub = Subscription(
+                    organization_id=org.id,
+                    plan_id=new_plan_id,
+                    status='active',
+                )
+                self.db_session.add(sub)
+                self.db_session.flush()
+                org.subscription_id = sub.id
 
         self.db_session.flush()
         return {'id': org.id, 'message': 'Organization updated'}
@@ -1076,7 +1165,7 @@ class AdminService:
         self.db_session.flush()
         return {'id': device.id, 'message': 'IoT device updated'}
 
-    def delete_iot_device(self, device_id: int) -> Dict[str, Any]:
+    def delete_iot_device(self, device_id: int, current_user: dict = None) -> Dict[str, Any]:
         """Soft-delete an iot_device AND unpair any paired hardware.
 
         Without the unpair step a deleted iot_device leaves its
@@ -1093,6 +1182,13 @@ class AdminService:
         """
         from sqlalchemy import text as _t
         import json as _json
+
+        # `iot_device_commands.issued_by` is NOT NULL, and matches the
+        # same admin who triggered the delete. Pull it off the JWT-derived
+        # current_user (same pattern as `issue_device_command`).
+        issuer_id = (current_user or {}).get('user_id')
+        if not issuer_id:
+            raise BadRequestException('Cannot determine issuing admin user')
 
         device = self.db_session.query(IoTDevice).filter(
             IoTDevice.id == device_id, IoTDevice.deleted_date.is_(None)
@@ -1138,13 +1234,14 @@ class AdminService:
                 "INSERT INTO iot_device_commands "
                 "(device_id, command_type, payload, status, issued_by) "
                 "VALUES (:device_id, 'force_logout', "
-                "        CAST(:pl AS JSONB), 'pending', NULL)"
+                "        CAST(:pl AS JSONB), 'pending', :issued_by)"
             ), {
                 'device_id': device_id,
                 'pl': _json.dumps({
                     'unpair': True,
                     'reason': 'iot_device_deleted',
                 }),
+                'issued_by': issuer_id,
             })
 
         # 3. Bump admin_watching_until so the tablet long-polls

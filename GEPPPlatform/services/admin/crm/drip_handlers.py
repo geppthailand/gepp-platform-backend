@@ -30,7 +30,9 @@ def list_crm_drip_sequences(
     query_params: dict,
     current_user: Optional[dict] = None,
 ) -> Dict[str, Any]:
-    org_id = _require_org_id(query_params, current_user)
+    # Super-admin: org_id may be None (list across all orgs) or filtered by ?organizationId=X.
+    # Non-admin: must have organization_id resolved from query or token.
+    org_id = _resolve_list_org_id(query_params, current_user)
     try:
         page = max(1, int(query_params.get("page", 1) or 1))
     except (TypeError, ValueError):
@@ -173,4 +175,32 @@ def _require_org_id(query_params: dict, current_user: Optional[dict] = None) -> 
         v2 = _org_from_user(current_user)
         if v2:
             return v2
+    raise BadRequestException("organizationId is required")
+
+
+def _is_super_admin(user: Optional[dict]) -> bool:
+    if not user:
+        return False
+    role = (user.get("admin_role") or user.get("platform_role") or "").strip()
+    return role in ("super-admin", "gepp-admin")
+
+
+def _resolve_list_org_id(query_params: dict, current_user: Optional[dict] = None) -> Optional[int]:
+    """
+    List-endpoint org resolution:
+      - explicit ?organizationId=X wins for everyone
+      - super-admin without query param → None (list across all orgs)
+      - non-admin → derive from token, else BadRequest
+    """
+    raw = (query_params or {}).get("organizationId") or (query_params or {}).get("organization_id")
+    if raw is not None:
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            pass
+    if _is_super_admin(current_user):
+        return None
+    v = _org_from_user(current_user)
+    if v:
+        return v
     raise BadRequestException("organizationId is required")
