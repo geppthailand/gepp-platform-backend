@@ -1228,6 +1228,23 @@ def main(event, context):
             })
         }
 
+    except APIException as api_error:
+        return {
+            "statusCode": api_error.status_code,
+            "headers": {
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type, Authorization",
+                "Content-Type": "application/json",
+            },
+            "body": json.dumps({
+                "success": False,
+                "message": api_error.message,
+                "error_code": api_error.error_code,
+                "errors": getattr(api_error, 'errors', None),
+            })
+        }
+
     except Exception as e:
         import traceback
         return {

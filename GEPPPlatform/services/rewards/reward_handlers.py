@@ -613,17 +613,24 @@ def handle_reward_routes(event: Dict[str, Any], data: Dict[str, Any], **params) 
             )
 
         if path == "/api/rewards/public/redemption-lookup" and method == "GET":
+            org_id = int(query_params.get("organization_id"))
+            _resolve_staff(org_id)  # auth: caller must be staff of this org
             svc = ConfirmService(db_session)
             return svc.lookup_redemption(
                 hash=query_params.get("hash", ""),
+                organization_id=org_id,
             )
 
         if path == "/api/rewards/public/confirm-redeem" and method == "POST":
+            org_id = int(data.get("organization_id"))
+            # Resolve staff identity server-side — never trust client-provided staff_org_user_id
+            staff_org_user_id = _resolve_staff(org_id)
             svc = ConfirmService(db_session)
             return svc.confirm_redemption(
                 hash=data.get("hash"),
                 group_hash=data.get("group_hash"),
-                staff_org_user_id=data.get("staff_org_user_id"),
+                staff_org_user_id=staff_org_user_id,
+                organization_id=org_id,
             )
 
         if path == "/api/rewards/public/reject-redemption" and method == "POST":
