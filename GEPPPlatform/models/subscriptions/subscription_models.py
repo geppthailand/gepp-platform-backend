@@ -25,6 +25,14 @@ class SubscriptionPlan(Base, BaseModel):
     description = Column(Text)
     price_monthly = Column(Integer, default=0)  # Price in cents
     price_yearly = Column(Integer, default=0)
+
+    # Marks the plan new sign-ups land on. Exactly one row may have
+    # ``is_default = TRUE`` at a time (enforced by a partial unique index,
+    # see migration 065). The register flow and any other "no plan
+    # specified" path should pick the row where this is true — *not*
+    # subscription_plan_id = 1 or filter_by(name='free').first(), both of
+    # which break when admins create a new plan version.
+    is_default = Column(Boolean, nullable=False, default=False)
     
     # Limits
     max_users = Column(Integer, default=1)

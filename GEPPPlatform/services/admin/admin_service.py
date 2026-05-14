@@ -478,6 +478,7 @@ class AdminService:
                 'maxStorageGb': plan.max_storage_gb,
                 'maxApiCallsDaily': plan.max_api_calls_daily,
                 'features': plan.features,
+                'isDefault': bool(plan.is_default),
                 'createdDate': plan.created_date.isoformat() if plan.created_date else None,
             })
 
@@ -514,6 +515,7 @@ class AdminService:
             'maxStorageGb': plan.max_storage_gb,
             'maxApiCallsDaily': plan.max_api_calls_daily,
             'features': plan.features,
+            'isDefault': bool(plan.is_default),
             'permissions': [
                 {'id': p.id, 'code': p.code, 'name': p.name, 'category': p.category}
                 for p in all_permissions if p.id in assigned_ids
@@ -555,6 +557,13 @@ class AdminService:
         if not plan:
             raise NotFoundException(f'Subscription plan {plan_id} not found')
 
+        # Promote-to-default is a global op (clears any other default first),
+        # so route it through the dedicated helper rather than a straight
+        # setattr that would race against the partial unique index.
+        if 'isDefault' in data and bool(data['isDefault']) and not plan.is_default:
+            self.set_default_subscription_plan(plan_id)
+            plan = self.db_session.query(SubscriptionPlan).get(plan_id)
+
         # name is immutable — only display_name and other fields can be changed
         for field in ['display_name', 'description', 'price_monthly', 'price_yearly',
                       'max_users', 'max_transactions_monthly', 'max_storage_gb', 'max_api_calls_daily', 'features']:
@@ -566,7 +575,17 @@ class AdminService:
         return {'id': plan.id, 'message': 'Subscription plan updated'}
 
     def _create_plan_version(self, old_plan: 'SubscriptionPlan', new_permission_ids: list) -> 'SubscriptionPlan':
-        """Create a new plan version with updated permissions, deactivate the old one, and migrate subscriptions."""
+        """Create a new plan version with updated permissions, deactivate the old one, and migrate subscriptions.
+
+        Carries forward ``is_default`` so that editing permissions on the
+        default plan doesn't silently strip the flag — that would point
+        register/login auto-assign at a stale row on the next request.
+        Because the partial unique index only fires when ``is_default = TRUE``,
+        we deactivate the old row first (it stays at TRUE but on an
+        is_active=FALSE row, which is ignored), then flush the new TRUE row.
+        """
+        was_default = bool(old_plan.is_default)
+
         new_plan = SubscriptionPlan(
             name=old_plan.name,
             display_name=old_plan.display_name,
@@ -579,12 +598,21 @@ class AdminService:
             max_api_calls_daily=old_plan.max_api_calls_daily,
             features=old_plan.features,
             permission_ids=new_permission_ids,
+            is_default=False,  # set after old row is_default cleared, below
         )
         self.db_session.add(new_plan)
 
-        # Deactivate old plan
+        # Deactivate old plan and clear its default flag so the partial unique
+        # index won't conflict when we set the new row to default below.
         old_plan.is_active = False
+        if was_default:
+            old_plan.is_default = False
         self.db_session.flush()
+
+        # Promote the new row to default if the old one was the default.
+        if was_default:
+            new_plan.is_default = True
+            self.db_session.flush()
 
         # Migrate active subscriptions to the new plan version
         self.db_session.query(Subscription).filter(
@@ -595,6 +623,33 @@ class AdminService:
         self.db_session.flush()
 
         return new_plan
+
+    def set_default_subscription_plan(self, plan_id: int) -> Dict[str, Any]:
+        """Flip the is_default flag to the given plan.
+
+        Clears the current default first so the partial unique index won't
+        fire mid-transaction, then sets the target.
+        """
+        target = self.db_session.query(SubscriptionPlan).filter(
+            SubscriptionPlan.id == plan_id,
+            SubscriptionPlan.is_active == True,
+        ).first()
+        if not target:
+            raise NotFoundException(f'Subscription plan {plan_id} not found')
+
+        if target.is_default:
+            return {'id': target.id, 'message': 'Plan is already the default'}
+
+        self.db_session.query(SubscriptionPlan).filter(
+            SubscriptionPlan.is_default == True,
+            SubscriptionPlan.id != plan_id,
+        ).update({SubscriptionPlan.is_default: False}, synchronize_session='fetch')
+        self.db_session.flush()
+
+        target.is_default = True
+        self.db_session.flush()
+
+        return {'id': target.id, 'message': f'Plan {target.name} marked as default'}
 
     def toggle_plan_permission(self, plan_id: int, data: dict) -> Dict[str, Any]:
         """Toggle a system permission — creates a new plan version for historical tracking"""

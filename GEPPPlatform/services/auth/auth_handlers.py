@@ -380,37 +380,72 @@ class AuthHandlers:
                 # 4. Update organization with owner
                 organization.owner_id = user.id
 
-                # 5. Get or create free subscription plan
-                free_plan = session.query(SubscriptionPlan).filter_by(name='free').first()
+                # 5. Pick the default subscription plan
+                # Admins create a new SubscriptionPlan row on every edit
+                # (the old row stays around with is_active=false), so the
+                # row's id moves. is_default is the stable handle: exactly
+                # one row has is_default=true (enforced by a partial unique
+                # index, migration 065). Don't hard-code id=1, and don't
+                # filter_by(name='free') — those silently latch onto stale
+                # rows.
+                default_plan = (
+                    session.query(SubscriptionPlan)
+                    .filter_by(is_default=True)
+                    .first()
+                )
 
-                if not free_plan:
-                    # Create free plan if it doesn't exist
-                    free_plan = SubscriptionPlan(
-                        name='free',
-                        display_name='Free Plan',
-                        description='Basic features for getting started',
-                        price_monthly=0,
-                        price_yearly=0,
-                        max_users=5,
-                        max_transactions_monthly=100,
-                        max_storage_gb=1,
-                        max_api_calls_daily=1000,
-                        features=json.dumps([
-                            'Basic waste tracking',
-                            'Up to 5 users',
-                            '100 transactions/month',
-                            '1GB storage',
-                            'Basic reporting'
-                        ])
+                if not default_plan:
+                    # No default flagged yet — fall back to the active
+                    # 'free' plan, else the most recent active plan, else
+                    # bootstrap a fresh free plan. Mark whatever we land on
+                    # as the default so the next register hits the fast
+                    # path.
+                    default_plan = (
+                        session.query(SubscriptionPlan)
+                        .filter_by(name='free', is_active=True)
+                        .order_by(SubscriptionPlan.created_date.desc())
+                        .first()
                     )
-                    session.add(free_plan)
-                    session.flush()  # Get the ID
+
+                    if not default_plan:
+                        default_plan = (
+                            session.query(SubscriptionPlan)
+                            .filter_by(is_active=True)
+                            .order_by(SubscriptionPlan.created_date.desc())
+                            .first()
+                        )
+
+                    if not default_plan:
+                        default_plan = SubscriptionPlan(
+                            name='free',
+                            display_name='Free Plan',
+                            description='Basic features for getting started',
+                            price_monthly=0,
+                            price_yearly=0,
+                            max_users=5,
+                            max_transactions_monthly=100,
+                            max_storage_gb=1,
+                            max_api_calls_daily=1000,
+                            features=json.dumps([
+                                'Basic waste tracking',
+                                'Up to 5 users',
+                                '100 transactions/month',
+                                '1GB storage',
+                                'Basic reporting'
+                            ]),
+                            is_default=True,
+                        )
+                        session.add(default_plan)
+                        session.flush()  # Get the ID
+                    else:
+                        default_plan.is_default = True
+                        session.flush()
                     
                 # 6. Create subscription for organization
                 now = datetime.now(timezone.utc)
                 subscription = Subscription(
                     organization_id=organization.id,
-                    plan_id=free_plan.id,
+                    plan_id=default_plan.id,
                     status='active',
                     trial_ends_at=(now + timedelta(days=14)).isoformat(),
                     current_period_starts_at=now.isoformat(),
@@ -825,21 +860,29 @@ class AuthHandlers:
                     Subscription.is_active == True
                 ).first()
 
-                # Auto-assign free plan if no active subscription exists
+                # Auto-assign the default plan if no active subscription exists.
+                # is_default is the stable handle that survives plan version
+                # bumps; fall back to the active 'free' plan only if no row
+                # has been flagged yet (e.g. pre-migration data).
                 if not active_sub:
-                    free_plan = session.query(SubscriptionPlan).filter(
-                        SubscriptionPlan.name == 'free',
+                    default_plan = session.query(SubscriptionPlan).filter(
+                        SubscriptionPlan.is_default == True,
                         SubscriptionPlan.is_active == True
                     ).first()
-                    if free_plan:
+                    if not default_plan:
+                        default_plan = session.query(SubscriptionPlan).filter(
+                            SubscriptionPlan.name == 'free',
+                            SubscriptionPlan.is_active == True
+                        ).order_by(SubscriptionPlan.created_date.desc()).first()
+                    if default_plan:
                         active_sub = Subscription(
                             organization_id=user.organization_id,
-                            plan_id=free_plan.id,
+                            plan_id=default_plan.id,
                             status='active',
                         )
                         session.add(active_sub)
                         session.flush()
-                        active_sub.plan = free_plan
+                        active_sub.plan = default_plan
 
                 if active_sub and active_sub.plan and active_sub.plan.permission_ids:
                     perm_rows = session.query(SystemPermission.code).filter(

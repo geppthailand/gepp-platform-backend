@@ -41,6 +41,7 @@ from GEPPPlatform.services.auth.auth_handlers import AuthHandlers
 from GEPPPlatform.libs import authGuard
 from GEPPPlatform.exceptions import APIException, UnauthorizedException
 from GEPPPlatform.database import get_session
+from GEPPPlatform import config as app_config
 
 import random
 import string
@@ -54,6 +55,19 @@ if not os.environ.get('MAILCHIMP_WEBHOOK_KEY'):
         "MAILCHIMP_WEBHOOK_KEY env var is missing — Mandrill webhooks will all 401"
     )
 # ──────────────────────────────────────────────────────────────────────────
+
+
+# ── Version response headers (deployment freshness check) ──────────────────
+# Centralised so every code path that builds a response can share them. The
+# frontend reads X-App-Version to detect stale Lambda deployments — see
+# config.py for how to bump.
+_VERSION_HEADERS = {
+    "X-App-Version": app_config.VERSION,
+    "X-App-Build-Commit": app_config.BUILD_COMMIT,
+}
+# CORS Expose-Headers is required so the browser actually surfaces these to
+# JS — without it, XHR/fetch can't read them at all.
+_EXPOSED_HEADER_NAMES = ", ".join(_VERSION_HEADERS.keys())
 
 
 def main(event, context):
@@ -89,7 +103,9 @@ def main(event, context):
                     "Access-Control-Allow-Origin": "*",
                     "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
                     "Access-Control-Allow-Headers": "Content-Type, Authorization",
+                    "Access-Control-Expose-Headers": _EXPOSED_HEADER_NAMES,
                     "Content-Type": "application/json",
+                    **_VERSION_HEADERS,
                 },
                 "body": json.dumps({"message": "CORS preflight"})
             }
@@ -113,19 +129,27 @@ def main(event, context):
                         "Access-Control-Allow-Origin": "*",
                         "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
                         "Access-Control-Allow-Headers": "Content-Type, Authorization",
+                        "Access-Control-Expose-Headers": _EXPOSED_HEADER_NAMES,
                         "Content-Type": "application/json",
+                        **_VERSION_HEADERS,
                     },
                     "body": json.dumps({"error": "Invalid JSON in request body"})
                 }
         
         results = {}
 
-        # CORS headers — included on all responses so browser accepts them
+        # CORS headers — included on all responses so browser accepts them.
+        # X-App-Version / X-App-Build-Commit are injected here so every
+        # response carries the deployed code version — frontend reads them to
+        # detect stale Lambdas. Access-Control-Expose-Headers makes them
+        # readable by the browser's fetch/XHR.
         headers = {
             'Access-Control-Allow-Origin': '*',
             'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
             'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-            'Content-Type': 'application/json'
+            'Access-Control-Expose-Headers': _EXPOSED_HEADER_NAMES,
+            'Content-Type': 'application/json',
+            **_VERSION_HEADERS,
         }
 
         # Use SQLAlchemy session instead of direct psycopg2 connection
@@ -181,6 +205,12 @@ def main(event, context):
             elif path == "/health" or "/health" in path:
                 # Health check endpoint (no authorization required)
                 results = {"status": "healthy", "timestamp": datetime.now().isoformat(), "method": http_method}
+
+            elif path == "/api/version" or path.endswith("/api/version"):
+                # Public version probe (no auth) — confirms which code revision
+                # the Lambda is actually running. Same info is also on every
+                # response as X-App-Version / X-App-Build-Commit headers.
+                results = {"success": True, "data": app_config.version_payload()}
 
             elif "/api/webhooks/mailchimp/inbound" in path and http_method == "POST":
                 # Mailchimp Transactional INBOUND reply webhook (Sprint 10 P1 inbox)
@@ -1209,10 +1239,12 @@ def main(event, context):
                 "statusCode": 200,
                 "headers": {
                     "Content-Type": "application/json",
+                    "Access-Control-Expose-Headers": _EXPOSED_HEADER_NAMES,
+                    **_VERSION_HEADERS,
                 },
                 "body": json.dumps(results, cls=DateTimeEncoder),
             }
-        
+
     except UnauthorizedException as auth_error:
         return {
             "statusCode": 401,
@@ -1220,7 +1252,9 @@ def main(event, context):
                 "Access-Control-Allow-Origin": "*",
                 "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
                 "Access-Control-Allow-Headers": "Content-Type, Authorization",
+                "Access-Control-Expose-Headers": _EXPOSED_HEADER_NAMES,
                 "Content-Type": "application/json",
+                **_VERSION_HEADERS,
             },
             "body": json.dumps({
                 "error": "Unauthorized",
@@ -1235,7 +1269,9 @@ def main(event, context):
                 "Access-Control-Allow-Origin": "*",
                 "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
                 "Access-Control-Allow-Headers": "Content-Type, Authorization",
+                "Access-Control-Expose-Headers": _EXPOSED_HEADER_NAMES,
                 "Content-Type": "application/json",
+                **_VERSION_HEADERS,
             },
             "body": json.dumps({
                 "success": False,
@@ -1253,7 +1289,9 @@ def main(event, context):
                 "Access-Control-Allow-Origin": "*",
                 "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
                 "Access-Control-Allow-Headers": "Content-Type, Authorization",
+                "Access-Control-Expose-Headers": _EXPOSED_HEADER_NAMES,
                 "Content-Type": "application/json",
+                **_VERSION_HEADERS,
             },
             "body": json.dumps({
                 "error": "Internal server error",
