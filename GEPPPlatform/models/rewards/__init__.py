@@ -5,7 +5,7 @@ Rewards Module — 15 focused models for B2B2C reward system
 from .management import (
     RewardSetup, RewardCampaign, RewardActivityMaterial,
     RewardCampaignClaim, RewardCampaignCatalog, RewardCampaignDroppoint,
-    RewardCampaignTarget, RewardActivityType, RewardCampaignActivityType,
+    RewardCampaignTarget, RewardActivityType,
 )
 from .catalog import RewardCatalog, RewardStock, RewardCatalogCategory
 from .points import RewardPointTransaction
@@ -18,7 +18,7 @@ __all__ = [
     # Management
     'RewardSetup', 'RewardCampaign', 'RewardActivityMaterial',
     'RewardCampaignClaim', 'RewardCampaignCatalog', 'RewardCampaignDroppoint',
-    'RewardCampaignTarget', 'RewardActivityType', 'RewardCampaignActivityType',
+    'RewardCampaignTarget', 'RewardActivityType',
     # Catalog
     'RewardCatalog', 'RewardStock', 'RewardCatalogCategory',
     # Points
