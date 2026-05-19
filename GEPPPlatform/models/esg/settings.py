@@ -3,6 +3,7 @@ ESG Organization Settings Model
 """
 
 from sqlalchemy import Column, BigInteger, Integer, String, Text, Numeric, Boolean, DateTime, TIMESTAMP, ForeignKey
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.sql import func
 
 from ..base import Base, BaseModel
@@ -21,6 +22,18 @@ class EsgOrganizationSettings(Base, BaseModel):
     reduction_target_percent = Column(Numeric(5, 2))
     reduction_target_year = Column(Integer)
 
+    # Scope 3 focus mode + per-org category whitelist (migration 056).
+    # 'scope3_only' (default) → UI hides S/G + non-Scope-3 E surfaces and
+    # the LLM cascade prompt is narrowed to Scope 3 only.
+    # 'full_esg' → original UI + prompt with all pillars visible.
+    focus_mode = Column(String(32), nullable=False, default='scope3_only')
+
+    # Set-union of all teammates' derived_categories from the materiality
+    # wizard. Drives the For You page, Data Warehouse hierarchy filter,
+    # dashboard widgets, the LLM prompt menu, and the
+    # _create_entry_from_extraction validation guard.
+    enabled_scope3_categories = Column(JSONB, nullable=False, default=list)
+
     # LINE Integration
     line_channel_id = Column(String(255))
     line_channel_secret = Column(String(255))
@@ -38,6 +51,8 @@ class EsgOrganizationSettings(Base, BaseModel):
             'base_year': self.base_year,
             'reduction_target_percent': float(self.reduction_target_percent) if self.reduction_target_percent else None,
             'reduction_target_year': self.reduction_target_year,
+            'focus_mode': self.focus_mode or 'scope3_only',
+            'enabled_scope3_categories': list(self.enabled_scope3_categories or []),
             'line_channel_id': self.line_channel_id,
             'line_channel_secret': '***' if self.line_channel_secret else None,
             'line_channel_token': '***' if self.line_channel_token else None,

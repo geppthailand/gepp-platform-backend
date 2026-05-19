@@ -1,0 +1,312 @@
+# =====================================================================
+# scope3_export_template.yaml
+# ---------------------------------------------------------------------
+# Layout-only schema for the TGO CFO Scope-3 audit workbook.
+#
+# Source: /Users/geppsa-ard/Documents/Workspace/platforms/T-Ver-sheet
+# CFO_GHG Emissions.xlsx — only the **layout** was extracted; no values
+# were copied. Customer data is filled at write time from `esg_records`.
+#
+# Consumers: EsgScope3ExportService (this file's primary user) and any
+# future export/import helpers that need the canonical Scope-3 sheet
+# shape (e.g. an admin-portal "Bulk import TGO workbook" feature).
+#
+# Notes for writers:
+#   • Every detail sheet starts with a fixed 3-line header block
+#     (`title`, "เรื่อง :", "ระยะเวลาเก็บข้อมูล :").
+#   • `placeholder_cats` (3, 4, 8, 13, 14, 15) often have no activity
+#     in real org data; the writer renders a "ไม่มีกิจกรรม / NO ACTIVITY"
+#     stub when the org has zero records under that cat. When records
+#     DO exist, fall back to the generic_table layout so the audit
+#     trail is not lost.
+#   • Sheet 6 (Business Travel) and Sheet 2 (Capital Goods) follow a
+#     flat-list convention rather than a monthly pivot. The writer
+#     branches by `kind`.
+#   • Coordinates are 1-indexed (matches openpyxl).
+# =====================================================================
+version: 1
+
+# Sheet 1 — % GHG scope 3 summary
+summary:
+  sheet_name: "% GHG scope 3"
+  header_row: 2
+  data_start_row: 3
+  columns:
+    - { col: 1, label_th: "หมวด",                label_en: "No.",      key: "scope3_id",        type: "int",    width: 8 }
+    - { col: 2, label_th: "ประเภท (Category)",   label_en: "Category", key: "category_label",   type: "text",   width: 80 }
+    - { col: 3, label_th: "Est. GHG (ton CO2e)", label_en: "tCO2e",    key: "tco2e",            type: "number", number_format: "#,##0.0000", width: 18 }
+    - { col: 4, label_th: "%",                   label_en: "Pct",      key: "pct_of_total",     type: "number", number_format: "0.00%",       width: 10 }
+
+# 15 detail sheets — one per Scope-3 category. Bilingual labels stay
+# verbatim with the T-Ver source so an auditor sees a familiar layout.
+categories:
+  - id: 1
+    sheet_name: "Scope 3.1"
+    title_th: "1. Purchased goods and services"
+    title_en: "Purchased goods and services"
+    kind: "monthly"
+    columns:
+      - { key: "seq",            label_th: "ลำดับ",   label_en: "No.",  type: "int",    width: 8 }
+      - { key: "record_label",   label_th: "รายการ",  label_en: "Item", type: "text",   width: 50 }
+      - { key: "unit",           label_th: "หน่วย",   label_en: "Unit", type: "text",   width: 14 }
+    has_total: true
+    has_notes: true
+  - id: 2
+    sheet_name: "Scope 3.2"
+    title_th: "2. Capital goods (ทรัพย์สินทุน)"
+    title_en: "Capital goods"
+    kind: "asset_register"
+    columns:
+      - { key: "seq",                    label_th: "ลำดับ",          label_en: "No.",         type: "int",    width: 8 }
+      - { key: "record_label",           label_th: "ทรัพย์สิน",        label_en: "Asset",       type: "text",   width: 40 }
+      - { key: "datapoint:asset_type",   label_th: "ประเภท",          label_en: "Type",        type: "text",   width: 18 }
+      - { key: "datapoint:purchase_date", label_th: "วันที่ซื้อ",      label_en: "Purchase Date", type: "date",  width: 14 }
+      - { key: "datapoint:quantity",     label_th: "จำนวน",           label_en: "Qty",         type: "number", width: 10 }
+      - { key: "unit",                   label_th: "หน่วย",           label_en: "Unit",        type: "text",   width: 12 }
+      - { key: "datapoint:unit_cost",    label_th: "ราคาต่อหน่วย",    label_en: "Unit Cost",   type: "number", number_format: "#,##0.00", width: 14 }
+      - { key: "datapoint:total_cost",   label_th: "มูลค่ารวม (บาท)", label_en: "Total Cost",  type: "number", number_format: "#,##0.00", width: 16 }
+      - { key: "kgco2e",                 label_th: "kgCO2e",          label_en: "kgCO2e",      type: "number", number_format: "#,##0.0000", width: 14 }
+      - { key: "evidence_ref",           label_th: "หลักฐาน/เอกสารอ้างอิง", label_en: "Evidence", type: "text", width: 40 }
+
+  - id: 3
+    sheet_name: "Scope 3.3"
+    title_th: "3. กิจกรรมที่เกี่ยวข้องกับเชื้อเพลิงและพลังงาน (ไม่รวมอยู่ใน Scope 1 หรือ Scope 2) (Fuel- and energy-related activities)"
+    title_en: "Fuel- and energy-related activities"
+    kind: "monthly"
+    placeholder: true
+    columns:
+      - { key: "seq",          label_th: "ลำดับ",  label_en: "No.",          type: "int",    width: 8 }
+      - { key: "record_label", label_th: "รายการ", label_en: "Item",         type: "text",   width: 40 }
+      - { key: "responsible",  label_th: "ผู้รับผิดชอบข้อมูล", label_en: "Owner",  type: "text",   width: 18 }
+      - { key: "evidence_ref", label_th: "หลักฐาน/เอกสารอ้างอิง", label_en: "Evidence", type: "text", width: 32 }
+      - { key: "unit",         label_th: "หน่วย",  label_en: "Unit",         type: "text",   width: 14 }
+    has_total: true
+
+  - id: 4
+    sheet_name: "Scope 3.4"
+    title_th: "4. การขนส่งและกระจายสินค้าต้นน้ำ (Upstream transportation and distribution)"
+    title_en: "Upstream transportation and distribution"
+    kind: "monthly"
+    placeholder: true
+    columns:
+      - { key: "seq",                       label_th: "ลำดับ",          label_en: "No.",        type: "int",    width: 8 }
+      - { key: "record_label",              label_th: "รายการ",          label_en: "Item",       type: "text",   width: 40 }
+      - { key: "datapoint:transport_mode",  label_th: "รูปแบบขนส่ง",     label_en: "Mode",       type: "text",   width: 14 }
+      - { key: "datapoint:weight_kg",       label_th: "น้ำหนัก (kg)",    label_en: "Weight (kg)", type: "number", number_format: "#,##0.00", width: 14 }
+      - { key: "datapoint:distance_km",     label_th: "ระยะทาง (km)",    label_en: "Distance (km)", type: "number", number_format: "#,##0.00", width: 14 }
+      - { key: "unit",                      label_th: "หน่วย",           label_en: "Unit",       type: "text",   width: 12 }
+    has_total: true
+
+  - id: 5
+    sheet_name: "Scope 3.5"
+    title_th: "5. ของเสียที่เกิดจากการดำเนินงาน (Waste generated in operations)"
+    title_en: "Waste generated in operations"
+    kind: "monthly"
+    columns:
+      - { key: "seq",                        label_th: "ลำดับ",            label_en: "No.",      type: "int",    width: 8 }
+      - { key: "record_label",               label_th: "รายการ",            label_en: "Item",     type: "text",   width: 36 }
+      - { key: "datapoint:disposal_method",  label_th: "วิธีกำจัด",         label_en: "Disposal", type: "text",   width: 18 }
+      - { key: "datapoint:supplier",         label_th: "Supplier",          label_en: "Supplier", type: "text",   width: 24 }
+      - { key: "responsible",                label_th: "ผู้รับผิดชอบข้อมูล", label_en: "Owner",     type: "text",   width: 18 }
+      - { key: "evidence_ref",               label_th: "หลักฐาน/เอกสารอ้างอิง", label_en: "Evidence", type: "text", width: 32 }
+      - { key: "unit",                       label_th: "หน่วย",             label_en: "Unit",     type: "text",   width: 12 }
+    has_total: true
+
+  - id: 6
+    sheet_name: "Scope 3.6"
+    title_th: "6. การเดินทางเพื่อธุรกิจ (Business travel)"
+    title_en: "Business travel"
+    kind: "travel_detail"
+    columns:
+      - { key: "seq",                        label_th: "ลำดับ",         label_en: "No.",          type: "int",    width: 8 }
+      - { key: "datapoint:vendor",           label_th: "Supplier",       label_en: "Supplier",     type: "text",   width: 28 }
+      - { key: "record_label",               label_th: "รายการ",         label_en: "Description",  type: "text",   width: 44 }
+      - { key: "datapoint:material_group",   label_th: "Material Group", label_en: "Material Group", type: "text", width: 14 }
+      - { key: "datapoint:plant",            label_th: "Plant",          label_en: "Plant",        type: "text",   width: 12 }
+      - { key: "datapoint:quantity",         label_th: "Order Quantity", label_en: "Qty",          type: "number", width: 10 }
+      - { key: "unit",                       label_th: "Order Unit",     label_en: "Unit",         type: "text",   width: 10 }
+      - { key: "datapoint:distance_km",      label_th: "ระยะทาง (km)",   label_en: "Distance (km)", type: "number", number_format: "#,##0", width: 14 }
+      - { key: "datapoint:nights",           label_th: "จำนวนคืนพักแรม (คืน)", label_en: "Nights", type: "number", width: 10 }
+      - { key: "kgco2e",                     label_th: "kgCO2e",          label_en: "kgCO2e",      type: "number", number_format: "#,##0.0000", width: 14 }
+      - { key: "evidence_ref",               label_th: "หลักฐาน/เอกสารอ้างอิง", label_en: "Evidence", type: "text", width: 32 }
+
+  - id: 7
+    sheet_name: "Scope 3.7"
+    title_th: "7. การเดินทางมาทำงานของพนักงาน (Employee commuting)"
+    title_en: "Employee commuting"
+    kind: "headcount_aggregate"
+    aggregate_rows:
+      - { label_th: "เดินทางโดยรถยนต์ (จำนวนพนักงาน)", label_en: "Car commuters (headcount)",   key: "metric:car_headcount",          unit: "คน" }
+      - { label_th: "ระยะทางรวม",                       label_en: "Total distance",              key: "datapoint_sum:distance_km",     unit: "km" }
+      - { label_th: "ปริมาณน้ำมันที่ใช้ (ประมาณการ)",  label_en: "Estimated fuel consumed",      key: "metric:fuel_estimate_litres",   unit: "L" }
+      - { label_th: "kgCO2e รวม",                       label_en: "Total kgCO2e",                key: "kgco2e_year_total",             unit: "kgCO2e" }
+
+  - id: 8
+    sheet_name: "Scope 3.8"
+    title_th: "8. สินทรัพย์เช่าต้นน้ำ (Upstream leased assets)"
+    title_en: "Upstream leased assets"
+    kind: "monthly"
+    placeholder: true
+    columns:
+      - { key: "seq",          label_th: "ลำดับ",  label_en: "No.",  type: "int",  width: 8 }
+      - { key: "record_label", label_th: "รายการ", label_en: "Item", type: "text", width: 40 }
+      - { key: "unit",         label_th: "หน่วย",  label_en: "Unit", type: "text", width: 14 }
+    has_total: true
+
+  - id: 9
+    sheet_name: "Scope 3.9"
+    title_th: "9. การขนส่งและกระจายสินค้าปลายน้ำ (Downstream transportation and distribution)"
+    title_en: "Downstream transportation and distribution"
+    kind: "monthly"
+    columns:
+      - { key: "seq",                      label_th: "ลำดับ",        label_en: "No.",        type: "int",    width: 8 }
+      - { key: "record_label",             label_th: "รายการ",        label_en: "Item",       type: "text",   width: 36 }
+      - { key: "datapoint:transport_mode", label_th: "รูปแบบขนส่ง",   label_en: "Mode",       type: "text",   width: 14 }
+      - { key: "datapoint:weight_kg",      label_th: "น้ำหนัก (kg)",  label_en: "Weight (kg)", type: "number", number_format: "#,##0.00", width: 14 }
+      - { key: "datapoint:distance_km",    label_th: "ระยะทาง (km)",  label_en: "Distance (km)", type: "number", number_format: "#,##0.00", width: 14 }
+      - { key: "responsible",              label_th: "ผู้รับผิดชอบข้อมูล", label_en: "Owner", type: "text",   width: 18 }
+      - { key: "evidence_ref",             label_th: "หลักฐาน/เอกสารอ้างอิง", label_en: "Evidence", type: "text", width: 30 }
+      - { key: "unit",                     label_th: "หน่วย",         label_en: "Unit",       type: "text",   width: 12 }
+    has_total: true
+
+  - id: 10
+    sheet_name: "Scope 3.10"
+    title_th: "10. การแปรรูปสินค้าที่ขาย (Processing of sold products)"
+    title_en: "Processing of sold products"
+    kind: "monthly"
+    columns:
+      - { key: "seq",          label_th: "ลำดับ",  label_en: "No.",  type: "int",  width: 8 }
+      - { key: "record_label", label_th: "รายการ", label_en: "Item", type: "text", width: 36 }
+      - { key: "responsible",  label_th: "ผู้รับผิดชอบข้อมูล", label_en: "Owner",  type: "text", width: 18 }
+      - { key: "evidence_ref", label_th: "หลักฐาน/เอกสารอ้างอิง", label_en: "Evidence", type: "text", width: 32 }
+      - { key: "unit",         label_th: "หน่วย",  label_en: "Unit", type: "text", width: 14 }
+    has_total: true
+
+  - id: 11
+    sheet_name: "Scope 3.11"
+    title_th: "11. การใช้งานสินค้าที่ขาย (Use of sold products)"
+    title_en: "Use of sold products"
+    kind: "monthly"
+    columns:
+      - { key: "seq",          label_th: "ลำดับ",  label_en: "No.",  type: "int",  width: 8 }
+      - { key: "record_label", label_th: "รายการ", label_en: "Item", type: "text", width: 36 }
+      - { key: "responsible",  label_th: "ผู้รับผิดชอบข้อมูล", label_en: "Owner",  type: "text", width: 18 }
+      - { key: "evidence_ref", label_th: "หลักฐาน/เอกสารอ้างอิง", label_en: "Evidence", type: "text", width: 32 }
+      - { key: "unit",         label_th: "หน่วย",  label_en: "Unit", type: "text", width: 14 }
+    has_total: true
+
+  - id: 12
+    sheet_name: "Scope 3.12"
+    title_th: "12. การจัดการสินค้าที่ขายเมื่อหมดอายุ (End-of-life treatment of sold products)"
+    title_en: "End-of-life treatment of sold products"
+    kind: "monthly"
+    columns:
+      - { key: "seq",                       label_th: "ลำดับ",       label_en: "No.",      type: "int",    width: 8 }
+      - { key: "record_label",              label_th: "รายการ",       label_en: "Item",     type: "text",   width: 36 }
+      - { key: "datapoint:disposal_method", label_th: "วิธีกำจัด",    label_en: "Disposal", type: "text",   width: 18 }
+      - { key: "responsible",               label_th: "ผู้รับผิดชอบข้อมูล", label_en: "Owner", type: "text",  width: 18 }
+      - { key: "evidence_ref",              label_th: "หลักฐาน/เอกสารอ้างอิง", label_en: "Evidence", type: "text", width: 32 }
+      - { key: "unit",                      label_th: "หน่วย",        label_en: "Unit",     type: "text",   width: 14 }
+    has_total: true
+
+  - id: 13
+    sheet_name: "Scope 3.13"
+    title_th: "13. สินทรัพย์เช่าปลายน้ำ (Downstream leased assets)"
+    title_en: "Downstream leased assets"
+    kind: "monthly"
+    placeholder: true
+    columns:
+      - { key: "seq",          label_th: "ลำดับ",  label_en: "No.",  type: "int",  width: 8 }
+      - { key: "record_label", label_th: "รายการ", label_en: "Item", type: "text", width: 36 }
+      - { key: "unit",         label_th: "หน่วย",  label_en: "Unit", type: "text", width: 14 }
+    has_total: true
+
+  - id: 14
+    sheet_name: "Scope 3.14"
+    title_th: "14. แฟรนไชส์ (Franchises)"
+    title_en: "Franchises"
+    kind: "monthly"
+    placeholder: true
+    columns:
+      - { key: "seq",          label_th: "ลำดับ",  label_en: "No.",  type: "int",  width: 8 }
+      - { key: "record_label", label_th: "รายการ", label_en: "Item", type: "text", width: 36 }
+      - { key: "unit",         label_th: "หน่วย",  label_en: "Unit", type: "text", width: 14 }
+    has_total: true
+
+  - id: 15
+    sheet_name: "Scope 3.15"
+    title_th: "15. การลงทุน (Investments)"
+    title_en: "Investments"
+    kind: "monthly"
+    placeholder: true
+    columns:
+      - { key: "seq",          label_th: "ลำดับ",  label_en: "No.",  type: "int",  width: 8 }
+      - { key: "record_label", label_th: "รายการ", label_en: "Item", type: "text", width: 36 }
+      - { key: "unit",         label_th: "หน่วย",  label_en: "Unit", type: "text", width: 14 }
+    has_total: true
+
+# Bilingual labels for the 15 cats — used by the summary sheet builder
+# AND by other consumers (e.g. dashboard data warehouse). Keeping the
+# canonical labels in this file means a future change only happens
+# in one place.
+category_labels:
+  1:  { th: "สินค้าและบริการที่ที่องค์กรจัดซื้อและใช้บริการ (Purchased goods and services)",                                            en: "Purchased goods and services" }
+  2:  { th: "สินค้าทุน (Capital goods)",                                                                                                en: "Capital goods" }
+  3:  { th: "กิจกรรมที่เกี่ยวข้องกับเชื้อเพลิงและพลังงาน (ไม่รวมอยู่ใน Scope 1 หรือ Scope 2) (Fuel- and energy-related activities)",  en: "Fuel- and energy-related activities" }
+  4:  { th: "การขนส่งและกระจายสินค้าต้นน้ำ (Upstream transportation and distribution)",                                                  en: "Upstream transportation and distribution" }
+  5:  { th: "ของเสียที่เกิดจากการดำเนินงาน (Waste generated in operations)",                                                            en: "Waste generated in operations" }
+  6:  { th: "การเดินทางเพื่อธุรกิจ (Business travel)",                                                                                  en: "Business travel" }
+  7:  { th: "การเดินทางมาทำงานของพนักงาน (Employee commuting)",                                                                          en: "Employee commuting" }
+  8:  { th: "สินทรัพย์เช่าต้นน้ำ (Upstream leased assets)",                                                                              en: "Upstream leased assets" }
+  9:  { th: "การขนส่งและกระจายสินค้าปลายน้ำ (Downstream transportation and distribution)",                                              en: "Downstream transportation and distribution" }
+  10: { th: "การแปรรูปสินค้าที่ขาย (Processing of sold products)",                                                                        en: "Processing of sold products" }
+  11: { th: "การใช้งานสินค้าที่ขาย (Use of sold products)",                                                                              en: "Use of sold products" }
+  12: { th: "การจัดการสินค้าที่ขายเมื่อหมดอายุ (End-of-life treatment of sold products)",                                              en: "End-of-life treatment of sold products" }
+  13: { th: "สินทรัพย์เช่าปลายน้ำ (Downstream leased assets)",                                                                            en: "Downstream leased assets" }
+  14: { th: "แฟรนไชส์ (Franchises)",                                                                                                      en: "Franchises" }
+  15: { th: "การลงทุน (Investments)",                                                                                                     en: "Investments" }
+
+# Style constants — applied uniformly so every sheet looks the same.
+style:
+  font_family: "Sarabun"            # Falls back to the workbook's default if Sarabun isn't installed
+  font_family_fallback: "Calibri"
+  title_size: 12
+  header_size: 11
+  body_size: 11
+  title_color: "0B1120"             # ink — matches the rest of the GEPP-ESG palette
+  header_fill: "ECFDF5"
+  header_font_color: "047857"
+  border_color: "E2E8F0"
+  zebra_fill: "FAFBFC"
+
+# Header block printed at the top of every detail sheet — verbatim
+# match against the source file so an auditor's eye finds it exactly
+# where they expect.
+sheet_header:
+  title_row:    { row: 1, col: 1, value_th: "3 การปล่อยก๊าซเรือนกระจกทางอ้อมอื่นๆ (Indirect GHG emissions)", merge_to_col: 8 }
+  topic_row:    { row: 2, key_col: 1, value_col: 2, key_th: "เรื่อง :" }
+  period_row:   { row: 3, key_col: 1, value_col: 2, key_th: "ระยะเวลาเก็บข้อมูล :", value_format: "{month_start_th} - {month_end_th} {year}" }
+  table_start_row: 5
+
+# Static phrase used when a cat has zero records (placeholder cats
+# 3, 4, 8, 13, 14, 15).
+no_activity:
+  th: "ไม่มีกิจกรรม"
+  en: "NO ACTIVITY"
+  cell: { row: 5, col: 2 }
+
+# Thai month names — used by the period_row formatter and monthly
+# header columns.
+months_th:
+  - "มกราคม"
+  - "กุมภาพันธ์"
+  - "มีนาคม"
+  - "เมษายน"
+  - "พฤษภาคม"
+  - "มิถุนายน"
+  - "กรกฎาคม"
+  - "สิงหาคม"
+  - "กันยายน"
+  - "ตุลาคม"
+  - "พฤศจิกายน"
+  - "ธันวาคม"

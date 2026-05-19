@@ -10,18 +10,30 @@ set -euo pipefail
 #   3. Starts Flask server that simulates API Gateway → Lambda
 #
 # Usage:
-#   ./run_local.sh              # default port 9000
+#   ./run_local.sh              # default port 9000, local DB
 #   ./run_local.sh 8080         # custom port
 #   ./run_local.sh --install    # force reinstall all deps
+#   ./run_local.sh dev          # point local backend at DEV DB
+#                               #   (sources migrations/.env.development)
+#   ./run_local.sh prd          # point local backend at PROD DB (READ-ONLY-MINDSET!)
+#                               #   (sources migrations/.env)
+#   ./run_local.sh --db=dev     # same as above, explicit form
+#   DB_TARGET=dev ./run_local.sh
 # ──────────────────────────────────────────────────────────────
 
 PORT="9000"
 FORCE_INSTALL=false
+# DB_TARGET: local (default) | dev | prd. Drives which env file is sourced
+# in step 2 below. Env-var form lets CI / wrappers override without args.
+DB_TARGET="${DB_TARGET:-local}"
 
 for arg in "$@"; do
   case "$arg" in
-    --install) FORCE_INSTALL=true ;;
-    [0-9]*)    PORT="$arg" ;;
+    --install)        FORCE_INSTALL=true ;;
+    --db=*)           DB_TARGET="${arg#--db=}" ;;
+    local|dev|prd)    DB_TARGET="$arg" ;;
+    prod|production)  DB_TARGET="prd" ;;
+    [0-9]*)           PORT="$arg" ;;
   esac
 done
 
@@ -61,7 +73,12 @@ fi
 
 log "Using Python 3.13 ($PYTHON)"
 
-# ── 2. Load .env.local (local dev config) ─────────────────────
+# ── 2. Load .env files based on DB_TARGET ─────────────────────
+# Always load $SCRIPT_DIR/.env.local first for non-DB config (JWT, log
+# level, AWS keys, etc.). When DB_TARGET != local, a second file from
+# migrations/ is sourced *after* with `set -a` so its DB_* vars override
+# whatever .env.local set. The migrations env files use DB_PASSWORD; we
+# alias it to DB_PASS (which is what database.py reads) below.
 ENV_FILE="$SCRIPT_DIR/.env.local"
 if [ -f "$ENV_FILE" ]; then
   log "Loading .env.local"
@@ -91,6 +108,45 @@ ENVEOF
   exit 1
 fi
 
+# Resolve which DB env file (if any) to overlay.
+DB_ENV_OVERLAY=""
+case "$DB_TARGET" in
+  local)
+    : # use whatever .env.local provided
+    ;;
+  dev)
+    DB_ENV_OVERLAY="$SCRIPT_DIR/migrations/.env.development"
+    ;;
+  prd)
+    DB_ENV_OVERLAY="$SCRIPT_DIR/migrations/.env"
+    ;;
+  *)
+    err "Unknown DB_TARGET '$DB_TARGET'. Use local | dev | prd."
+    exit 1
+    ;;
+esac
+
+if [ -n "$DB_ENV_OVERLAY" ]; then
+  if [ ! -f "$DB_ENV_OVERLAY" ]; then
+    err "DB_TARGET=$DB_TARGET but env file not found: $DB_ENV_OVERLAY"
+    exit 1
+  fi
+  # Wipe any DB_* values from .env.local so we don't accidentally mix
+  # them with the overlay (e.g. local DB_HOST sticking around).
+  unset DB_HOST DB_PORT DB_NAME DB_USER DB_PASS DB_PASSWORD DATABASE_URL
+  log "Loading DB overlay: ${DB_ENV_OVERLAY#$SCRIPT_DIR/}"
+  set -a; source "$DB_ENV_OVERLAY"; set +a
+fi
+
+# Migrations env files set DB_PASSWORD (long form); database.py reads
+# DB_PASS (short form). Bridge them in either direction.
+if [ -z "${DB_PASS:-}" ] && [ -n "${DB_PASSWORD:-}" ]; then
+  export DB_PASS="$DB_PASSWORD"
+fi
+if [ -z "${DB_PASSWORD:-}" ] && [ -n "${DB_PASS:-}" ]; then
+  export DB_PASSWORD="$DB_PASS"
+fi
+
 # ── 3. Parse DATABASE_URL if individual DB_* vars missing ────
 if [ -n "${DATABASE_URL:-}" ] && [ -z "${DB_HOST:-}" ]; then
   rest="${DATABASE_URL#*://}"
@@ -104,6 +160,30 @@ if [ -n "${DATABASE_URL:-}" ] && [ -z "${DB_HOST:-}" ]; then
   export DB_NAME="${hostportdb#*/}"
   log "Parsed DATABASE_URL -> ${DB_HOST}:${DB_PORT}/${DB_NAME}"
 fi
+
+# ── 3b. Loud banner so the user can never confuse which DB is in play.
+case "$DB_TARGET" in
+  dev)
+    echo
+    echo -e "${YELLOW}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${YELLOW}║  LOCAL BACKEND IS POINTED AT  *DEV*  DATABASE                ║${NC}"
+    echo -e "${YELLOW}║  Host: ${DB_HOST:-?}  DB: ${DB_NAME:-?}${NC}"
+    echo -e "${YELLOW}╚══════════════════════════════════════════════════════════════╝${NC}"
+    echo
+    ;;
+  prd)
+    echo
+    echo -e "${RED}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${RED}║  ⚠  LOCAL BACKEND IS POINTED AT  *PRODUCTION*  DATABASE     ║${NC}"
+    echo -e "${RED}║  Any write you trigger will hit production. Be careful.     ║${NC}"
+    echo -e "${RED}║  Host: ${DB_HOST:-?}  DB: ${DB_NAME:-?}${NC}"
+    echo -e "${RED}╚══════════════════════════════════════════════════════════════╝${NC}"
+    echo
+    ;;
+  local)
+    log "DB target: local (${DB_HOST:-?}:${DB_PORT:-?}/${DB_NAME:-?})"
+    ;;
+esac
 
 # ── 4. Create venv if missing ────────────────────────────────
 # Recreate venv if it exists but uses wrong Python version
@@ -166,16 +246,67 @@ else
   fi
 fi
 
-# ── 6. Start local server ────────────────────────────────────
+# ── 6. Detect LAN IP (so other devices on the same Wi-Fi can hit us) ─
+# Tries the standard primary-interface route first; falls back to ifconfig.
+# On macOS the primary Wi-Fi is usually en0 or en1; on Linux the active
+# default route exposes the LAN IP via `ip route`.
+detect_lan_ip() {
+  local ip=""
+  if command -v route &>/dev/null && [ "$(uname)" = "Darwin" ]; then
+    # macOS: query the routing table for the primary interface, then read
+    # its inet address.
+    local iface
+    iface=$(route -n get default 2>/dev/null | awk '/interface:/ {print $2}')
+    if [ -n "$iface" ]; then
+      ip=$(ipconfig getifaddr "$iface" 2>/dev/null || true)
+    fi
+  fi
+  if [ -z "$ip" ] && command -v ip &>/dev/null; then
+    # Linux
+    ip=$(ip -4 -o route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if ($i=="src") print $(i+1)}')
+  fi
+  if [ -z "$ip" ]; then
+    # Last resort — pick the first non-loopback IPv4 from ifconfig / ip addr.
+    ip=$( (ifconfig 2>/dev/null || ip -4 addr show 2>/dev/null) \
+        | grep -Eo 'inet (addr:)?([0-9]+\.){3}[0-9]+' \
+        | grep -Eo '([0-9]+\.){3}[0-9]+' \
+        | grep -v '^127\.' \
+        | head -1 )
+  fi
+  echo "$ip"
+}
+
+LAN_IP="$(detect_lan_ip)"
+
+# ── 7. Start local server ────────────────────────────────────
 echo ""
 echo -e "${GREEN}==========================================${NC}"
 echo -e "${GREEN}  GEPP Platform — Local Lambda Server${NC}"
 echo -e "${GREEN}  Port: $PORT${NC}"
 echo -e "${GREEN}==========================================${NC}"
 echo ""
+echo -e "  Reachable at:"
+echo -e "    Localhost  : ${CYAN}http://localhost:${PORT}${NC}"
+echo -e "    Localhost  : ${CYAN}http://127.0.0.1:${PORT}${NC}"
+if [ -n "$LAN_IP" ]; then
+  echo -e "    LAN (Wi-Fi): ${CYAN}http://${LAN_IP}:${PORT}${NC}  ${YELLOW}← use this from tablets / phones on the same Wi-Fi${NC}"
+  echo ""
+  echo -e "  ${YELLOW}IoT scale tablet${NC} (Flutter app) — start with:"
+  echo -e "    ${CYAN}flutter run --dart-define=APP_ENV=local --dart-define=API_BASE_URL=http://${LAN_IP}:${PORT}/api${NC}"
+  echo ""
+  echo -e "  ${YELLOW}Backoffice${NC} (gepp-new-webapp) — set in .env.local:"
+  echo -e "    ${CYAN}VITE_V3_API_URL_LOCAL=http://${LAN_IP}:${PORT}/api${NC}"
+else
+  warn "Could not auto-detect LAN IP. Manual: ipconfig getifaddr en0 (macOS) / hostname -I (Linux)"
+fi
+echo ""
+warn "First-time LAN access on macOS may show 'Allow Python to accept incoming connections?' — click Allow."
+warn "If LAN clients can't connect, check System Settings → Network → Firewall (allow Python or temporarily disable)."
+echo ""
 
 export PYTHONPATH="$SCRIPT_DIR"
 export PORT="$PORT"
+export LAN_IP="$LAN_IP"
 
 exec "$VENV_DIR/bin/python" -c "
 import json, sys, os, traceback
@@ -259,13 +390,28 @@ def catch_all(path):
     try:
         result = lambda_handler(event, None)
     except Exception as e:
+        tb = traceback.format_exc()
+        print(f'\n\033[0;31m[500 EXCEPTION]\033[0m {request.method} /{path}', file=sys.stderr)
+        print(tb, file=sys.stderr)
         result = {
             'statusCode': 500,
             'headers': {'Content-Type': 'application/json'},
-            'body': json.dumps({'error': str(e), 'trace': traceback.format_exc()}),
+            'body': json.dumps({'error': str(e), 'trace': tb}),
         }
 
     status = result.get('statusCode', 200)
+    if status >= 500:
+        try:
+            body_data = json.loads(result.get('body', '{}'))
+            print(f'\n\033[0;31m[500 RESPONSE]\033[0m {request.method} /{path}', file=sys.stderr)
+            if 'stack_trace' in body_data:
+                print(body_data['stack_trace'], file=sys.stderr)
+            elif 'trace' in body_data:
+                print(body_data['trace'], file=sys.stderr)
+            else:
+                print(json.dumps(body_data, indent=2), file=sys.stderr)
+        except Exception:
+            print(result.get('body', ''), file=sys.stderr)
     resp_headers = result.get('headers', {})
     body = result.get('body', '')
 
@@ -273,13 +419,20 @@ def catch_all(path):
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 9000))
+    lan_ip = os.environ.get('LAN_IP', '').strip()
     print()
-    print('  Routes:')
+    print('  Routes (localhost):')
     print(f'    Health check  : http://localhost:{port}/health')
     print(f'    Auth          : http://localhost:{port}/api/auth/...')
     print(f'    Users         : http://localhost:{port}/api/users/...')
     print(f'    Transactions  : http://localhost:{port}/api/transactions/...')
     print(f'    Materials     : http://localhost:{port}/api/materials/...')
+    if lan_ip:
+        print()
+        print(f'  LAN (Wi-Fi): http://{lan_ip}:{port}  ← reachable from any device on the same network')
     print()
+    # Bind to 0.0.0.0 so the dev server is reachable from any host on the
+    # local network (LAN), not just loopback. Required for the Flutter
+    # tablet / iOS device on the same Wi-Fi to hit the API.
     app.run(host='0.0.0.0', port=port, debug=True)
 "

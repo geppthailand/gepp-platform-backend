@@ -41,12 +41,34 @@ from GEPPPlatform.services.auth.auth_handlers import AuthHandlers
 from GEPPPlatform.libs import authGuard
 from GEPPPlatform.exceptions import APIException, UnauthorizedException
 from GEPPPlatform.database import get_session
+from GEPPPlatform import config as app_config
 
 import random
 import string
 import logging
 
 logger = logging.getLogger(__name__)
+
+# ── Startup env-var checks ─────────────────────────────────────────────────
+if not os.environ.get('MAILCHIMP_WEBHOOK_KEY'):
+    logger.critical(
+        "MAILCHIMP_WEBHOOK_KEY env var is missing — Mandrill webhooks will all 401"
+    )
+# ──────────────────────────────────────────────────────────────────────────
+
+
+# ── Version response headers (deployment freshness check) ──────────────────
+# Centralised so every code path that builds a response can share them. The
+# frontend reads X-App-Version to detect stale Lambda deployments — see
+# config.py for how to bump.
+_VERSION_HEADERS = {
+    "X-App-Version": app_config.VERSION,
+    "X-App-Build-Commit": app_config.BUILD_COMMIT,
+}
+# CORS Expose-Headers is required so the browser actually surfaces these to
+# JS — without it, XHR/fetch can't read them at all.
+_EXPOSED_HEADER_NAMES = ", ".join(_VERSION_HEADERS.keys())
+
 
 def main(event, context):
     try:
@@ -81,7 +103,9 @@ def main(event, context):
                     "Access-Control-Allow-Origin": "*",
                     "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
                     "Access-Control-Allow-Headers": "Content-Type, Authorization",
+                    "Access-Control-Expose-Headers": _EXPOSED_HEADER_NAMES,
                     "Content-Type": "application/json",
+                    **_VERSION_HEADERS,
                 },
                 "body": json.dumps({"message": "CORS preflight"})
             }
@@ -105,19 +129,27 @@ def main(event, context):
                         "Access-Control-Allow-Origin": "*",
                         "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
                         "Access-Control-Allow-Headers": "Content-Type, Authorization",
+                        "Access-Control-Expose-Headers": _EXPOSED_HEADER_NAMES,
                         "Content-Type": "application/json",
+                        **_VERSION_HEADERS,
                     },
                     "body": json.dumps({"error": "Invalid JSON in request body"})
                 }
         
         results = {}
 
-        # CORS headers — included on all responses so browser accepts them
+        # CORS headers — included on all responses so browser accepts them.
+        # X-App-Version / X-App-Build-Commit are injected here so every
+        # response carries the deployed code version — frontend reads them to
+        # detect stale Lambdas. Access-Control-Expose-Headers makes them
+        # readable by the browser's fetch/XHR.
         headers = {
             'Access-Control-Allow-Origin': '*',
             'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
             'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-            'Content-Type': 'application/json'
+            'Access-Control-Expose-Headers': _EXPOSED_HEADER_NAMES,
+            'Content-Type': 'application/json',
+            **_VERSION_HEADERS,
         }
 
         # Use SQLAlchemy session instead of direct psycopg2 connection
@@ -144,6 +176,17 @@ def main(event, context):
                 auth_result = handle_auth_routes(path, data=body, **commonParams)
                 results = {"data": auth_result}
 
+            elif "/api/iot-hardwares" in path:
+                # PUBLIC: physical-tablet self-checkin (every ~15 s, pre-login).
+                # See migration 051 + iot_hardwares_handlers.py for the
+                # rationale. Routed here so unauthenticated tablets can
+                # report MAC + serial without needing device-token first.
+                from GEPPPlatform.services.cores.iot_hardwares.iot_hardwares_handlers import (
+                    handle_iot_hardware_routes,
+                )
+                hw_result = handle_iot_hardware_routes(event, data=body, **commonParams)
+                results = {"success": True, "data": hw_result}
+
             elif "/documents/api-docs" in raw_path or "/docs/bma/" in raw_path:
                 # Handle documentation routes (no authorization required)
                 from .docs.docs_handlers import handle_docs_routes
@@ -162,6 +205,39 @@ def main(event, context):
             elif path == "/health" or "/health" in path:
                 # Health check endpoint (no authorization required)
                 results = {"status": "healthy", "timestamp": datetime.now().isoformat(), "method": http_method}
+
+            elif path == "/api/version" or path.endswith("/api/version"):
+                # Public version probe (no auth) — confirms which code revision
+                # the Lambda is actually running. Same info is also on every
+                # response as X-App-Version / X-App-Build-Commit headers.
+                results = {"success": True, "data": app_config.version_payload()}
+
+            elif "/api/webhooks/mailchimp/inbound" in path and http_method == "POST":
+                # Mailchimp Transactional INBOUND reply webhook (Sprint 10 P1 inbox)
+                from GEPPPlatform.services.webhooks.mailchimp_inbound_handler import handle_mailchimp_inbound_webhook
+                return handle_mailchimp_inbound_webhook(event, session)
+
+            elif "/api/webhooks/mailchimp" in path and http_method == "POST":
+                # Mailchimp Transactional activity webhook (public, HMAC-signed)
+                from GEPPPlatform.services.webhooks.mailchimp_handler import handle_mailchimp_webhook
+                return handle_mailchimp_webhook(event, session)
+
+            elif "/api/crm/unsubscribe/" in path and http_method == "GET":
+                # Public unsubscribe landing page (token-signed)
+                from GEPPPlatform.services.public.crm_unsubscribe_handler import handle_unsubscribe
+                token = path.split('/api/crm/unsubscribe/')[1].split('/')[0].split('?')[0]
+                return handle_unsubscribe(token, session)
+
+            elif "/api/public/leads" in path and http_method == "POST":
+                # Public lead capture — no auth required.
+                # Accepts form submissions from embedded widgets.
+                from GEPPPlatform.services.public.leads_capture_handler import handle_public_lead_capture
+                request_meta = {
+                    "ip_address": (event.get("requestContext", {}).get("http", {}) or {}).get("sourceIp"),
+                    "user_agent": (event.get("headers") or {}).get("user-agent"),
+                }
+                lead_result = handle_public_lead_capture(body, session, request_meta=request_meta)
+                results = {"success": True, "data": lead_result}
 
             elif "/api/userapi/documents/" in path:
                 # PUBLIC: Handle API documentation routes (no authentication required)
@@ -597,6 +673,7 @@ def main(event, context):
                         'user_id': token_data['user_id'],
                         'organization_id': token_data.get('organization_id'),
                         'email': token_data.get('email'),
+                        'admin_role': token_data.get('admin_role'),  # Sprint 4: needed by CRM email-list scoping
                         'token_data': token_data  # Include full token data for future use
                     }
                     commonParams['current_user'] = current_user
@@ -614,10 +691,48 @@ def main(event, context):
                             }
                         from GEPPPlatform.services.admin import handle_admin_routes
                         admin_result = handle_admin_routes(path, data=body, **commonParams)
-                        results = {
-                            "success": True,
-                            "data": admin_result
+                        # Allow admin handlers to return a raw proxy response
+                        # (e.g. 304 Not Modified for ETag-aware endpoints).
+                        if isinstance(admin_result, dict) and isinstance(admin_result.get('__http__'), dict):
+                            http_meta = admin_result['__http__']
+                            if 'statusCode' in http_meta:
+                                # Full proxy response — return directly.
+                                proxy_headers = dict(headers)
+                                proxy_headers.update(http_meta.get('headers', {}) or {})
+                                results = {
+                                    "statusCode": http_meta['statusCode'],
+                                    "headers": proxy_headers,
+                                    "body": http_meta.get('body', ''),
+                                }
+                            else:
+                                # Headers-only override (e.g. attach ETag to a normal JSON response).
+                                extra_headers = http_meta.get('headers', {}) or {}
+                                # Strip the meta key from the payload before serialising.
+                                payload = {k: v for k, v in admin_result.items() if k != '__http__'}
+                                body_dict = {"success": True, "data": payload}
+                                merged_headers = dict(headers)
+                                merged_headers.update(extra_headers)
+                                results = {
+                                    "statusCode": 200,
+                                    "headers": merged_headers,
+                                    "body": json.dumps(body_dict, cls=DateTimeEncoder),
+                                }
+                        else:
+                            results = {
+                                "success": True,
+                                "data": admin_result
+                            }
+                    elif "/api/crm/events" in path and http_method == "POST":
+                        # Authed client-side event ingest (user JWT)
+                        from GEPPPlatform.services.public.crm_client_events_handler import handle_client_event
+                        request_meta = {
+                            "session_id": (event.get("headers") or {}).get("x-session-id"),
+                            "ip_address": (event.get("requestContext", {}).get("http", {}) or {}).get("sourceIp"),
+                            "user_agent": (event.get("headers") or {}).get("user-agent"),
                         }
+                        crm_evt_result = handle_client_event(body, current_user, request_meta, session)
+                        results = {"success": True, "data": crm_evt_result}
+
                     elif "/api/iot-devices" in path:
                         # Handle all IoT devices management routes
                         from GEPPPlatform.services.cores.iot_devices.iot_devices_handlers import handle_iot_devices_routes
@@ -1124,10 +1239,12 @@ def main(event, context):
                 "statusCode": 200,
                 "headers": {
                     "Content-Type": "application/json",
+                    "Access-Control-Expose-Headers": _EXPOSED_HEADER_NAMES,
+                    **_VERSION_HEADERS,
                 },
                 "body": json.dumps(results, cls=DateTimeEncoder),
             }
-        
+
     except UnauthorizedException as auth_error:
         return {
             "statusCode": 401,
@@ -1135,7 +1252,9 @@ def main(event, context):
                 "Access-Control-Allow-Origin": "*",
                 "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
                 "Access-Control-Allow-Headers": "Content-Type, Authorization",
+                "Access-Control-Expose-Headers": _EXPOSED_HEADER_NAMES,
                 "Content-Type": "application/json",
+                **_VERSION_HEADERS,
             },
             "body": json.dumps({
                 "error": "Unauthorized",
@@ -1150,7 +1269,9 @@ def main(event, context):
                 "Access-Control-Allow-Origin": "*",
                 "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
                 "Access-Control-Allow-Headers": "Content-Type, Authorization",
+                "Access-Control-Expose-Headers": _EXPOSED_HEADER_NAMES,
                 "Content-Type": "application/json",
+                **_VERSION_HEADERS,
             },
             "body": json.dumps({
                 "success": False,
@@ -1168,7 +1289,9 @@ def main(event, context):
                 "Access-Control-Allow-Origin": "*",
                 "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
                 "Access-Control-Allow-Headers": "Content-Type, Authorization",
+                "Access-Control-Expose-Headers": _EXPOSED_HEADER_NAMES,
                 "Content-Type": "application/json",
+                **_VERSION_HEADERS,
             },
             "body": json.dumps({
                 "error": "Internal server error",

@@ -92,6 +92,7 @@ def get_swagger_spec() -> Dict[str, Any]:
                                         "recycling_rate": 0.72,
                                         "ghg_reduction_kg": 8500.2,
                                         "tree_equivalent": 894.76,
+                                        "forest_rai_equivalent": 8.9476,
                                         "material_breakdown": [
                                             {
                                                 "category_id": 1,
@@ -231,7 +232,8 @@ def get_swagger_spec() -> Dict[str, Any]:
                         "total_weight_kg": {"type": "number", "description": "Total waste weight in kg"},
                         "recycling_rate": {"type": "number", "description": "Recycling rate (0-1)"},
                         "ghg_reduction_kg": {"type": "number", "description": "GHG reduction in kg CO2"},
-                        "tree_equivalent": {"type": "number", "description": "Tree equivalent (1 tree = 9.5 kg CO2/year)"},
+                        "tree_equivalent": {"type": "number", "description": "Tree equivalent (T-VER: 1 tree absorbs ~9.5 kgCO2eq/year)"},
+                        "forest_rai_equivalent": {"type": "number", "description": "Forest area equivalent in rai (T-VER: 1 rai of Thai forest absorbs ~950 kgCO2eq/year ≈ 100 trees/rai)"},
                         "material_breakdown": {
                             "type": "array",
                             "items": {"$ref": "#/components/schemas/CategoryBreakdown"}

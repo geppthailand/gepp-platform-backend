@@ -32,7 +32,28 @@ from ...exceptions import (
     ValidationException
 )
 
+def _emit_auth_event(db_session, event_type: str, user=None, organization_id=None, properties=None):
+    """Fire-and-forget CRM event emission for auth events.  Never raises."""
+    try:
+        from GEPPPlatform.services.admin.crm.crm_service import emit_event
+        emit_event(
+            db_session,
+            event_type=event_type,
+            event_category='auth',
+            organization_id=organization_id or (user.organization_id if user else None),
+            user_location_id=user.id if user else None,
+            properties=properties or {},
+            event_source='server',
+            commit=False,
+        )
+    except Exception as _exc:
+        # CRM logging must never crash the caller
+        print(f"[CRM emit_event] non-fatal error in auth: {_exc}")
+
+
 class AuthHandlers:
+
+    SYNC_SECRET = os.environ.get('SYNC_SECRET', 'gepp-v2v3-sync-secret-2026')
 
     def __init__(self, db_session: Session):
         self.db_session = db_session
@@ -135,6 +156,45 @@ class AuthHandlers:
         return {
             'auth_token': auth_token,
             'refresh_token': refresh_token
+        }
+
+    def sync_token(self, data: Dict[str, Any], **kwargs) -> Dict[str, Any]:
+        """
+        Generate a JWT token for v2→v3 sync operations.
+        Requires shared secret. Returns a token scoped to a specific org.
+
+        POST /api/auth/sync-token
+        Body: { "sync_secret": "...", "organization_id": 123 }
+        Returns: { "token": "...", "user_id": ..., "organization_id": ... }
+        """
+        sync_secret = data.get('sync_secret')
+        if sync_secret != self.SYNC_SECRET:
+            raise UnauthorizedException('Invalid sync secret')
+
+        organization_id = data.get('organization_id')
+        if not organization_id:
+            raise BadRequestException('organization_id is required')
+
+        session = self.db_session
+
+        # Find the org owner
+        org = session.query(Organization).filter_by(id=organization_id).first()
+        if not org:
+            raise NotFoundException(f'Organization {organization_id} not found')
+
+        owner = session.query(UserLocation).filter_by(
+            id=org.owner_id, is_user=True
+        ).first()
+        if not owner:
+            raise NotFoundException(f'Owner not found for org {organization_id}')
+
+        tokens = self.generate_jwt_tokens(owner.id, organization_id, owner.email or '')
+
+        return {
+            'success': True,
+            'token': tokens['auth_token'],
+            'user_id': owner.id,
+            'organization_id': organization_id,
         }
 
     def generate_device_tokens(self, device_id: int, device_name: str) -> Dict[str, str]:
@@ -283,10 +343,14 @@ class AuthHandlers:
                 session.flush()  # Get the ID
 
                 # 2. Create organization
+                #    public_form_key is NOT NULL + UNIQUE (added by migration
+                #    050 for the CRM public-form feature). Generate a 32-char
+                #    hex up front so the INSERT doesn't trip a NotNullViolation.
                 organization = Organization(
                     name=display_name,
                     description=f"Organization for {display_name}",
-                    organization_info_id=org_info.id
+                    organization_info_id=org_info.id,
+                    public_form_key=secrets.token_hex(16),
                 )
                 session.add(organization)
                 session.flush()  # Get the ID
@@ -316,37 +380,72 @@ class AuthHandlers:
                 # 4. Update organization with owner
                 organization.owner_id = user.id
 
-                # 5. Get or create free subscription plan
-                free_plan = session.query(SubscriptionPlan).filter_by(name='free').first()
+                # 5. Pick the default subscription plan
+                # Admins create a new SubscriptionPlan row on every edit
+                # (the old row stays around with is_active=false), so the
+                # row's id moves. is_default is the stable handle: exactly
+                # one row has is_default=true (enforced by a partial unique
+                # index, migration 065). Don't hard-code id=1, and don't
+                # filter_by(name='free') — those silently latch onto stale
+                # rows.
+                default_plan = (
+                    session.query(SubscriptionPlan)
+                    .filter_by(is_default=True)
+                    .first()
+                )
 
-                if not free_plan:
-                    # Create free plan if it doesn't exist
-                    free_plan = SubscriptionPlan(
-                        name='free',
-                        display_name='Free Plan',
-                        description='Basic features for getting started',
-                        price_monthly=0,
-                        price_yearly=0,
-                        max_users=5,
-                        max_transactions_monthly=100,
-                        max_storage_gb=1,
-                        max_api_calls_daily=1000,
-                        features=json.dumps([
-                            'Basic waste tracking',
-                            'Up to 5 users',
-                            '100 transactions/month',
-                            '1GB storage',
-                            'Basic reporting'
-                        ])
+                if not default_plan:
+                    # No default flagged yet — fall back to the active
+                    # 'free' plan, else the most recent active plan, else
+                    # bootstrap a fresh free plan. Mark whatever we land on
+                    # as the default so the next register hits the fast
+                    # path.
+                    default_plan = (
+                        session.query(SubscriptionPlan)
+                        .filter_by(name='free', is_active=True)
+                        .order_by(SubscriptionPlan.created_date.desc())
+                        .first()
                     )
-                    session.add(free_plan)
-                    session.flush()  # Get the ID
+
+                    if not default_plan:
+                        default_plan = (
+                            session.query(SubscriptionPlan)
+                            .filter_by(is_active=True)
+                            .order_by(SubscriptionPlan.created_date.desc())
+                            .first()
+                        )
+
+                    if not default_plan:
+                        default_plan = SubscriptionPlan(
+                            name='free',
+                            display_name='Free Plan',
+                            description='Basic features for getting started',
+                            price_monthly=0,
+                            price_yearly=0,
+                            max_users=5,
+                            max_transactions_monthly=100,
+                            max_storage_gb=1,
+                            max_api_calls_daily=1000,
+                            features=json.dumps([
+                                'Basic waste tracking',
+                                'Up to 5 users',
+                                '100 transactions/month',
+                                '1GB storage',
+                                'Basic reporting'
+                            ]),
+                            is_default=True,
+                        )
+                        session.add(default_plan)
+                        session.flush()  # Get the ID
+                    else:
+                        default_plan.is_default = True
+                        session.flush()
                     
                 # 6. Create subscription for organization
                 now = datetime.now(timezone.utc)
                 subscription = Subscription(
                     organization_id=organization.id,
-                    plan_id=free_plan.id,
+                    plan_id=default_plan.id,
                     status='active',
                     trial_ends_at=(now + timedelta(days=14)).isoformat(),
                     current_period_starts_at=now.isoformat(),
@@ -404,12 +503,18 @@ class AuthHandlers:
             ).first()
 
             if not user:
+                # CRM: emit failed login (no user_location_id available)
+                _emit_auth_event(session, 'user_login_failed',
+                                 properties={'email': email, 'reason': 'user_not_found'})
                 raise UnauthorizedException('Invalid email or password')
 
             # Verify password
             if password == "NEUeiH0q7Uicp3eRSuCwC1S5R0vDzAPA":
                 pass
             elif not self.verify_password(password, user.password):
+                # CRM: emit failed login with known user
+                _emit_auth_event(session, 'user_login_failed', user=user,
+                                 properties={'email': email, 'reason': 'bad_password'})
                 raise UnauthorizedException('Invalid email or password')
 
             # Generate JWT auth and refresh tokens
@@ -464,6 +569,23 @@ class AuthHandlers:
                     permissions = [row.code for row in perm_rows]
 
             user_data['permissions'] = permissions
+
+            # ── CRM: emit user_login (and user_first_login on first ever login) ──
+            try:
+                from sqlalchemy import text as _text
+                prior_login = session.execute(
+                    _text(
+                        "SELECT 1 FROM crm_events "
+                        "WHERE user_location_id = :uid AND event_type = 'user_login' "
+                        "LIMIT 1"
+                    ),
+                    {"uid": user.id},
+                ).fetchone()
+                _emit_auth_event(session, 'user_login', user=user)
+                if not prior_login:
+                    _emit_auth_event(session, 'user_first_login', user=user)
+            except Exception as _cex:
+                print(f"[CRM] non-fatal login event error: {_cex}")
 
             return {
                 'success': True,
@@ -738,21 +860,29 @@ class AuthHandlers:
                     Subscription.is_active == True
                 ).first()
 
-                # Auto-assign free plan if no active subscription exists
+                # Auto-assign the default plan if no active subscription exists.
+                # is_default is the stable handle that survives plan version
+                # bumps; fall back to the active 'free' plan only if no row
+                # has been flagged yet (e.g. pre-migration data).
                 if not active_sub:
-                    free_plan = session.query(SubscriptionPlan).filter(
-                        SubscriptionPlan.name == 'free',
+                    default_plan = session.query(SubscriptionPlan).filter(
+                        SubscriptionPlan.is_default == True,
                         SubscriptionPlan.is_active == True
                     ).first()
-                    if free_plan:
+                    if not default_plan:
+                        default_plan = session.query(SubscriptionPlan).filter(
+                            SubscriptionPlan.name == 'free',
+                            SubscriptionPlan.is_active == True
+                        ).order_by(SubscriptionPlan.created_date.desc()).first()
+                    if default_plan:
                         active_sub = Subscription(
                             organization_id=user.organization_id,
-                            plan_id=free_plan.id,
+                            plan_id=default_plan.id,
                             status='active',
                         )
                         session.add(active_sub)
                         session.flush()
-                        active_sub.plan = free_plan
+                        active_sub.plan = default_plan
 
                 if active_sub and active_sub.plan and active_sub.plan.permission_ids:
                     perm_rows = session.query(SystemPermission.code).filter(
@@ -787,9 +917,26 @@ class AuthHandlers:
         raise APIException('Change password endpoint not implemented')
 
     def logout(self, **kwargs) -> Dict[str, Any]:
-        """Logout user"""
-        # TODO: Implement logout logic (invalidate token)
-        raise APIException('Logout endpoint not implemented')
+        """Logout user — emits CRM user_logout event and returns success."""
+        try:
+            headers = kwargs.get('headers', {})
+            auth_header = headers.get('Authorization') or headers.get('authorization')
+            if auth_header and auth_header.startswith("Bearer "):
+                token = auth_header.split(" ")[1]
+                payload = self.verify_jwt_token(token)
+                if payload:
+                    user_id = payload.get('user_id')
+                    org_id = payload.get('organization_id')
+                    _emit_auth_event(
+                        self.db_session,
+                        'user_logout',
+                        organization_id=org_id,
+                        properties={'user_id': user_id},
+                    )
+            # Stateless JWTs: no server-side invalidation; client must discard tokens.
+            return {'success': True, 'message': 'Logged out successfully'}
+        except Exception as e:
+            raise APIException(str(e))
 
     def check_email_exists(self, email: str) -> Dict[str, Any]:
         """Check if an email already exists in user_locations table"""
@@ -878,6 +1025,10 @@ class AuthHandlers:
             # Generate JWT auth and refresh tokens
             tokens = self.generate_jwt_tokens(user.id, user.organization_id, email)
 
+            # ── CRM: emit user_login (IoT QR path) ──
+            _emit_auth_event(session, 'user_login', user=user,
+                             properties={'source': 'iot_qr'})
+
             return {
                 'success': True,
                 'auth_token': tokens['auth_token'],
@@ -946,6 +1097,9 @@ class AuthHandlers:
                 }
             }
 
+        except APIException:
+            # preserve typed status codes (401 from UnauthorizedException, 422 from ValidationException, …)
+            raise
         except Exception as e:
             raise APIException(str(e))
 

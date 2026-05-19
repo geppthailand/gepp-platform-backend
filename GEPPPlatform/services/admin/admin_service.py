@@ -21,7 +21,12 @@ from GEPPPlatform.models.subscriptions.subscription_models import (
 from GEPPPlatform.models.cores.roles import SystemPermission, subscription_permissions
 from GEPPPlatform.models.cores.iot_devices import IoTDevice
 from GEPPPlatform.models.cores.iot_scales import IoTScale
-from GEPPPlatform.exceptions import NotFoundException, BadRequestException, ValidationException
+from GEPPPlatform.exceptions import (
+    NotFoundException,
+    BadRequestException,
+    ValidationException,
+    ConflictException,
+)
 
 
 class AdminService:
@@ -148,12 +153,14 @@ class AdminService:
             'subscriptions': [
                 {
                     'id': sub.id,
+                    'planId': sub.plan_id,
                     'planName': sub.plan.display_name if sub.plan else sub.plan_id,
                     'status': sub.status,
                     'currentPeriodEndsAt': sub.current_period_ends_at,
                 }
                 for sub in (org.subscriptions or [])
             ],
+            'currentSubscriptionId': org.subscription_id,
             'allowAiAudit': org.allow_ai_audit,
             'maxOrgStructureNodes': org.max_org_structure_nodes if hasattr(org, 'max_org_structure_nodes') else 50,
             'isActive': org.is_active,
@@ -161,20 +168,107 @@ class AdminService:
         }
 
     def update_organization(self, org_id: int, data: dict) -> Dict[str, Any]:
-        org = self.db_session.query(Organization).filter(
-            Organization.id == org_id, Organization.is_active == True
-        ).first()
+        """Update org-level fields **and** nested OrganizationInfo in one
+        PATCH. The backoffice show page sends a flat object that may
+        include any subset of:
+          - top-level org: name, description, allowAiAudit,
+                           maxOrgStructureNodes, isActive
+          - nested company info (`organizationInfo: {...}`):
+                companyName, companyNameTh, companyNameEn,
+                displayName, businessType, businessIndustry, taxId,
+                companyEmail, phoneNumber, companyPhone, address
+        Only keys actually present in the payload are written, so the
+        same endpoint serves both small inline edits and the full Edit
+        tab form."""
+        org = self.db_session.query(Organization).options(
+            joinedload(Organization.organization_info)
+        ).filter(Organization.id == org_id).first()
         if not org:
             raise NotFoundException(f'Organization {org_id} not found')
 
+        # ── Org-level scalars ────────────────────────────────────────
         if 'name' in data:
             org.name = data['name']
         if 'description' in data:
             org.description = data['description']
         if 'allowAiAudit' in data:
-            org.allow_ai_audit = data['allowAiAudit']
+            org.allow_ai_audit = bool(data['allowAiAudit'])
+        if 'isActive' in data:
+            org.is_active = bool(data['isActive'])
         if 'maxOrgStructureNodes' in data:
             org.max_org_structure_nodes = int(data['maxOrgStructureNodes'])
+
+        # ── Company info (OrganizationInfo row) ─────────────────────
+        # Accept BOTH nested `{organizationInfo: {...}}` and flat
+        # camelCase keys at the top level, so simple inline edits don't
+        # need a wrapper object.
+        info_patch = data.get('organizationInfo') or {}
+        info_field_map = {
+            'companyName':       'company_name',
+            'companyNameTh':     'company_name_th',
+            'companyNameEn':     'company_name_en',
+            'displayName':       'display_name',
+            'businessType':      'business_type',
+            'businessIndustry':  'business_industry',
+            'taxId':             'tax_id',
+            'companyEmail':      'company_email',
+            'phoneNumber':       'phone_number',
+            'companyPhone':      'company_phone',
+            'address':           'address',
+        }
+        # Also pull any of the same keys from the top level.
+        flat_info_patch = {k: data[k] for k in info_field_map if k in data}
+        merged_info = {**info_patch, **flat_info_patch}
+
+        if merged_info:
+            info = org.organization_info
+            if not info:
+                # Lazy-create the row the first time admin fills it in.
+                info = OrganizationInfo()
+                self.db_session.add(info)
+                self.db_session.flush()
+                org.organization_info_id = info.id
+                org.organization_info = info
+            for camel, snake in info_field_map.items():
+                if camel in merged_info:
+                    val = merged_info[camel]
+                    # Treat empty strings as NULL so we don't pollute
+                    # NOT-NULL-tolerant columns with whitespace.
+                    setattr(info, snake, val if val != '' else None)
+
+        # ── Subscription plan switch ────────────────────────────────
+        # If `planId` is supplied, change the org's current subscription
+        # to that plan. If the org has no subscription yet, create one.
+        # We do this here (instead of forcing the FE to call a second
+        # endpoint) so the admin "Save" button is one atomic action.
+        if 'planId' in data and data['planId'] is not None:
+            new_plan_id = int(data['planId'])
+            plan_exists = self.db_session.query(SubscriptionPlan).filter(
+                SubscriptionPlan.id == new_plan_id,
+                SubscriptionPlan.is_active == True,  # noqa: E712
+            ).first()
+            if not plan_exists:
+                raise NotFoundException(f'Subscription plan {new_plan_id} not found')
+
+            sub = None
+            if org.subscription_id:
+                sub = self.db_session.query(Subscription).filter(
+                    Subscription.id == org.subscription_id
+                ).first()
+            if sub:
+                sub.plan_id = new_plan_id
+                if sub.status != 'active':
+                    sub.status = 'active'
+            else:
+                # No subscription yet — mint one and point the org at it.
+                sub = Subscription(
+                    organization_id=org.id,
+                    plan_id=new_plan_id,
+                    status='active',
+                )
+                self.db_session.add(sub)
+                self.db_session.flush()
+                org.subscription_id = sub.id
 
         self.db_session.flush()
         return {'id': org.id, 'message': 'Organization updated'}
@@ -473,6 +567,7 @@ class AdminService:
                 'maxStorageGb': plan.max_storage_gb,
                 'maxApiCallsDaily': plan.max_api_calls_daily,
                 'features': plan.features,
+                'isDefault': bool(plan.is_default),
                 'createdDate': plan.created_date.isoformat() if plan.created_date else None,
             })
 
@@ -509,6 +604,7 @@ class AdminService:
             'maxStorageGb': plan.max_storage_gb,
             'maxApiCallsDaily': plan.max_api_calls_daily,
             'features': plan.features,
+            'isDefault': bool(plan.is_default),
             'permissions': [
                 {'id': p.id, 'code': p.code, 'name': p.name, 'category': p.category}
                 for p in all_permissions if p.id in assigned_ids
@@ -550,6 +646,13 @@ class AdminService:
         if not plan:
             raise NotFoundException(f'Subscription plan {plan_id} not found')
 
+        # Promote-to-default is a global op (clears any other default first),
+        # so route it through the dedicated helper rather than a straight
+        # setattr that would race against the partial unique index.
+        if 'isDefault' in data and bool(data['isDefault']) and not plan.is_default:
+            self.set_default_subscription_plan(plan_id)
+            plan = self.db_session.query(SubscriptionPlan).get(plan_id)
+
         # name is immutable — only display_name and other fields can be changed
         for field in ['display_name', 'description', 'price_monthly', 'price_yearly',
                       'max_users', 'max_transactions_monthly', 'max_storage_gb', 'max_api_calls_daily', 'features']:
@@ -561,7 +664,17 @@ class AdminService:
         return {'id': plan.id, 'message': 'Subscription plan updated'}
 
     def _create_plan_version(self, old_plan: 'SubscriptionPlan', new_permission_ids: list) -> 'SubscriptionPlan':
-        """Create a new plan version with updated permissions, deactivate the old one, and migrate subscriptions."""
+        """Create a new plan version with updated permissions, deactivate the old one, and migrate subscriptions.
+
+        Carries forward ``is_default`` so that editing permissions on the
+        default plan doesn't silently strip the flag — that would point
+        register/login auto-assign at a stale row on the next request.
+        Because the partial unique index only fires when ``is_default = TRUE``,
+        we deactivate the old row first (it stays at TRUE but on an
+        is_active=FALSE row, which is ignored), then flush the new TRUE row.
+        """
+        was_default = bool(old_plan.is_default)
+
         new_plan = SubscriptionPlan(
             name=old_plan.name,
             display_name=old_plan.display_name,
@@ -574,12 +687,21 @@ class AdminService:
             max_api_calls_daily=old_plan.max_api_calls_daily,
             features=old_plan.features,
             permission_ids=new_permission_ids,
+            is_default=False,  # set after old row is_default cleared, below
         )
         self.db_session.add(new_plan)
 
-        # Deactivate old plan
+        # Deactivate old plan and clear its default flag so the partial unique
+        # index won't conflict when we set the new row to default below.
         old_plan.is_active = False
+        if was_default:
+            old_plan.is_default = False
         self.db_session.flush()
+
+        # Promote the new row to default if the old one was the default.
+        if was_default:
+            new_plan.is_default = True
+            self.db_session.flush()
 
         # Migrate active subscriptions to the new plan version
         self.db_session.query(Subscription).filter(
@@ -590,6 +712,33 @@ class AdminService:
         self.db_session.flush()
 
         return new_plan
+
+    def set_default_subscription_plan(self, plan_id: int) -> Dict[str, Any]:
+        """Flip the is_default flag to the given plan.
+
+        Clears the current default first so the partial unique index won't
+        fire mid-transaction, then sets the target.
+        """
+        target = self.db_session.query(SubscriptionPlan).filter(
+            SubscriptionPlan.id == plan_id,
+            SubscriptionPlan.is_active == True,
+        ).first()
+        if not target:
+            raise NotFoundException(f'Subscription plan {plan_id} not found')
+
+        if target.is_default:
+            return {'id': target.id, 'message': 'Plan is already the default'}
+
+        self.db_session.query(SubscriptionPlan).filter(
+            SubscriptionPlan.is_default == True,
+            SubscriptionPlan.id != plan_id,
+        ).update({SubscriptionPlan.is_default: False}, synchronize_session='fetch')
+        self.db_session.flush()
+
+        target.is_default = True
+        self.db_session.flush()
+
+        return {'id': target.id, 'message': f'Plan {target.name} marked as default'}
 
     def toggle_plan_permission(self, plan_id: int, data: dict) -> Dict[str, Any]:
         """Toggle a system permission — creates a new plan version for historical tracking"""
@@ -921,6 +1070,19 @@ class AdminService:
             if org:
                 org_name = org.name
 
+        # Resolve paired hardware (if any) so the show page can render the
+        # HW#id + MAC badge without a second round-trip.
+        hardware_id = getattr(device, 'hardware_id', None)
+        hardware_mac = None
+        if hardware_id:
+            from sqlalchemy import text as _t
+            hw_row = self.db_session.execute(_t(
+                "SELECT mac_address FROM iot_hardwares "
+                "WHERE id = :id AND deleted_date IS NULL"
+            ), {'id': int(hardware_id)}).fetchone()
+            if hw_row:
+                hardware_mac = hw_row[0]
+
         return {
             'id': device.id,
             'deviceName': device.device_name,
@@ -931,6 +1093,8 @@ class AdminService:
             'organizationName': org_name,
             'hasPassword': bool(device.password),
             'isActive': device.is_active,
+            'hardwareId': hardware_id,
+            'hardwareMac': hardware_mac,
             'createdDate': device.created_date.isoformat() if device.created_date else None,
             'updatedDate': device.updated_date.isoformat() if device.updated_date else None,
         }
@@ -1001,16 +1165,210 @@ class AdminService:
         self.db_session.flush()
         return {'id': device.id, 'message': 'IoT device updated'}
 
-    def delete_iot_device(self, device_id: int) -> Dict[str, Any]:
+    def delete_iot_device(self, device_id: int, current_user: dict = None) -> Dict[str, Any]:
+        """Soft-delete an iot_device AND unpair any paired hardware.
+
+        Without the unpair step a deleted iot_device leaves its
+        iot_hardwares row with `paired_iot_device_id` pointing at a
+        ghost: future /checkin responses from that tablet still see
+        `paired=true` and try to refresh tokens that no longer have
+        a backing device. The tablet would never recover until an
+        admin manually unpaired the hardware row separately.
+
+        We mirror what `unpair_iot_hardware` does (clear the pairing
+        pointer + queue `force_logout {unpair:true}`) so that within
+        one /sync cycle (~5–15 s) the tablet self-cleans and drops
+        back to /device-setup, ready for a fresh pair.
+        """
+        from sqlalchemy import text as _t
+        import json as _json
+
+        # `iot_device_commands.issued_by` is NOT NULL, and matches the
+        # same admin who triggered the delete. Pull it off the JWT-derived
+        # current_user (same pattern as `issue_device_command`).
+        issuer_id = (current_user or {}).get('user_id')
+        if not issuer_id:
+            raise BadRequestException('Cannot determine issuing admin user')
+
         device = self.db_session.query(IoTDevice).filter(
             IoTDevice.id == device_id, IoTDevice.deleted_date.is_(None)
         ).first()
         if not device:
             raise NotFoundException(f'IoT device {device_id} not found')
+
+        # 1. Find paired hardware BEFORE soft-deleting (the hardware
+        # row may reference device_id; clearing it now keeps FK
+        # integrity if a check exists, and avoids orphans either way).
+        hardware_row = self.db_session.execute(_t(
+            "SELECT id FROM iot_hardwares "
+            "WHERE paired_iot_device_id = :device_id "
+            "  AND deleted_date IS NULL"
+        ), {'device_id': device_id}).fetchone()
+        unpaired_hardware_id = int(hardware_row[0]) if hardware_row else None
+
+        if unpaired_hardware_id is not None:
+            self.db_session.execute(_t(
+                "UPDATE iot_hardwares SET "
+                "  paired_iot_device_id = NULL, "
+                "  pending_pin = NULL, "
+                "  updated_date = NOW() "
+                "WHERE id = :hardware_id"
+            ), {'hardware_id': unpaired_hardware_id})
+
+        # 2. Queue force_logout {unpair:true} so a tablet that's
+        # currently syncing the soon-to-be-deleted iot_device picks
+        # up the cleanup directive on its very next /sync cycle.
+        # Idempotent with the MAC-mismatch path that fires on
+        # subsequent syncs.
+        # Dedup: don't pile up if an unpair command is already pending.
+        existing = self.db_session.execute(_t(
+            "SELECT 1 FROM iot_device_commands "
+            "WHERE device_id = :device_id "
+            "  AND command_type = 'force_logout' "
+            "  AND status IN ('pending', 'delivered') "
+            "  AND payload @> '{\"unpair\": true}'::jsonb "
+            "LIMIT 1"
+        ), {'device_id': device_id}).fetchone()
+        if not existing:
+            self.db_session.execute(_t(
+                "INSERT INTO iot_device_commands "
+                "(device_id, command_type, payload, status, issued_by) "
+                "VALUES (:device_id, 'force_logout', "
+                "        CAST(:pl AS JSONB), 'pending', :issued_by)"
+            ), {
+                'device_id': device_id,
+                'pl': _json.dumps({
+                    'unpair': True,
+                    'reason': 'iot_device_deleted',
+                }),
+                'issued_by': issuer_id,
+            })
+
+        # 3. Bump admin_watching_until so the tablet long-polls
+        # eagerly and grabs the unpair command within ~1 s.
+        try:
+            self._bump_admin_watching_until(device_id, minutes=2)
+        except Exception:
+            # Older deployments may not have the helper yet — non-fatal.
+            pass
+
+        # 4. Soft-delete the iot_device row.
         device.deleted_date = datetime.now(timezone.utc)
         device.is_active = False
         self.db_session.flush()
-        return {'id': device.id, 'message': 'IoT device deleted'}
+
+        return {
+            'id': device.id,
+            'message': 'IoT device deleted',
+            'unpaired_hardware_id': unpaired_hardware_id,
+        }
+
+    # ── Debug-log mode toggle ────────────────────────────────────────────
+    # Admin clicks "Debug Log Mode" in the device's Quick Templates panel
+    # → POST /api/admin/v3-iot-devices/{id}/debug-log {enabled: true|false}
+    # Enabled → writes `debug_log_until = NOW() + 1h` into iot_device_health.raw
+    # Disabled → clears the key. Tablet's /sync response carries
+    # `debug_log_active: bool` based on the comparison. Auto-off is implicit.
+    def set_iot_device_debug_log_mode(self, device_id: int, data: dict) -> Dict[str, Any]:
+        from sqlalchemy import text as _t
+        if not isinstance(data, dict):
+            raise ValidationException('Body must be an object')
+        device = self.db_session.query(IoTDevice).filter(
+            IoTDevice.id == device_id, IoTDevice.deleted_date.is_(None)
+        ).first()
+        if not device:
+            raise NotFoundException(f'IoT device {device_id} not found')
+        enabled = bool(data.get('enabled', False))
+        # Duration is fixed at 1 hour per product spec. Admin who wants
+        # longer can re-toggle (which extends).
+        if enabled:
+            self.db_session.execute(_t(
+                "INSERT INTO iot_device_health (device_id, last_seen_at, raw) "
+                "VALUES (:device_id, NOW() - INTERVAL '1 hour', "
+                "        jsonb_build_object('debug_log_until', "
+                "                           to_char((NOW() + INTERVAL '1 hour') AT TIME ZONE 'UTC', "
+                "                                   'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'))) "
+                "ON CONFLICT (device_id) DO UPDATE "
+                "SET raw = COALESCE(iot_device_health.raw, '{}'::jsonb) || "
+                "          jsonb_build_object('debug_log_until', "
+                "            to_char((NOW() + INTERVAL '1 hour') AT TIME ZONE 'UTC', "
+                "                    'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'))"
+            ), {'device_id': device_id})
+        else:
+            # Remove the key so the sync response reports debug_log_active=false.
+            self.db_session.execute(_t(
+                "UPDATE iot_device_health "
+                "SET raw = raw - 'debug_log_until' "
+                "WHERE device_id = :device_id"
+            ), {'device_id': device_id})
+        # Bump admin_watching_until so the tablet picks up the new state
+        # within ~5 s instead of waiting for the next idle-cadence sync.
+        self._bump_admin_watching_until(device_id, minutes=2)
+        self.db_session.commit()
+
+        # Return the resolved active-state for the UI to render immediately.
+        from sqlalchemy import text as _t2
+        row = self.db_session.execute(_t2(
+            "SELECT raw -> 'debug_log_until' AS du "
+            "FROM iot_device_health WHERE device_id = :device_id"
+        ), {'device_id': device_id}).fetchone()
+        return {
+            'device_id': device_id,
+            'enabled': enabled,
+            'debug_log_until': row[0] if row else None,
+        }
+
+    # ── Debug-log ingest ─────────────────────────────────────────────────
+    # Called by the tablet (NOT admin auth, but device JWT) — registered
+    # alongside /sync. Each entry: {ts, level, tag, msg}. Server filters
+    # for [Error]/[Warn] defensively; if mode is off we drop the batch.
+    def ingest_iot_debug_logs(self, current_device: dict, data: dict) -> Dict[str, Any]:
+        from sqlalchemy import text as _t
+        device_id = current_device.get('device_id') if isinstance(current_device, dict) else None
+        if not device_id:
+            raise UnauthorizedException('Unauthorized device')
+        if not isinstance(data, dict):
+            raise ValidationException('Body must be an object')
+        entries = data.get('logs') or []
+        if not isinstance(entries, list):
+            raise ValidationException('logs must be an array')
+
+        # Gate: only accept while mode is active. This guards against
+        # zombie shippers and bandwidth abuse.
+        row = self.db_session.execute(_t(
+            "SELECT raw -> 'debug_log_until' AS du "
+            "FROM iot_device_health WHERE device_id = :device_id"
+        ), {'device_id': device_id}).fetchone()
+        until_raw = row[0] if row else None
+        if not until_raw:
+            return {'accepted': 0, 'reason': 'mode_off'}
+
+        accepted = 0
+        for e in entries[:500]:  # hard cap per batch
+            if not isinstance(e, dict):
+                continue
+            level = (e.get('level') or '').strip()
+            if level not in ('error', 'warn'):
+                continue
+            msg = (e.get('msg') or '')
+            if not msg:
+                continue
+            ts = e.get('ts')
+            tag = e.get('tag')
+            self.db_session.execute(_t(
+                "INSERT INTO iot_debug_logs "
+                "(iot_device_id, captured_at, level, tag, message) "
+                "VALUES (:device_id, COALESCE(:ts::timestamptz, NOW()), :level, :tag, :msg)"
+            ), {
+                'device_id': device_id,
+                'ts': ts,
+                'level': level,
+                'tag': tag,
+                'msg': msg,
+            })
+            accepted += 1
+        self.db_session.commit()
+        return {'accepted': accepted}
 
     def get_iot_device_stats(self, query_params: dict) -> Dict[str, Any]:
         base = self.db_session.query(IoTDevice).filter(IoTDevice.deleted_date.is_(None))
@@ -1045,12 +1403,1607 @@ class AdminService:
             for row in top_orgs_rows
         ]
 
+        # Pending command count (FleetOverview "Pending Commands" card).
+        # Counts cmds that are still waiting to be picked up by the device
+        # OR have been delivered but not yet ACKed. Both states warrant
+        # admin attention.
+        from sqlalchemy import text as _t
+        pending_cmds = int(self.db_session.execute(_t(
+            "SELECT COUNT(*) FROM iot_device_commands "
+            "WHERE status IN ('pending', 'delivered')"
+        )).fetchone()[0] or 0)
+
+        # Active-watcher count (FleetOverview "Active Watchers" card).
+        # Devices whose admin_watching_until flag is currently in the
+        # future — i.e. an admin is actively watching the detail page or
+        # has just clicked Pair / Unpair / issue-cmd within the last
+        # 5 min, putting the tablet into long-poll mode.
+        active_watchers = int(self.db_session.execute(_t(
+            "SELECT COUNT(*) FROM iot_device_health "
+            "WHERE raw->>'admin_watching_until' IS NOT NULL "
+            "  AND (raw->>'admin_watching_until')::timestamptz > NOW()"
+        )).fetchone()[0] or 0)
+
         return {
             'totalDevices': total,
             'assignedDevices': assigned,
             'unassignedDevices': unassigned,
             'byType': by_type,
             'topOrganizations': top_organizations,
+            'pendingCommands': pending_cmds,
+            'activeWatchers': active_watchers,
+        }
+
+    # ── IoT Devices: realtime / status / commands / events ─────────────
+
+    ALLOWED_DEVICE_COMMAND_TYPES = [
+        'force_login', 'force_logout', 'navigate', 'reset_to_home', 'reset_input',
+        'overwrite_cache', 'clear_storage', 'restart_app', 'ping',
+        # Server-issued during Pair-with-PIN. Tablet hijack_agent writes the
+        # 4–8 digit PIN to secure storage. Admin command-issue endpoint
+        # accepts this too for ad-hoc PIN resets.
+        'set_settings_pin',
+        # Kiosk Mode toggle. The tablet calls KioskModeNotifier which opens
+        # the system Home-app chooser — an on-site tap is required to
+        # complete the launcher swap. The kiosk flag (router gating, wake-
+        # lock, allowed-paths whitelist) flips immediately regardless.
+        'enable_kiosk', 'disable_kiosk',
+        # Free-text bottom-floating notification. Payload may carry
+        # `message`, optional `auto_dismiss_seconds`, or `clear:true`.
+        'show_banner',
+        # Capture a screenshot of the current screen. Server pre-issues a
+        # presigned POST + File row; tablet captures, uploads to S3, then
+        # acks with file_id. See _issue_capture_screenshot for the payload
+        # shape and the matching hijack handler in the Flutter app.
+        'capture_screenshot',
+    ]
+
+    def _serialize_device_row(self, row) -> Dict[str, Any]:
+        """Shared row shape for /realtime + /by-organization."""
+        # Row indexes match the SELECT below in list_realtime / list_by_organization.
+        # Cols 15-17 are the tags + maintenance metadata added in
+        # 20260503_*_049_add_tags_and_maintenance_to_iot_devices.sql.
+        tags_raw = row[15]
+        # JSONB comes back as a Python list already with most drivers; tolerate
+        # bytes/str just in case.
+        if isinstance(tags_raw, (bytes, bytearray)):
+            try:
+                import json as _json
+                tags = _json.loads(tags_raw.decode('utf-8'))
+            except Exception:
+                tags = []
+        elif isinstance(tags_raw, str):
+            try:
+                import json as _json
+                tags = _json.loads(tags_raw)
+            except Exception:
+                tags = []
+        elif isinstance(tags_raw, list):
+            tags = tags_raw
+        else:
+            tags = []
+        return {
+            'id': row[0],
+            'device_name': row[1],
+            'type': row[2],
+            'mac_bt': row[3],
+            'mac_tablet': row[4],
+            'organization': (
+                {'id': row[5], 'name': row[6]} if row[5] is not None else None
+            ),
+            'online': bool(row[7]),
+            'last_seen_at': row[8].isoformat() if row[8] else None,
+            'current_route': row[9],
+            'current_user_id': row[10],
+            'battery_level': row[11],
+            'battery_charging': row[12],
+            'network_type': row[13],
+            'network_strength': row[14],
+            'tags': tags,
+            'maintenance_mode': bool(row[16]) if row[16] is not None else False,
+            'maintenance_reason': row[17],
+            # Hardware pairing — when a physical tablet is bound to this
+            # logical iot_devices account, surface the MAC for the admin
+            # list ("MAC Address" column before Device Name) and the
+            # hardware_id for the detail-page badge.
+            'hardware_id': row[18],
+            'hardware_mac': row[19],
+        }
+
+    _REALTIME_BASE_SELECT = (
+        "SELECT d.id, d.device_name, d.device_type, d.mac_address_bluetooth, "
+        "d.mac_address_tablet, d.organization_id, "
+        "COALESCE(oi.company_name, o.name) AS org_name, "
+        "(h.last_seen_at > NOW() - INTERVAL '30 seconds') AS online, "
+        "h.last_seen_at, h.current_route, h.current_user_id, "
+        "h.battery_level, h.battery_charging, h.network_type, h.network_strength, "
+        "d.tags, d.maintenance_mode, d.maintenance_reason, "
+        "d.hardware_id, hw.mac_address AS hardware_mac "
+        "FROM iot_devices d "
+        "LEFT JOIN iot_device_health h ON h.device_id = d.id "
+        "LEFT JOIN organizations o ON o.id = d.organization_id "
+        "LEFT JOIN organization_info oi ON oi.id = o.organization_info_id "
+        "LEFT JOIN iot_hardwares hw ON hw.id = d.hardware_id "
+    )
+
+    def list_realtime(self, query_params: dict, headers: Optional[dict] = None) -> Dict[str, Any]:
+        """List of devices with realtime health for the admin dashboard.
+
+        Supports filters: organizationId, status (online|offline), search.
+        Provides ETag/304 short-circuit so the dashboard can poll cheaply.
+        Always returns a dict; callers use the optional ``__http__`` key when present
+        to override status/headers (e.g. 304).
+        """
+        from sqlalchemy import text as _t
+        import hashlib as _hashlib
+
+        org_id = (query_params.get('organizationId') or '').strip() if query_params else ''
+        status = (query_params.get('status') or '').strip().lower() if query_params else ''
+        search = (query_params.get('search') or '').strip() if query_params else ''
+        tag = (query_params.get('tag') or '').strip() if query_params else ''
+        maintenance = (query_params.get('maintenance') or '').strip().lower() if query_params else ''
+
+        where_clauses = ['d.deleted_date IS NULL']
+        params: Dict[str, Any] = {}
+        if org_id:
+            where_clauses.append('d.organization_id = :org_id')
+            params['org_id'] = int(org_id)
+        if search:
+            where_clauses.append("(d.device_name ILIKE :search OR d.mac_address_bluetooth ILIKE :search OR d.mac_address_tablet ILIKE :search)")
+            params['search'] = f'%{search}%'
+        if status == 'online':
+            where_clauses.append("(h.last_seen_at > NOW() - INTERVAL '30 seconds')")
+        elif status == 'offline':
+            where_clauses.append("(h.last_seen_at IS NULL OR h.last_seen_at <= NOW() - INTERVAL '30 seconds')")
+        # Tag filter — `tags` is a JSONB array of strings; the @> operator
+        # uses the GIN index added in migration 049 for fast lookup.
+        if tag:
+            where_clauses.append("d.tags @> CAST(:tag_filter AS JSONB)")
+            import json as _json
+            params['tag_filter'] = _json.dumps([tag])
+        # Maintenance filter — accepts 'on' / 'off'.
+        if maintenance == 'on':
+            where_clauses.append('d.maintenance_mode = TRUE')
+        elif maintenance == 'off':
+            where_clauses.append('d.maintenance_mode = FALSE')
+
+        where_sql = ' AND '.join(where_clauses)
+
+        # ETag based on global health watermark (cheap to compute)
+        etag_row = self.db_session.execute(_t(
+            "SELECT MAX(last_seen_at) AS m, COUNT(*) AS c FROM iot_device_health"
+        )).fetchone()
+        watermark = etag_row[0].isoformat() if (etag_row and etag_row[0]) else 'none'
+        count = int(etag_row[1] if etag_row else 0)
+        etag = '"' + _hashlib.md5(f'{watermark}|{count}|{where_sql}|{params}'.encode('utf-8')).hexdigest() + '"'
+
+        if_none_match = None
+        if headers:
+            for k, v in headers.items():
+                if k.lower() == 'if-none-match':
+                    if_none_match = v
+                    break
+
+        if if_none_match and if_none_match == etag:
+            return {
+                '__http__': {
+                    'statusCode': 304,
+                    'headers': {'ETag': etag},
+                    'body': '',
+                }
+            }
+
+        sql = self._REALTIME_BASE_SELECT + 'WHERE ' + where_sql + ' ORDER BY d.id ASC'
+        rows = self.db_session.execute(_t(sql), params).fetchall()
+        items = [self._serialize_device_row(r) for r in rows]
+
+        return {
+            'items': items,
+            'etag': etag,
+            '__http__': {'headers': {'ETag': etag}},
+        }
+
+    def list_by_organization(self) -> Dict[str, Any]:
+        """Devices grouped by organization, including an unassigned bucket."""
+        from sqlalchemy import text as _t
+
+        sql = self._REALTIME_BASE_SELECT + 'WHERE d.deleted_date IS NULL ORDER BY d.organization_id NULLS LAST, d.id ASC'
+        rows = self.db_session.execute(_t(sql)).fetchall()
+
+        groups: Dict[Any, Dict[str, Any]] = {}
+        for r in rows:
+            row = self._serialize_device_row(r)
+            org_id = r[5]
+            org_name = r[6]
+            key = org_id if org_id is not None else '__unassigned__'
+            if key not in groups:
+                groups[key] = {
+                    'organization': (
+                        {'id': org_id, 'name': org_name}
+                        if org_id is not None else
+                        {'id': None, 'name': 'Unassigned'}
+                    ),
+                    'devices': [],
+                    'online_count': 0,
+                    'total_count': 0,
+                    'last_activity_at': None,
+                }
+            entry = groups[key]
+            entry['devices'].append(row)
+            entry['total_count'] += 1
+            if row['online']:
+                entry['online_count'] += 1
+            if row['last_seen_at']:
+                if entry['last_activity_at'] is None or row['last_seen_at'] > entry['last_activity_at']:
+                    entry['last_activity_at'] = row['last_seen_at']
+
+        # Stable order: orgs first by id ASC, unassigned last.
+        ordered: List[Dict[str, Any]] = []
+        for key in sorted([k for k in groups.keys() if k != '__unassigned__']):
+            ordered.append(groups[key])
+        if '__unassigned__' in groups:
+            ordered.append(groups['__unassigned__'])
+
+        return {'items': ordered}
+
+    def _ensure_device_exists(self, device_id: int) -> None:
+        from GEPPPlatform.models.cores.iot_devices import IoTDevice as _D
+        device = self.db_session.query(_D).filter(_D.id == device_id, _D.deleted_date.is_(None)).first()
+        if not device:
+            raise NotFoundException(f'IoT device {device_id} not found')
+
+    def get_device_status(self, device_id: int) -> Dict[str, Any]:
+        """Full health row + last 5 commands + last 50 events.
+
+        Side-effect: extends the per-device ``admin_watching_until`` flag in
+        ``iot_device_health.raw`` for 30 minutes so subsequent /sync calls long-poll.
+        """
+        from sqlalchemy import text as _t
+        self._ensure_device_exists(device_id)
+
+        # Refresh (or insert sentinel) admin_watching_until.
+        self.db_session.execute(_t(
+            "INSERT INTO iot_device_health (device_id, last_seen_at, raw) "
+            "VALUES (:device_id, NOW() - INTERVAL '1 hour', "
+            "        jsonb_build_object('admin_watching_until', "
+            "                           to_char((NOW() + INTERVAL '30 minutes') AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'))) "
+            "ON CONFLICT (device_id) DO UPDATE "
+            "SET raw = COALESCE(iot_device_health.raw, '{}'::jsonb) || "
+            "          jsonb_build_object('admin_watching_until', "
+            "            to_char((NOW() + INTERVAL '30 minutes') AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'))"
+        ), {'device_id': device_id})
+
+        health_row = self.db_session.execute(_t(
+            "SELECT device_id, last_seen_at, "
+            "(last_seen_at > NOW() - INTERVAL '30 seconds') AS online, "
+            "battery_level, battery_charging, cpu_temp_c, network_type, network_strength, "
+            "ip_address, storage_free_mb, ram_free_mb, os_version, app_version, "
+            "current_route, current_user_id, current_org_id, current_location_id, "
+            "scale_connected, scale_mac_bt, cache_summary, raw "
+            "FROM iot_device_health WHERE device_id = :device_id"
+        ), {'device_id': device_id}).fetchone()
+
+        health: Optional[Dict[str, Any]] = None
+        if health_row:
+            health = {
+                'device_id': health_row[0],
+                'last_seen_at': health_row[1].isoformat() if health_row[1] else None,
+                'online': bool(health_row[2]),
+                'battery_level': health_row[3],
+                'battery_charging': health_row[4],
+                'cpu_temp_c': float(health_row[5]) if health_row[5] is not None else None,
+                'network_type': health_row[6],
+                'network_strength': health_row[7],
+                'ip_address': health_row[8],
+                'storage_free_mb': health_row[9],
+                'ram_free_mb': health_row[10],
+                'os_version': health_row[11],
+                'app_version': health_row[12],
+                'current_route': health_row[13],
+                'current_user_id': health_row[14],
+                'current_org_id': health_row[15],
+                'current_location_id': health_row[16],
+                'scale_connected': health_row[17],
+                'scale_mac_bt': health_row[18],
+                'cache_summary': health_row[19],
+                'raw': health_row[20],
+            }
+
+        cmd_rows = self.db_session.execute(_t(
+            "SELECT id, command_type, payload, status, issued_by, issued_at, "
+            "delivered_at, acked_at, completed_at, result, expires_at "
+            "FROM iot_device_commands WHERE device_id = :device_id "
+            "ORDER BY issued_at DESC LIMIT 5"
+        ), {'device_id': device_id}).fetchall()
+        recent_commands = [
+            {
+                'id': r[0], 'command_type': r[1], 'payload': r[2], 'status': r[3],
+                'issued_by': r[4],
+                'issued_at': r[5].isoformat() if r[5] else None,
+                'delivered_at': r[6].isoformat() if r[6] else None,
+                'acked_at': r[7].isoformat() if r[7] else None,
+                'completed_at': r[8].isoformat() if r[8] else None,
+                'result': r[9],
+                'expires_at': r[10].isoformat() if r[10] else None,
+            }
+            for r in cmd_rows
+        ]
+
+        ev_rows = self.db_session.execute(_t(
+            "SELECT id, occurred_at, received_at, event_type, route, payload, user_id, session_id "
+            "FROM iot_device_events WHERE device_id = :device_id "
+            "ORDER BY occurred_at DESC LIMIT 50"
+        ), {'device_id': device_id}).fetchall()
+        recent_events = [
+            {
+                'id': r[0],
+                'occurred_at': r[1].isoformat() if r[1] else None,
+                'received_at': r[2].isoformat() if r[2] else None,
+                'event_type': r[3],
+                'route': r[4],
+                'payload': r[5],
+                'user_id': r[6],
+                'session_id': r[7],
+            }
+            for r in ev_rows
+        ]
+
+        return {
+            'health': health,
+            'recent_commands': recent_commands,
+            'recent_events': recent_events,
+        }
+
+    def list_iot_device_events(self, device_id: int, query_params: dict) -> Dict[str, Any]:
+        from sqlalchemy import text as _t
+        self._ensure_device_exists(device_id)
+
+        page = max(1, int(query_params.get('page', 1)))
+        page_size = int(query_params.get('pageSize', 50))
+        if page_size > 200:
+            page_size = 200
+        if page_size < 1:
+            page_size = 50
+
+        date_from = (query_params.get('from') or '').strip()
+        date_to = (query_params.get('to') or '').strip()
+        type_filter = (query_params.get('type') or '').strip()
+        route_filter = (query_params.get('route') or '').strip()
+
+        where = ['device_id = :device_id']
+        params: Dict[str, Any] = {'device_id': device_id}
+        if date_from:
+            where.append('occurred_at >= :date_from')
+            params['date_from'] = date_from
+        if date_to:
+            where.append('occurred_at <= :date_to')
+            params['date_to'] = date_to
+        if type_filter:
+            type_list = [t.strip() for t in type_filter.split(',') if t.strip()]
+            if type_list:
+                where.append('event_type = ANY(:type_list)')
+                params['type_list'] = type_list
+        if route_filter:
+            where.append('route = :route_filter')
+            params['route_filter'] = route_filter
+        where_sql = ' AND '.join(where)
+
+        total_row = self.db_session.execute(_t(
+            f"SELECT COUNT(*) FROM iot_device_events WHERE {where_sql}"
+        ), params).fetchone()
+        total = int(total_row[0] if total_row else 0)
+
+        params_paged = dict(params)
+        params_paged['_limit'] = page_size
+        params_paged['_offset'] = (page - 1) * page_size
+        rows = self.db_session.execute(_t(
+            f"SELECT id, occurred_at, received_at, event_type, route, payload, user_id, session_id "
+            f"FROM iot_device_events WHERE {where_sql} "
+            f"ORDER BY occurred_at DESC LIMIT :_limit OFFSET :_offset"
+        ), params_paged).fetchall()
+
+        # NB: top-level key is `items` (NOT `data`). The frontend provider's
+        # unwrap() helper collapses `{data: ...}` wrappers, so a `data:[…]`
+        # payload would arrive at the consumer as a bare array, dropping
+        # `total`/`page` and breaking the Action Trail / Commands tabs.
+        return {
+            'items': [
+                {
+                    'id': r[0],
+                    'occurred_at': r[1].isoformat() if r[1] else None,
+                    'received_at': r[2].isoformat() if r[2] else None,
+                    'event_type': r[3],
+                    'route': r[4],
+                    'payload': r[5],
+                    'user_id': r[6],
+                    'session_id': r[7],
+                }
+                for r in rows
+            ],
+            'total': total,
+            'page': page,
+            'pageSize': page_size,
+        }
+
+    def list_iot_device_commands(self, device_id: int, query_params: dict) -> Dict[str, Any]:
+        from sqlalchemy import text as _t
+        self._ensure_device_exists(device_id)
+
+        page = max(1, int(query_params.get('page', 1)))
+        page_size = int(query_params.get('pageSize', 50))
+        if page_size > 200:
+            page_size = 200
+        if page_size < 1:
+            page_size = 50
+
+        status_filter = (query_params.get('status') or '').strip()
+        where = ['c.device_id = :device_id']
+        params: Dict[str, Any] = {'device_id': device_id}
+        if status_filter:
+            status_list = [s.strip() for s in status_filter.split(',') if s.strip()]
+            if status_list:
+                where.append('c.status = ANY(:status_list)')
+                params['status_list'] = status_list
+        where_sql = ' AND '.join(where)
+
+        total_row = self.db_session.execute(_t(
+            f"SELECT COUNT(*) FROM iot_device_commands c WHERE {where_sql}"
+        ), params).fetchone()
+        total = int(total_row[0] if total_row else 0)
+
+        params_paged = dict(params)
+        params_paged['_limit'] = page_size
+        params_paged['_offset'] = (page - 1) * page_size
+        rows = self.db_session.execute(_t(
+            f"SELECT c.id, c.command_type, c.payload, c.status, c.issued_by, "
+            f"COALESCE(NULLIF(TRIM(CONCAT_WS(' ', u.first_name, u.last_name)), ''), u.display_name, u.email) AS issued_by_name, "
+            f"c.issued_at, c.delivered_at, c.acked_at, c.completed_at, c.result, c.expires_at "
+            f"FROM iot_device_commands c "
+            f"LEFT JOIN user_locations u ON u.id = c.issued_by "
+            f"WHERE {where_sql} "
+            f"ORDER BY c.issued_at DESC LIMIT :_limit OFFSET :_offset"
+        ), params_paged).fetchall()
+
+        # See note in list_iot_device_events about `items` vs `data`.
+        return {
+            'items': [
+                {
+                    'id': r[0],
+                    'command_type': r[1],
+                    'payload': r[2],
+                    'status': r[3],
+                    'issued_by': r[4],
+                    'issued_by_name': r[5],
+                    'issued_at': r[6].isoformat() if r[6] else None,
+                    'delivered_at': r[7].isoformat() if r[7] else None,
+                    'acked_at': r[8].isoformat() if r[8] else None,
+                    'completed_at': r[9].isoformat() if r[9] else None,
+                    'result': r[10],
+                    'expires_at': r[11].isoformat() if r[11] else None,
+                }
+                for r in rows
+            ],
+            'total': total,
+            'page': page,
+            'pageSize': page_size,
+        }
+
+    def issue_device_command(self, device_id: int, data: dict, current_user: dict) -> Dict[str, Any]:
+        from sqlalchemy import text as _t
+        import json as _json
+
+        self._ensure_device_exists(device_id)
+
+        if not isinstance(data, dict):
+            raise BadRequestException('Body must be an object')
+        command_type = (data.get('command_type') or '').strip()
+        if command_type not in self.ALLOWED_DEVICE_COMMAND_TYPES:
+            raise BadRequestException(
+                f'command_type must be one of {self.ALLOWED_DEVICE_COMMAND_TYPES}'
+            )
+
+        payload = data.get('payload') or {}
+        if not isinstance(payload, dict):
+            raise BadRequestException('payload must be an object')
+
+        issuer_id = (current_user or {}).get('user_id')
+        if not issuer_id:
+            raise BadRequestException('Cannot determine issuing admin user')
+
+        # capture_screenshot is a thin wrapper around the standard
+        # iot_device_commands queue + presigned-POST flow. We pre-create
+        # the File row (status=pending) and stash the presigned upload
+        # data inside the command payload so the tablet can POST the PNG
+        # straight to S3 without a second round-trip. The matching
+        # hijack handler on the device uploads, then acks the command
+        # with `{ok:true, file_id:<n>}`; the ack handler flips File to
+        # status=uploaded.
+        if command_type == 'capture_screenshot':
+            payload = self._enrich_capture_screenshot_payload(
+                device_id=device_id,
+                payload=payload,
+                issuer_id=issuer_id,
+            )
+
+        row = self.db_session.execute(_t(
+            "INSERT INTO iot_device_commands "
+            "(device_id, command_type, payload, status, issued_by, issued_at, expires_at) "
+            "VALUES (:device_id, :command_type, CAST(:payload AS jsonb), 'pending', "
+            ":issued_by, NOW(), NOW() + INTERVAL '5 minutes') "
+            "RETURNING id, status, expires_at"
+        ), {
+            'device_id': device_id,
+            'command_type': command_type,
+            'payload': _json.dumps(payload),
+            'issued_by': issuer_id,
+        }).fetchone()
+
+        # Refresh the admin_watching_until flag so the device long-polls eagerly.
+        self.db_session.execute(_t(
+            "INSERT INTO iot_device_health (device_id, last_seen_at, raw) "
+            "VALUES (:device_id, NOW() - INTERVAL '1 hour', "
+            "        jsonb_build_object('admin_watching_until', "
+            "                           to_char((NOW() + INTERVAL '30 minutes') AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'))) "
+            "ON CONFLICT (device_id) DO UPDATE "
+            "SET raw = COALESCE(iot_device_health.raw, '{}'::jsonb) || "
+            "          jsonb_build_object('admin_watching_until', "
+            "            to_char((NOW() + INTERVAL '30 minutes') AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'))"
+        ), {'device_id': device_id})
+
+        return {
+            'id': row[0],
+            'status': row[1],
+            'expires_at': row[2].isoformat() if row[2] else None,
+        }
+
+    # ── IoT Devices: screenshots (capture + history) ─────────────────
+
+    def _enrich_capture_screenshot_payload(
+        self, device_id: int, payload: dict, issuer_id: int,
+    ) -> Dict[str, Any]:
+        """Create a pending File row + presigned POST for a screenshot.
+
+        Returned dict is the new payload to store on the command. The
+        tablet receives this verbatim on /sync and uses the presigned
+        upload data to PUT the PNG bytes directly to S3 — no round-trip
+        through our API. On success the tablet acks the command with
+        ``{ok:true, file_id:<n>}`` which flips the File row to
+        ``status=uploaded`` (see handle_iot_command_ack).
+        """
+        from sqlalchemy import text as _t
+        from GEPPPlatform.models.cores.files import (
+            File, FileType, FileStatus, FileSource,
+        )
+        from GEPPPlatform.services.cores.transactions.presigned_url_service import (
+            TransactionPresignedUrlService,
+        )
+
+        # Look up the device's organization. screenshots live under the
+        # device's owning org so existing org-scoped access rules apply
+        # without a special case.
+        row = self.db_session.execute(_t(
+            "SELECT organization_id FROM iot_devices WHERE id = :id"
+        ), {'id': device_id}).fetchone()
+        if not row or row[0] is None:
+            raise BadRequestException(
+                'capture_screenshot: device has no organization_id; '
+                'pair the device to an organization first.'
+            )
+        organization_id = int(row[0])
+
+        # Filename = ISO timestamp so the S3 key stays human-readable.
+        # The presigned-url service adds its own uuid8 suffix.
+        from datetime import datetime as _dt
+        ts = _dt.utcnow().strftime('%Y%m%dT%H%M%SZ')
+        file_name = f'iot-screenshot-{device_id}-{ts}.png'
+
+        presigned_svc = TransactionPresignedUrlService()
+        presigned_res = presigned_svc.get_transaction_file_upload_presigned_urls(
+            file_names=[file_name],
+            organization_id=organization_id,
+            user_id=issuer_id,
+            db=self.db_session,
+            file_type='iot_screenshot',
+            related_entity_type='iot_device',
+            related_entity_id=device_id,
+            expiration_seconds=600,  # 10 min — plenty for a PNG
+        )
+
+        if not presigned_res.get('success'):
+            raise BadRequestException(
+                f"capture_screenshot: could not allocate upload URL "
+                f"({presigned_res.get('message')})"
+            )
+        items = presigned_res.get('presigned_urls') or []
+        if not items:
+            raise BadRequestException('capture_screenshot: no presigned URL issued')
+        item = items[0]
+
+        # Filter the payload to only the keys the tablet should ever
+        # use — anything extra we want to keep server-only (e.g. note
+        # for the admin log) stays out of the device-visible payload.
+        enriched = {
+            'file_id': item.get('file_id'),
+            'upload_url': item.get('upload_url'),
+            'upload_fields': item.get('upload_fields'),
+            'final_s3_url': item.get('final_s3_url'),
+            'content_type': item.get('content_type'),
+            's3_key': item.get('s3_key'),
+            'expires_at': item.get('expires_at'),
+            # Optional caller hints (carried through but ignored by the
+            # tablet if it doesn't understand them):
+            'note': payload.get('note') if isinstance(payload.get('note'), str) else None,
+            'pixel_ratio': payload.get('pixel_ratio') if isinstance(payload.get('pixel_ratio'), (int, float)) else None,
+        }
+        return enriched
+
+    def list_iot_device_screenshots(
+        self, device_id: int, query_params: dict,
+    ) -> Dict[str, Any]:
+        """Return the screenshot history for a device with view URLs.
+
+        Pulls every File row whose related_entity_type='iot_device' and
+        related_entity_id=device_id, optionally filters to uploaded
+        rows (default), and produces presigned GET URLs for each.
+        """
+        from sqlalchemy import text as _t
+        from GEPPPlatform.models.cores.files import (
+            File, FileStatus, FileSource,
+        )
+        from GEPPPlatform.services.cores.transactions.presigned_url_service import (
+            TransactionPresignedUrlService,
+        )
+
+        self._ensure_device_exists(device_id)
+
+        try:
+            page = int(query_params.get('page', 1) or 1)
+        except Exception:
+            page = 1
+        try:
+            page_size = int(query_params.get('pageSize', 30) or 30)
+        except Exception:
+            page_size = 30
+        page = max(page, 1)
+        page_size = max(min(page_size, 100), 1)
+
+        # Include pending rows too — admins want visibility into "we
+        # asked but haven't received the PNG yet" so a stuck capture is
+        # debuggable.
+        include_pending = (query_params.get('includePending') or 'true').lower() == 'true'
+
+        status_clause = ""
+        if not include_pending:
+            status_clause = "AND status = 'uploaded'"
+
+        # Look up organization for both access control + presigned-view
+        # generation later.
+        org_row = self.db_session.execute(_t(
+            "SELECT organization_id FROM iot_devices WHERE id = :id"
+        ), {'id': device_id}).fetchone()
+        organization_id = int(org_row[0]) if org_row and org_row[0] is not None else None
+
+        total = int(self.db_session.execute(_t(
+            "SELECT COUNT(*) FROM files "
+            "WHERE related_entity_type = 'iot_device' "
+            "  AND related_entity_id = :device_id "
+            "  AND file_type = 'iot_screenshot' "
+            f"  {status_clause} "
+            "  AND is_active = TRUE"
+        ), {'device_id': device_id}).fetchone()[0] or 0)
+
+        rows = self.db_session.execute(_t(
+            "SELECT id, status, url, original_filename, file_size, mime_type, "
+            "       uploader_id, created_date, upload_completed_at, metadata, "
+            "       source, s3_key, processing_error "
+            "FROM files "
+            "WHERE related_entity_type = 'iot_device' "
+            "  AND related_entity_id = :device_id "
+            "  AND file_type = 'iot_screenshot' "
+            f"  {status_clause} "
+            "  AND is_active = TRUE "
+            "ORDER BY created_date DESC "
+            "LIMIT :limit OFFSET :offset"
+        ), {
+            'device_id': device_id,
+            'limit': page_size,
+            'offset': (page - 1) * page_size,
+        }).fetchall()
+
+        # Batch-presign view URLs only for uploaded S3 files.
+        uploaded_ids = [int(r[0]) for r in rows if r[1] == 'uploaded' and r[10] == 's3']
+        view_url_by_id: Dict[int, str] = {}
+        if uploaded_ids and organization_id is not None:
+            presigned_svc = TransactionPresignedUrlService()
+            res = presigned_svc.get_transaction_file_view_presigned_urls_by_ids(
+                file_ids=uploaded_ids,
+                db=self.db_session,
+                organization_id=organization_id,
+                user_id=0,
+                expiration_seconds=3600,
+            )
+            for fid, info in (res.get('presigned_urls') or {}).items():
+                if isinstance(info, dict) and info.get('view_url'):
+                    try:
+                        view_url_by_id[int(fid)] = info['view_url']
+                    except Exception:
+                        continue
+
+        items: List[Dict[str, Any]] = []
+        for r in rows:
+            file_id = int(r[0])
+            status = r[1]
+            items.append({
+                'id': file_id,
+                'status': status,
+                'original_filename': r[3],
+                'file_size': r[4],
+                'mime_type': r[5],
+                'uploader_id': r[6],
+                'created_date': r[7].isoformat() if r[7] else None,
+                'upload_completed_at': r[8],
+                'metadata': r[9] or {},
+                'source': r[10],
+                'view_url': view_url_by_id.get(file_id),
+                'processing_error': r[12],
+            })
+
+        return {
+            'items': items,
+            'total': total,
+            'page': page,
+            'pageSize': page_size,
+        }
+
+    # ── IoT Devices: per-device runtime settings (login methods,
+    #    photo enforcement, tutorial visibility, font scale) ──────────
+
+    _SETTINGS_LOGIN_KEYS = ('qr', 'user_id', 'pin')
+
+    _SETTINGS_DEFAULTS = {
+        'login_methods': {'qr': True, 'user_id': True, 'pin': True},
+        'require_photo_on_save': True,
+        'show_user_manual': True,
+        'font_scale': 1.0,
+    }
+
+    def _normalize_device_settings(self, raw: Any) -> Dict[str, Any]:
+        """Coerce + bounds-check whatever the admin posted.
+
+        Anything unrecognised is dropped; missing keys fall back to the
+        defaults. Invariant: at least one login method must stay
+        enabled — otherwise the tablet cannot be unlocked without a
+        re-pair, which is a footgun we never want to allow remotely.
+        """
+        out: Dict[str, Any] = {}
+        src = raw if isinstance(raw, dict) else {}
+
+        # login_methods
+        lm_src = src.get('login_methods') if isinstance(src.get('login_methods'), dict) else {}
+        lm: Dict[str, bool] = {}
+        any_on = False
+        for k in self._SETTINGS_LOGIN_KEYS:
+            v = lm_src.get(k, self._SETTINGS_DEFAULTS['login_methods'][k])
+            lm[k] = bool(v)
+            if lm[k]:
+                any_on = True
+        if not any_on:
+            raise BadRequestException(
+                'At least one login method (qr / user_id / pin) must be enabled.'
+            )
+        out['login_methods'] = lm
+
+        # require_photo_on_save
+        rps = src.get('require_photo_on_save', self._SETTINGS_DEFAULTS['require_photo_on_save'])
+        out['require_photo_on_save'] = bool(rps)
+
+        # show_user_manual
+        sum_ = src.get('show_user_manual', self._SETTINGS_DEFAULTS['show_user_manual'])
+        out['show_user_manual'] = bool(sum_)
+
+        # font_scale — clamp to 0.85..1.5 inclusive. Anything outside
+        # that range hurts readability or breaks the layout on the 8"
+        # tablet, so we silently clamp rather than reject.
+        fs = src.get('font_scale', self._SETTINGS_DEFAULTS['font_scale'])
+        try:
+            fs_f = float(fs)
+        except Exception:
+            fs_f = float(self._SETTINGS_DEFAULTS['font_scale'])
+        fs_f = max(0.85, min(1.5, fs_f))
+        # Round to 2 dp so the tablet UI doesn't show 1.0000000001.
+        out['font_scale'] = round(fs_f, 2)
+        return out
+
+    def get_iot_device_settings(self, device_id: int) -> Dict[str, Any]:
+        """Return current effective settings (server value or defaults)."""
+        from sqlalchemy import text as _t
+        self._ensure_device_exists(device_id)
+        row = self.db_session.execute(_t(
+            "SELECT device_settings FROM iot_devices WHERE id = :id"
+        ), {'id': device_id}).fetchone()
+        raw = (row[0] if row else None) or {}
+        # Re-normalise on read so the UI always sees the full key set,
+        # even if the row was written before a new field was introduced.
+        try:
+            effective = self._normalize_device_settings(raw)
+        except BadRequestException:
+            # Self-heal: row was written outside the normaliser and is
+            # invalid. Surface the defaults to the admin so the next
+            # POST can replace it cleanly.
+            effective = dict(self._SETTINGS_DEFAULTS)
+            effective['login_methods'] = dict(self._SETTINGS_DEFAULTS['login_methods'])
+        return {
+            'device_id': device_id,
+            'settings': effective,
+            'has_override': bool(raw),
+        }
+
+    def update_iot_device_settings(self, device_id: int, data: dict) -> Dict[str, Any]:
+        from sqlalchemy import text as _t
+        import json as _json
+        self._ensure_device_exists(device_id)
+        if not isinstance(data, dict):
+            raise BadRequestException('Body must be an object')
+        normalized = self._normalize_device_settings(data.get('settings') or data)
+        self.db_session.execute(_t(
+            "UPDATE iot_devices "
+            "SET device_settings = CAST(:settings AS jsonb), updated_date = NOW() "
+            "WHERE id = :id AND deleted_date IS NULL"
+        ), {'id': device_id, 'settings': _json.dumps(normalized)})
+        # Push admin_watching_until forward so the device long-polls
+        # quickly and picks up the change within seconds.
+        self.db_session.execute(_t(
+            "INSERT INTO iot_device_health (device_id, last_seen_at, raw) "
+            "VALUES (:device_id, NOW() - INTERVAL '1 hour', "
+            "        jsonb_build_object('admin_watching_until', "
+            "                           to_char((NOW() + INTERVAL '15 minutes') AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'))) "
+            "ON CONFLICT (device_id) DO UPDATE "
+            "SET raw = COALESCE(iot_device_health.raw, '{}'::jsonb) || "
+            "          jsonb_build_object('admin_watching_until', "
+            "            to_char((NOW() + INTERVAL '15 minutes') AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'))"
+        ), {'device_id': device_id})
+        self.db_session.commit()
+        return {'device_id': device_id, 'settings': normalized}
+
+    # ── IoT Devices: tags + maintenance + activity feed ──────────────
+
+    def update_device_tags(self, device_id: int, data: dict) -> Dict[str, Any]:
+        """Replace the tags JSONB array on a device.
+
+        Body: ``{tags: ["pilot-group-a", "firmware-v2"]}``. Tags are
+        deduped + lowercased + trimmed server-side so the GIN index
+        matches consistently.
+        """
+        from sqlalchemy import text as _t
+        import json as _json
+
+        self._ensure_device_exists(device_id)
+
+        raw = data.get('tags')
+        if not isinstance(raw, list):
+            raise BadRequestException('tags must be an array of strings')
+        # Normalise: trim, lowercase, drop empty + dupes, cap length.
+        seen: set = set()
+        cleaned: list = []
+        for t in raw:
+            if not isinstance(t, str):
+                continue
+            v = t.strip().lower()
+            if not v or v in seen:
+                continue
+            if len(v) > 64:
+                v = v[:64]
+            seen.add(v)
+            cleaned.append(v)
+        # Hard cap: 20 tags per device — enough for any realistic combination
+        # without letting the array grow unbounded.
+        cleaned = cleaned[:20]
+
+        self.db_session.execute(_t(
+            "UPDATE iot_devices SET tags = CAST(:tags AS JSONB), updated_date = NOW() "
+            "WHERE id = :id AND deleted_date IS NULL"
+        ), {'id': device_id, 'tags': _json.dumps(cleaned)})
+        self.db_session.commit()
+        return {'id': device_id, 'tags': cleaned}
+
+    def list_device_tags(self) -> Dict[str, Any]:
+        """Return the distinct set of tags currently in use across the fleet,
+        with usage counts. Powers the tag-filter dropdown in the admin list.
+        """
+        from sqlalchemy import text as _t
+        rows = self.db_session.execute(_t(
+            "SELECT tag, COUNT(*) AS n "
+            "FROM iot_devices, jsonb_array_elements_text(tags) AS tag "
+            "WHERE deleted_date IS NULL "
+            "GROUP BY tag "
+            "ORDER BY n DESC, tag ASC"
+        )).fetchall()
+        return {'items': [{'tag': r[0], 'count': int(r[1])} for r in rows]}
+
+    def update_device_maintenance(self, device_id: int, data: dict) -> Dict[str, Any]:
+        """Toggle maintenance mode + reason + auto-clear timestamp.
+
+        Body: ``{maintenance_mode: bool, reason?: str, until?: iso8601}``.
+        Devices in maintenance are suppressed from the alerts panel and
+        proactive notifications (when the cron lands).
+        """
+        from sqlalchemy import text as _t
+        from datetime import datetime as _dt
+
+        self._ensure_device_exists(device_id)
+
+        mm = data.get('maintenance_mode')
+        if not isinstance(mm, bool):
+            raise BadRequestException('maintenance_mode must be a boolean')
+        reason = data.get('reason')
+        if reason is not None and not isinstance(reason, str):
+            raise BadRequestException('reason must be a string when provided')
+
+        until_iso = data.get('until')
+        until_val = None
+        if until_iso:
+            try:
+                # Accept Z-suffixed and offset-aware ISO strings alike.
+                until_val = _dt.fromisoformat(until_iso.replace('Z', '+00:00'))
+            except Exception:
+                raise BadRequestException('until must be a valid ISO 8601 timestamp')
+
+        self.db_session.execute(_t(
+            "UPDATE iot_devices SET "
+            "  maintenance_mode = :mm, "
+            "  maintenance_reason = :reason, "
+            "  maintenance_until = :until, "
+            "  updated_date = NOW() "
+            "WHERE id = :id AND deleted_date IS NULL"
+        ), {
+            'id': device_id,
+            'mm': mm,
+            'reason': reason,
+            'until': until_val,
+        })
+        self.db_session.commit()
+        return {
+            'id': device_id,
+            'maintenance_mode': mm,
+            'maintenance_reason': reason,
+            'maintenance_until': until_val.isoformat() if until_val else None,
+        }
+
+    def list_recent_activity(self, query_params: dict) -> Dict[str, Any]:
+        """Fleet-wide activity feed — recent commands joined with device + actor names.
+
+        Query params:
+          * limit (default 50, max 200)
+          * since (ISO 8601; defaults to NOW() - INTERVAL '24 hours')
+          * status (csv of pending/delivered/succeeded/failed/expired)
+        """
+        from sqlalchemy import text as _t
+
+        try:
+            limit = int(query_params.get('limit', 50))
+        except Exception:
+            limit = 50
+        limit = max(1, min(200, limit))
+
+        since = (query_params.get('since') or '').strip()
+        status = (query_params.get('status') or '').strip()
+
+        where_clauses = []
+        params: Dict[str, Any] = {'lim': limit}
+        if since:
+            where_clauses.append('c.issued_at >= :since')
+            params['since'] = since
+        else:
+            where_clauses.append("c.issued_at >= NOW() - INTERVAL '24 hours'")
+        if status:
+            statuses = [s.strip() for s in status.split(',') if s.strip()]
+            if statuses:
+                where_clauses.append('c.status = ANY(:statuses)')
+                params['statuses'] = statuses
+
+        where_sql = ' AND '.join(where_clauses) if where_clauses else 'TRUE'
+
+        rows = self.db_session.execute(_t(
+            "SELECT c.id, c.device_id, d.device_name, "
+            "       c.command_type, c.status, c.issued_at, c.delivered_at, "
+            "       c.acked_at, c.completed_at, c.expires_at, c.payload, c.result, "
+            "       c.issued_by, ul.first_name, ul.last_name "
+            "FROM iot_device_commands c "
+            "LEFT JOIN iot_devices d ON d.id = c.device_id "
+            "LEFT JOIN user_locations ul ON ul.id = c.issued_by "
+            f"WHERE {where_sql} "
+            "ORDER BY c.issued_at DESC "
+            "LIMIT :lim"
+        ), params).fetchall()
+
+        items = []
+        for r in rows:
+            actor_name = None
+            if r[13] or r[14]:
+                actor_name = ' '.join([p for p in (r[13], r[14]) if p]).strip() or None
+            items.append({
+                'id': r[0],
+                'device_id': r[1],
+                'device_name': r[2],
+                'command_type': r[3],
+                'status': r[4],
+                'issued_at': r[5].isoformat() if r[5] else None,
+                'delivered_at': r[6].isoformat() if r[6] else None,
+                'acked_at': r[7].isoformat() if r[7] else None,
+                'completed_at': r[8].isoformat() if r[8] else None,
+                'expires_at': r[9].isoformat() if r[9] else None,
+                'payload': r[10],
+                'result': r[11],
+                'issued_by': r[12],
+                'issued_by_name': actor_name,
+            })
+        return {'items': items, 'total': len(items)}
+
+    # ── IoT Hardwares: physical-tablet registry + pair/unpair ───────
+
+    def list_iot_hardwares(self, query_params: dict) -> Dict[str, Any]:
+        """GET /api/admin/iot-hardwares — list all reporting tablets.
+
+        Filters: paired ('yes'|'no'), search (mac/serial/model).
+        """
+        from sqlalchemy import text as _t
+
+        try:
+            page = max(1, int(query_params.get('page', 1) or 1))
+        except Exception:
+            page = 1
+        try:
+            page_size = int(query_params.get('pageSize', 50) or 50)
+        except Exception:
+            page_size = 50
+        page_size = max(1, min(page_size, 200))
+
+        paired = (query_params.get('paired') or '').strip().lower()
+        search = (query_params.get('search') or '').strip()
+
+        # Sort. Default to `id ASC` so rows don't reshuffle on every refresh
+        # when devices check in (the old `last_checkin_at DESC` default
+        # caused exactly that). Sort field is whitelisted to avoid SQL
+        # injection through the column name; unknown values fall back to id.
+        _SORT_COLS = {
+            'id':                   'h.id',
+            'mac_address':          'h.mac_address',
+            'serial_number':        'h.serial_number',
+            'device_code':          'h.device_code',
+            'device_model':         'h.device_model',
+            'os_version':           'h.os_version',
+            'app_version':          'h.app_version',
+            'last_checkin_at':      'h.last_checkin_at',
+            'paired_iot_device_id': 'h.paired_iot_device_id',
+            'created_date':         'h.created_date',
+        }
+        sort_field_raw = (query_params.get('sortField') or 'id').strip()
+        sort_order_raw = (query_params.get('sortOrder') or 'asc').strip().lower()
+        sort_col = _SORT_COLS.get(sort_field_raw, 'h.id')
+        sort_dir = 'DESC' if sort_order_raw in ('desc', 'descend') else 'ASC'
+        # Always tiebreak on id ASC so adjacent rows with equal sort
+        # values keep a deterministic order across refreshes. NULLS LAST
+        # keeps not-yet-checked-in rows out of the way regardless of dir.
+        order_sql = f"{sort_col} {sort_dir} NULLS LAST, h.id ASC"
+
+        where = ['h.deleted_date IS NULL']
+        params: Dict[str, Any] = {}
+        if paired == 'yes':
+            where.append('h.paired_iot_device_id IS NOT NULL')
+        elif paired == 'no':
+            where.append('h.paired_iot_device_id IS NULL')
+        if search:
+            where.append(
+                '('
+                'h.mac_address ILIKE :search OR '
+                'h.serial_number ILIKE :search OR '
+                'h.device_model ILIKE :search OR '
+                'h.device_code ILIKE :search'
+                ')'
+            )
+            params['search'] = f'%{search}%'
+        where_sql = ' AND '.join(where)
+
+        total = int(self.db_session.execute(_t(
+            f"SELECT COUNT(*) FROM iot_hardwares h WHERE {where_sql}"
+        ), params).fetchone()[0] or 0)
+
+        params_paged = dict(params)
+        params_paged['_lim'] = page_size
+        params_paged['_off'] = (page - 1) * page_size
+
+        rows = self.db_session.execute(_t(
+            "SELECT h.id, h.mac_address, h.serial_number, h.device_code, "
+            "       h.device_model, h.os_version, h.app_version, "
+            "       h.last_checkin_at, h.last_ip_address, "
+            "       h.paired_iot_device_id, d.device_name, h.paired_at, h.created_date, "
+            "       h.last_lat, h.last_lng, h.last_location_accuracy_m, h.last_location_at, "
+            "       o.id AS organization_id, "
+            "       o.name AS organization_name, "
+            "       dh.current_route, "
+            "       h.tags "
+            "FROM iot_hardwares h "
+            "LEFT JOIN iot_devices d ON d.id = h.paired_iot_device_id "
+            "LEFT JOIN organizations o ON o.id = d.organization_id "
+            "LEFT JOIN iot_device_health dh ON dh.device_id = d.id "
+            f"WHERE {where_sql} "
+            f"ORDER BY {order_sql} "
+            "LIMIT :_lim OFFSET :_off"
+        ), params_paged).fetchall()
+
+        items = []
+        now = self.db_session.execute(_t("SELECT NOW()")).fetchone()[0]
+        for r in rows:
+            last_checkin = r[7]
+            online = False
+            if last_checkin is not None:
+                try:
+                    delta = (now - last_checkin).total_seconds()
+                    online = delta <= 15  # 3 missed beats @ 5 s
+                except Exception:
+                    online = False
+            items.append({
+                'id': r[0],
+                'mac_address': r[1],
+                'serial_number': r[2],
+                'device_code': r[3],
+                'device_model': r[4],
+                'os_version': r[5],
+                'app_version': r[6],
+                'last_checkin_at': last_checkin.isoformat() if last_checkin else None,
+                'online': online,
+                'last_ip_address': r[8],
+                'paired_iot_device_id': r[9],
+                'paired_iot_device_name': r[10],
+                'paired_at': r[11].isoformat() if r[11] else None,
+                'created_date': r[12].isoformat() if r[12] else None,
+                # GPS — drives the Map tab.
+                'last_lat': float(r[13]) if r[13] is not None else None,
+                'last_lng': float(r[14]) if r[14] is not None else None,
+                'last_location_accuracy_m': float(r[15]) if r[15] is not None else None,
+                'last_location_at': r[16].isoformat() if r[16] else None,
+                # Joined org name + current_route — handy for the Map popup.
+                'organization_id': r[17],
+                'organization_name': r[18],
+                'current_route': r[19],
+                # Per-hardware tags (location, pilot batch, hw revision …).
+                # Postgres returns JSONB as a list/dict already; if a row
+                # somehow has NULL despite the NOT NULL default, normalise.
+                'tags': list(r[20]) if isinstance(r[20], list) else [],
+            })
+
+        return {
+            'items': items,
+            'total': total,
+            'page': page,
+            'pageSize': page_size,
+        }
+
+    def _ensure_hardware_exists(self, hardware_id: int):
+        from sqlalchemy import text as _t
+        row = self.db_session.execute(_t(
+            "SELECT id FROM iot_hardwares WHERE id = :id AND deleted_date IS NULL"
+        ), {'id': hardware_id}).fetchone()
+        if not row:
+            raise NotFoundException(f'iot_hardware {hardware_id} not found')
+
+    def update_iot_hardware_tags(self, hardware_id: int, data: dict) -> Dict[str, Any]:
+        """Replace the tags JSONB array on an iot_hardware row.
+
+        Body: ``{tags: ["lobby-a", "pilot-batch-2"]}``. Mirrors
+        `update_device_tags` — tags are deduped + lowercased + trimmed
+        server-side so the GIN index matches consistently. Cap 20 tags
+        per hardware, each ≤ 64 chars.
+
+        Tags live on the *hardware* (physical tablet) rather than the
+        iot_device so they follow the tablet across re-pairings — that's
+        the useful unit when admins are labelling "this tablet is at
+        lobby A" or "this is part of pilot batch 2".
+        """
+        from sqlalchemy import text as _t
+        import json as _json
+
+        self._ensure_hardware_exists(hardware_id)
+
+        raw = data.get('tags')
+        if not isinstance(raw, list):
+            raise BadRequestException('tags must be an array of strings')
+        seen: set = set()
+        cleaned: list = []
+        for t in raw:
+            if not isinstance(t, str):
+                continue
+            v = t.strip().lower()
+            if not v or v in seen:
+                continue
+            if len(v) > 64:
+                v = v[:64]
+            seen.add(v)
+            cleaned.append(v)
+        cleaned = cleaned[:20]
+
+        self.db_session.execute(_t(
+            "UPDATE iot_hardwares SET tags = CAST(:tags AS JSONB), updated_date = NOW() "
+            "WHERE id = :id AND deleted_date IS NULL"
+        ), {'tags': _json.dumps(cleaned), 'id': hardware_id})
+        self.db_session.commit()
+        return {'id': hardware_id, 'tags': cleaned}
+
+    def _bump_admin_watching_until(self, device_id: int, minutes: int = 5) -> None:
+        """Mark `iot_device_health.raw.admin_watching_until = NOW() + N min`.
+
+        Causes the device's next `/sync` to:
+          1. Receive `next_interval_s = 5` (down from 10/30/120 s adaptive).
+          2. Long-poll for up to 25 s waiting for new commands.
+
+        Used after Pair / Unpair so the tablet picks up `force_login` (mints
+        live on /checkin) or the queued `force_logout {unpair:true}` within
+        ~1 s of admin action — instead of waiting up to 30 s for the next
+        idle-cadence sync. 5 min is a generous window: more than enough for
+        the next sync to fire, short enough that an admin who navigates
+        away doesn't keep the tablet in long-poll mode forever.
+        """
+        from sqlalchemy import text as _t
+        self.db_session.execute(_t(
+            "INSERT INTO iot_device_health (device_id, last_seen_at, raw) "
+            "VALUES (:device_id, NOW() - INTERVAL '1 hour', "
+            "        jsonb_build_object('admin_watching_until', "
+            "                           to_char((NOW() + (:mins || ' minutes')::interval) AT TIME ZONE 'UTC', "
+            "                                   'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'))) "
+            "ON CONFLICT (device_id) DO UPDATE "
+            "SET raw = COALESCE(iot_device_health.raw, '{}'::jsonb) || "
+            "          jsonb_build_object('admin_watching_until', "
+            "            to_char((NOW() + (:mins || ' minutes')::interval) AT TIME ZONE 'UTC', "
+            "                    'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'))"
+        ), {'device_id': device_id, 'mins': str(minutes)})
+
+    def pair_iot_hardware(self, hardware_id: int, data: dict, current_user: dict) -> Dict[str, Any]:
+        """POST /api/admin/iot-hardwares/{id}/pair  body: {device_id}.
+
+        Sets the bidirectional pointer:
+          iot_hardwares.paired_iot_device_id = D
+          iot_devices.hardware_id           = H
+
+        On the hardware's NEXT /checkin (within ~15 s) it will receive a
+        `force_login` directive in the response and transition to the
+        device-token sync flow automatically.
+        """
+        from sqlalchemy import text as _t
+
+        self._ensure_hardware_exists(hardware_id)
+
+        # Accept either `iot_device_id` (preferred — matches the bidirectional
+        # column name) or `device_id` (legacy) so older callers don't break.
+        device_id_raw = data.get('iot_device_id', data.get('device_id'))
+        if device_id_raw is None:
+            raise BadRequestException('iot_device_id is required')
+        try:
+            device_id = int(device_id_raw)
+        except Exception:
+            raise BadRequestException('iot_device_id must be an integer')
+
+        # Optional settings-PIN. Stored transiently on the hardware row;
+        # consumed and cleared by the next /checkin response. 4–8 digits.
+        pin_raw = data.get('pin')
+        pending_pin: str | None = None
+        if pin_raw is not None and str(pin_raw).strip() != '':
+            pin_str = str(pin_raw).strip()
+            if not pin_str.isdigit() or not (4 <= len(pin_str) <= 8):
+                raise BadRequestException('pin must be 4–8 digits')
+            pending_pin = pin_str
+
+        # Validate target device exists.
+        dev = self.db_session.execute(_t(
+            "SELECT id, device_name FROM iot_devices "
+            "WHERE id = :id AND deleted_date IS NULL"
+        ), {'id': device_id}).fetchone()
+        if not dev:
+            raise NotFoundException(f'iot_device {device_id} not found')
+
+        # Reject if either side is already paired to something else.
+        existing = self.db_session.execute(_t(
+            "SELECT paired_iot_device_id FROM iot_hardwares WHERE id = :id"
+        ), {'id': hardware_id}).fetchone()
+        if existing and existing[0] is not None and int(existing[0]) != device_id:
+            raise ConflictException(
+                f'hardware {hardware_id} is already paired to device {int(existing[0])}; unpair first'
+            )
+
+        device_pair = self.db_session.execute(_t(
+            "SELECT hardware_id FROM iot_devices WHERE id = :id"
+        ), {'id': device_id}).fetchone()
+        if device_pair and device_pair[0] is not None and int(device_pair[0]) != hardware_id:
+            raise ConflictException(
+                f'device {device_id} is already paired to hardware {int(device_pair[0])}; unpair first'
+            )
+
+        actor_id = (current_user or {}).get('user_id') or (current_user or {}).get('id')
+
+        # Set both sides atomically. Also stash any admin-supplied PIN so
+        # the tablet picks it up on its next checkin (and we clear it then).
+        self.db_session.execute(_t(
+            "UPDATE iot_hardwares SET "
+            "  paired_iot_device_id = :dev, paired_at = NOW(), paired_by = :actor, "
+            "  pending_pin = :pin, "
+            "  updated_date = NOW() "
+            "WHERE id = :id"
+        ), {'id': hardware_id, 'dev': device_id, 'actor': actor_id, 'pin': pending_pin})
+        self.db_session.execute(_t(
+            "UPDATE iot_devices SET hardware_id = :hw, updated_date = NOW() "
+            "WHERE id = :id"
+        ), {'id': device_id, 'hw': hardware_id})
+        # Expire STALE unpair-style force_logout commands sitting in the
+        # queue from a long-past unpair (e.g. a tablet that was offline at
+        # the time and never picked up the cmd). Without this, the tablet's
+        # first /sync after a fresh pair would deliver the ghost command
+        # and immediately log itself out — see the 2026-05-03 ghost-loop
+        # fix. Generic force_logout commands (without `unpair:true`) are
+        # left alone — they're operator-only logouts with separate semantics.
+        #
+        # CRITICAL: only sweep cmds older than 60 s. A force_logout queued
+        # in the last minute is almost certainly a legitimate Unpair the
+        # admin just clicked — possibly followed by Pair-to-same-device
+        # for testing or to push a new PIN — and the tablet must actually
+        # execute that logout before re-authenticating. Sweeping it would
+        # leave the tablet silently in stale state ("Unpair then Pair
+        # doesn't work" UX bug from 2026-05-05).
+        self.db_session.execute(_t(
+            "UPDATE iot_device_commands SET "
+            "  status = 'expired', "
+            "  completed_at = NOW() "
+            "WHERE device_id = :dev "
+            "  AND command_type = 'force_logout' "
+            "  AND status IN ('pending', 'delivered') "
+            "  AND payload @> '{\"unpair\": true}'::jsonb "
+            "  AND issued_at < NOW() - INTERVAL '60 seconds'"
+        ), {'dev': device_id})
+        # Tell the tablet to enter long-poll mode for the next 5 minutes so
+        # the very next /sync fetches the freshly-minted force_login (if it
+        # somehow missed the /checkin response) within ≤1 s instead of
+        # waiting up to 30 s for the idle-cadence sync.
+        self._bump_admin_watching_until(device_id, minutes=5)
+
+        # If admin set a PIN, ALSO queue a `set_settings_pin` device command.
+        # This covers the re-pair-with-PIN case where the tablet is already
+        # paired and on /sync (so the /checkin pending_pin column never gets
+        # consumed because HwCheckin is no-op'ing in steady state). The
+        # command rides /sync's long-poll flow, so the PIN reaches the
+        # tablet within ~1 s. Idempotent with the /checkin path: if both
+        # arrive, the second write of the same value is harmless.
+        if pending_pin:
+            import json as _json
+            self.db_session.execute(_t(
+                "INSERT INTO iot_device_commands "
+                "(device_id, command_type, payload, status, issued_by) "
+                "VALUES (:dev, 'set_settings_pin', CAST(:pl AS JSONB), 'pending', :actor)"
+            ), {
+                'dev': device_id,
+                'actor': actor_id,
+                'pl': _json.dumps({'pin': pending_pin}),
+            })
+        self.db_session.commit()
+
+        return {
+            'hardware_id': hardware_id,
+            'iot_device_id': device_id,
+            'iot_device_name': dev[1],
+            'paired': True,
+        }
+
+    def unpair_iot_hardware(self, hardware_id: int, current_user: dict) -> Dict[str, Any]:
+        """POST /api/admin/iot-hardwares/{id}/unpair.
+
+        Clears both sides AND queues a force_logout command on the
+        previously-paired device so the tablet drops back to the pre-login
+        checkin loop on its next /sync.
+        """
+        from sqlalchemy import text as _t
+
+        self._ensure_hardware_exists(hardware_id)
+
+        existing = self.db_session.execute(_t(
+            "SELECT paired_iot_device_id FROM iot_hardwares WHERE id = :id"
+        ), {'id': hardware_id}).fetchone()
+        prev_device_id = (
+            int(existing[0]) if (existing and existing[0] is not None) else None
+        )
+
+        # Clear hardware → device.
+        self.db_session.execute(_t(
+            "UPDATE iot_hardwares SET "
+            "  paired_iot_device_id = NULL, paired_at = NULL, paired_by = NULL, "
+            "  updated_date = NOW() "
+            "WHERE id = :id"
+        ), {'id': hardware_id})
+        # Clear device → hardware (only if it points back at us).
+        if prev_device_id:
+            self.db_session.execute(_t(
+                "UPDATE iot_devices SET hardware_id = NULL, updated_date = NOW() "
+                "WHERE id = :id AND hardware_id = :hw"
+            ), {'id': prev_device_id, 'hw': hardware_id})
+
+            # Queue a force_logout command so the tablet drops back into the
+            # pre-login state on its next /sync. The `unpair: true` payload
+            # flag tells the tablet to also clear *device* credentials (not
+            # just the operator session) and restart the hardware checkin loop.
+            actor_id = (current_user or {}).get('user_id') or (current_user or {}).get('id')
+            self.db_session.execute(_t(
+                "INSERT INTO iot_device_commands "
+                "(device_id, command_type, payload, status, issued_by) "
+                "VALUES (:dev, 'force_logout', CAST(:pl AS JSONB), 'pending', :actor)"
+            ), {
+                'dev': prev_device_id,
+                'actor': actor_id,
+                'pl': '{"unpair": true}',
+            })
+            # Drop the tablet into long-poll mode so it fetches the queued
+            # force_logout within ~1 s (vs up to 30 s on the idle-cadence
+            # sync). Without this an idle paired tablet can take 30 s to
+            # actually log out, which made the Unpair button feel slow.
+            self._bump_admin_watching_until(prev_device_id, minutes=5)
+        self.db_session.commit()
+
+        return {
+            'hardware_id': hardware_id,
+            'unpaired_from_iot_device_id': prev_device_id,
+            'paired': False,
+        }
+
+    # ── IoT Devices: aggregated history (5-min buckets) ─────────────
+
+    # 5-min aggregation cadence — matches the bucket size in the SQL.
+    _HISTORY_BUCKET_MIN = 5
+    _HISTORY_RETENTION_DAYS = 7
+
+    def aggregate_health_snapshot(self) -> Dict[str, Any]:
+        """Write a single 5-min bucket row per active device.
+
+        Idempotent — the table's PK (device_id, bucket_start) means calling
+        this twice in the same bucket is a no-op. Designed to be called by:
+          * a CloudWatch / cron job every 5 minutes (preferred), OR
+          * manually via this endpoint for testing / backfill.
+
+        Also opportunistically drops rows older than 7 days from the same
+        bucket so retention stays bounded without a separate sweeper.
+        """
+        from sqlalchemy import text as _t
+
+        # Bucket alignment: floor NOW() to the nearest 5-min boundary.
+        # Postgres expression keeps the math server-side so we don't drift
+        # on clock skew between app server + db.
+        result = self.db_session.execute(_t(
+            "INSERT INTO iot_device_health_history "
+            "  (device_id, bucket_start, online, battery_level, "
+            "   battery_charging, network_type, network_strength, last_seen_at) "
+            "SELECT "
+            "  d.id, "
+            "  date_trunc('hour', NOW()) "
+            "    + (FLOOR(EXTRACT(MINUTE FROM NOW())::int / :bucket_min) "
+            "       * :bucket_min) * INTERVAL '1 minute' AS bucket_start, "
+            "  COALESCE(h.last_seen_at > NOW() - INTERVAL '30 seconds', FALSE) AS online, "
+            "  h.battery_level, h.battery_charging, h.network_type, h.network_strength, "
+            "  h.last_seen_at "
+            "FROM iot_devices d "
+            "LEFT JOIN iot_device_health h ON h.device_id = d.id "
+            "WHERE d.deleted_date IS NULL "
+            "ON CONFLICT (device_id, bucket_start) DO NOTHING"
+        ), {'bucket_min': self._HISTORY_BUCKET_MIN})
+
+        # Drop rows older than the retention window. Keeps the table small.
+        purged = self.db_session.execute(_t(
+            "DELETE FROM iot_device_health_history "
+            "WHERE bucket_start < NOW() - INTERVAL ':d days'".replace(
+                ':d', str(self._HISTORY_RETENTION_DAYS)
+            )
+        ))
+
+        self.db_session.commit()
+
+        return {
+            'inserted': getattr(result, 'rowcount', 0) or 0,
+            'purged': getattr(purged, 'rowcount', 0) or 0,
+            'bucket_minutes': self._HISTORY_BUCKET_MIN,
+            'retention_days': self._HISTORY_RETENTION_DAYS,
+        }
+
+    def list_online_history(self, query_params: dict) -> Dict[str, Any]:
+        """Fleet-wide online% over a time range.
+
+        Params:
+          * range  — ``24h`` (default) | ``7d`` | ``1h``
+          * organizationId — restrict to one org
+        Returns ``[{bucket_start, total, online, online_pct}, …]`` ordered
+        chronologically; empty buckets are skipped (frontend renders gaps).
+        """
+        from sqlalchemy import text as _t
+
+        rng = (query_params.get('range') or '24h').strip()
+        if rng not in ('1h', '24h', '7d'):
+            rng = '24h'
+        interval_sql = {
+            '1h': "INTERVAL '1 hour'",
+            '24h': "INTERVAL '24 hours'",
+            '7d': "INTERVAL '7 days'",
+        }[rng]
+
+        org_id = (query_params.get('organizationId') or '').strip()
+        params: Dict[str, Any] = {}
+        org_filter = ''
+        if org_id:
+            org_filter = ' AND d.organization_id = :org_id'
+            params['org_id'] = int(org_id)
+
+        rows = self.db_session.execute(_t(
+            "SELECT h.bucket_start, "
+            "       COUNT(*) AS total, "
+            "       COUNT(*) FILTER (WHERE h.online) AS online "
+            "FROM iot_device_health_history h "
+            "JOIN iot_devices d ON d.id = h.device_id "
+            "WHERE h.bucket_start >= NOW() - " + interval_sql + " "
+            "  AND d.deleted_date IS NULL"
+            + org_filter +
+            " GROUP BY h.bucket_start "
+            "ORDER BY h.bucket_start ASC"
+        ), params).fetchall()
+
+        items = []
+        for r in rows:
+            total = int(r[1] or 0)
+            online = int(r[2] or 0)
+            items.append({
+                'bucket_start': r[0].isoformat() if r[0] else None,
+                'total': total,
+                'online': online,
+                'online_pct': round(100.0 * online / total, 1) if total else 0.0,
+            })
+        return {'items': items, 'range': rng}
+
+    def list_iot_device_health_history(
+        self, device_id: int, query_params: dict
+    ) -> Dict[str, Any]:
+        """Per-device history for sparklines on the show.tsx Status tab.
+
+        Params:
+          * range  — ``24h`` (default) | ``7d`` | ``1h``
+        Returns ``[{bucket_start, online, battery_level, network_strength,
+                    network_type}, …]`` ordered chronologically.
+        """
+        from sqlalchemy import text as _t
+
+        self._ensure_device_exists(device_id)
+
+        rng = (query_params.get('range') or '24h').strip()
+        if rng not in ('1h', '24h', '7d'):
+            rng = '24h'
+        interval_sql = {
+            '1h': "INTERVAL '1 hour'",
+            '24h': "INTERVAL '24 hours'",
+            '7d': "INTERVAL '7 days'",
+        }[rng]
+
+        rows = self.db_session.execute(_t(
+            "SELECT bucket_start, online, battery_level, battery_charging, "
+            "       network_type, network_strength, last_seen_at "
+            "FROM iot_device_health_history "
+            "WHERE device_id = :id "
+            "  AND bucket_start >= NOW() - " + interval_sql + " "
+            "ORDER BY bucket_start ASC"
+        ), {'id': device_id}).fetchall()
+
+        return {
+            'items': [
+                {
+                    'bucket_start': r[0].isoformat() if r[0] else None,
+                    'online': bool(r[1]),
+                    'battery_level': r[2],
+                    'battery_charging': r[3],
+                    'network_type': r[4],
+                    'network_strength': r[5],
+                    'last_seen_at': r[6].isoformat() if r[6] else None,
+                }
+                for r in rows
+            ],
+            'range': rng,
         }
 
     # ── IoT Scales ──────────────────────────────────────────────────

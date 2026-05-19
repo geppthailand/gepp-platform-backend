@@ -715,11 +715,19 @@ class UserCRUD:
         Args:
             organization_id: Filter by organization ID
             location_ids: If provided, only return locations with these IDs
+
+        IMPORTANT: filters out soft-deleted rows (deleted_date IS NOT NULL).
+        Without this guard, ``DELETE /api/locations/:id`` (which sets
+        deleted_date but leaves is_active alone) would leave zombie rows in
+        the response — the frontend would still place them in the org chart
+        as "Room N" / "Destination N" boxes and the layout algorithm would
+        crash sideways trying to render them.
         """
         query = self.db.query(UserLocation).filter(
             and_(
                 UserLocation.is_location == True,
-                UserLocation.is_active == True
+                UserLocation.is_active == True,
+                UserLocation.deleted_date.is_(None),
             )
         )
 

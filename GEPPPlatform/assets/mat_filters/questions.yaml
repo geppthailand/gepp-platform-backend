@@ -1,0 +1,274 @@
+# GEPP ESG Materiality Filter — Question Definitions
+# See ./concept.md for the design rationale.
+#
+# Bump this version when you change scoring shape so old saved answers can be
+# detected and the user re-prompted.
+version: 1
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Question schema:
+#   id:                stable identifier — used as a key in the answers JSON.
+#                      Never rename without a migration.
+#   type:              searchable_select | single_select | multi_select
+#   illustration:      key into liff/pages/Materiality/illustrations/index.tsx
+#   labels:            { en, th } — question prompt
+#   help:              { en, th } — small subtext below the prompt
+#   show_when:         optional — { field, op, value }; question is skipped
+#                      entirely when this evaluates false
+#   options:           list of { id, labels: {en, th}, category_weights: {N: w}}
+#                      For searchable_select with `free_text: true`, picking
+#                      that option reveals a free-text input.
+#   industry_seeds:    only on q1_industry — per-option seed map of category
+#                      pre-weights that flow into the score regardless of
+#                      later answers.
+# ─────────────────────────────────────────────────────────────────────────────
+
+questions:
+
+  # ─── Q1 — INDUSTRY ────────────────────────────────────────────────────────
+  - id: q1_industry
+    type: searchable_select
+    illustration: industry
+    required: true
+    labels:
+      en: What industry is your business in?
+      th: ธุรกิจของคุณอยู่ในอุตสาหกรรมใด?
+    help:
+      en: Pick the closest match. If nothing fits, choose "Other" and tell us in your own words.
+      th: เลือกอันที่ใกล้เคียงที่สุด หากไม่มีในรายการ เลือก "อื่นๆ" และพิมพ์อธิบายให้เราได้
+    options_source: industries.yaml   # rendered from industries.yaml; "Other" is automatic
+
+  # ─── Q2 — WHAT YOU SELL/DELIVER ───────────────────────────────────────────
+  - id: q2_offering
+    type: multi_select
+    illustration: offering
+    required: true
+    labels:
+      en: What does your business sell or deliver?
+      th: ธุรกิจของคุณขายหรือให้บริการอะไร?
+    help:
+      en: Select all that apply. Most businesses pick 1–3.
+      th: เลือกได้มากกว่าหนึ่งข้อ ส่วนใหญ่จะเลือก 1–3 ข้อ
+    options:
+      - id: physical_b2b
+        labels: { en: Physical products to other businesses (B2B), th: สินค้าทางกายภาพให้ธุรกิจอื่น (B2B) }
+        category_weights: { 1: 0.4, 4: 0.4, 9: 0.5, 10: 0.4, 11: 0.3 }
+
+      - id: physical_b2c
+        labels: { en: Physical products to consumers (B2C), th: สินค้าทางกายภาพให้ผู้บริโภค (B2C) }
+        category_weights: { 1: 0.4, 4: 0.3, 9: 0.6, 11: 0.3, 12: 0.5 }
+
+      - id: digital_services
+        labels: { en: Digital products / SaaS / software, th: ผลิตภัณฑ์ดิจิทัล / SaaS / ซอฟต์แวร์ }
+        category_weights: { 1: 0.3, 5: 0.2 }
+
+      - id: professional_services
+        labels:
+          en: "Professional services (consulting, legal, accounting, etc.)"
+          th: "บริการเชิงวิชาชีพ (ที่ปรึกษา / กฎหมาย / บัญชี)"
+        category_weights: { 1: 0.3, 6: 0.3 }
+
+      - id: financial_products
+        labels:
+          en: "Financial products (loans, insurance, investments)"
+          th: "ผลิตภัณฑ์ทางการเงิน (สินเชื่อ ประกัน การลงทุน)"
+        category_weights: { 15: 0.8 }
+
+      - id: franchised_brand
+        labels: { en: We operate a franchised brand, th: เราดำเนินธุรกิจแบบแฟรนไชส์ }
+        category_weights: { 14: 0.8 }
+
+      - id: energy_fuels
+        labels:
+          en: "Energy or fuels (electricity, gas, petroleum)"
+          th: "พลังงานหรือเชื้อเพลิง (ไฟฟ้า ก๊าซ ปิโตรเลียม)"
+        category_weights: { 3: 0.5, 11: 0.7 }
+
+      - id: capital_equipment
+        labels:
+          en: "Heavy machinery, vehicles, or capital equipment"
+          th: "เครื่องจักรหนัก ยานพาหนะ หรืออุปกรณ์ทุน"
+        category_weights: { 1: 0.3, 2: 0.5, 11: 0.6, 12: 0.4 }
+
+      - id: food_beverage
+        labels:
+          en: "Food, beverages, or perishables"
+          th: "อาหาร เครื่องดื่ม หรือของสด"
+        category_weights: { 1: 0.5, 4: 0.4, 5: 0.4, 9: 0.5, 12: 0.4 }
+
+  # ─── Q3 — DISTRIBUTION (conditional) ──────────────────────────────────────
+  - id: q3_distribution
+    type: single_select
+    illustration: distribution
+    show_when:
+      field: q2_offering
+      op: any_of
+      value: [physical_b2b, physical_b2c, capital_equipment, energy_fuels, food_beverage]
+    labels:
+      en: How do your products reach customers?
+      th: สินค้าของคุณส่งถึงลูกค้าอย่างไร?
+    help:
+      en: This determines whether upstream and downstream transport emissions matter for you.
+      th: ข้อนี้บอกได้ว่าการขนส่งต้นน้ำและปลายน้ำเกี่ยวข้องกับธุรกิจของคุณแค่ไหน
+    options:
+      - id: own_fleet
+        labels: { en: We deliver with our own fleet, th: เราจัดส่งด้วยกองรถของตัวเอง }
+        category_weights: { 4: 0.3, 9: 0.6 }   # downstream is direct (Scope 1 normally) but upstream of materials still applies
+
+      - id: third_party_logistics
+        labels: { en: Third-party logistics handle delivery for us, th: ใช้บริการขนส่งจากบุคคลที่สาม }
+        category_weights: { 4: 0.5, 9: 0.7 }
+
+      - id: customer_pickup
+        labels: { en: Customers pick up directly from us, th: ลูกค้ามารับสินค้าเอง }
+        category_weights: { 4: 0.4 }            # downstream is the customer's, upstream still ours
+
+      - id: digital_delivery
+        labels: { en: Mostly delivered digitally / no physical shipment, th: ส่งมอบแบบดิจิทัลเป็นหลัก / ไม่มีการขนส่งทางกายภาพ }
+        category_weights: {}                    # zero — nothing material here
+
+  # ─── Q4 — WORKFORCE ───────────────────────────────────────────────────────
+  - id: q4_workforce
+    type: multi_select
+    illustration: workforce
+    labels:
+      en: What does your workforce look like?
+      th: พนักงานของคุณทำงานแบบไหน?
+    help:
+      en: Select all that apply. This decides whether business travel and commuting are material.
+      th: เลือกได้มากกว่าหนึ่งข้อ ข้อนี้ตัดสินว่าการเดินทางและการเดินทางมาทำงานสำคัญหรือไม่
+    options:
+      - id: office_bound
+        labels: { en: Most staff work in offices, th: พนักงานส่วนใหญ่ทำงานในออฟฟิศ }
+        category_weights: { 7: 0.6 }
+
+      - id: field_onsite
+        labels:
+          en: "Field / on-site workers (factories, sites, retail floor)"
+          th: "พนักงานภาคสนาม / หน้างาน (โรงงาน ไซต์งาน หน้าร้าน)"
+        category_weights: { 6: 0.3, 7: 0.4 }
+
+      - id: hybrid_workforce
+        labels: { en: Hybrid / remote workforce, th: พนักงานแบบไฮบริด / ทำงานทางไกล }
+        category_weights: { 7: 0.3 }            # commuting still real but lighter
+
+      - id: frequent_travel
+        labels:
+          en: "Frequent business travel (clients, conferences, sites)"
+          th: "เดินทางทำงานบ่อย (พบลูกค้า งานประชุม ไซต์งาน)"
+        category_weights: { 6: 0.7 }
+
+      - id: rare_travel
+        labels: { en: Rarely travel for work, th: ไม่ค่อยเดินทางทำงาน }
+        category_weights: {}                    # explicit "no" — leaves cat 6 sub-threshold
+
+  # ─── Q5 — ASSET MODEL ─────────────────────────────────────────────────────
+  - id: q5_assets
+    type: multi_select
+    illustration: assets
+    labels:
+      en: How do you operate your facilities and assets?
+      th: คุณดำเนินงานเกี่ยวกับสถานที่และสินทรัพย์อย่างไร?
+    help:
+      en: Select all that apply. This decides whether leased assets, franchises, and investments are material.
+      th: เลือกได้มากกว่าหนึ่งข้อ ข้อนี้ตัดสินว่าสินทรัพย์เช่า แฟรนไชส์ และการลงทุน สำคัญหรือไม่
+    options:
+      - id: own_facilities
+        labels: { en: We own our facilities, th: เราเป็นเจ้าของสถานที่เอง }
+        category_weights: {}                    # no Scope 3 leased — those are Scope 1/2
+
+      - id: lease_facilities
+        labels: { en: We lease our office or factory space, th: เราเช่าออฟฟิศหรือโรงงาน }
+        category_weights: { 8: 0.7 }
+
+      - id: lease_equipment
+        labels: { en: We lease equipment or vehicles, th: เราเช่าอุปกรณ์หรือยานพาหนะ }
+        category_weights: { 8: 0.5 }
+
+      - id: lease_out
+        labels: { en: We lease assets or property TO other businesses, th: เราให้เช่าสินทรัพย์หรืออสังหาแก่ธุรกิจอื่น }
+        category_weights: { 13: 0.8 }
+
+      - id: run_franchises
+        labels: { en: We have franchisees operating under our brand, th: เรามีแฟรนไชส์ที่ดำเนินงานภายใต้แบรนด์ของเรา }
+        category_weights: { 14: 0.8 }
+
+      - id: hold_investments
+        labels: { en: We hold significant equity investments or run a portfolio, th: เราถือหุ้นใหญ่หรือบริหารพอร์ตการลงทุน }
+        category_weights: { 15: 0.7 }
+
+  # ─── Q6 — ENERGY & WASTE (conditional) ────────────────────────────────────
+  - id: q6_energy_waste
+    type: multi_select
+    illustration: energy_waste
+    show_when:
+      field: q1_industry
+      op: not_in
+      value: [software_it, financial_services, professional_services, education, other]
+    labels:
+      en: What's your energy and waste profile?
+      th: ลักษณะการใช้พลังงานและของเสียของคุณเป็นอย่างไร?
+    help:
+      en: Select all that apply. This decides whether upstream fuel and operational waste are material.
+      th: เลือกได้มากกว่าหนึ่งข้อ ข้อนี้ตัดสินว่าเชื้อเพลิงต้นน้ำและของเสียในการดำเนินงาน สำคัญหรือไม่
+    options:
+      - id: heavy_electricity
+        labels:
+          en: "Significant electricity use (factory, data centre, refrigeration)"
+          th: "ใช้ไฟฟ้าจำนวนมาก (โรงงาน ดาต้าเซ็นเตอร์ การแช่เย็น)"
+        category_weights: { 3: 0.7 }
+
+      - id: vehicle_fleet
+        labels:
+          en: "Vehicle fleet (trucks, delivery vans, company cars)"
+          th: "มีกองยานพาหนะ (รถบรรทุก รถส่งของ รถบริษัท)"
+        category_weights: { 3: 0.5, 4: 0.3 }
+
+      - id: significant_waste
+        labels:
+          en: "Significant operational waste (food scraps, manufacturing offcuts, packaging)"
+          th: "มีของเสียจากการดำเนินงานมาก (เศษอาหาร เศษการผลิต บรรจุภัณฑ์)"
+        category_weights: { 5: 0.8 }
+
+      - id: standard_office
+        labels: { en: Standard office utilities only, th: ใช้ระบบสาธารณูปโภคออฟฟิศทั่วไปเท่านั้น }
+        category_weights: { 3: 0.2, 5: 0.2 }
+
+  # ─── Q7 — PRODUCT LIFECYCLE (conditional) ─────────────────────────────────
+  - id: q7_lifecycle
+    type: multi_select
+    illustration: lifecycle
+    show_when:
+      field: q2_offering
+      op: any_of
+      value: [physical_b2b, physical_b2c, capital_equipment, food_beverage, energy_fuels]
+    labels:
+      en: What happens to your products after sale?
+      th: หลังจากขายแล้ว สินค้าของคุณเป็นอย่างไรต่อ?
+    help:
+      en: Select all that apply. This decides whether processing, use-phase, and end-of-life emissions are material.
+      th: เลือกได้มากกว่าหนึ่งข้อ ข้อนี้ตัดสินว่าการแปรรูปต่อ การใช้งาน และการกำจัดสินค้า สำคัญหรือไม่
+    options:
+      - id: use_phase_energy
+        labels:
+          en: "Customers consume energy when using our products (appliances, vehicles, electronics)"
+          th: "ลูกค้าใช้พลังงานในการใช้งานสินค้าเรา (เครื่องใช้ไฟฟ้า ยานพาหนะ อุปกรณ์อิเล็กทรอนิกส์)"
+        category_weights: { 11: 0.8 }
+
+      - id: single_use_disposable
+        labels:
+          en: "Customers dispose of our products after a single use (packaging, consumables)"
+          th: "ลูกค้าทิ้งสินค้าหลังใช้ครั้งเดียว (บรรจุภัณฑ์ ของใช้สิ้นเปลือง)"
+        category_weights: { 12: 0.7 }
+
+      - id: long_lived_disposed
+        labels: { en: Customers eventually dispose of our products at end-of-life, th: ลูกค้ากำจัดสินค้าเมื่อหมดอายุการใช้งาน }
+        category_weights: { 12: 0.6 }
+
+      - id: intermediate_processed
+        labels: { en: Our products are intermediate goods that customers process further, th: สินค้าของเราเป็นวัตถุดิบที่ลูกค้านำไปแปรรูปต่อ }
+        category_weights: { 10: 0.8 }
+
+      - id: services_consumed
+        labels: { en: Our products are services or are consumed instantly, th: สินค้าของเราเป็นบริการ หรือถูกใช้ทันที }
+        category_weights: {}                    # zero — explicit "none of the above"

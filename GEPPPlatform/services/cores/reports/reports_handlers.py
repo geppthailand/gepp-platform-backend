@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 import boto3
 
 from .reports_service import ReportsService
+from .ghg_equivalents import kg_co2_to_trees, kg_co2_to_forest_rai
 from ..transactions.presigned_url_service import TransactionPresignedUrlService
 from ....exceptions import APIException, ValidationException, NotFoundException
 from GEPPPlatform.models.cores.references import MainMaterial, MaterialCategory
@@ -464,11 +465,18 @@ def _handle_overview_report(
         total_waste += weight
         ghg_reduction += record_ghg
 
-        # Monthly aggregation
+        # Monthly aggregation — bucket by the user's local timezone (Bangkok),
+        # not UTC. Without this, a tx stored as e.g. 2025-10-31 18:00 UTC
+        # (= 2025-11-01 01:00 Bangkok) lands in October here while the SQL
+        # date-range filter (converted to Bangkok) includes it in November,
+        # causing an Oct/Nov split on the chart.
         if tx_date:
             try:
                 dt = tx_date if isinstance(tx_date, datetime) else datetime.fromisoformat(str(tx_date))
-                y, m = dt.year, dt.month
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                dt_local = dt.astimezone(ZoneInfo('Asia/Bangkok'))
+                y, m = dt_local.year, dt_local.month
                 if y not in month_totals_by_year:
                     month_totals_by_year[y] = {}
                 month_totals_by_year[y][m] = month_totals_by_year[y].get(m, 0.0) + weight
@@ -602,7 +610,8 @@ def _handle_overview_report(
         'overall_charts': {
             'chart_stat_data': [
                 {'title': 'Total Recyclables', 'value': round(recyclable_waste * 100) / 100},
-                {'title': 'Number of Trees', 'value': round((recyclable_ghg_reduction / 9.5 * 100) * 100) / 100 if recyclable_ghg_reduction > 0 else 0.0},
+                {'title': 'Number of Trees', 'value': int(round(kg_co2_to_trees(recyclable_ghg_reduction) * 100 / 100))},
+                # {'title': 'Forest (rai)', 'value': round(kg_co2_to_forest_rai(recyclable_ghg_reduction) * 100) / 100},
                 {'title': 'Plastic Saved', 'value': round(plastic_saved * 100) / 100},
             ],
             'chart_data': chart_data
@@ -1369,17 +1378,28 @@ def _handle_comparison_report(
     # Handle leap year edge cases:
     #   - Feb 29 in leap year -> Feb 28 in non-leap year
     #   - Feb 28 (end of Feb in non-leap year) -> Feb 29 if previous year is leap year
+    #
+    # CRITICAL: do calendar arithmetic on the **client-locale** representation, not
+    # on the UTC-shifted one. A user picking "March 1 Bangkok" stores as
+    # "2026-02-28T17:00:00+00:00" in UTC; extracting .month from UTC yields 2 and
+    # would falsely trigger the Feb-29 branch.
     import calendar
 
     def subtract_year(dt: datetime, is_end_date: bool = False) -> datetime:
-        prev_year = dt.year - 1
-        if dt.month == 2 and dt.day == 29:
-            # Current is leap year Feb 29 -> previous non-leap year Feb 28
-            return dt.replace(year=prev_year, day=28)
-        if is_end_date and dt.month == 2 and dt.day == 28 and not calendar.isleap(dt.year) and calendar.isleap(prev_year):
-            # Current is non-leap year Feb 28 (end of Feb) -> previous leap year Feb 29
-            return dt.replace(year=prev_year, day=29)
-        return dt.replace(year=prev_year)
+        # Project the UTC instant into client TZ for calendar reasoning, then
+        # rebuild the equivalent UTC instant for the previous year.
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        local = dt.astimezone(client_tz)
+        prev_year = local.year - 1
+        if local.month == 2 and local.day == 29:
+            adjusted_local = local.replace(year=prev_year, day=28)
+        elif is_end_date and local.month == 2 and local.day == 28 \
+                and not calendar.isleap(local.year) and calendar.isleap(prev_year):
+            adjusted_local = local.replace(year=prev_year, day=29)
+        else:
+            adjusted_local = local.replace(year=prev_year)
+        return adjusted_local.astimezone(timezone.utc)
 
     left_from_dt = subtract_year(right_from_dt)
     left_to_dt = subtract_year(right_to_dt, is_end_date=True)
@@ -1438,9 +1458,17 @@ def _handle_comparison_report(
         end_dt = _parse_datetime(end_iso)
         if not start_dt or not end_dt:
             return None
+        # Convert to Bangkok so labels reflect the user-visible range, not UTC.
+        bkk = ZoneInfo('Asia/Bangkok')
+        if start_dt.tzinfo is None:
+            start_dt = start_dt.replace(tzinfo=timezone.utc)
+        if end_dt.tzinfo is None:
+            end_dt = end_dt.replace(tzinfo=timezone.utc)
+        start_local = start_dt.astimezone(bkk)
+        end_local = end_dt.astimezone(bkk)
         labels = []
-        y, m = start_dt.year, start_dt.month
-        while (y < end_dt.year) or (y == end_dt.year and m <= end_dt.month):
+        y, m = start_local.year, start_local.month
+        while (y < end_local.year) or (y == end_local.year and m <= end_local.month):
             labels.append(datetime(2000, m, 1).strftime('%b'))
             m += 1
             if m > 12:
@@ -1483,6 +1511,13 @@ def _handle_comparison_report(
             if not dt:
                 continue
 
+            # Bucket by Bangkok month to match the SQL date-range filter
+            # (otherwise UTC month can split data across adjacent months).
+            if dt.tzinfo is None:
+                dt_local = dt.replace(tzinfo=timezone.utc).astimezone(ZoneInfo('Asia/Bangkok'))
+            else:
+                dt_local = dt.astimezone(ZoneInfo('Asia/Bangkok'))
+
             if cat_id is not None:
                 try:
                     cat_id_int = int(cat_id)
@@ -1490,7 +1525,7 @@ def _handle_comparison_report(
                     continue
                 category_ids.add(cat_id_int)
 
-                month_label = datetime(2000, dt.month, 1).strftime('%b')
+                month_label = datetime(2000, dt_local.month, 1).strftime('%b')
                 total_waste += weight
                 month_map[month_label] = month_map.get(month_label, 0.0) + weight
 
@@ -2453,9 +2488,21 @@ def _handle_export_pdf_report(
                 right_to_local = right_to_dt.astimezone(client_tz)
                 _right_period = f"{right_from_local.strftime('%d %b %Y')} - {right_to_local.strftime('%d %b %Y')}"
                 
-                # Left period dates (last year - same calendar dates)
-                left_from_dt = right_from_dt.replace(year=right_from_dt.year - 1)
-                left_to_dt = right_to_dt.replace(year=right_to_dt.year - 1)
+                # Left period dates (last year - same calendar dates).
+                # Do the year shift in client TZ to keep "same calendar date for
+                # the user" semantics (and to avoid Feb-29 ambiguity that bites
+                # when the UTC representation lands on a different date).
+                def _shift_year_local(dt_utc: datetime, delta: int) -> datetime:
+                    local = dt_utc.astimezone(client_tz)
+                    target_year = local.year + delta
+                    try:
+                        shifted = local.replace(year=target_year)
+                    except ValueError:
+                        # Feb 29 -> Feb 28 in non-leap year
+                        shifted = local.replace(year=target_year, day=28)
+                    return shifted.astimezone(timezone.utc)
+                left_from_dt = _shift_year_local(right_from_dt, -1)
+                left_to_dt = _shift_year_local(right_to_dt, -1)
                 left_from_local = left_from_dt.astimezone(client_tz)
                 left_to_local = left_to_dt.astimezone(client_tz)
                 _left_period = f"{left_from_local.strftime('%d %b %Y')} - {left_to_local.strftime('%d %b %Y')}"
@@ -2549,7 +2596,7 @@ def _handle_export_pdf_report(
             'total_waste_kg': 'Total Waste (kg)',
             'recycling_rate_pct': 'Recycling rate (%)',
             'ghg_reduction_kgco2e': 'GHG Reduction (kgCO2e)',
-            'top_recyclables': 'Top Recyclables',
+            'top_recyclables': 'Top Recycling Sources',
             'overall': 'Overall',
             'category_proportion': 'Category proportion',
             'general_waste': 'General Waste',
@@ -2613,7 +2660,7 @@ def _handle_export_pdf_report(
             'total_waste_kg': 'ขยะทั้งหมด (กก.)',
             'recycling_rate_pct': 'อัตราการรีไซเคิล (%)',
             'ghg_reduction_kgco2e': 'ลดก๊าซเรือนกระจก (กก.)',
-            'top_recyclables': 'วัสดุรีไซเคิลยอดนิยม',
+            'top_recyclables': 'อันดับสถานที่รีไซเคิลสูงสุด',
             'overall': 'ภาพรวม',
             'category_proportion': 'สัดส่วนตามประเภท',
             'general_waste': 'ขยะทั่วไป',

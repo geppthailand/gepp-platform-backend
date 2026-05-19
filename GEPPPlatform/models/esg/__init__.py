@@ -9,7 +9,7 @@ from .organization_setup import EsgOrganizationSetup
 from .platform_binding import EsgExternalPlatformBinding
 from .data_hierarchy import EsgDataCategory, EsgDataSubcategory, EsgDatapoint
 from .data_extraction import EsgOrganizationDataExtraction
-from .data_entries import EsgDataEntry, EntrySource, EntryStatus
+from .records import EsgRecord, GhgStatus
 from .emission_factors import EmissionFactor
 from .esg_users import EsgUser
 from .esg_external_invitation_links import EsgExternalInvitationLink
@@ -23,6 +23,9 @@ from .cbam import EsgCbamProduct, EsgCbamReport
 from .macc import EsgMaccInitiative
 from .condition_rules import EsgConditionRule
 from .xbrl import EsgXbrlTag, EsgXbrlReportValue
+from .user_materiality import EsgUserMateriality
+from .materiality_submission import EsgMaterialitySubmission
+from .line_chat_histories import EsgLineChatHistory
 
 __all__ = [
     'EsgOrganizationSettings',
@@ -32,7 +35,7 @@ __all__ = [
     'EsgExternalPlatformBinding',
     'EsgDataCategory', 'EsgDataSubcategory', 'EsgDatapoint',
     'EsgOrganizationDataExtraction',
-    'EsgDataEntry', 'EntrySource', 'EntryStatus',
+    'EsgRecord', 'GhgStatus',
     'EmissionFactor',
     'EsgUser',
     'EsgExternalInvitationLink',
@@ -46,4 +49,7 @@ __all__ = [
     'EsgMaccInitiative',
     'EsgConditionRule',
     'EsgXbrlTag', 'EsgXbrlReportValue',
+    'EsgUserMateriality',
+    'EsgMaterialitySubmission',
+    'EsgLineChatHistory',
 ]

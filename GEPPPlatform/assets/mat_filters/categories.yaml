@@ -1,0 +1,470 @@
+# GHG Protocol Scope 3 — 15 categories.
+# This file is the source for the "For You" page content.
+# Aligned with docs/Services/GEPP-ESG/mvp1.1/scope3_deep_dive.html
+#
+# Each category has:
+#   id          — int 1..15, matches GHG Protocol category number
+#   tier        — upstream | downstream
+#   name        — { en, th }
+#   short       — { en, th } — one-line elevator pitch
+#   why_it_matters — { en, th } — why a typical user might care, ≤2 sentences
+#   data_collection_tips — list of { en, th } practical tips
+#   good_evidence — list of { en, th } examples of strong source documents
+#   methodology_tier_examples — { spend_based, average_data, supplier_specific }
+#                              all { en, th } showing how to calculate at each
+#                              data quality tier (matches the 5-level scale at
+#                              scope3_deep_dive.html#L569-L653, simplified to 3)
+#   icon — key into a small icon component map
+
+categories:
+
+  - id: 1
+    tier: upstream
+    icon: shopping_cart
+    name:
+      en: Purchased goods and services
+      th: สินค้าและบริการที่ซื้อ
+    short:
+      en: Cradle-to-gate emissions of everything you buy.
+      th: การปล่อยก๊าซตั้งแต่ต้นทางจนถึงประตูโรงงานของทุกสิ่งที่คุณซื้อ
+    why_it_matters:
+      en: For most companies, this is the single largest Scope 3 source. Every laptop, every kg of steel, every cloud subscription has an embedded carbon cost.
+      th: สำหรับธุรกิจส่วนใหญ่ นี่คือแหล่งปล่อยก๊าซ Scope 3 ที่ใหญ่ที่สุด โน้ตบุ๊กทุกเครื่อง เหล็กทุกกิโลกรัม ซับสคริปชันคลาวด์ทุกตัว ล้วนมีคาร์บอนแฝงอยู่
+    data_collection_tips:
+      - en: Pull your top-50 vendors by spend from accounting; they usually cover 80% of emissions.
+        th: ดึงรายชื่อผู้ขาย 50 อันดับแรกตามยอดใช้จ่ายจากระบบบัญชี — มักครอบคลุม 80% ของการปล่อยก๊าซ
+      - en: Group spend by procurement category (IT, raw materials, services, etc.) before applying emission factors.
+        th: จัดกลุ่มยอดใช้จ่ายตามประเภทการจัดซื้อ (ไอที วัตถุดิบ บริการ ฯลฯ) ก่อนใช้ค่าการปล่อยก๊าซ
+      - en: Ask top 5 vendors directly for their product carbon footprint — most enterprise vendors now publish them.
+        th: ถามผู้ขาย 5 อันดับแรกโดยตรงเพื่อขอ carbon footprint ของสินค้า — ผู้ขายระดับองค์กรส่วนใหญ่เผยแพร่แล้ว
+    good_evidence:
+      - en: Annual procurement spend report by GL code or vendor category
+        th: รายงานยอดจัดซื้อรายปีตามรหัส GL หรือประเภทผู้ขาย
+      - en: EPDs (Environmental Product Declarations) from manufacturers
+        th: EPD (Environmental Product Declarations) จากผู้ผลิต
+      - en: Supplier-provided product carbon footprint statements
+        th: เอกสาร carbon footprint ของสินค้าที่ผู้ขายจัดหาให้
+    methodology_tier_examples:
+      spend_based:
+        en: Spend (THB) × emission factor per category (e.g. 0.5 kgCO2e/THB for office supplies). Fast but imprecise.
+        th: ยอดใช้จ่าย (บาท) × ค่าการปล่อยก๊าซตามประเภท (เช่น 0.5 kgCO2e/บาทสำหรับอุปกรณ์สำนักงาน) — เร็วแต่แม่นยำต่ำ
+      average_data:
+        en: Quantity (kg, units) × industry-average emission factor per material. Better for raw materials.
+        th: ปริมาณ (กก. ชิ้น) × ค่าการปล่อยก๊าซเฉลี่ยของอุตสาหกรรมต่อวัสดุ — ดีกว่าสำหรับวัตถุดิบ
+      supplier_specific:
+        en: Direct supplier-reported emissions for that specific product or service. Most accurate.
+        th: ข้อมูลการปล่อยก๊าซโดยตรงจากผู้ขายสำหรับสินค้าหรือบริการนั้น ๆ — แม่นยำที่สุด
+
+  - id: 2
+    tier: upstream
+    icon: factory
+    name: { en: Capital goods, th: สินค้าทุน }
+    short:
+      en: Cradle-to-gate emissions of long-lived assets you bought to produce things.
+      th: การปล่อยก๊าซของสินทรัพย์ระยะยาวที่ซื้อมาเพื่อใช้ในการผลิต
+    why_it_matters:
+      en: Big-ticket items — buildings, machinery, servers — carry huge embedded emissions but are bought infrequently. Material if you're scaling capacity.
+      th: รายการใหญ่ — อาคาร เครื่องจักร เซิร์ฟเวอร์ — มีการปล่อยก๊าซแฝงมหาศาล แต่ซื้อไม่บ่อย สำคัญถ้ากำลังขยายกำลังการผลิต
+    data_collection_tips:
+      - en: Pull capex spend from your fixed-asset register, not opex.
+        th: ดึงรายจ่ายลงทุนจากทะเบียนสินทรัพย์ถาวร ไม่ใช่จากค่าใช้จ่ายดำเนินงาน
+      - en: Allocate emissions in the year of acquisition, not depreciated over life (per GHG Protocol).
+        th: คิดการปล่อยก๊าซในปีที่ซื้อ ไม่ใช่ทยอยตามค่าเสื่อมราคา (ตามแนวทาง GHG Protocol)
+    good_evidence:
+      - en: Fixed-asset register with acquisition date, type, and cost
+        th: ทะเบียนสินทรัพย์ถาวรพร้อมวันที่ซื้อ ประเภท และต้นทุน
+      - en: Manufacturer EPDs for major equipment
+        th: EPD จากผู้ผลิตสำหรับอุปกรณ์หลัก
+    methodology_tier_examples:
+      spend_based:
+        en: Capex (THB) × emission factor for capital goods (typically 0.3–0.6 kgCO2e/THB).
+        th: รายจ่ายลงทุน (บาท) × ค่าการปล่อยก๊าซสำหรับสินค้าทุน (ปกติ 0.3–0.6 kgCO2e/บาท)
+      average_data:
+        en: Asset type × industry-average kgCO2e per unit (e.g. 50 tCO2e per industrial robot).
+        th: ประเภทสินทรัพย์ × ค่าเฉลี่ย kgCO2e ต่อหน่วยของอุตสาหกรรม (เช่น 50 tCO2e ต่อหุ่นยนต์อุตสาหกรรม)
+      supplier_specific:
+        en: Direct EPD or LCA from the equipment manufacturer.
+        th: EPD หรือ LCA โดยตรงจากผู้ผลิตอุปกรณ์
+
+  - id: 3
+    tier: upstream
+    icon: bolt
+    name: { en: Fuel- and energy-related activities (not in Scope 1/2), th: กิจกรรมที่เกี่ยวข้องกับเชื้อเพลิงและพลังงาน (นอกเหนือ Scope 1/2) }
+    short:
+      en: Upstream emissions of the fuels and electricity you already report in Scope 1 & 2.
+      th: การปล่อยก๊าซต้นน้ำของเชื้อเพลิงและไฟฟ้าที่คุณรายงานใน Scope 1 และ 2 อยู่แล้ว
+    why_it_matters:
+      en: Your diesel doesn't appear from nowhere — extracting and refining it produces emissions too. Typically 15–25% on top of your Scope 1+2 total.
+      th: ดีเซลของคุณไม่ได้ปรากฏขึ้นเอง — การขุดและกลั่นก็ปล่อยก๊าซเช่นกัน โดยทั่วไปประมาณ 15–25% เพิ่มจากยอด Scope 1+2
+    data_collection_tips:
+      - en: You already have the activity data — just multiply by the well-to-tank emission factor instead of the combustion factor.
+        th: คุณมีข้อมูลกิจกรรมอยู่แล้ว — เพียงคูณด้วยค่าการปล่อยก๊าซแบบ well-to-tank แทนค่า combustion
+      - en: TGO publishes Thailand-specific upstream electricity factors annually.
+        th: TGO เผยแพร่ค่าปล่อยก๊าซต้นน้ำของไฟฟ้าเฉพาะประเทศไทยรายปี
+    good_evidence:
+      - en: Same fuel and electricity invoices you already collect for Scope 1/2
+        th: ใบแจ้งหนี้เชื้อเพลิงและไฟฟ้าเดิมที่คุณเก็บสำหรับ Scope 1/2
+      - en: Grid loss factors from your utility provider
+        th: ค่าสูญเสียในระบบส่งไฟฟ้าจากการไฟฟ้า
+    methodology_tier_examples:
+      spend_based:
+        en: Energy spend × upstream EF for grid mix.
+        th: ยอดใช้จ่ายพลังงาน × ค่า EF ต้นน้ำของส่วนผสมไฟฟ้า
+      average_data:
+        en: kWh × Thailand grid upstream EF (TGO published).
+        th: kWh × EF ต้นน้ำของระบบไฟฟ้าไทย (เผยแพร่โดย TGO)
+      supplier_specific:
+        en: Generator-specific EF from your utility (e.g. for renewable PPAs).
+        th: EF ที่จำเพาะกับโรงไฟฟ้าจากการไฟฟ้า (เช่น สำหรับ PPA พลังงานหมุนเวียน)
+
+  - id: 4
+    tier: upstream
+    icon: truck_in
+    name: { en: Upstream transportation and distribution, th: การขนส่งและกระจายสินค้าต้นน้ำ }
+    short:
+      en: Getting purchased goods to your facilities.
+      th: การขนส่งสินค้าที่ซื้อมายังสถานที่ของคุณ
+    why_it_matters:
+      en: Inbound freight emissions you pay for, plus emissions of any transport you arranged. Material for import-heavy supply chains.
+      th: การปล่อยก๊าซจากการขนส่งขาเข้าที่คุณเป็นผู้จ่าย รวมถึงการขนส่งที่คุณจัดเอง สำคัญสำหรับซัพพลายเชนที่นำเข้าเยอะ
+    data_collection_tips:
+      - en: Pull inbound logistics invoices grouped by mode (sea / air / road / rail).
+        th: ดึงใบแจ้งหนี้ค่าขนส่งขาเข้าจัดกลุ่มตามรูปแบบ (เรือ / อากาศ / ถนน / ราง)
+      - en: Air freight is ~10× sea freight per tonne-km — flag any air shipments.
+        th: การขนส่งทางอากาศปล่อยก๊าซประมาณ 10 เท่าของการขนส่งทางเรือต่อตัน-กิโลเมตร — ตั้งธงเตือนทุกการส่งทางอากาศ
+    good_evidence:
+      - en: Freight forwarder invoices with weight, distance, and mode
+        th: ใบแจ้งหนี้จาก freight forwarder พร้อมน้ำหนัก ระยะทาง และรูปแบบการขนส่ง
+      - en: Bills of lading
+        th: ใบตราส่งสินค้า (Bill of Lading)
+    methodology_tier_examples:
+      spend_based:
+        en: Logistics spend × EF per mode-spend.
+        th: ยอดใช้จ่ายค่าขนส่ง × EF ต่อยอดใช้จ่ายแยกตามรูปแบบ
+      average_data:
+        en: Tonne-km × mode-specific EF (e.g. 0.062 kgCO2e/tonne-km road, 0.011 sea).
+        th: ตัน-กิโลเมตร × EF ตามรูปแบบ (เช่น 0.062 kgCO2e/ตัน-กม. ทางถนน 0.011 ทางเรือ)
+      supplier_specific:
+        en: Carrier-reported emissions per shipment (e.g. Maersk Emissions Dashboard).
+        th: ข้อมูลการปล่อยก๊าซต่อการส่งจากผู้ให้บริการ (เช่น Maersk Emissions Dashboard)
+
+  - id: 5
+    tier: upstream
+    icon: trash
+    name: { en: Waste generated in operations, th: ของเสียที่เกิดจากการดำเนินงาน }
+    short:
+      en: Disposal and treatment of waste from your facilities.
+      th: การกำจัดและบำบัดของเสียจากสถานที่ของคุณ
+    why_it_matters:
+      en: Landfill methane is 28× CO2; food waste is the worst offender. Material for restaurants, hospitals, manufacturing offcuts.
+      th: ก๊าซมีเทนจากหลุมฝังกลบรุนแรงกว่า CO2 28 เท่า ของเสียจากอาหารคือตัวร้ายที่สุด สำคัญสำหรับร้านอาหาร โรงพยาบาล และเศษการผลิต
+    data_collection_tips:
+      - en: Get waste manifests by stream (organic, recyclable, general, hazardous).
+        th: ขอใบขนถ่ายของเสียแยกตามประเภท (ของเสียอินทรีย์ รีไซเคิล ทั่วไป อันตราย)
+      - en: GEPP-Business platform already tracks this — link your data if you use it.
+        th: แพลตฟอร์ม GEPP-Business ติดตามข้อมูลนี้อยู่แล้ว — เชื่อมโยงข้อมูลถ้าคุณใช้งานอยู่
+    good_evidence:
+      - en: Monthly waste hauler manifests with weight by stream
+        th: ใบขนถ่ายของเสียรายเดือนจากผู้ขนส่งของเสีย พร้อมน้ำหนักแยกตามประเภท
+      - en: Recycling reports from waste partners
+        th: รายงานการรีไซเคิลจากพันธมิตรกำจัดของเสีย
+    methodology_tier_examples:
+      spend_based:
+        en: Waste-handling fees × EF per fee type.
+        th: ค่าธรรมเนียมจัดการของเสีย × EF ตามประเภทค่าธรรมเนียม
+      average_data:
+        en: Tonnes per stream × Thailand EF (TGO).
+        th: ตันแยกตามประเภท × EF ของไทย (TGO)
+      supplier_specific:
+        en: Waste partner's actual treatment-route data.
+        th: ข้อมูลเส้นทางการบำบัดจริงจากพันธมิตรกำจัดของเสีย
+
+  - id: 6
+    tier: upstream
+    icon: airplane
+    name: { en: Business travel, th: การเดินทางเพื่อธุรกิจ }
+    short:
+      en: Flights, hotels, and ground transport for work trips.
+      th: ตั๋วเครื่องบิน โรงแรม และการเดินทางภาคพื้นดินเพื่อทำงาน
+    why_it_matters:
+      en: One transcontinental return flight (~3.5 tCO2e) often exceeds an employee's entire annual commuting footprint.
+      th: เที่ยวบินไปกลับระหว่างทวีปหนึ่งเที่ยว (~3.5 tCO2e) มักเกินกว่าการเดินทางมาทำงานของพนักงานทั้งปี
+    data_collection_tips:
+      - en: Pull travel-agent reports — they often have CO2 per booking already.
+        th: ดึงรายงานจากบริษัทท่องเที่ยว — มักมีข้อมูล CO2 ต่อการจองพร้อมอยู่แล้ว
+      - en: Distinguish economy / business / first class — class matters for flight EFs (3× factor between economy and first).
+        th: แยกชั้นโดยสาร — ประเภทตั๋วสำคัญต่อ EF ของเที่ยวบิน (ส่วนต่าง 3 เท่าระหว่างชั้นประหยัดและชั้นหนึ่ง)
+    good_evidence:
+      - en: Travel management company (TMC) reports
+        th: รายงานจากบริษัทบริหารการเดินทาง (TMC)
+      - en: Expense reports with airline/route/class
+        th: รายงานค่าใช้จ่ายพร้อมสายการบิน เส้นทาง และชั้นโดยสาร
+    methodology_tier_examples:
+      spend_based:
+        en: Travel spend × EF per spend category.
+        th: ยอดใช้จ่ายเดินทาง × EF ตามประเภทยอด
+      average_data:
+        en: Passenger-km × class-specific EF (DEFRA tables).
+        th: ผู้โดยสาร-กิโลเมตร × EF ตามชั้นโดยสาร (ตาราง DEFRA)
+      supplier_specific:
+        en: Airline-specific EF where available.
+        th: EF ของสายการบินเฉพาะ (ถ้ามีข้อมูล)
+
+  - id: 7
+    tier: upstream
+    icon: commute
+    name: { en: Employee commuting, th: การเดินทางมาทำงานของพนักงาน }
+    short:
+      en: Daily travel between home and work.
+      th: การเดินทางรายวันระหว่างบ้านกับที่ทำงาน
+    why_it_matters:
+      en: Material for office-bound workforces in cities. In Bangkok, the average commute generates 1.2–2.0 tCO2e per employee per year.
+      th: สำคัญสำหรับพนักงานที่ทำงานในออฟฟิศในเมือง ในกรุงเทพฯ การเดินทางมาทำงานเฉลี่ยปล่อย 1.2–2.0 tCO2e ต่อคนต่อปี
+    data_collection_tips:
+      - en: A simple HR survey (mode + distance + days/week) covers 90% of accuracy.
+        th: แบบสำรวจ HR ง่าย ๆ (รูปแบบเดินทาง + ระยะทาง + วัน/สัปดาห์) ครอบคลุมความแม่นยำ 90%
+      - en: Remote/hybrid days reduce this category proportionally — track WFH policy.
+        th: วัน WFH ลดการปล่อยก๊าซในหมวดนี้ตามสัดส่วน — ติดตามนโยบาย WFH
+    good_evidence:
+      - en: Annual commuting survey (anonymised)
+        th: แบบสำรวจการเดินทางมาทำงานรายปี (ไม่ระบุตัวตน)
+      - en: HR records of headcount × work-from-home days
+        th: บันทึก HR ของจำนวนพนักงาน × วัน WFH
+    methodology_tier_examples:
+      spend_based:
+        en: Not really applicable — commuting is not paid by the employer.
+        th: ใช้ไม่ได้จริง ๆ — พนักงานเป็นผู้จ่ายค่าเดินทางเอง
+      average_data:
+        en: Headcount × average commuting EF for Thailand (TGO).
+        th: จำนวนพนักงาน × EF เฉลี่ยการเดินทางมาทำงานในไทย (TGO)
+      supplier_specific:
+        en: Survey-based — passenger-km per employee × mode-specific EF.
+        th: ใช้แบบสำรวจ — ผู้โดยสาร-กม. ต่อพนักงาน × EF ตามรูปแบบ
+
+  - id: 8
+    tier: upstream
+    icon: building_lease
+    name: { en: Upstream leased assets, th: สินทรัพย์เช่าต้นน้ำ }
+    short:
+      en: Operations of facilities and equipment YOU lease (and don't include in Scope 1/2).
+      th: การดำเนินงานของสถานที่และอุปกรณ์ที่คุณเช่ามาใช้ (และไม่ได้รวมใน Scope 1/2)
+    why_it_matters:
+      en: Often only material if you exclude leased assets from your operational boundary. For most Thai SMEs renting an office, this collapses into Scope 2.
+      th: มักสำคัญเมื่อคุณไม่รวมสินทรัพย์เช่าในขอบเขตการดำเนินงาน สำหรับ SME ไทยที่เช่าออฟฟิศ มักรวมอยู่ใน Scope 2 อยู่แล้ว
+    data_collection_tips:
+      - en: First check your operational boundary — if leased = controlled, it's already in Scope 1/2 and this category is empty.
+        th: ตรวจสอบขอบเขตการดำเนินงานก่อน — ถ้าสินทรัพย์เช่า = ควบคุม จะรวมอยู่ใน Scope 1/2 อยู่แล้ว และหมวดนี้จะว่าง
+    good_evidence:
+      - en: Lease agreements + utility bills allocated to leased space
+        th: สัญญาเช่า + ใบแจ้งหนี้สาธารณูปโภคที่จัดสรรให้พื้นที่เช่า
+    methodology_tier_examples:
+      spend_based:
+        en: Lease cost × building EF.
+        th: ค่าเช่า × EF ของอาคาร
+      average_data:
+        en: Floor area × Thailand commercial-building energy intensity.
+        th: พื้นที่ × ความเข้มข้นการใช้พลังงานของอาคารพาณิชย์ไทย
+      supplier_specific:
+        en: Landlord-provided sub-meter readings.
+        th: ค่าวัดจากซับมิเตอร์ที่เจ้าของให้
+
+  - id: 9
+    tier: downstream
+    icon: truck_out
+    name: { en: Downstream transportation and distribution, th: การขนส่งและกระจายสินค้าปลายน้ำ }
+    short:
+      en: Getting your products to customers (when paid by anyone but you).
+      th: การส่งสินค้าให้ลูกค้า (เมื่อค่าใช้จ่ายไม่ได้อยู่กับคุณ)
+    why_it_matters:
+      en: Critical for retail and e-commerce. Last-mile delivery in cities is high-emission per kg-km.
+      th: สำคัญสำหรับค้าปลีกและอีคอมเมิร์ซ การจัดส่งช่วงสุดท้ายในเมืองปล่อยก๊าซสูงต่อกก.-กม.
+    data_collection_tips:
+      - en: If you ship FOB (customer pays freight), this is yours; if DDP (you pay), it's Scope 3 cat 4.
+        th: ถ้าขายแบบ FOB (ลูกค้าจ่ายค่าขนส่ง) อยู่ในหมวดนี้ ถ้า DDP (คุณจ่าย) อยู่ในหมวด 4
+    good_evidence:
+      - en: Shipping records with destination + weight + mode
+        th: บันทึกการขนส่งพร้อมปลายทาง + น้ำหนัก + รูปแบบ
+      - en: Carrier API integrations (Lalamove, Kerry, Flash)
+        th: การเชื่อมต่อ API ของผู้ให้บริการขนส่ง (Lalamove, Kerry, Flash)
+    methodology_tier_examples:
+      spend_based:
+        en: Customer-paid freight estimate × EF.
+        th: ประมาณค่าขนส่งที่ลูกค้าจ่าย × EF
+      average_data:
+        en: Tonne-km × mode EF (same factors as cat 4).
+        th: ตัน-กม. × EF ตามรูปแบบ (ค่าเดียวกับหมวด 4)
+      supplier_specific:
+        en: Carrier emissions reports (Lalamove, Kerry now publish per-shipment CO2).
+        th: รายงานการปล่อยก๊าซจากผู้ให้บริการขนส่ง (Lalamove, Kerry เผยแพร่ CO2 ต่อการส่งแล้ว)
+
+  - id: 10
+    tier: downstream
+    icon: gear
+    name: { en: Processing of sold products, th: การแปรรูปสินค้าที่ขาย }
+    short:
+      en: Emissions when your customer further processes what you sold them.
+      th: การปล่อยก๊าซเมื่อลูกค้านำสินค้าของคุณไปแปรรูปต่อ
+    why_it_matters:
+      en: Material for sellers of intermediate goods (steel, plastics, components). The processing stage between you and the final product matters.
+      th: สำคัญสำหรับผู้ขายสินค้าวัตถุดิบ (เหล็ก พลาสติก ชิ้นส่วน) ขั้นตอนการแปรรูประหว่างคุณกับผลิตภัณฑ์สุดท้ายมีนัยสำคัญ
+    data_collection_tips:
+      - en: Pick your top-3 customer-product combinations and model their downstream processing energy.
+        th: เลือกชุดลูกค้า-สินค้า 3 อันดับแรก แล้วประมาณการพลังงานในการแปรรูปต่อ
+    good_evidence:
+      - en: LCAs from industry associations covering downstream processing
+        th: LCA จากสมาคมอุตสาหกรรมที่ครอบคลุมการแปรรูปปลายน้ำ
+    methodology_tier_examples:
+      spend_based:
+        en: Limited applicability — use average data instead.
+        th: ใช้ได้จำกัด — ใช้ข้อมูลเฉลี่ยแทน
+      average_data:
+        en: Volume sold × industry-average processing energy intensity.
+        th: ปริมาณที่ขาย × ความเข้มข้นการใช้พลังงานเฉลี่ยในการแปรรูป
+      supplier_specific:
+        en: Direct data from major customers (rare, valuable).
+        th: ข้อมูลโดยตรงจากลูกค้ารายใหญ่ (พบได้น้อย แต่มีค่า)
+
+  - id: 11
+    tier: downstream
+    icon: lightbulb
+    name: { en: Use of sold products, th: การใช้งานสินค้าที่ขาย }
+    short:
+      en: Energy your customers use OPERATING your products over their lifetime.
+      th: พลังงานที่ลูกค้าใช้ในการใช้งานสินค้าของคุณตลอดอายุการใช้งาน
+    why_it_matters:
+      en: Often the LARGEST Scope 3 category for makers of vehicles, appliances, electronics, and fuels — sometimes 80%+ of their footprint.
+      th: มักเป็นหมวด Scope 3 ที่ใหญ่ที่สุดสำหรับผู้ผลิตยานพาหนะ เครื่องใช้ไฟฟ้า อิเล็กทรอนิกส์ และเชื้อเพลิง — บางครั้งถึง 80%+ ของฟุตพรินต์ทั้งหมด
+    data_collection_tips:
+      - en: Power rating × hours of use × product lifetime × grid EF in destination markets.
+        th: กำลังไฟฟ้า × ชั่วโมงใช้งาน × อายุการใช้งาน × EF ของระบบไฟฟ้าในตลาดปลายทาง
+      - en: "For fuels: combustion EF × volume sold."
+        th: "สำหรับเชื้อเพลิง: EF การเผาไหม้ × ปริมาณที่ขาย"
+    good_evidence:
+      - en: Product datasheets with rated energy consumption
+        th: เอกสารข้อมูลสินค้าพร้อมการใช้พลังงานตามพิกัด
+      - en: Energy-label certifications (EU, ENERGY STAR)
+        th: ฉลากประหยัดพลังงาน (EU, ENERGY STAR)
+    methodology_tier_examples:
+      spend_based:
+        en: Not applicable.
+        th: ใช้ไม่ได้
+      average_data:
+        en: Units sold × average lifetime energy use × destination grid EF.
+        th: จำนวนหน่วยที่ขาย × พลังงานเฉลี่ยตลอดอายุการใช้งาน × EF ระบบไฟฟ้าปลายทาง
+      supplier_specific:
+        en: Real telemetry from connected products (IoT-enabled).
+        th: ข้อมูลจริงจากสินค้าที่เชื่อมต่อ (IoT)
+
+  - id: 12
+    tier: downstream
+    icon: recycle
+    name: { en: End-of-life treatment of sold products, th: การจัดการสินค้าที่ขายเมื่อหมดอายุ }
+    short:
+      en: What happens when customers throw away your products.
+      th: เกิดอะไรขึ้นเมื่อลูกค้าทิ้งสินค้าของคุณ
+    why_it_matters:
+      en: Material for makers of packaging, single-use items, and durable goods that end up in landfills.
+      th: สำคัญสำหรับผู้ผลิตบรรจุภัณฑ์ ของใช้แบบใช้ครั้งเดียว และของคงทนที่สุดท้ายลงหลุมฝังกลบ
+    data_collection_tips:
+      - en: Use country-specific waste-management mix (Thailand recycling rate ≈18%).
+        th: ใช้ส่วนผสมการจัดการของเสียเฉพาะประเทศ (อัตรารีไซเคิลของไทยประมาณ 18%)
+    good_evidence:
+      - en: Product weight by material composition
+        th: น้ำหนักสินค้าจำแนกตามองค์ประกอบของวัสดุ
+      - en: Take-back program records (if any)
+        th: บันทึกโครงการรับคืนสินค้า (ถ้ามี)
+    methodology_tier_examples:
+      spend_based:
+        en: Not applicable.
+        th: ใช้ไม่ได้
+      average_data:
+        en: Units sold × material weight × country-mix EOL EF.
+        th: จำนวนหน่วยที่ขาย × น้ำหนักวัสดุ × EF ส่วนผสมการจัดการของเสียประเทศ
+      supplier_specific:
+        en: Direct take-back program data (rare for Thailand).
+        th: ข้อมูลจากโครงการรับคืนสินค้าโดยตรง (พบได้น้อยในไทย)
+
+  - id: 13
+    tier: downstream
+    icon: building_lease_out
+    name: { en: Downstream leased assets, th: สินทรัพย์เช่าปลายน้ำ }
+    short:
+      en: Operations of assets you LEASE OUT to other businesses.
+      th: การดำเนินงานของสินทรัพย์ที่คุณให้ผู้อื่นเช่า
+    why_it_matters:
+      en: Material for landlords, equipment lessors, and shopping malls. The energy used by your tenants is yours to report.
+      th: สำคัญสำหรับเจ้าของที่ดิน ผู้ให้เช่าอุปกรณ์ และศูนย์การค้า พลังงานที่ผู้เช่าใช้ ถือเป็นการปล่อยก๊าซของคุณ
+    data_collection_tips:
+      - en: Sub-meter where you can; estimate based on lease size where you can't.
+        th: ติดตั้งซับมิเตอร์ที่ทำได้ ใช้การประมาณตามขนาดการเช่าที่ทำไม่ได้
+    good_evidence:
+      - en: Tenant utility data (with permission)
+        th: ข้อมูลสาธารณูปโภคของผู้เช่า (เมื่อได้รับอนุญาต)
+    methodology_tier_examples:
+      spend_based:
+        en: Limited applicability.
+        th: ใช้ได้จำกัด
+      average_data:
+        en: Leased floor area × commercial-building energy intensity.
+        th: พื้นที่ให้เช่า × ความเข้มข้นการใช้พลังงานของอาคารพาณิชย์
+      supplier_specific:
+        en: Tenant-reported sub-meter readings.
+        th: ค่าวัดจากซับมิเตอร์ที่ผู้เช่ารายงาน
+
+  - id: 14
+    tier: downstream
+    icon: brand
+    name: { en: Franchises, th: แฟรนไชส์ }
+    short:
+      en: Scope 1 + 2 emissions of franchisees operating under your brand.
+      th: การปล่อยก๊าซ Scope 1 + 2 ของผู้รับสิทธิ์แฟรนไชส์ที่ดำเนินงานใต้แบรนด์คุณ
+    why_it_matters:
+      en: Material if you're a franchisor. McDonald's Thailand reports cat 14 for every store it doesn't own.
+      th: สำคัญถ้าคุณเป็นเจ้าของแฟรนไชส์ McDonald's ประเทศไทยรายงานหมวด 14 สำหรับร้านทุกแห่งที่ไม่ได้เป็นเจ้าของเอง
+    data_collection_tips:
+      - en: Survey franchisees once a year — utility bill totals are usually the only ask.
+        th: สำรวจผู้รับแฟรนไชส์ปีละครั้ง — มักขอแค่ยอดรวมใบแจ้งหนี้สาธารณูปโภคพอ
+    good_evidence:
+      - en: Franchisee utility-bill submissions
+        th: การส่งใบแจ้งหนี้สาธารณูปโภคจากผู้รับแฟรนไชส์
+    methodology_tier_examples:
+      spend_based:
+        en: Franchise revenue × industry energy intensity.
+        th: รายได้แฟรนไชส์ × ความเข้มข้นการใช้พลังงานของอุตสาหกรรม
+      average_data:
+        en: Number of franchisees × average store energy use × grid EF.
+        th: จำนวนผู้รับแฟรนไชส์ × การใช้พลังงานเฉลี่ยต่อร้าน × EF ระบบไฟฟ้า
+      supplier_specific:
+        en: Each franchisee's actual Scope 1+2 reported.
+        th: ค่า Scope 1+2 จริงที่ผู้รับแฟรนไชส์รายงาน
+
+  - id: 15
+    tier: downstream
+    icon: portfolio
+    name: { en: Investments, th: การลงทุน }
+    short:
+      en: Emissions of companies you've invested in (proportional to your stake).
+      th: การปล่อยก๊าซของบริษัทที่คุณลงทุน (ตามสัดส่วนการถือหุ้น)
+    why_it_matters:
+      en: THE category for banks, asset managers, and insurers. Often >95% of a financial institution's footprint.
+      th: หมวดสำคัญสำหรับธนาคาร ผู้บริหารสินทรัพย์ และบริษัทประกัน มักมากกว่า 95% ของฟุตพรินต์ของสถาบันการเงิน
+    data_collection_tips:
+      - en: Use PCAF (Partnership for Carbon Accounting Financials) methodology — it's the de-facto standard.
+        th: ใช้แนวทาง PCAF (Partnership for Carbon Accounting Financials) — เป็นมาตรฐานที่ใช้งานจริง
+      - en: For listed equity, use investee's published Scope 1+2 × ownership share.
+        th: สำหรับหุ้นในตลาด ใช้ Scope 1+2 ที่บริษัทเปิดเผย × สัดส่วนการถือหุ้น
+    good_evidence:
+      - en: Portfolio holdings + investee sustainability reports
+        th: รายชื่อหุ้นในพอร์ต + รายงานความยั่งยืนของบริษัทผู้รับการลงทุน
+      - en: PCAF data quality scoring per investment
+        th: คะแนนคุณภาพข้อมูล PCAF ต่อการลงทุน
+    methodology_tier_examples:
+      spend_based:
+        en: Investment value × sector EF.
+        th: มูลค่าการลงทุน × EF ของภาคอุตสาหกรรม
+      average_data:
+        en: Investee revenue × industry intensity × ownership share.
+        th: รายได้ของบริษัทผู้รับการลงทุน × ความเข้มข้นของอุตสาหกรรม × สัดส่วนการถือหุ้น
+      supplier_specific:
+        en: Investee-reported Scope 1+2 × ownership share (PCAF data quality 1–2).
+        th: ค่า Scope 1+2 ที่ผู้รับการลงทุนรายงาน × สัดส่วนการถือหุ้น (PCAF data quality 1–2)

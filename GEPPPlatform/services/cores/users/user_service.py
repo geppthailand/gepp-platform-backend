@@ -1002,7 +1002,14 @@ class UserService:
                     f"must match creator's organization_id ({creator.organization_id})"
                 )
 
-    def get_locations(self, organization_id: int, include_all: bool = False, current_user_id: int = None) -> List[Dict[str, Any]]:
+    def get_locations(
+        self,
+        organization_id: int,
+        include_all: bool = False,
+        current_user_id: int = None,
+        page: Optional[int] = None,
+        page_size: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """
         Get user locations (is_location = True) for an organization.
 
@@ -1011,43 +1018,118 @@ class UserService:
         - Member of a location: sees that location + all descendants in the org tree
         - Non-member: sees no locations (unless include_all=True)
 
+        Pagination:
+        - When ``page`` and ``page_size`` are supplied we slice **before** loading
+          full UserLocation rows. We still resolve 3-tier access using a
+          lightweight ``(id, members)`` projection so the page slice respects
+          visibility, then full-load just the page (~50 rows) for serialization,
+          tag enrichment and path building.
+        - Ancestors (Tier 2 minimal data) are always returned in full because
+          the tree must render unbroken; the count is bounded by the org depth.
+
         Args:
             organization_id: The organization ID to filter by
             include_all: If True, return all locations. If False, filter by organization setup
             current_user_id: The current user's ID for member-based filtering
+            page: 1-indexed page number (paginates the assigned/full data set)
+            page_size: page size for assigned data; ancestors are not paginated
 
-        Returns all user_location columns except password, username, and email
+        Returns: dict with ``data``, ``ancestors``, ``is_owner``,
+        ``manageable_user_ids``, plus ``total_assigned`` (full count of the
+        assigned set across all pages).
         """
-        # Get organization setup to determine which locations to include
+        from types import SimpleNamespace
+
+        paginate = bool(page and page_size and page_size > 0)
+        if paginate:
+            page = max(int(page), 1)
+            page_size = min(max(int(page_size), 1), 200)
+
+        # ── PHASE 1: Determine the candidate ID universe (cheap projection).
+        # We only fetch (id, members) here so tier resolution can run without
+        # paying for the 40+ column row each location carries. The full row is
+        # loaded later, only for the page slice.
+        light_query = self.db.query(UserLocation.id, UserLocation.members).filter(
+            UserLocation.is_location == True,
+            UserLocation.is_active == True,
+            UserLocation.deleted_date.is_(None),  # skip soft-deleted rows
+            UserLocation.organization_id == organization_id,
+        )
+        setup_location_ids: Optional[List[int]] = None
         if not include_all:
             setup_location_ids = self._get_setup_location_ids(organization_id)
             if setup_location_ids is not None:
-                locations = self.crud.get_user_locations(
-                    organization_id=organization_id,
-                    location_ids=setup_location_ids
-                )
-            else:
-                # No setup found, return all locations
-                locations = self.crud.get_user_locations(organization_id=organization_id)
-        else:
-            # Return all locations
-            locations = self.crud.get_user_locations(organization_id=organization_id)
+                if not setup_location_ids:
+                    # Empty setup → no locations at all
+                    return {
+                        'data': [],
+                        'ancestors': [],
+                        'is_owner': False,
+                        'manageable_user_ids': [],
+                        'total_assigned': 0,
+                    }
+                light_query = light_query.filter(UserLocation.id.in_(setup_location_ids))
 
-        # Resolve 3-tier access if current_user_id is provided
+        # Stable order for pagination — newest first matches the legacy CRUD.
+        light_rows = light_query.order_by(UserLocation.created_date.desc()).all()
+        light_locs = [SimpleNamespace(id=r.id, members=r.members) for r in light_rows]
+
+        # ── PHASE 2: Resolve 3-tier access with the lightweight projection.
+        # Non-owners ALWAYS go through tier filtering, even when the caller
+        # passes ?all=true. `include_all` is meant to expose orphans (rows
+        # outside the org_setup tree) to admins — it is not an access-control
+        # bypass. Without this, a sub-user hitting /api/locations?all=true
+        # would receive every UserLocation in the org and the frontend would
+        # loop paginating through tens of thousands of rows it can't act on.
         tiers = None
-        if current_user_id and not include_all:
+        if current_user_id:
             tiers = self._resolve_location_tiers(
-                locations, organization_id, current_user_id
+                light_locs, organization_id, current_user_id
             )
-            if not tiers['is_owner']:
-                # Filter to only assigned + ancestor locations
-                visible_ids = tiers['assigned_ids'] | tiers['ancestor_ids']
-                locations = [loc for loc in locations if (loc.id if hasattr(loc, 'id') else loc.get('id')) in visible_ids]
 
-        # Serialize location data - include all columns except sensitive fields
+        is_owner_now = tiers['is_owner'] if tiers else True
+
+        # Determine the ordered list of assigned IDs (stable, paginatable).
+        if not is_owner_now and tiers:
+            assigned_set = tiers['assigned_ids']
+            assigned_ordered = [r.id for r in light_rows if r.id in assigned_set]
+        else:
+            assigned_ordered = [r.id for r in light_rows]
+
+        total_assigned = len(assigned_ordered)
+
+        # Slice down to the page window before any heavy load.
+        if paginate:
+            offset = (page - 1) * page_size
+            page_assigned_ids = assigned_ordered[offset:offset + page_size]
+        else:
+            page_assigned_ids = assigned_ordered
+
+        # ── PHASE 3: Full-load only the page slice + (always) the ancestor set.
+        page_locations = []
+        if page_assigned_ids:
+            page_locations = self.crud.get_user_locations(
+                organization_id=organization_id,
+                location_ids=page_assigned_ids,
+            )
+            # Re-order to follow the assigned_ordered slice (CRUD orders by
+            # created_date desc; subset still preserves that ordering).
+            order_idx = {lid: i for i, lid in enumerate(page_assigned_ids)}
+            page_locations.sort(key=lambda l: order_idx.get(l.id, 1_000_000))
+
+        ancestor_set: set = tiers['ancestor_ids'] if (tiers and not is_owner_now) else set()
+        ancestor_locations = []
+        if ancestor_set:
+            ancestor_locations = self.crud.get_user_locations(
+                organization_id=organization_id,
+                location_ids=list(ancestor_set),
+            )
+
+        # ── PHASE 4: Serialize. Page slice → full dicts; ancestors → minimal.
         location_data = []
         ancestor_data = []
-        for location in locations:
+        # Build a single iterable that mirrors the legacy loop's two outputs.
+        for location in list(page_locations) + list(ancestor_locations):
             # Debug: log members for each location
             if location.members:
                 print(f"[DEBUG] get_locations: Location {location.id} ({location.display_name}) has members: {location.members}")
@@ -1208,6 +1290,7 @@ class UserService:
             'ancestors': ancestor_data,
             'is_owner': is_owner,
             'manageable_user_ids': manageable_user_ids,
+            'total_assigned': total_assigned,
         }
 
     def get_orphan_locations(
@@ -1538,19 +1621,6 @@ class UserService:
             if not setup or not setup.root_nodes:
                 return {}
 
-            # Fetch ALL locations in the organization to get their names
-            all_locations = self.db.query(UserLocation).filter(
-                UserLocation.organization_id == organization_id,
-                UserLocation.is_active == True,
-                UserLocation.deleted_date.is_(None)
-            ).all()
-
-            # Create name lookup map
-            location_names = {
-                loc.id: loc.display_name or loc.name_en or loc.name_th or f"Location {loc.id}"
-                for loc in all_locations
-            }
-
             # Build parent map from tree structure
             # key: nodeId, value: parentId
             parent_map: Dict[int, int] = {}
@@ -1572,6 +1642,33 @@ class UserService:
             root_nodes = setup.root_nodes
             if isinstance(root_nodes, list):
                 build_parent_map(root_nodes, None)
+
+            # Fetch names ONLY for nodes that participate in path traces.
+            # Previously we loaded every UserLocation in the org just to map
+            # IDs → names; that scaled with org size and crushed paginated
+            # responses. The set we actually need is:
+            #   - every parent in the tree (parent_map values)
+            #   - every location currently being serialized (location_data ids)
+            needed_ids: set = set(parent_map.values())
+            for loc in location_data:
+                lid = loc.get('id')
+                if lid is not None:
+                    needed_ids.add(lid)
+
+            location_names: Dict[int, str] = {}
+            if needed_ids:
+                rows = self.db.query(
+                    UserLocation.id,
+                    UserLocation.display_name,
+                    UserLocation.name_en,
+                    UserLocation.name_th,
+                ).filter(
+                    UserLocation.id.in_(needed_ids),
+                    UserLocation.is_active == True,
+                    UserLocation.deleted_date.is_(None),
+                ).all()
+                for r in rows:
+                    location_names[r.id] = r.display_name or r.name_en or r.name_th or f"Location {r.id}"
 
             # Build paths for each location
             location_paths = {}
