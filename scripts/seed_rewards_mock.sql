@@ -62,9 +62,6 @@ DELETE FROM reward_campaign_droppoints
 DELETE FROM reward_campaign_claims
  WHERE campaign_id IN (SELECT id FROM reward_campaigns WHERE description LIKE '[MOCK]%');
 
-DELETE FROM reward_campaign_activity_types
- WHERE campaign_id IN (SELECT id FROM reward_campaigns WHERE description LIKE '[MOCK]%');
-
 DELETE FROM reward_campaigns WHERE description LIKE '[MOCK]%';
 
 DELETE FROM droppoints WHERE name LIKE '[MOCK]%';
@@ -177,24 +174,24 @@ SELECT id, 25, 'staff', NOW() - INTERVAL '90 days'
 
 INSERT INTO reward_campaigns (
   organization_id, name, description, start_date, end_date, status,
-  metric_type, target_participants, budget_baht
+  target_participants, budget_baht
 ) VALUES
   (25, 'รักษ์โลก ฤดูร้อน 2026',
    '[MOCK] เก็บขยะรีไซเคิลตลอดฤดูร้อน รับแต้มแลกของรางวัล',
    NOW() - INTERVAL '170 days', NOW() + INTERVAL '60 days', 'active',
-   'material', 200, 50000),
+   200, 50000),
   (25, 'BYO Bag Challenge',
    '[MOCK] สะสมแต้มจากการพกถุงผ้าและแก้วน้ำส่วนตัว',
    NOW() - INTERVAL '90 days', NOW() + INTERVAL '30 days', 'active',
-   'activity', 100, 15000),
+   100, 15000),
   (25, 'เก็บขยะชายหาด',
    '[MOCK] กิจกรรม Clean Beach หยุดชั่วคราวรอตรวจสอบงบประมาณ',
    NOW() - INTERVAL '60 days', NOW() + INTERVAL '15 days', 'paused',
-   'activity', 50, 8000),
+   50, 8000),
   (25, 'แคมเปญถัดไป Q3 2026',
    '[MOCK] ตัวอย่าง draft ที่ยังไม่ publish',
    NOW() + INTERVAL '30 days', NOW() + INTERVAL '120 days', 'draft',
-   'material', 150, 30000);
+   150, 30000);
 
 -- Convenience temp table for FK lookups
 DROP TABLE IF EXISTS _mock_ids;
