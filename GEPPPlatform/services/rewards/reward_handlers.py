@@ -646,7 +646,8 @@ def handle_reward_routes(event: Dict[str, Any], data: Dict[str, Any], **params) 
 
         if path == "/api/rewards/public/memberships" and method == "GET":
             svc = PublicRewardService(db_session)
-            return svc.get_memberships(_resolve_user())
+            include_inactive = str(query_params.get("include_inactive", "")).lower() in ("1", "true", "yes")
+            return svc.get_memberships(_resolve_user(), include_inactive=include_inactive)
 
         if path == "/api/rewards/public/verify-staff" and method == "POST":
             svc = PublicRewardService(db_session)
