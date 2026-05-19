@@ -605,6 +605,7 @@ def handle_reward_routes(event: Dict[str, Any], data: Dict[str, Any], **params) 
                 current_org_id,
                 current_user_id,
                 expiry_hours=data.get("expiry_hours"),
+                invitee_name=data.get("invitee_name"),
             )
 
         if path == "/api/rewards/staff-invites/revoke" and method == "POST":
