@@ -389,7 +389,9 @@ class StockService:
         )
         if organization_id is not None:
             q = q.filter(RewardCatalog.organization_id == organization_id)
-        catalog = q.first()
+        # Lock catalog row to serialise stock writes for this item across concurrent
+        # admin actions + redemption confirmations (prevents negative stock TOCTOU).
+        catalog = q.with_for_update().first()
         if not catalog:
             raise NotFoundException("Catalog item not found or not in your organization")
 

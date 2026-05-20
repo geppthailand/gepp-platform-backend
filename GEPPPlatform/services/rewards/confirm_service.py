@@ -238,7 +238,19 @@ class ConfirmService:
         return result.rowcount > 0
 
     def _deduct_stock(self, redemption: RewardRedemption):
-        """Deduct stock for a single redemption item (status already set to completed)."""
+        """Deduct stock for a single redemption item (status already set to completed).
+
+        Concurrency: locks the catalog row with SELECT ... FOR UPDATE before reading
+        the stock sum + inserting the -quantity ledger entry. This serialises
+        concurrent redemptions on the same item and prevents the stock total from
+        going negative through a TOCTOU race.
+        """
+        # Lock the catalog row to serialise stock operations for this item.
+        # Released at transaction commit / rollback.
+        self.db.query(RewardCatalog).filter(
+            RewardCatalog.id == redemption.catalog_id
+        ).with_for_update().first()
+
         current_stock = (
             self.db.query(func.coalesce(func.sum(RewardStock.values), 0))
             .filter(
