@@ -193,25 +193,19 @@ class PublicRewardService:
 
         return profile
 
-    def get_memberships(self, reward_user_id: int, include_inactive: bool = False) -> list[dict]:
-        """Get organization memberships for a user (from organization_reward_users).
-
-        By default only returns active memberships. Pass include_inactive=True
-        from the LIFF entry to also surface deactivated rows so the client can
-        show a "blocked" screen when every membership has been turned off.
-        """
+    def get_memberships(self, reward_user_id: int) -> list[dict]:
+        """Get all organization memberships for a user (from organization_reward_users)."""
         from ...models.subscriptions.organizations import Organization
 
-        query = (
+        rows = (
             self.db.query(OrganizationRewardUser)
             .filter(
                 OrganizationRewardUser.reward_user_id == reward_user_id,
+                OrganizationRewardUser.is_active == True,
                 OrganizationRewardUser.deleted_date.is_(None),
             )
+            .all()
         )
-        if not include_inactive:
-            query = query.filter(OrganizationRewardUser.is_active == True)
-        rows = query.all()
 
         result = []
         for oru in rows:
