@@ -18,13 +18,13 @@ import os
 # ── Version metadata ──────────────────────────────────────────────────────
 # Bump VERSION on every meaningful deploy. Format is free-form; semver-ish
 # (MAJOR.MINOR.PATCH) is what we use today.
-VERSION: str = "2026.05.14.02"
+VERSION: str = "2026.05.18.02"
 
 # Short label describing the change in this version (free text, optional).
 # Surfaced in /api/version for a quick human-readable confirmation.
 VERSION_NOTE: str = (
-    "fix double-pagination in handle_get_locations "
-    "(was clobbering full_total to page_size)"
+    "waste-transactions date filter now uses TransactionRecord.transaction_date "
+    "(EXISTS-subquery); materials report splits Waste-to-Energy items"
 )
 
 # Build-time / commit info — usually injected by CI at deploy time via env

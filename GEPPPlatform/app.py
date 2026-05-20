@@ -97,6 +97,43 @@ def main(event, context):
         # and never forwards to Lambda. If OPTIONS reaches here, API Gateway CORS is
         # not configured — so we handle it in Lambda.
         if http_method == "OPTIONS":
+            # Origin-restricted preflight for customer-leads (marketing site).
+            # Browser will refuse the actual POST unless this preflight echoes
+            # back the exact Origin from the allowlist — `*` is rejected when
+            # the request needs credentials/origin trust.
+            if "/api/public/customer-leads" in path:
+                from GEPPPlatform.services.public.customer_leads_handler import (
+                    ALLOWED_ORIGINS, is_origin_allowed,
+                )
+                origin = (event.get("headers") or {}).get("origin") \
+                      or (event.get("headers") or {}).get("Origin")
+                if is_origin_allowed(origin):
+                    return {
+                        "statusCode": 200,
+                        "headers": {
+                            "Access-Control-Allow-Origin": origin,
+                            "Access-Control-Allow-Methods": "POST, OPTIONS",
+                            "Access-Control-Allow-Headers": "Content-Type",
+                            "Access-Control-Max-Age": "86400",
+                            "Vary": "Origin",
+                            "Content-Type": "application/json",
+                            **_VERSION_HEADERS,
+                        },
+                        "body": json.dumps({"message": "CORS preflight"})
+                    }
+                return {
+                    "statusCode": 403,
+                    "headers": {
+                        "Vary": "Origin",
+                        "Content-Type": "application/json",
+                        **_VERSION_HEADERS,
+                    },
+                    "body": json.dumps({
+                        "error": "origin_not_allowed",
+                        "allowed_origins": sorted(ALLOWED_ORIGINS),
+                    }),
+                }
+
             return {
                 "statusCode": 200,
                 "headers": {
@@ -238,6 +275,46 @@ def main(event, context):
                 }
                 lead_result = handle_public_lead_capture(body, session, request_meta=request_meta)
                 results = {"success": True, "data": lead_result}
+
+            elif "/api/public/customer-leads" in path and http_method == "POST":
+                # Marketing-site lead capture (gepp.me Contact form).
+                # Origin-allowlisted; rejects requests from anywhere else.
+                from GEPPPlatform.services.public.customer_leads_handler import (
+                    handle_customer_lead_capture, is_origin_allowed, ALLOWED_ORIGINS,
+                )
+                req_headers = event.get("headers") or {}
+                origin = req_headers.get("origin") or req_headers.get("Origin")
+                if not is_origin_allowed(origin):
+                    return {
+                        "statusCode": 403,
+                        "headers": {
+                            "Vary": "Origin",
+                            "Content-Type": "application/json",
+                            **_VERSION_HEADERS,
+                        },
+                        "body": json.dumps({
+                            "success": False,
+                            "error": "origin_not_allowed",
+                            "allowed_origins": sorted(ALLOWED_ORIGINS),
+                        }),
+                    }
+                request_meta = {
+                    "origin":     origin,
+                    "ip_address": (event.get("requestContext", {}).get("http", {}) or {}).get("sourceIp"),
+                    "user_agent": req_headers.get("user-agent") or req_headers.get("User-Agent"),
+                    "referrer":   req_headers.get("referer")   or req_headers.get("Referer"),
+                }
+                lead_result = handle_customer_lead_capture(body, session, request_meta=request_meta)
+                return {
+                    "statusCode": 200,
+                    "headers": {
+                        "Access-Control-Allow-Origin": origin,
+                        "Vary": "Origin",
+                        "Content-Type": "application/json",
+                        **_VERSION_HEADERS,
+                    },
+                    "body": json.dumps({"success": True, "data": lead_result}),
+                }
 
             elif "/api/userapi/documents/" in path:
                 # PUBLIC: Handle API documentation routes (no authentication required)

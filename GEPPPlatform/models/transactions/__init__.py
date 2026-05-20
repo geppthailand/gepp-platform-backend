@@ -7,6 +7,8 @@ from .transaction_records import TransactionRecord
 from .transaction_audits import TransactionAudit
 from .traceability_transaction_group import TraceabilityTransactionGroup
 from .transport_transaction import TransportTransaction
+from .traceability_consolidation import TraceabilityConsolidation, TraceabilityConsolidationSource
+from .transport_transaction_file import TransportTransactionFile
 from .ai_audit_document_types import AiAuditDocumentType
 
 __all__ = [
@@ -27,4 +29,9 @@ __all__ = [
 
     # Transport transactions (traceability)
     'TransportTransaction',
+
+    # Consolidation feature
+    'TraceabilityConsolidation',
+    'TraceabilityConsolidationSource',
+    'TransportTransactionFile',
 ]
