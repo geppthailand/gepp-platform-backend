@@ -8,7 +8,7 @@ Function exported: lambda_handler(event, context)
 
 Local smoke test:
     python3 -c "
-    from GEPPPlatform.services.admin.crm.campaign_scheduler_lambda import lambda_handler
+    from GEPPPlatform.entry_points.campaign_scheduler import lambda_handler
     print('ok')
     "
 

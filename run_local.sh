@@ -314,7 +314,7 @@ import json, sys, os, traceback
 sys.path.insert(0, os.environ.get('PYTHONPATH', '.'))
 
 from flask import Flask, request, Response
-from GEPPPlatform.app import main as lambda_handler
+from GEPPPlatform.entry_points.app import main as lambda_handler
 
 app = Flask(__name__)
 

@@ -1774,7 +1774,13 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                     (cast(Transaction.id, String).ilike(search_pattern))
                 )
 
-            # Date range filters (interpret dates in Asia/Bangkok timezone)
+            # Date range filters — include any transaction that has AT LEAST
+            # ONE TransactionRecord with transaction_date inside the window.
+            # Filtering on Transaction.transaction_date alone misses cases
+            # where a record was logged later with a back-dated transaction_date
+            # (e.g. waste collected today, billed yesterday). Per the product
+            # requirement, the record-level date is what the user filters on,
+            # not the parent transaction's created/transaction_date.
             if date_from or date_to:
                 from datetime import datetime, timedelta
                 try:
@@ -1784,19 +1790,25 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                     import pytz
                     tz = pytz.timezone(TRACEABILITY_DATE_TZ)
 
+                date_conds = [
+                    TransactionRecord.created_transaction_id == Transaction.id,
+                    TransactionRecord.is_active == True,
+                ]
                 if date_from:
                     date_from_obj = datetime.fromisoformat(date_from)
                     if date_from_obj.tzinfo is None:
                         date_from_obj = date_from_obj.replace(hour=0, minute=0, second=0)
                         date_from_obj = tz.localize(date_from_obj) if hasattr(tz, 'localize') else date_from_obj.replace(tzinfo=tz)
-                    query = query.filter(Transaction.transaction_date >= date_from_obj)
+                    date_conds.append(TransactionRecord.transaction_date >= date_from_obj)
                 if date_to:
                     date_to_obj = datetime.fromisoformat(date_to)
                     if date_to_obj.tzinfo is None:
                         # End of day: 23:59:59.999999
                         date_to_obj = date_to_obj.replace(hour=23, minute=59, second=59, microsecond=999999)
                         date_to_obj = tz.localize(date_to_obj) if hasattr(tz, 'localize') else date_to_obj.replace(tzinfo=tz)
-                    query = query.filter(Transaction.transaction_date <= date_to_obj)
+                    date_conds.append(TransactionRecord.transaction_date <= date_to_obj)
+
+                query = query.filter(exists().where(and_(*date_conds)))
 
             # District/Sub-district filters (filter by origin_id)
             if district or sub_district:

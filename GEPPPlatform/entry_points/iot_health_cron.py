@@ -4,13 +4,13 @@ Wire this as a Lambda function fired by an EventBridge rule every 5 min:
 
     Function:    {ENV}-GEPPPlatform-IOTHEALTHCRON
     Schedule:    rate(5 minutes)   (or  cron(*/5 * * * ? *))
-    Handler:     GEPPPlatform.iot_health_cron.cron_iot_health_snapshot
+    Handler:     GEPPPlatform.entry_points.iot_health_cron.cron_iot_health_snapshot
     Memory:      256 MB     (light DB-only workload)
     Timeout:     30 s
 
 The body is intentionally tiny — all it does is call
 `AdminService.aggregate_health_snapshot()` which idempotently writes one
-5-min bucket row per active device. See `update_iot_health_cron.sh` for
+5-min bucket row per active device. See `update_function.sh iot-health-cron` for
 the deploy command and `admin_service.py:aggregate_health_snapshot` for
 the actual SQL.
 """
@@ -25,7 +25,7 @@ def cron_iot_health_snapshot(event, context):
 
     try:
         from GEPPPlatform.services.admin.admin_service import AdminService
-        from GEPPPlatform.database import get_session
+        from GEPPPlatform.libs.database import get_session
 
         with get_session() as session:
             svc = AdminService(session)
