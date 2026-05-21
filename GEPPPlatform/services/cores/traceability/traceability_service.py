@@ -2332,12 +2332,16 @@ class TraceabilityService:
             for g, _w in group_contribs:
                 affected_group_ids.add(g.id)
 
-            # 4d) Header row
+            # 4d) Header row — all event-level facts (point, batch_name, status)
+            #     live on the header, NOT on the consolidated transport's meta_data.
             consolidation = TraceabilityConsolidation(
                 organization_id=organization_id,
                 consolidated_transport_id=new_transport.id,
+                consolidation_point_id=destination_id_val,
                 material_id=req_material_id,
                 total_weight=total_weight,
+                batch_name=(req.get("batch_origin_name") or None),
+                status="active",
                 created_by=current_user_id,
             )
             self.db.add(consolidation)
@@ -2350,11 +2354,14 @@ class TraceabilityService:
             new_transport.meta_data = patched_meta
             new_transport.updated_date = now
 
-            # 4f) Source-join rows — one per contribution, transport OR group.
+            # 4f) Source-join rows — one per contribution. ``source_kind`` is the
+            #     canonical discriminator; the legacy NULL-FK pair stays valid via
+            #     the chk_consolidation_source_kind constraint.
             ordering = 0
             for src, contributed in transport_contribs:
                 self.db.add(TraceabilityConsolidationSource(
                     consolidation_id=consolidation.id,
+                    source_kind="transport",
                     source_transport_id=src.id,
                     source_group_id=None,
                     contributed_weight=contributed,
@@ -2364,6 +2371,7 @@ class TraceabilityService:
             for g, contributed in group_contribs:
                 self.db.add(TraceabilityConsolidationSource(
                     consolidation_id=consolidation.id,
+                    source_kind="group",
                     source_transport_id=None,
                     source_group_id=g.id,
                     contributed_weight=contributed,
@@ -3019,6 +3027,9 @@ class TraceabilityService:
                 for h in consol_headers:
                     h.is_active = False
                     h.deleted_date = now
+                    # Explicit business state — readers can detect a reverted
+                    # event without inferring from soft-delete fields.
+                    h.status = "reverted"
                 self.db.flush()
                 for gid in affected_groups:
                     try:
