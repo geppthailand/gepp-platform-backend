@@ -237,7 +237,27 @@ class TraceabilityService:
 
         treatment_w = 0.0
         disposal_w = 0.0
-        total_group_weight = 0.0
+        total_origin_weight = 0.0
+        managed_origin_weight = 0.0
+        hierarchy_group_ids: set = set()
+
+        def _collect_subtree_consolidated_weight(node: Dict[str, Any]) -> float:
+            total = 0.0
+
+            def _walk(n: Dict[str, Any]) -> None:
+                nonlocal total
+                if not isinstance(n, dict):
+                    return
+                sources = n.get("consolidation_sources")
+                if isinstance(sources, list):
+                    for source in sources:
+                        if isinstance(source, dict):
+                            total += float(source.get("contributed_weight") or 0)
+                for child in n.get("children") or []:
+                    _walk(child)
+
+            _walk(node)
+            return round(total, 2)
 
         def _sum_leaves(nodes):
             nonlocal treatment_w, disposal_w
@@ -264,15 +284,36 @@ class TraceabilityService:
             for group_node in origin_node.get("children") or []:
                 if not isinstance(group_node, dict):
                     continue
-                gw = float(group_node.get("weight") or group_node.get("total_weight_kg") or 0)
-                total_group_weight += gw
+                group_id = group_node.get("group_id") or group_node.get("id")
+                if group_id is not None:
+                    hierarchy_group_ids.add(str(group_id))
+                raw_weight = float(group_node.get("weight") or group_node.get("total_weight_kg") or 0)
+                consolidated_weight = _collect_subtree_consolidated_weight(group_node)
+                origin_weight = consolidated_weight if consolidated_weight > 0 else raw_weight
+                # Hierarchy only contains groups with at least one non-idle hop.
+                # Count those origin-side weights as managed, rather than summing
+                # terminal nodes, so split/completed leaves never inflate the card.
+                total_origin_weight += origin_weight
+                managed_origin_weight += origin_weight
                 _sum_leaves(group_node.get("children") or [])
 
-        # total_waste_weight is the sum of all group weights in this month
-        total_waste_weight = round(total_group_weight, 2)
+        # Include original origin groups that are not in any flow yet. Arrived
+        # transports also appear in arr0 as next-origin items, so only count
+        # true group/tentative rows here and never add them to managed weight.
+        for item in arr0:
+            if not isinstance(item, dict):
+                continue
+            if item.get("source") not in {"group", "tentative"}:
+                continue
+            group_id = item.get("group_id") or item.get("id")
+            if group_id is not None and str(group_id) in hierarchy_group_ids:
+                continue
+            total_origin_weight += float(item.get("weight") or item.get("total_weight_kg") or 0)
+
+        total_waste_weight = round(total_origin_weight, 2)
         total_treatment = round(treatment_w, 2)
         total_disposal = round(disposal_w, 2)
-        total_managed_waste = round(total_treatment + total_disposal, 2)
+        total_managed_waste = round(managed_origin_weight, 2)
 
         return {
             "data": [arr0, arr1, arr2],
