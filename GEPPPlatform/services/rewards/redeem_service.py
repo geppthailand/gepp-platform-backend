@@ -54,6 +54,23 @@ class RedeemService:
         if not campaign:
             raise BadRequestException("Campaign not active, ended, or not found")
 
+        # [V3] Block redemptions for members whose org membership is deactivated.
+        # Mirrors the same guard in claim_service.claim_points so the "Active" toggle on
+        # the admin Members tab actually freezes the user's account end-to-end.
+        membership = (
+            self.db.query(OrganizationRewardUser)
+            .filter(
+                OrganizationRewardUser.reward_user_id == reward_user_id,
+                OrganizationRewardUser.organization_id == organization_id,
+                OrganizationRewardUser.deleted_date.is_(None),
+            )
+            .first()
+        )
+        if not membership:
+            raise BadRequestException("Member is not registered with this organization")
+        if not membership.is_active:
+            raise BadRequestException("Member account is deactivated — contact admin to reactivate")
+
         # 1. Lock the user's point rows for this campaign to prevent concurrent overdraw,
         #    then calculate balance. FOR UPDATE cannot be used with aggregate functions,
         #    so we lock first, then SUM separately.

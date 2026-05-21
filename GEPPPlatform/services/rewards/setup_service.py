@@ -55,6 +55,7 @@ class RewardSetupService:
             "welcome_message": setup.welcome_message,
             "reward_budget_total": float(setup.reward_budget_total) if setup.reward_budget_total is not None else None,
             "low_stock_threshold": setup.low_stock_threshold,
+            "cost_management_enabled": bool(setup.cost_management_enabled),
             "created_date": setup.created_date.isoformat() if setup.created_date else None,
             "updated_date": setup.updated_date.isoformat() if setup.updated_date else None,
         }
@@ -76,6 +77,7 @@ class RewardSetupService:
             "qr_code_size", "qr_error_correction",
             "receipt_template", "welcome_message",
             "reward_budget_total", "low_stock_threshold",
+            "cost_management_enabled",
         ]
 
         if setup:

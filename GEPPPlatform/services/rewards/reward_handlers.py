@@ -16,6 +16,8 @@ from .campaign_droppoint_service import CampaignDroppointService
 from .campaign_target_service import CampaignTargetService
 from .catalog_service import CatalogService
 from .catalog_category_service import CatalogCategoryService
+from .expense_category_service import ExpenseCategoryService
+from .campaign_expense_service import CampaignExpenseService
 from .stock_service import StockService
 from .member_service import MemberService
 from .staff_service import StaffService
@@ -69,9 +71,24 @@ def handle_reward_routes(event: Dict[str, Any], data: Dict[str, Any], **params) 
             return svc.update_conversion_rate(current_org_id, data)
 
         # --- Overview ---
+        # V3-OVERVIEW: All overview routes now accept optional filters
+        #   date_from, date_to: ISO date strings (YYYY-MM-DD or full ISO)
+        #   campaign_id:        integer; scopes aggregates to a single campaign
+        # All filters are backward-compatible: omitting them yields the legacy behavior.
+        def _parse_campaign_id(raw):
+            try:
+                return int(raw) if raw not in (None, "", "null") else None
+            except (TypeError, ValueError):
+                return None
+
         if path == "/api/rewards/overview" and method == "GET":
             svc = OverviewService(db_session)
-            return svc.get_stats(current_org_id)
+            return svc.get_stats(
+                current_org_id,
+                date_from=query_params.get("date_from") or None,
+                date_to=query_params.get("date_to") or None,
+                campaign_id=_parse_campaign_id(query_params.get("campaign_id")),
+            )
 
         if path == "/api/rewards/overview/alerts" and method == "GET":
             svc = OverviewService(db_session)
@@ -79,16 +96,31 @@ def handle_reward_routes(event: Dict[str, Any], data: Dict[str, Any], **params) 
 
         if path == "/api/rewards/overview/campaigns" and method == "GET":
             svc = OverviewService(db_session)
-            return svc.get_campaign_details(current_org_id)
+            return svc.get_campaign_details(
+                current_org_id,
+                date_from=query_params.get("date_from") or None,
+                date_to=query_params.get("date_to") or None,
+            )
 
         if path == "/api/rewards/overview/staff-today" and method == "GET":
             svc = OverviewService(db_session)
-            return svc.get_staff_today(current_org_id)
+            return svc.get_staff_today(
+                current_org_id,
+                date_from=query_params.get("date_from") or None,
+                date_to=query_params.get("date_to") or None,
+                campaign_id=_parse_campaign_id(query_params.get("campaign_id")),
+            )
 
         if path == "/api/rewards/overview/trends" and method == "GET":
             svc = OverviewService(db_session)
             months = int(query_params.get("months", 6))
-            return svc.get_trends(current_org_id, months=months)
+            return svc.get_trends(
+                current_org_id,
+                months=months,
+                date_from=query_params.get("date_from") or None,
+                date_to=query_params.get("date_to") or None,
+                campaign_id=_parse_campaign_id(query_params.get("campaign_id")),
+            )
 
         if path == "/api/rewards/overview/stock-matrix" and method == "GET":
             svc = OverviewService(db_session)
@@ -97,16 +129,24 @@ def handle_reward_routes(event: Dict[str, Any], data: Dict[str, Any], **params) 
         if path == "/api/rewards/overview/top-members" and method == "GET":
             svc = OverviewService(db_session)
             limit = int(query_params.get("limit", 5))
-            return svc.get_top_members(current_org_id, limit=limit)
+            return svc.get_top_members(
+                current_org_id,
+                limit=limit,
+                date_from=query_params.get("date_from") or None,
+                date_to=query_params.get("date_to") or None,
+                campaign_id=_parse_campaign_id(query_params.get("campaign_id")),
+            )
 
         # --- Phase 2: Drop Point Breakdown (Material kg / Activity count) ---
         if path == "/api/rewards/overview/dropoint-breakdown" and method == "GET":
             svc = OverviewService(db_session)
             metric = query_params.get("metric", "material")
-            campaign_id = query_params.get("campaign_id")
-            campaign_id_int = int(campaign_id) if campaign_id else None
             return svc.get_dropoint_breakdown(
-                current_org_id, metric=metric, campaign_id=campaign_id_int,
+                current_org_id,
+                metric=metric,
+                campaign_id=_parse_campaign_id(query_params.get("campaign_id")),
+                date_from=query_params.get("date_from") or None,
+                date_to=query_params.get("date_to") or None,
             )
 
         # --- Phase 2: Activity Types CRUD ---
@@ -358,6 +398,50 @@ def handle_reward_routes(event: Dict[str, Any], data: Dict[str, Any], **params) 
             item_id = data.get("id") or query_params.get("id")
             return svc.delete(int(item_id))
 
+        # --- [V3-COST-LEDGER] Expense Categories ---
+        if path == "/api/rewards/expense-categories" and method == "GET":
+            svc = ExpenseCategoryService(db_session)
+            return svc.list(current_org_id)
+
+        if path == "/api/rewards/expense-categories" and method == "POST":
+            svc = ExpenseCategoryService(db_session)
+            return svc.create(current_org_id, data)
+
+        if path == "/api/rewards/expense-categories" and method == "PUT":
+            svc = ExpenseCategoryService(db_session)
+            return svc.update(int(data.get("id")), current_org_id, data)
+
+        if path == "/api/rewards/expense-categories" and method == "DELETE":
+            svc = ExpenseCategoryService(db_session)
+            item_id = data.get("id") or query_params.get("id")
+            return svc.delete(int(item_id), current_org_id)
+
+        # --- [V3-COST-LEDGER] Campaign Expense entries ---
+        if path == "/api/rewards/campaign-expenses" and method == "GET":
+            svc = CampaignExpenseService(db_session)
+            campaign_id = query_params.get("campaign_id")
+            category_id = query_params.get("category_id")
+            return svc.list(
+                current_org_id,
+                campaign_id=int(campaign_id) if campaign_id else None,
+                category_id=int(category_id) if category_id else None,
+                date_from=query_params.get("date_from"),
+                date_to=query_params.get("date_to"),
+            )
+
+        if path == "/api/rewards/campaign-expenses" and method == "POST":
+            svc = CampaignExpenseService(db_session)
+            return svc.create(current_org_id, data)
+
+        if path == "/api/rewards/campaign-expenses" and method == "PUT":
+            svc = CampaignExpenseService(db_session)
+            return svc.update(int(data.get("id")), current_org_id, data)
+
+        if path == "/api/rewards/campaign-expenses" and method == "DELETE":
+            svc = CampaignExpenseService(db_session)
+            item_id = data.get("id") or query_params.get("id")
+            return svc.delete(int(item_id), current_org_id)
+
         # --- Catalog Archive (2-step: check → confirm) ---
         if path == "/api/rewards/catalog/archive" and method == "POST":
             svc = CatalogService(db_session)
@@ -380,10 +464,12 @@ def handle_reward_routes(event: Dict[str, Any], data: Dict[str, Any], **params) 
         # --- Phase 2: Cost Report (full-page destination) ---
         if path == "/api/rewards/inventory/cost-report" and method == "GET":
             svc = CostReportService(db_session)
+            campaign_id_qp = query_params.get("campaign_id")
             return svc.get_report(
                 organization_id=current_org_id,
                 date_from=query_params.get("date_from"),
                 date_to=query_params.get("date_to"),
+                campaign_id=int(campaign_id_qp) if campaign_id_qp else None,
             )
 
         if path == "/api/rewards/inventory/summary" and method == "GET":
@@ -694,6 +780,15 @@ def handle_reward_routes(event: Dict[str, Any], data: Dict[str, Any], **params) 
             svc = HistoryService(db_session)
             return svc.get_staff_daily_stats(
                 staff_org_user_id=_resolve_staff(org_id),
+                organization_id=org_id,
+            )
+
+        if path == "/api/rewards/public/staff/lookup-user" and method == "GET":
+            org_id = int(query_params.get("organization_id"))
+            _resolve_staff(org_id)  # auth: caller must be staff of this org
+            svc = PublicRewardService(db_session)
+            return svc.get_profile(
+                reward_user_id=int(query_params.get("reward_user_id")),
                 organization_id=org_id,
             )
 

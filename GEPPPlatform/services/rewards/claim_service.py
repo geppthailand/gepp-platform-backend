@@ -61,6 +61,23 @@ class ClaimService:
         if not campaign:
             raise NotFoundException("Campaign not found, not active, or has ended")
 
+        # [V3] Block claims for members whose org membership is deactivated.
+        # Without this guard, deactivating a user from the admin Members tab had no effect on
+        # their ability to earn points via staff scan.
+        membership = (
+            self.db.query(OrganizationRewardUser)
+            .filter(
+                OrganizationRewardUser.reward_user_id == reward_user_id,
+                OrganizationRewardUser.organization_id == campaign.organization_id,
+                OrganizationRewardUser.deleted_date.is_(None),
+            )
+            .first()
+        )
+        if not membership:
+            raise BadRequestException("Member is not registered with this organization")
+        if not membership.is_active:
+            raise BadRequestException("Member account is deactivated — contact admin to reactivate")
+
         # Verify droppoint is linked to campaign
         dp_link = (
             self.db.query(RewardCampaignDroppoint)

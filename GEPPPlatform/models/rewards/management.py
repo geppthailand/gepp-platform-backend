@@ -27,6 +27,10 @@ class RewardSetup(Base, BaseModel):
     reward_budget_total = Column(DECIMAL(12, 2), nullable=True)  # org-level budget cap (THB)
     low_stock_threshold = Column(Integer, default=10)  # items below this count flagged as low
     point_to_baht_rate = Column(DECIMAL(10, 4), nullable=True)  # Phase 2: 1 point = X baht (Cost Report ROI)
+    # [V3-COST-TOGGLE] Master switch for the "บัญชี & ต้นทุน" feature surface. OFF (default)
+    # hides every cost-related UI (deposit unit_price, KPI baht subtexts, campaign budget /
+    # rate inputs, the top-level cost tab). Data is preserved across toggle flips.
+    cost_management_enabled = Column(Boolean, nullable=False, default=False)
 
 
 class RewardCampaign(Base, BaseModel):
@@ -44,7 +48,9 @@ class RewardCampaign(Base, BaseModel):
     points_per_day_limit = Column(Integer, nullable=True)  # null = no limit
     target_participants = Column(Integer, nullable=True)
     budget_baht = Column(DECIMAL(12, 2), nullable=True)
-    metric_type = Column(String(20), nullable=False, default='material')  # Phase 2: 'material' | 'activity'
+    # [V3-CAMPAIGN-RATE] Per-campaign conversion rate (1 pt = X baht). NULL = fall back
+    # to reward_setup.point_to_baht_rate (org default).
+    point_to_baht_rate = Column(DECIMAL(10, 4), nullable=True)
 
 
 class RewardActivityMaterial(Base, BaseModel):
@@ -58,7 +64,12 @@ class RewardActivityMaterial(Base, BaseModel):
     material_id = Column(BigInteger, nullable=True)  # FK materials.id when type=material
     image_id = Column(BigInteger, nullable=True)  # FK files.id
     selling_price_per_kg = Column(DECIMAL(10, 2), nullable=True)  # waste resale value (THB/kg)
-    ghg_factor = Column(DECIMAL(6, 3), nullable=True)  # kg CO2e saved per kg material
+    # [V3-OVERVIEW] DEPRECATED — column kept for backward-compat but no longer read.
+    # GHG source of truth is `materials.calc_ghg` (joined via material_id). Reward services
+    # (overview_service, campaign_service) now read `Material.calc_ghg` directly. This column
+    # was never populated by ActivityMaterialService.create/update — relying on it gave 0.
+    # Safe to DROP COLUMN in a future cleanup migration.
+    ghg_factor = Column(DECIMAL(6, 3), nullable=True)  # [DEPRECATED] use materials.calc_ghg instead
 
 
 class RewardCampaignClaim(Base, BaseModel):
@@ -137,10 +148,32 @@ class RewardActivityType(Base, BaseModel):
     is_default = Column(Boolean, nullable=False, default=False)
 
 
-class RewardCampaignActivityType(Base, BaseModel):
-    """Many-to-many: which activity types each activity-based campaign tracks."""
-    __tablename__ = 'reward_campaign_activity_types'
+# [V3-COST-LEDGER] Expense categories + per-campaign expense entries — see migration 011.
+class RewardExpenseCategory(Base, BaseModel):
+    """Org-managed categories for the campaign expense ledger.
 
-    campaign_id = Column(BigInteger, ForeignKey('reward_campaigns.id'), nullable=False)
-    activity_type_id = Column(BigInteger, ForeignKey('reward_activity_types.id'), nullable=False)
-    points_per_event = Column(DECIMAL(10, 2), nullable=True)  # optional override
+    The "ของรางวัล" row (is_inventory=True, is_system=True) is locked — its amount in
+    reports comes from inventory deposits, not from this ledger. Other categories
+    (Manpower / Transport / Marketing / etc.) are admin-managed.
+    """
+    __tablename__ = 'reward_expense_categories'
+
+    organization_id = Column(BigInteger, ForeignKey('organizations.id'), nullable=False)
+    name = Column(String(100), nullable=False)
+    is_inventory = Column(Boolean, nullable=False, default=False)
+    is_system = Column(Boolean, nullable=False, default=False)
+    sort_order = Column(Integer, nullable=False, default=0)
+
+
+class RewardCampaignExpense(Base, BaseModel):
+    """Per-campaign expense ledger entry (entry-level granularity)."""
+    __tablename__ = 'reward_campaign_expenses'
+
+    organization_id = Column(BigInteger, ForeignKey('organizations.id'), nullable=False)
+    reward_campaign_id = Column(BigInteger, ForeignKey('reward_campaigns.id'), nullable=False)
+    expense_category_id = Column(BigInteger, ForeignKey('reward_expense_categories.id'), nullable=False)
+    amount_baht = Column(DECIMAL(12, 2), nullable=False)
+    expense_date = Column(DateTime(timezone=True), nullable=False)
+    vendor = Column(String(255), nullable=True)
+    note = Column(Text, nullable=True)
+    receipt_file_id = Column(BigInteger, nullable=True)

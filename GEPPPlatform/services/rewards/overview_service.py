@@ -3,7 +3,7 @@ Overview Service - Dashboard statistics for reward programs
 """
 
 from datetime import datetime, timedelta, timezone
-from sqlalchemy import func, distinct, and_
+from sqlalchemy import func, distinct, and_, case
 from sqlalchemy.orm import Session
 
 from ...models.rewards.redemptions import (
@@ -14,6 +14,10 @@ from ...models.rewards.management import (
 )
 from ...models.rewards.points import RewardPointTransaction
 from ...models.rewards.catalog import RewardCatalog, RewardStock
+# [V3-OVERVIEW] GHG source-of-truth: materials.calc_ghg — NOT reward_activity_materials.ghg_factor
+# (the latter is a denormalized column that was never populated by the create/update flow).
+# All GHG aggregations join through RewardActivityMaterial.material_id → Material.calc_ghg.
+from ...models.cores.references import Material
 from .campaign_target_service import CampaignTargetService
 
 
@@ -31,23 +35,58 @@ class OverviewService:
     # ================================================================
     # § 2 — KPI Cards data (get_stats)
     # ================================================================
-    def get_stats(self, organization_id: int) -> dict:
+    def get_stats(
+        self,
+        organization_id: int,
+        date_from=None,
+        date_to=None,
+        campaign_id: int | None = None,
+    ) -> dict:
         """Return KPI data for the 8 cards in Overview Section 2.
 
         Row 1 (Operations): campaigns, members, weight, GHG
         Row 2 (Financial): points issued, budget used, waste revenue, profit/loss
         Plus fields needed by other sections (pending redemptions, etc.)
+
+        Optional filters (all backward-compatible — None preserves prior behavior):
+        - date_from / date_to: ISO date strings or datetimes; scope aggregates to that window
+        - campaign_id: scope every aggregate to a single campaign
         """
         now = datetime.now(timezone.utc)
         this_month_start, last_month_start = _month_boundaries(now)
         week_ago = now - timedelta(days=7)
 
+        date_from_dt = self._parse_iso(date_from)
+        date_to_dt = self._parse_iso(date_to)
+
         # ── Members ──
-        total_members = self._scalar_count(
-            OrganizationRewardUser,
-            OrganizationRewardUser.organization_id == organization_id,
-            OrganizationRewardUser.deleted_date.is_(None),
-        )
+        # When campaign_id set: count distinct participants in that campaign within range.
+        # When unset: count all OrganizationRewardUser rows (current behavior).
+        if campaign_id is not None:
+            mq = (
+                self.db.query(func.count(distinct(RewardPointTransaction.reward_user_id)))
+                .filter(
+                    RewardPointTransaction.organization_id == organization_id,
+                    RewardPointTransaction.reward_campaign_id == campaign_id,
+                    RewardPointTransaction.reference_type == "claim",
+                    RewardPointTransaction.deleted_date.is_(None),
+                )
+            )
+            if date_from_dt is not None:
+                mq = mq.filter(RewardPointTransaction.claimed_date >= date_from_dt)
+            if date_to_dt is not None:
+                mq = mq.filter(RewardPointTransaction.claimed_date <= date_to_dt)
+            total_members = int(mq.scalar() or 0)
+        else:
+            mfilters = [
+                OrganizationRewardUser.organization_id == organization_id,
+                OrganizationRewardUser.deleted_date.is_(None),
+            ]
+            if date_from_dt is not None:
+                mfilters.append(OrganizationRewardUser.created_date >= date_from_dt)
+            if date_to_dt is not None:
+                mfilters.append(OrganizationRewardUser.created_date <= date_to_dt)
+            total_members = self._scalar_count(OrganizationRewardUser, *mfilters)
         new_members_this_month = self._scalar_count(
             OrganizationRewardUser,
             OrganizationRewardUser.organization_id == organization_id,
@@ -62,45 +101,72 @@ class OverviewService:
         )
 
         # ── Campaigns ──
-        active_campaigns = self._scalar_count(
-            RewardCampaign,
-            RewardCampaign.organization_id == organization_id,
-            RewardCampaign.status == "active",
-            RewardCampaign.deleted_date.is_(None),
-        )
-        total_campaigns = self._scalar_count(
-            RewardCampaign,
-            RewardCampaign.organization_id == organization_id,
-            RewardCampaign.deleted_date.is_(None),
-        )
+        # When a single campaign is filter-selected, total/active reduce to that one.
+        if campaign_id is not None:
+            c = (
+                self.db.query(RewardCampaign)
+                .filter(
+                    RewardCampaign.organization_id == organization_id,
+                    RewardCampaign.id == campaign_id,
+                    RewardCampaign.deleted_date.is_(None),
+                )
+                .first()
+            )
+            total_campaigns = 1 if c else 0
+            active_campaigns = 1 if (c and c.status == "active") else 0
+        else:
+            active_campaigns = self._scalar_count(
+                RewardCampaign,
+                RewardCampaign.organization_id == organization_id,
+                RewardCampaign.status == "active",
+                RewardCampaign.deleted_date.is_(None),
+            )
+            total_campaigns = self._scalar_count(
+                RewardCampaign,
+                RewardCampaign.organization_id == organization_id,
+                RewardCampaign.deleted_date.is_(None),
+            )
 
         # ── Weight (kg) ── SUM(value) for claim-type transactions
         total_weight_all_time = self._sum_weight(
-            organization_id, start=None, end=None,
+            organization_id, start=date_from_dt, end=date_to_dt, campaign_id=campaign_id,
         )
         total_weight_this_month = self._sum_weight(
-            organization_id, start=this_month_start, end=None,
+            organization_id, start=this_month_start, end=None, campaign_id=campaign_id,
         )
         total_weight_last_month = self._sum_weight(
-            organization_id, start=last_month_start, end=this_month_start,
+            organization_id, start=last_month_start, end=this_month_start, campaign_id=campaign_id,
         )
 
-        # ── GHG (tCO2e) ── value × ghg_factor (join activity_materials)
-        total_ghg_all_time = self._sum_ghg(organization_id, start=None, end=None)
-        total_ghg_this_month = self._sum_ghg(organization_id, start=this_month_start, end=None)
-        total_ghg_last_month = self._sum_ghg(organization_id, start=last_month_start, end=this_month_start)
+        # ── GHG (kg CO2e) ── value × materials.calc_ghg (join activity_materials → materials)
+        total_ghg_all_time = self._sum_ghg(
+            organization_id, start=date_from_dt, end=date_to_dt, campaign_id=campaign_id,
+        )
+        total_ghg_this_month = self._sum_ghg(
+            organization_id, start=this_month_start, end=None, campaign_id=campaign_id,
+        )
+        total_ghg_last_month = self._sum_ghg(
+            organization_id, start=last_month_start, end=this_month_start, campaign_id=campaign_id,
+        )
 
         # ── Points ──
-        total_points_issued = float(
+        pi_q = (
             self.db.query(func.coalesce(func.sum(RewardPointTransaction.points), 0))
             .filter(
                 RewardPointTransaction.organization_id == organization_id,
                 RewardPointTransaction.points > 0,
                 RewardPointTransaction.deleted_date.is_(None),
             )
-            .scalar() or 0
         )
-        total_points_redeemed = float(
+        if date_from_dt is not None:
+            pi_q = pi_q.filter(RewardPointTransaction.claimed_date >= date_from_dt)
+        if date_to_dt is not None:
+            pi_q = pi_q.filter(RewardPointTransaction.claimed_date <= date_to_dt)
+        if campaign_id is not None:
+            pi_q = pi_q.filter(RewardPointTransaction.reward_campaign_id == campaign_id)
+        total_points_issued = float(pi_q.scalar() or 0)
+
+        pr_q = (
             self.db.query(func.coalesce(func.sum(-RewardPointTransaction.points), 0))
             .filter(
                 RewardPointTransaction.organization_id == organization_id,
@@ -108,25 +174,92 @@ class OverviewService:
                 RewardPointTransaction.points < 0,
                 RewardPointTransaction.deleted_date.is_(None),
             )
-            .scalar() or 0
         )
+        if date_from_dt is not None:
+            pr_q = pr_q.filter(RewardPointTransaction.claimed_date >= date_from_dt)
+        if date_to_dt is not None:
+            pr_q = pr_q.filter(RewardPointTransaction.claimed_date <= date_to_dt)
+        if campaign_id is not None:
+            pr_q = pr_q.filter(RewardPointTransaction.reward_campaign_id == campaign_id)
+        total_points_redeemed = float(pr_q.scalar() or 0)
+
+        # [V3-CAMPAIGN-RATE] Weighted total_redemption_value_baht — each redemption is
+        # multiplied by its campaign's own rate (falling back to org rate). Pre-computed
+        # so KPI #3 on Overview doesn't have to guess which rate to use when campaigns differ.
+        # Resolve org-level rate (used as fallback for campaigns that don't set their own).
+        org_setup_for_rate = (
+            self.db.query(RewardSetup)
+            .filter(
+                RewardSetup.organization_id == organization_id,
+                RewardSetup.deleted_date.is_(None),
+            )
+            .first()
+        )
+        if org_setup_for_rate and org_setup_for_rate.point_to_baht_rate is not None:
+            fallback_rate = float(org_setup_for_rate.point_to_baht_rate)
+        elif org_setup_for_rate and org_setup_for_rate.cost_per_point is not None:
+            fallback_rate = float(org_setup_for_rate.cost_per_point)
+        else:
+            fallback_rate = 0.0
+
+        per_campaign_redeem_q = (
+            self.db.query(
+                RewardPointTransaction.reward_campaign_id.label("campaign_id"),
+                func.coalesce(func.sum(-RewardPointTransaction.points), 0).label("pts"),
+            )
+            .filter(
+                RewardPointTransaction.organization_id == organization_id,
+                RewardPointTransaction.reference_type == "redeem",
+                RewardPointTransaction.points < 0,
+                RewardPointTransaction.deleted_date.is_(None),
+            )
+        )
+        if date_from_dt is not None:
+            per_campaign_redeem_q = per_campaign_redeem_q.filter(RewardPointTransaction.claimed_date >= date_from_dt)
+        if date_to_dt is not None:
+            per_campaign_redeem_q = per_campaign_redeem_q.filter(RewardPointTransaction.claimed_date <= date_to_dt)
+        if campaign_id is not None:
+            per_campaign_redeem_q = per_campaign_redeem_q.filter(RewardPointTransaction.reward_campaign_id == campaign_id)
+        per_campaign_rows = per_campaign_redeem_q.group_by(RewardPointTransaction.reward_campaign_id).all()
+
+        campaign_ids_for_rate = [r.campaign_id for r in per_campaign_rows if r.campaign_id is not None]
+        campaign_rate_map: dict[int, float] = {}
+        if campaign_ids_for_rate:
+            for c in (
+                self.db.query(RewardCampaign.id, RewardCampaign.point_to_baht_rate)
+                .filter(RewardCampaign.id.in_(campaign_ids_for_rate))
+                .all()
+            ):
+                if c.point_to_baht_rate is not None:
+                    campaign_rate_map[c.id] = float(c.point_to_baht_rate)
+
+        total_redemption_value_baht = 0.0
+        for r in per_campaign_rows:
+            pts = float(r.pts or 0)
+            rate = campaign_rate_map.get(r.campaign_id, fallback_rate)
+            total_redemption_value_baht += pts * rate
 
         # ── Redemptions ──
-        total_redemptions = self._scalar_count(
-            RewardRedemption,
+        red_filters = [
             RewardRedemption.organization_id == organization_id,
             RewardRedemption.deleted_date.is_(None),
-        )
+        ]
+        if date_from_dt is not None:
+            red_filters.append(RewardRedemption.created_date >= date_from_dt)
+        if date_to_dt is not None:
+            red_filters.append(RewardRedemption.created_date <= date_to_dt)
+        if campaign_id is not None:
+            red_filters.append(RewardRedemption.reward_campaign_id == campaign_id)
+        total_redemptions = self._scalar_count(RewardRedemption, *red_filters)
         pending_redemptions = self._scalar_count(
             RewardRedemption,
-            RewardRedemption.organization_id == organization_id,
+            *red_filters,
             RewardRedemption.status == "inprogress",
-            RewardRedemption.deleted_date.is_(None),
         )
 
         # ── Financial: Reward budget used ──
         # SUM(catalog.cost_baht × redemption.quantity) for completed redemptions
-        reward_budget_used = float(
+        bu_q = (
             self.db.query(
                 func.coalesce(
                     func.sum(RewardCatalog.cost_baht * RewardRedemption.quantity), 0
@@ -140,8 +273,14 @@ class OverviewService:
                 RewardRedemption.deleted_date.is_(None),
                 RewardCatalog.cost_baht.isnot(None),
             )
-            .scalar() or 0
         )
+        if date_from_dt is not None:
+            bu_q = bu_q.filter(RewardRedemption.updated_date >= date_from_dt)
+        if date_to_dt is not None:
+            bu_q = bu_q.filter(RewardRedemption.updated_date <= date_to_dt)
+        if campaign_id is not None:
+            bu_q = bu_q.filter(RewardRedemption.reward_campaign_id == campaign_id)
+        reward_budget_used = float(bu_q.scalar() or 0)
 
         # ── Reward budget total from setup ──
         setup = (
@@ -156,9 +295,11 @@ class OverviewService:
 
         # ── Financial: Waste revenue ──
         # SUM(transaction.value × material.selling_price_per_kg)
-        waste_revenue_total = self._sum_waste_revenue(organization_id, start=None, end=None)
+        waste_revenue_total = self._sum_waste_revenue(
+            organization_id, start=date_from_dt, end=date_to_dt, campaign_id=campaign_id,
+        )
         waste_revenue_this_month = self._sum_waste_revenue(
-            organization_id, start=this_month_start, end=None,
+            organization_id, start=this_month_start, end=None, campaign_id=campaign_id,
         )
 
         return {
@@ -177,6 +318,10 @@ class OverviewService:
             # Points
             "total_points_issued": total_points_issued,
             "total_points_redeemed": total_points_redeemed,
+            # [V3-CAMPAIGN-RATE] Sum of (redeemed_pts × campaign_rate) — each redemption
+            # uses its own campaign's rate (org rate as fallback). Use this directly in
+            # Overview KPI #3 instead of multiplying total_points_redeemed by org rate.
+            "total_redemption_value_baht": round(total_redemption_value_baht, 2),
             # Redemptions
             "total_redemptions": total_redemptions,
             "pending_redemptions": pending_redemptions,
@@ -285,22 +430,46 @@ class OverviewService:
     # ================================================================
     # § 3 — Active Campaign Detail Cards
     # ================================================================
-    def get_campaign_details(self, organization_id: int) -> list[dict]:
-        """Per-campaign metrics for active campaigns:
-        participants, weight, GHG, stock per item, staff activity today."""
+    def get_campaign_details(
+        self,
+        organization_id: int,
+        date_from=None,
+        date_to=None,
+    ) -> list[dict]:
+        """Per-campaign metrics for campaigns active within a date range.
+
+        Filter (backward-compatible):
+        - date_from / date_to: when supplied, include campaigns whose run window
+          (start_date .. end_date) overlaps the requested range. When unsupplied,
+          include all currently-active campaigns (legacy behavior).
+        """
         now = datetime.now(timezone.utc)
         today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
 
-        campaigns = (
+        date_from_dt = self._parse_iso(date_from)
+        date_to_dt = self._parse_iso(date_to)
+
+        cq = (
             self.db.query(RewardCampaign)
             .filter(
                 RewardCampaign.organization_id == organization_id,
-                RewardCampaign.status == "active",
                 RewardCampaign.deleted_date.is_(None),
             )
-            .order_by(RewardCampaign.start_date.desc())
-            .all()
         )
+        if date_from_dt is not None or date_to_dt is not None:
+            # Range overlap: campaign.start_date <= date_to AND
+            #                (campaign.end_date IS NULL OR campaign.end_date >= date_from)
+            if date_to_dt is not None:
+                cq = cq.filter(RewardCampaign.start_date <= date_to_dt)
+            if date_from_dt is not None:
+                cq = cq.filter(
+                    (RewardCampaign.end_date.is_(None))
+                    | (RewardCampaign.end_date >= date_from_dt)
+                )
+        else:
+            # Legacy: only currently-active campaigns
+            cq = cq.filter(RewardCampaign.status == "active")
+        campaigns = cq.order_by(RewardCampaign.start_date.desc()).all()
 
         result = []
         for c in campaigns:
@@ -326,11 +495,12 @@ class OverviewService:
                 .scalar() or 0
             )
 
-            # GHG saved (tCO2e) for this campaign
+            # GHG saved (kg CO2e) for this campaign
+            # [V3-OVERVIEW] Source of truth = materials.calc_ghg (joined via material_id).
             ghg_kg = float(
                 self.db.query(
                     func.coalesce(
-                        func.sum(RewardPointTransaction.value * RewardActivityMaterial.ghg_factor),
+                        func.sum(RewardPointTransaction.value * Material.calc_ghg),
                         0,
                     )
                 )
@@ -339,10 +509,16 @@ class OverviewService:
                     RewardActivityMaterial,
                     RewardActivityMaterial.id == RewardPointTransaction.reward_activity_materials_id,
                 )
+                .join(
+                    Material,
+                    Material.id == RewardActivityMaterial.material_id,
+                )
                 .filter(
                     RewardPointTransaction.reward_campaign_id == c.id,
                     RewardPointTransaction.reference_type == "claim",
-                    RewardActivityMaterial.ghg_factor.isnot(None),
+                    RewardActivityMaterial.type == "material",
+                    Material.calc_ghg.isnot(None),
+                    Material.calc_ghg > 0,
                     RewardPointTransaction.deleted_date.is_(None),
                 )
                 .scalar() or 0
@@ -464,14 +640,34 @@ class OverviewService:
     # ================================================================
     # § 4 — Staff Active Today
     # ================================================================
-    def get_staff_today(self, organization_id: int) -> list[dict]:
-        """All staff in the org, with today's claim activity + online/offline status.
+    def get_staff_today(
+        self,
+        organization_id: int,
+        date_from=None,
+        date_to=None,
+        campaign_id: int | None = None,
+    ) -> list[dict]:
+        """All staff in the org, with claim activity within a date window.
 
-        online = has ≥1 claim today
-        offline = no claim today; show last_active
+        When date_from / date_to are unsupplied, defaults to "today" (legacy behavior).
+        When supplied, "claims_today" / "weight_today" reflect the supplied range.
+        When campaign_id is set, scope to that campaign only.
+
+        online = has ≥1 claim within the window
+        offline = no claim within the window; show last_active
         """
         now = datetime.now(timezone.utc)
-        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+        date_from_dt = self._parse_iso(date_from)
+        date_to_dt = self._parse_iso(date_to)
+
+        # Defaults: today window when no explicit range given (backward-compat)
+        if date_from_dt is None and date_to_dt is None:
+            window_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            window_end = None
+        else:
+            window_start = date_from_dt
+            window_end = date_to_dt
 
         # All staff of the org
         staff_entries = (
@@ -487,8 +683,8 @@ class OverviewService:
 
         result = []
         for oru, user in staff_entries:
-            # Today's activity
-            today = (
+            # Activity within window
+            tq = (
                 self.db.query(
                     func.count(RewardPointTransaction.id).label("claims"),
                     func.coalesce(func.sum(RewardPointTransaction.value), 0).label("weight"),
@@ -497,25 +693,32 @@ class OverviewService:
                 .filter(
                     RewardPointTransaction.staff_id == oru.id,
                     RewardPointTransaction.reference_type == "claim",
-                    RewardPointTransaction.claimed_date >= today_start,
                     RewardPointTransaction.deleted_date.is_(None),
                 )
-                .first()
             )
+            if window_start is not None:
+                tq = tq.filter(RewardPointTransaction.claimed_date >= window_start)
+            if window_end is not None:
+                tq = tq.filter(RewardPointTransaction.claimed_date <= window_end)
+            if campaign_id is not None:
+                tq = tq.filter(RewardPointTransaction.reward_campaign_id == campaign_id)
+            today = tq.first()
             claims_today = int(today.claims or 0) if today else 0
             weight_today = float(today.weight or 0) if today else 0.0
             droppoint_id = today.droppoint_id if today else None
 
-            # Last active (most recent claim ever)
-            last = (
+            # Last active (most recent claim ever, ignoring window)
+            lq = (
                 self.db.query(func.max(RewardPointTransaction.claimed_date))
                 .filter(
                     RewardPointTransaction.staff_id == oru.id,
                     RewardPointTransaction.reference_type == "claim",
                     RewardPointTransaction.deleted_date.is_(None),
                 )
-                .scalar()
             )
+            if campaign_id is not None:
+                lq = lq.filter(RewardPointTransaction.reward_campaign_id == campaign_id)
+            last = lq.scalar()
 
             # Droppoint name
             dp_name = None
@@ -546,6 +749,8 @@ class OverviewService:
         organization_id: int,
         metric: str = "material",
         campaign_id: int | None = None,
+        date_from=None,
+        date_to=None,
     ) -> dict:
         """Phase 2 endpoint powering the 2 Drop Point Breakdown cards on Overview.
 
@@ -553,16 +758,20 @@ class OverviewService:
         - metric='activity': count of activity-type claims per droppoint.
 
         If campaign_id provided, scope to that campaign only; otherwise aggregate all
-        active campaigns matching the metric type.
+        active campaigns. Filter by activity_material.type (Phase 4A: campaigns no
+        longer carry metric_type — claims do). Optional date_from/date_to scopes to that
+        window (claim.claimed_date).
         """
         if metric not in ("material", "activity"):
             metric = "material"
 
-        # Resolve eligible campaigns for this metric
+        date_from_dt = self._parse_iso(date_from)
+        date_to_dt = self._parse_iso(date_to)
+
+        # Resolve eligible campaigns (no metric filter — campaigns are mixed)
         eligible_q = self.db.query(RewardCampaign.id).filter(
             RewardCampaign.organization_id == organization_id,
             RewardCampaign.deleted_date.is_(None),
-            RewardCampaign.metric_type == metric,
         )
         if campaign_id is not None:
             eligible_q = eligible_q.filter(RewardCampaign.id == campaign_id)
@@ -574,60 +783,88 @@ class OverviewService:
                 "rows": [],
             }
 
-        # Aggregate claim transactions in those campaigns, grouped by droppoint × material
-        if metric == "material":
-            rows = (
-                self.db.query(
-                    RewardPointTransaction.droppoint_id.label("droppoint_id"),
-                    RewardActivityMaterial.id.label("material_id"),
-                    RewardActivityMaterial.name.label("material_name"),
-                    func.coalesce(func.sum(RewardPointTransaction.value), 0).label("total"),
-                )
-                .join(
-                    RewardActivityMaterial,
-                    RewardActivityMaterial.id == RewardPointTransaction.reward_activity_materials_id,
-                    isouter=True,
-                )
-                .filter(
-                    RewardPointTransaction.reward_campaign_id.in_(eligible_ids),
-                    RewardPointTransaction.reference_type == "claim",
-                    RewardPointTransaction.deleted_date.is_(None),
-                )
-                .group_by(
-                    RewardPointTransaction.droppoint_id,
-                    RewardActivityMaterial.id,
-                    RewardActivityMaterial.name,
-                )
-                .all()
+        # Build the aggregate query — common skeleton, varies by metric
+        agg_expr = (
+            func.coalesce(func.sum(RewardPointTransaction.value), 0)
+            if metric == "material"
+            else func.count(RewardPointTransaction.id)
+        )
+        bq = (
+            self.db.query(
+                RewardPointTransaction.droppoint_id.label("droppoint_id"),
+                RewardActivityMaterial.id.label("material_id"),
+                RewardActivityMaterial.name.label("material_name"),
+                agg_expr.label("total"),
             )
-        else:
-            rows = (
-                self.db.query(
-                    RewardPointTransaction.droppoint_id.label("droppoint_id"),
-                    RewardActivityMaterial.id.label("material_id"),
-                    RewardActivityMaterial.name.label("material_name"),
-                    func.count(RewardPointTransaction.id).label("total"),
-                )
-                .join(
-                    RewardActivityMaterial,
-                    RewardActivityMaterial.id == RewardPointTransaction.reward_activity_materials_id,
-                    isouter=True,
-                )
-                .filter(
-                    RewardPointTransaction.reward_campaign_id.in_(eligible_ids),
-                    RewardPointTransaction.reference_type == "claim",
-                    RewardPointTransaction.deleted_date.is_(None),
-                )
-                .group_by(
-                    RewardPointTransaction.droppoint_id,
-                    RewardActivityMaterial.id,
-                    RewardActivityMaterial.name,
-                )
-                .all()
+            .join(
+                RewardActivityMaterial,
+                RewardActivityMaterial.id == RewardPointTransaction.reward_activity_materials_id,
             )
+            .filter(
+                RewardPointTransaction.reward_campaign_id.in_(eligible_ids),
+                RewardPointTransaction.reference_type == "claim",
+                RewardPointTransaction.deleted_date.is_(None),
+                RewardActivityMaterial.type == metric,
+            )
+        )
+        if date_from_dt is not None:
+            bq = bq.filter(RewardPointTransaction.claimed_date >= date_from_dt)
+        if date_to_dt is not None:
+            bq = bq.filter(RewardPointTransaction.claimed_date <= date_to_dt)
+        rows = (
+            bq.group_by(
+                RewardPointTransaction.droppoint_id,
+                RewardActivityMaterial.id,
+                RewardActivityMaterial.name,
+            ).all()
+        )
 
-        # Resolve droppoint names
-        dp_ids = {r.droppoint_id for r in rows if r.droppoint_id}
+        # [V3-OVERVIEW] Points per droppoint — overlaid on the breakdown chart so that
+        # the location view (chart in BigTrendChart) can show 2 stacked bars per droppoint:
+        # top bar = material/activity (in kg/ครั้ง), bottom bar = points issued+redeemed (in PT).
+        pq = (
+            self.db.query(
+                RewardPointTransaction.droppoint_id.label("dp"),
+                func.coalesce(
+                    func.sum(case(
+                        (and_(
+                            RewardPointTransaction.reference_type == "claim",
+                            RewardPointTransaction.points > 0,
+                        ), RewardPointTransaction.points),
+                        else_=0,
+                    )),
+                    0,
+                ).label("issued"),
+                func.coalesce(
+                    func.sum(case(
+                        (and_(
+                            RewardPointTransaction.reference_type == "redeem",
+                            RewardPointTransaction.points < 0,
+                        ), -RewardPointTransaction.points),
+                        else_=0,
+                    )),
+                    0,
+                ).label("redeemed"),
+            )
+            .filter(
+                RewardPointTransaction.reward_campaign_id.in_(eligible_ids),
+                RewardPointTransaction.deleted_date.is_(None),
+            )
+        )
+        if date_from_dt is not None:
+            pq = pq.filter(RewardPointTransaction.claimed_date >= date_from_dt)
+        if date_to_dt is not None:
+            pq = pq.filter(RewardPointTransaction.claimed_date <= date_to_dt)
+        points_rows = pq.group_by(RewardPointTransaction.droppoint_id).all()
+        points_by_dp: dict[int | None, tuple[float, float]] = {
+            r.dp: (float(r.issued or 0), float(r.redeemed or 0)) for r in points_rows
+        }
+
+        # Resolve droppoint names — union of dp_ids from both queries
+        dp_ids: set[int] = {r.droppoint_id for r in rows if r.droppoint_id}
+        for pr in points_rows:
+            if pr.dp:
+                dp_ids.add(pr.dp)
         dp_names: dict[int, str] = {}
         if dp_ids:
             for dp in self.db.query(Droppoint).filter(Droppoint.id.in_(dp_ids)).all():
@@ -642,6 +879,8 @@ class OverviewService:
                 "droppoint_name": dp_names.get(dp_id) if dp_id else "ไม่ระบุจุดรับ",
                 "total": 0.0,
                 "by_material": [],
+                "points_issued": 0.0,
+                "points_redeemed": 0.0,
             })
             value = float(r.total or 0)
             bucket["total"] += value
@@ -651,11 +890,26 @@ class OverviewService:
                 "value": value,
             })
 
-        # Sort each droppoint's materials by value desc, droppoints by total desc
+        # Inject points into existing buckets + add droppoints that have only points (no material/activity rows in this window)
+        for dp_id, (issued, redeemed) in points_by_dp.items():
+            if dp_id in grouped:
+                grouped[dp_id]["points_issued"] = issued
+                grouped[dp_id]["points_redeemed"] = redeemed
+            elif issued > 0 or redeemed > 0:
+                grouped[dp_id] = {
+                    "droppoint_id": dp_id,
+                    "droppoint_name": dp_names.get(dp_id) if dp_id else "ไม่ระบุจุดรับ",
+                    "total": 0.0,
+                    "by_material": [],
+                    "points_issued": issued,
+                    "points_redeemed": redeemed,
+                }
+
+        # Sort each droppoint's materials by value desc, droppoints by total desc (then by points if total ties)
         result_rows = list(grouped.values())
         for row in result_rows:
             row["by_material"].sort(key=lambda x: -x["value"])
-        result_rows.sort(key=lambda x: -x["total"])
+        result_rows.sort(key=lambda x: (-x["total"], -(x.get("points_issued") or 0)))
 
         # Eligible campaigns metadata (for client-side dropdown)
         campaign_meta = (
@@ -675,9 +929,15 @@ class OverviewService:
     # ================================================================
     # § 5 — Trends (6-month time-series) + § 6 Environmental Impact
     # ================================================================
-    def get_trends(self, organization_id: int, months: int = 6) -> dict:
-        """Return monthly aggregates for the last N months (default 6)
-        for the 5 dashboard charts + breakdown data.
+    def get_trends(
+        self,
+        organization_id: int,
+        months: int = 6,
+        date_from=None,
+        date_to=None,
+        campaign_id: int | None = None,
+    ) -> dict:
+        """Return monthly aggregates for the chart series.
 
         Charts covered:
         - Chart 1 (dual-axis): waste_by_month + ghg_by_month
@@ -685,51 +945,94 @@ class OverviewService:
         - Chart 3 (donut):     waste_by_type
         - Chart 4 (dual-line): points_issued_by_month + points_redeemed_by_month
         - Chart 5 (bar):       new_members_by_month
+        - New (V3-OVERVIEW):   activity_count_by_month (count of activity-type claims)
+
+        Filters (all backward-compatible):
+        - months: when no date_from/date_to is supplied, defines window length (default 6)
+        - date_from / date_to: ISO date strings; when supplied, month buckets span this range
+        - campaign_id: scope every series to a single campaign
         """
         now = datetime.now(timezone.utc)
-        # Start of N-th month ago (first day)
-        this_month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        # Walk back (months - 1) months
-        start = this_month_start
-        for _ in range(months - 1):
-            start = (start - timedelta(days=1)).replace(day=1)
 
-        # Build month buckets: list of (bucket_start, bucket_end, label "YYYY-MM")
-        buckets: list[tuple[datetime, datetime, str]] = []
-        cursor = start
-        for _ in range(months):
-            if cursor.month == 12:
-                next_month = cursor.replace(year=cursor.year + 1, month=1)
+        date_from_dt = self._parse_iso(date_from)
+        date_to_dt = self._parse_iso(date_to)
+
+        # ── Determine window for month buckets ──
+        # Priority: explicit date range > months window
+        if date_from_dt is not None or date_to_dt is not None:
+            # Use the supplied range; clamp to month boundaries
+            window_end = date_to_dt or now
+            window_end_month = window_end.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            # advance to the first day of the NEXT month so the bucket containing date_to is included
+            if window_end.month == 12:
+                window_end_next = window_end_month.replace(year=window_end_month.year + 1, month=1)
             else:
-                next_month = cursor.replace(month=cursor.month + 1)
-            label = cursor.strftime("%Y-%m")
-            buckets.append((cursor, next_month, label))
-            cursor = next_month
+                window_end_next = window_end_month.replace(month=window_end_month.month + 1)
+
+            window_start = date_from_dt or window_end_next - timedelta(days=180)
+            start = window_start.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            cursor = start
+            buckets: list[tuple[datetime, datetime, str]] = []
+            while cursor < window_end_next:
+                if cursor.month == 12:
+                    nxt = cursor.replace(year=cursor.year + 1, month=1)
+                else:
+                    nxt = cursor.replace(month=cursor.month + 1)
+                buckets.append((cursor, nxt, cursor.strftime("%Y-%m")))
+                cursor = nxt
+        else:
+            # Legacy: walk back `months - 1` from the current month
+            this_month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            start = this_month_start
+            for _ in range(months - 1):
+                start = (start - timedelta(days=1)).replace(day=1)
+            buckets = []
+            cursor = start
+            for _ in range(months):
+                if cursor.month == 12:
+                    next_month = cursor.replace(year=cursor.year + 1, month=1)
+                else:
+                    next_month = cursor.replace(month=cursor.month + 1)
+                buckets.append((cursor, next_month, cursor.strftime("%Y-%m")))
+                cursor = next_month
 
         # Waste + GHG + points issued by month (from reward_point_transactions)
         waste_by_month = []
         ghg_by_month = []
         points_issued_by_month = []
         points_redeemed_by_month = []
+        activity_count_by_month = []
         budget_by_month = []
         revenue_by_month = []
         new_members_by_month = []
 
         for (bucket_start, bucket_end, label) in buckets:
             # Waste (kg)
-            w = self._sum_weight(organization_id, start=bucket_start, end=bucket_end)
+            w = self._sum_weight(
+                organization_id, start=bucket_start, end=bucket_end, campaign_id=campaign_id,
+            )
             waste_by_month.append({"month": label, "weight": float(w)})
 
             # GHG (kg CO2e)
-            g = self._sum_ghg(organization_id, start=bucket_start, end=bucket_end)
+            g = self._sum_ghg(
+                organization_id, start=bucket_start, end=bucket_end, campaign_id=campaign_id,
+            )
             ghg_by_month.append({"month": label, "ghg_kg": float(g)})
 
             # Revenue
-            r = self._sum_waste_revenue(organization_id, start=bucket_start, end=bucket_end)
+            r = self._sum_waste_revenue(
+                organization_id, start=bucket_start, end=bucket_end, campaign_id=campaign_id,
+            )
             revenue_by_month.append({"month": label, "revenue": float(r)})
 
+            # Activity count (claims tied to ActivityMaterials of type='activity')
+            ac = self._count_activity_claims(
+                organization_id, start=bucket_start, end=bucket_end, campaign_id=campaign_id,
+            )
+            activity_count_by_month.append({"month": label, "count": int(ac)})
+
             # Points issued (positive, claim)
-            pts_in = float(
+            pi_q = (
                 self.db.query(func.coalesce(func.sum(RewardPointTransaction.points), 0))
                 .filter(
                     RewardPointTransaction.organization_id == organization_id,
@@ -739,12 +1042,14 @@ class OverviewService:
                     RewardPointTransaction.claimed_date < bucket_end,
                     RewardPointTransaction.deleted_date.is_(None),
                 )
-                .scalar() or 0
             )
+            if campaign_id is not None:
+                pi_q = pi_q.filter(RewardPointTransaction.reward_campaign_id == campaign_id)
+            pts_in = float(pi_q.scalar() or 0)
             points_issued_by_month.append({"month": label, "points": pts_in})
 
             # Points redeemed (abs value of negative redeem)
-            pts_out = float(
+            pr_q = (
                 self.db.query(func.coalesce(func.sum(-RewardPointTransaction.points), 0))
                 .filter(
                     RewardPointTransaction.organization_id == organization_id,
@@ -754,12 +1059,14 @@ class OverviewService:
                     RewardPointTransaction.claimed_date < bucket_end,
                     RewardPointTransaction.deleted_date.is_(None),
                 )
-                .scalar() or 0
             )
+            if campaign_id is not None:
+                pr_q = pr_q.filter(RewardPointTransaction.reward_campaign_id == campaign_id)
+            pts_out = float(pr_q.scalar() or 0)
             points_redeemed_by_month.append({"month": label, "points": pts_out})
 
             # Budget used (cost_baht × qty for completed redemptions in this bucket)
-            b = float(
+            bu_q = (
                 self.db.query(
                     func.coalesce(
                         func.sum(RewardCatalog.cost_baht * RewardRedemption.quantity), 0
@@ -775,11 +1082,13 @@ class OverviewService:
                     RewardRedemption.updated_date >= bucket_start,
                     RewardRedemption.updated_date < bucket_end,
                 )
-                .scalar() or 0
             )
+            if campaign_id is not None:
+                bu_q = bu_q.filter(RewardRedemption.reward_campaign_id == campaign_id)
+            b = float(bu_q.scalar() or 0)
             budget_by_month.append({"month": label, "budget_used": b})
 
-            # New members in this bucket
+            # New members in this bucket — not campaign-scoped
             nm = self._scalar_count(
                 OrganizationRewardUser,
                 OrganizationRewardUser.organization_id == organization_id,
@@ -789,8 +1098,8 @@ class OverviewService:
             )
             new_members_by_month.append({"month": label, "count": nm})
 
-        # Waste by type (all-time, group by activity material)
-        waste_by_type_rows = (
+        # Waste by type (group by activity material) — also respects filter
+        wbt_q = (
             self.db.query(
                 RewardActivityMaterial.id.label("material_id"),
                 RewardActivityMaterial.name.label("name"),
@@ -806,6 +1115,15 @@ class OverviewService:
                 RewardPointTransaction.reference_type == "claim",
                 RewardPointTransaction.deleted_date.is_(None),
             )
+        )
+        if date_from_dt is not None:
+            wbt_q = wbt_q.filter(RewardPointTransaction.claimed_date >= date_from_dt)
+        if date_to_dt is not None:
+            wbt_q = wbt_q.filter(RewardPointTransaction.claimed_date <= date_to_dt)
+        if campaign_id is not None:
+            wbt_q = wbt_q.filter(RewardPointTransaction.reward_campaign_id == campaign_id)
+        waste_by_type_rows = (
+            wbt_q
             .group_by(RewardActivityMaterial.id, RewardActivityMaterial.name)
             .order_by(func.sum(RewardPointTransaction.value).desc())
             .all()
@@ -828,6 +1146,7 @@ class OverviewService:
             "waste_by_type": waste_by_type,
             "points_issued_by_month": points_issued_by_month,
             "points_redeemed_by_month": points_redeemed_by_month,
+            "activity_count_by_month": activity_count_by_month,
             "new_members_by_month": new_members_by_month,
         }
 
@@ -920,12 +1239,34 @@ class OverviewService:
     # ================================================================
     # § 8 — Top Members Leaderboard
     # ================================================================
-    def get_top_members(self, organization_id: int, limit: int = 5) -> list[dict]:
-        """Return top N members ranked by points earned TODAY (in this org)."""
-        now = datetime.now(timezone.utc)
-        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    def get_top_members(
+        self,
+        organization_id: int,
+        limit: int = 5,
+        date_from=None,
+        date_to=None,
+        campaign_id: int | None = None,
+    ) -> list[dict]:
+        """Return top N members ranked by points earned in a window.
 
-        rows = (
+        When no date range supplied, defaults to "today" (legacy behavior).
+        When campaign_id supplied, scope to that campaign only.
+        """
+        now = datetime.now(timezone.utc)
+
+        date_from_dt = self._parse_iso(date_from)
+        date_to_dt = self._parse_iso(date_to)
+
+        if date_from_dt is None and date_to_dt is None:
+            window_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            window_end = None
+            scope_label = "today"
+        else:
+            window_start = date_from_dt
+            window_end = date_to_dt
+            scope_label = "range"
+
+        q = (
             self.db.query(
                 RewardPointTransaction.reward_user_id.label("reward_user_id"),
                 func.coalesce(func.sum(RewardPointTransaction.points), 0).label("total_points"),
@@ -935,10 +1276,18 @@ class OverviewService:
                 RewardPointTransaction.organization_id == organization_id,
                 RewardPointTransaction.points > 0,
                 RewardPointTransaction.reference_type == "claim",
-                RewardPointTransaction.claimed_date >= today_start,
                 RewardPointTransaction.deleted_date.is_(None),
             )
-            .group_by(RewardPointTransaction.reward_user_id)
+        )
+        if window_start is not None:
+            q = q.filter(RewardPointTransaction.claimed_date >= window_start)
+        if window_end is not None:
+            q = q.filter(RewardPointTransaction.claimed_date <= window_end)
+        if campaign_id is not None:
+            q = q.filter(RewardPointTransaction.reward_campaign_id == campaign_id)
+
+        rows = (
+            q.group_by(RewardPointTransaction.reward_user_id)
             .order_by(func.sum(RewardPointTransaction.points).desc())
             .limit(limit)
             .all()
@@ -969,7 +1318,7 @@ class OverviewService:
                 "line_picture_url": user.line_picture_url if user else None,
                 "total_points": float(r.total_points or 0),
                 "claims_count": int(r.claims_count or 0),
-                "scope": "today",
+                "scope": scope_label,
             })
         return result
 
@@ -981,7 +1330,7 @@ class OverviewService:
             self.db.query(func.count(model.id)).filter(*filters).scalar() or 0
         )
 
-    def _sum_weight(self, organization_id: int, start, end) -> float:
+    def _sum_weight(self, organization_id: int, start, end, campaign_id=None) -> float:
         q = (
             self.db.query(func.coalesce(func.sum(RewardPointTransaction.value), 0))
             .filter(
@@ -994,14 +1343,22 @@ class OverviewService:
             q = q.filter(RewardPointTransaction.claimed_date >= start)
         if end is not None:
             q = q.filter(RewardPointTransaction.claimed_date < end)
+        if campaign_id is not None:
+            q = q.filter(RewardPointTransaction.reward_campaign_id == campaign_id)
         return float(q.scalar() or 0)
 
-    def _sum_ghg(self, organization_id: int, start, end) -> float:
-        """GHG in kg CO2e."""
+    def _sum_ghg(self, organization_id: int, start, end, campaign_id=None) -> float:
+        """GHG in kg CO2e.
+
+        [V3-OVERVIEW] Source of truth: `materials.calc_ghg` (entered by admins via the
+        main Materials UI in the V3 core system). We join through
+        `RewardActivityMaterial.material_id → Material.id` to read it. Activity-type
+        ActivityMaterials (no `material_id`) yield no GHG by design.
+        """
         q = (
             self.db.query(
                 func.coalesce(
-                    func.sum(RewardPointTransaction.value * RewardActivityMaterial.ghg_factor),
+                    func.sum(RewardPointTransaction.value * Material.calc_ghg),
                     0,
                 )
             )
@@ -1010,10 +1367,16 @@ class OverviewService:
                 RewardActivityMaterial,
                 RewardActivityMaterial.id == RewardPointTransaction.reward_activity_materials_id,
             )
+            .join(
+                Material,
+                Material.id == RewardActivityMaterial.material_id,
+            )
             .filter(
                 RewardPointTransaction.organization_id == organization_id,
                 RewardPointTransaction.reference_type == "claim",
-                RewardActivityMaterial.ghg_factor.isnot(None),
+                RewardActivityMaterial.type == "material",
+                Material.calc_ghg.isnot(None),
+                Material.calc_ghg > 0,
                 RewardPointTransaction.deleted_date.is_(None),
             )
         )
@@ -1021,9 +1384,11 @@ class OverviewService:
             q = q.filter(RewardPointTransaction.claimed_date >= start)
         if end is not None:
             q = q.filter(RewardPointTransaction.claimed_date < end)
+        if campaign_id is not None:
+            q = q.filter(RewardPointTransaction.reward_campaign_id == campaign_id)
         return float(q.scalar() or 0)
 
-    def _sum_waste_revenue(self, organization_id: int, start, end) -> float:
+    def _sum_waste_revenue(self, organization_id: int, start, end, campaign_id=None) -> float:
         q = (
             self.db.query(
                 func.coalesce(
@@ -1049,4 +1414,57 @@ class OverviewService:
             q = q.filter(RewardPointTransaction.claimed_date >= start)
         if end is not None:
             q = q.filter(RewardPointTransaction.claimed_date < end)
+        if campaign_id is not None:
+            q = q.filter(RewardPointTransaction.reward_campaign_id == campaign_id)
         return float(q.scalar() or 0)
+
+    def _count_activity_claims(self, organization_id: int, start, end, campaign_id=None) -> int:
+        """Count of claim transactions tied to ActivityMaterials of type='activity'.
+        Used as the 'activity_count' chart metric series on the Overview trend chart.
+        """
+        q = (
+            self.db.query(func.count(RewardPointTransaction.id))
+            .select_from(RewardPointTransaction)
+            .join(
+                RewardActivityMaterial,
+                RewardActivityMaterial.id == RewardPointTransaction.reward_activity_materials_id,
+            )
+            .filter(
+                RewardPointTransaction.organization_id == organization_id,
+                RewardPointTransaction.reference_type == "claim",
+                RewardPointTransaction.deleted_date.is_(None),
+                RewardActivityMaterial.type == "activity",
+            )
+        )
+        if start is not None:
+            q = q.filter(RewardPointTransaction.claimed_date >= start)
+        if end is not None:
+            q = q.filter(RewardPointTransaction.claimed_date < end)
+        if campaign_id is not None:
+            q = q.filter(RewardPointTransaction.reward_campaign_id == campaign_id)
+        return int(q.scalar() or 0)
+
+    def _parse_iso(self, value):
+        """Parse ISO date string (YYYY-MM-DD or full ISO timestamp) to aware datetime.
+        Returns None if value is falsy.
+        """
+        if not value:
+            return None
+        if isinstance(value, datetime):
+            return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        s = str(value).strip()
+        if not s:
+            return None
+        # Common shapes: 2026-05-20, 2026-05-20T00:00:00, 2026-05-20T00:00:00Z
+        s = s.replace("Z", "+00:00")
+        try:
+            dt = datetime.fromisoformat(s)
+        except ValueError:
+            # Fallback: just date
+            try:
+                dt = datetime.strptime(s[:10], "%Y-%m-%d")
+            except ValueError:
+                return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
