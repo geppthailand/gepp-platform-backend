@@ -65,7 +65,7 @@ case "$lower_name" in
     ;;
   export|report|report-export|geppgeneratev3report)
     FUNCTION_NAME="${ENV_NAME}-GEPPGenerateV3Report"
-    HANDLER="GEPPPlatform.entry_points.pdf_export_hub.lambda_handler"
+    HANDLER="GEPPPlatform.entry_points.GEPPGenerateV3Report.lambda_handler"
     ;;
   iot|iot-health|iot-health-cron|geppplatform-iothealthcron)
     FUNCTION_NAME="${ENV_NAME}-GEPPPlatform-IOTHEALTHCRON"

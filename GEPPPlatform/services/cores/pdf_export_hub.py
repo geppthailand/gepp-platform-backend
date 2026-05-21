@@ -737,4 +737,3 @@ def lambda_handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]
                 "traceback": tb_str[-1000:] if len(tb_str) > 1000 else tb_str
             })
         }
-
