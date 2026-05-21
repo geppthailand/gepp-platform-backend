@@ -7,7 +7,7 @@
 #   aws lambda create-function \
 #     --function-name "${1}-GEPPPlatform-IOTHEALTHCRON" \
 #     --runtime python3.13 \
-#     --handler GEPPPlatform.iot_health_cron.cron_iot_health_snapshot \
+#     --handler GEPPPlatform.entry_points.iot_health_cron.cron_iot_health_snapshot \
 #     --role arn:aws:iam::ACCOUNT:role/GEPPPlatform-LambdaRole \
 #     --memory-size 256 --timeout 30 \
 #     --zip-file fileb://deploy_functions.zip
@@ -33,3 +33,8 @@ echo "DEPLOY ${1}-GEPPPlatform-IOTHEALTHCRON"
 aws lambda update-function-code \
     --function-name "${1}-GEPPPlatform-IOTHEALTHCRON" \
     --zip-file fileb://deploy_functions.zip ${2} > /dev/null
+
+# Keep the Lambda handler pointed at the centralized entry_points package.
+aws lambda update-function-configuration \
+    --function-name "${1}-GEPPPlatform-IOTHEALTHCRON" \
+    --handler GEPPPlatform.entry_points.iot_health_cron.cron_iot_health_snapshot ${2} > /dev/null

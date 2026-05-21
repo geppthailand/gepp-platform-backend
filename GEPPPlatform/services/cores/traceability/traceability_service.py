@@ -1273,6 +1273,35 @@ class TraceabilityService:
         rows = [r for r in rows if r.id not in parent_ids_in_set]
         if not rows:
             return []
+        # Hide arrived transports that have already been consumed as sources of
+        # an active consolidation — their material has been merged into a new
+        # consolidated transport and they should no longer surface as awaiting
+        # items. Without this filter the user could re-consolidate the same
+        # transports indefinitely (each pass adding redundant flow).
+        candidate_ids = [r.id for r in rows]
+        consolidated_transport_ids: set = set()
+        if candidate_ids:
+            cs_rows = (
+                self.db.query(TraceabilityConsolidationSource.source_transport_id)
+                .join(
+                    TraceabilityConsolidation,
+                    TraceabilityConsolidation.id == TraceabilityConsolidationSource.consolidation_id,
+                )
+                .filter(
+                    TraceabilityConsolidationSource.source_transport_id.in_(candidate_ids),
+                    TraceabilityConsolidationSource.is_active == True,
+                    TraceabilityConsolidationSource.deleted_date.is_(None),
+                    TraceabilityConsolidation.is_active == True,
+                    TraceabilityConsolidation.deleted_date.is_(None),
+                )
+                .distinct()
+                .all()
+            )
+            consolidated_transport_ids = {r[0] for r in cs_rows if r[0] is not None}
+        if consolidated_transport_ids:
+            rows = [r for r in rows if r.id not in consolidated_transport_ids]
+        if not rows:
+            return []
         destination_ids = set()
         for r in rows:
             dest_id = getattr(r, "destination_id", None)
@@ -1327,6 +1356,8 @@ class TraceabilityService:
                 "transaction_group_id": r.transaction_group_id,
                 "status": r.status,
                 "arrival_date": r.arrival_date.isoformat() if r.arrival_date else None,
+                "meta_data": r.meta_data or {},
+                "is_consolidation_result": bool((r.meta_data or {}).get("consolidation")),
                 "source": "arrived_transport",
             })
         return out
@@ -2110,6 +2141,77 @@ class TraceabilityService:
         sources_by_id: Dict[int, TransportTransaction] = {s.id: s for s in sources}
         groups_by_id: Dict[int, TraceabilityTransactionGroup] = {g.id: g for g in groups}
 
+        # Reject duplicate or circular consolidation at the API boundary. The
+        # kanban may still show consolidated result transports for normal onward
+        # pickup, but those rows are not valid inputs for another consolidation.
+        if normalised_source_ids:
+            consumed_transport_rows = (
+                self.db.query(TraceabilityConsolidationSource.source_transport_id)
+                .join(
+                    TraceabilityConsolidation,
+                    TraceabilityConsolidation.id == TraceabilityConsolidationSource.consolidation_id,
+                )
+                .filter(
+                    TraceabilityConsolidationSource.source_transport_id.in_(normalised_source_ids),
+                    TraceabilityConsolidationSource.is_active == True,
+                    TraceabilityConsolidationSource.deleted_date.is_(None),
+                    TraceabilityConsolidation.is_active == True,
+                    TraceabilityConsolidation.deleted_date.is_(None),
+                )
+                .distinct()
+                .all()
+            )
+            consumed_transport_ids = [r[0] for r in consumed_transport_rows if r[0] is not None]
+            if consumed_transport_ids:
+                raise APIException(
+                    f"Source transports already consolidated: {consumed_transport_ids}",
+                    400,
+                    "SOURCE_ALREADY_CONSOLIDATED",
+                )
+
+            result_transport_rows = (
+                self.db.query(TraceabilityConsolidation.consolidated_transport_id)
+                .filter(
+                    TraceabilityConsolidation.consolidated_transport_id.in_(normalised_source_ids),
+                    TraceabilityConsolidation.is_active == True,
+                    TraceabilityConsolidation.deleted_date.is_(None),
+                )
+                .distinct()
+                .all()
+            )
+            result_transport_ids = [r[0] for r in result_transport_rows if r[0] is not None]
+            if result_transport_ids:
+                raise APIException(
+                    f"Consolidated result transports cannot be used as consolidation sources: {result_transport_ids}",
+                    400,
+                    "CONSOLIDATED_RESULT_NOT_SOURCE",
+                )
+
+        if normalised_group_ids:
+            consumed_group_rows = (
+                self.db.query(TraceabilityConsolidationSource.source_group_id)
+                .join(
+                    TraceabilityConsolidation,
+                    TraceabilityConsolidation.id == TraceabilityConsolidationSource.consolidation_id,
+                )
+                .filter(
+                    TraceabilityConsolidationSource.source_group_id.in_(normalised_group_ids),
+                    TraceabilityConsolidationSource.is_active == True,
+                    TraceabilityConsolidationSource.deleted_date.is_(None),
+                    TraceabilityConsolidation.is_active == True,
+                    TraceabilityConsolidation.deleted_date.is_(None),
+                )
+                .distinct()
+                .all()
+            )
+            consumed_group_ids = [r[0] for r in consumed_group_rows if r[0] is not None]
+            if consumed_group_ids:
+                raise APIException(
+                    f"Source groups already consolidated: {consumed_group_ids}",
+                    400,
+                    "SOURCE_ALREADY_CONSOLIDATED",
+                )
+
         # Pre-compute weights for groups: sum of approved transaction_records
         # in each group (record_ids stored in the group row).
         group_weights: Dict[int, Decimal] = {}
@@ -2267,6 +2369,20 @@ class TraceabilityService:
                         f"Invalid destination_id: {destination_id_raw!r}",
                         400,
                         "INVALID_REQUEST",
+                    )
+            if destination_id_val is not None:
+                source_location_ids = set()
+                for src, _w in transport_contribs:
+                    if src.destination_id is not None:
+                        source_location_ids.add(int(src.destination_id))
+                for g, _w in group_contribs:
+                    if g.origin_id is not None:
+                        source_location_ids.add(int(g.origin_id))
+                if destination_id_val in source_location_ids:
+                    raise APIException(
+                        "Consolidation point cannot be one of the selected source locations",
+                        400,
+                        "CONSOLIDATION_POINT_IS_SOURCE",
                     )
 
             disposal_method_val = (req.get("disposal_method") or "").strip() or None
