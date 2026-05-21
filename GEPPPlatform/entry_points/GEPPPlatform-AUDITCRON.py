@@ -27,7 +27,7 @@ def cron_process_audits(event, context):
 
     try:
         from GEPPPlatform.prompts.ai_audit_v1.default.scripts.audit_scripts import run_default_audit
-        from GEPPPlatform.database import db_manager
+        from GEPPPlatform.libs.database import db_manager
 
         logger.info("Starting default AI audit processing from transaction_audit_history queue")
         result = run_default_audit(db_manager.get_session_factory)

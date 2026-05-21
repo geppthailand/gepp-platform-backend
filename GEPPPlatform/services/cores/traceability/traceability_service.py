@@ -16,7 +16,10 @@ from ....models.transactions.transactions import Transaction, TransactionStatus
 from ....models.transactions.transaction_records import TransactionRecord
 from ....models.transactions.traceability_transaction_group import TraceabilityTransactionGroup
 from ....models.transactions.transport_transaction import TransportTransaction
+from ....models.transactions.traceability_consolidation import TraceabilityConsolidation, TraceabilityConsolidationSource
+from ....models.transactions.transport_transaction_file import TransportTransactionFile
 from ....models.users.user_location import UserLocation
+from ....exceptions import APIException
 
 
 def _emit_traceability_event(db: Session, event_type: str, organization_id=None, user_id=None, properties: dict = None):
@@ -161,9 +164,36 @@ class TraceabilityService:
                     _seen_keys[key] = g
 
         group_ids = [g.id for g in groups]
-        # First array: only groups that do NOT have any traceability_transport_transactions yet
+        # Also hide any group that is a source in an active consolidation — its
+        # material has been merged into the consolidated transport and should no
+        # longer appear as a pickable origin item.
+        consolidated_group_ids: set = set()
+        if group_ids:
+            cs_rows = (
+                self.db.query(TraceabilityConsolidationSource.source_group_id)
+                .join(
+                    TraceabilityConsolidation,
+                    TraceabilityConsolidation.id == TraceabilityConsolidationSource.consolidation_id,
+                )
+                .filter(
+                    TraceabilityConsolidationSource.source_group_id.in_(group_ids),
+                    TraceabilityConsolidationSource.is_active == True,
+                    TraceabilityConsolidationSource.deleted_date.is_(None),
+                    TraceabilityConsolidation.is_active == True,
+                    TraceabilityConsolidation.deleted_date.is_(None),
+                )
+                .distinct()
+                .all()
+            )
+            consolidated_group_ids = {r[0] for r in cs_rows if r[0] is not None}
+        # First array: only groups that do NOT have any traceability_transport_transactions yet,
+        # AND that haven't been consumed by an active consolidation.
         group_ids_with_transport = _dedup_transport_ids & set(group_ids)
-        groups_for_first_array = [g for g in groups if g.id not in group_ids_with_transport]
+        groups_for_first_array = [
+            g for g in groups
+            if g.id not in group_ids_with_transport
+            and g.id not in consolidated_group_ids
+        ]
         arr0 = self._groups_to_dict_list(groups_for_first_array, organization_id)
         # Add tentative groups (approved records without active group)
         arr0 = arr0 + tentative_arr
@@ -420,6 +450,24 @@ class TraceabilityService:
 
         group_list = self._groups_to_dict_list(groups, organization_id)
         groups_with_children: List[Dict[str, Any]] = []
+        # Collect every transport node we materialise so we can batch-enrich
+        # them with consolidation_sources + attachments at the end (one query
+        # for each, instead of N+1).
+        nodes_by_transport_id: Dict[int, Dict[str, Any]] = {}
+
+        def _index_nodes(nodes: List[Dict[str, Any]]) -> None:
+            for n in nodes:
+                if not isinstance(n, dict):
+                    continue
+                tid = n.get("transport_transaction_id") or n.get("id")
+                if tid is not None:
+                    try:
+                        nodes_by_transport_id[int(tid)] = n
+                    except (TypeError, ValueError):
+                        pass
+                if n.get("children"):
+                    _index_nodes(n["children"])
+
         for g in groups:
             transports = by_group.get(g.id, [])
             if not transports:
@@ -446,6 +494,7 @@ class TraceabilityService:
             group_dict["percentage_of_parent"] = 100.0
             group_dict["percentage_of_group"] = 100.0
             _annotate_percentages(group_dict["children"], 100.0)
+            _index_nodes(group_dict["children"])
             groups_with_children.append(group_dict)
 
         # Hierarchy: Location (origin) -> Group -> TransportTransaction tree
@@ -472,6 +521,15 @@ class TraceabilityService:
                 "origin": origin_obj,
                 "children": group_children,
             })
+
+        # Batch-enrich every transport node with its consolidation sources
+        # (if any) and its file attachments (if any). Mutates nodes_by_transport_id
+        # in place; out already references those dicts so the changes propagate.
+        if nodes_by_transport_id:
+            self._enrich_nodes_with_consolidation_and_files(
+                nodes_by_transport_id,
+                list(nodes_by_transport_id.keys()),
+            )
         return {"data": out}
 
     def get_traceability_hierarchy_per_row(
@@ -1215,6 +1273,35 @@ class TraceabilityService:
         rows = [r for r in rows if r.id not in parent_ids_in_set]
         if not rows:
             return []
+        # Hide arrived transports that have already been consumed as sources of
+        # an active consolidation — their material has been merged into a new
+        # consolidated transport and they should no longer surface as awaiting
+        # items. Without this filter the user could re-consolidate the same
+        # transports indefinitely (each pass adding redundant flow).
+        candidate_ids = [r.id for r in rows]
+        consolidated_transport_ids: set = set()
+        if candidate_ids:
+            cs_rows = (
+                self.db.query(TraceabilityConsolidationSource.source_transport_id)
+                .join(
+                    TraceabilityConsolidation,
+                    TraceabilityConsolidation.id == TraceabilityConsolidationSource.consolidation_id,
+                )
+                .filter(
+                    TraceabilityConsolidationSource.source_transport_id.in_(candidate_ids),
+                    TraceabilityConsolidationSource.is_active == True,
+                    TraceabilityConsolidationSource.deleted_date.is_(None),
+                    TraceabilityConsolidation.is_active == True,
+                    TraceabilityConsolidation.deleted_date.is_(None),
+                )
+                .distinct()
+                .all()
+            )
+            consolidated_transport_ids = {r[0] for r in cs_rows if r[0] is not None}
+        if consolidated_transport_ids:
+            rows = [r for r in rows if r.id not in consolidated_transport_ids]
+        if not rows:
+            return []
         destination_ids = set()
         for r in rows:
             dest_id = getattr(r, "destination_id", None)
@@ -1269,6 +1356,8 @@ class TraceabilityService:
                 "transaction_group_id": r.transaction_group_id,
                 "status": r.status,
                 "arrival_date": r.arrival_date.isoformat() if r.arrival_date else None,
+                "meta_data": r.meta_data or {},
+                "is_consolidation_result": bool((r.meta_data or {}).get("consolidation")),
                 "source": "arrived_transport",
             })
         return out
@@ -1472,13 +1561,24 @@ class TraceabilityService:
 
     def get_destination_locations(self, organization_id: Optional[int] = None) -> List[Dict[str, Any]]:
         """
-        Get locations that are destination options: UserLocation with is_location=True and type='hub'.
-        Used as options for destination input (e.g. dropdown). Each location includes path.
+        Get locations that may be selected as a destination.
+
+        Two sources are merged:
+          1. UserLocation rows with ``is_location=True`` and ``type='hub'`` —
+             traditional hub destinations (existing behavior).
+          2. Origin locations (root_nodes in ``organization_setup``) whose node
+             carries ``is_destination=True``. These are origin nodes flagged as
+             eligible destinations via the Location Setup drawer; they should
+             show up in the "Destination to send" / "Consolidate point" dropdown
+             too so consolidations can land on any of those origins.
+
+        Each entry includes ``path``. The list is deduplicated by location id.
         """
         if organization_id is None:
             return []
 
-        locations = (
+        # 1) Hub-type locations
+        hub_locations = (
             self.db.query(UserLocation)
             .filter(
                 UserLocation.organization_id == organization_id,
@@ -1489,19 +1589,74 @@ class TraceabilityService:
             )
             .all()
         )
-        if not locations:
+
+        # 2) Origin nodes flagged is_destination=True in root_nodes JSON
+        flagged_origin_ids: List[int] = []
+        try:
+            from ....models.subscriptions.organizations import OrganizationSetup
+            setup_row = (
+                self.db.query(OrganizationSetup)
+                .filter(
+                    OrganizationSetup.organization_id == organization_id,
+                    OrganizationSetup.is_active == True,
+                    OrganizationSetup.deleted_date.is_(None),
+                )
+                .order_by(OrganizationSetup.id.desc())
+                .first()
+            )
+            if setup_row and isinstance(setup_row.root_nodes, list):
+                def _walk(nodes):
+                    for n in nodes:
+                        if not isinstance(n, dict):
+                            continue
+                        if n.get("is_destination"):
+                            nid = n.get("nodeId")
+                            try:
+                                flagged_origin_ids.append(int(nid))
+                            except (TypeError, ValueError):
+                                pass
+                        children = n.get("children")
+                        if isinstance(children, list):
+                            _walk(children)
+                _walk(setup_row.root_nodes)
+        except Exception:
+            # Failing to parse setup must not break the destinations query.
+            flagged_origin_ids = []
+
+        flagged_locations: List[UserLocation] = []
+        if flagged_origin_ids:
+            flagged_locations = (
+                self.db.query(UserLocation)
+                .filter(
+                    UserLocation.id.in_(flagged_origin_ids),
+                    UserLocation.organization_id == organization_id,
+                    UserLocation.is_active == True,
+                    UserLocation.deleted_date.is_(None),
+                )
+                .all()
+            )
+
+        # Merge + dedupe by id (hub list keeps precedence on collision)
+        by_id: Dict[int, UserLocation] = {}
+        for loc in hub_locations:
+            by_id[loc.id] = loc
+        for loc in flagged_locations:
+            by_id.setdefault(loc.id, loc)
+        merged = list(by_id.values())
+        if not merged:
             return []
 
-        location_ids = [loc.id for loc in locations]
-        path_map: Dict[int, str] = {}
+        location_ids = list(by_id.keys())
         from ..users.user_service import UserService
         user_service = UserService(self.db)
-        location_data = [{"id": lid} for lid in location_ids]
-        path_map = user_service._build_location_paths(organization_id, location_data) or {}
+        path_map = (
+            user_service._build_location_paths(organization_id, [{"id": lid} for lid in location_ids])
+            or {}
+        )
 
         return [
             self._location_to_dict(loc, path=path_map.get(loc.id, ""))
-            for loc in locations
+            for loc in merged
         ]
 
     # disposal_method body value -> store in Transaction.disposal_method
@@ -1612,6 +1767,7 @@ class TraceabilityService:
         organization_id: int,
         transaction_group_id: Optional[int] = None,
         transport_transaction_id: Optional[int] = None,
+        current_user_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Create rows in traceability_transport_transactions (no Transaction created).
@@ -1620,6 +1776,11 @@ class TraceabilityService:
         - vehicle_info and messenger_info are stored in meta_data.
         - is_root is False when parent_id/transport_transaction_id is set.
         - status is "in_transit" when item has destination_id/vehicle_info/messenger_info/disposal_method; otherwise "idle".
+
+        Per item: if the item dict carries an "attachments" key (list of file IDs),
+        each file id is linked to the new TransportTransaction via the
+        traceability_transport_files join table (idempotent — duplicates skipped).
+        ``current_user_id`` is recorded on each attachment as ``uploaded_by``.
         """
         if not data:
             return {"success": False, "message": "data array is required and must not be empty", "ids": []}
@@ -1732,6 +1893,11 @@ class TraceabilityService:
             self.db.flush()
             created_ids.append(row.id)
 
+            # Optional: per-transport attachments
+            attachments = item.get("attachments") or []
+            if attachments:
+                self._attach_files_to_transport(row.id, attachments, current_user_id)
+
         # IMPORTANT: Recalculate absolute_percentage for the entire group after creating nodes.
         # Any future code that creates transport transactions must also trigger this recalculation.
         if transaction_group_id:
@@ -1743,15 +1909,649 @@ class TraceabilityService:
             "ids": created_ids,
         }
 
+    def _attach_files_to_transport(
+        self,
+        transport_transaction_id: int,
+        file_ids: List[Any],
+        uploaded_by: Optional[int],
+    ) -> None:
+        """
+        Idempotently attach a set of file IDs to a TransportTransaction.
+
+        Reads the existing active rows in ``traceability_transport_files`` for
+        the given transport_transaction_id and only inserts file_ids that are
+        not already present. Empty / None / non-coercible inputs are silently
+        skipped — callers can pass `None`, `[]`, or a sparse list and the helper
+        will no-op gracefully.
+        """
+        if not file_ids:
+            return
+        # Normalise + dedupe input ids; drop None / non-integer
+        normalised_ids: List[int] = []
+        seen: set = set()
+        for fid in file_ids:
+            if fid is None:
+                continue
+            try:
+                fid_int = int(fid)
+            except (TypeError, ValueError):
+                continue
+            if fid_int in seen:
+                continue
+            seen.add(fid_int)
+            normalised_ids.append(fid_int)
+        if not normalised_ids:
+            return
+
+        # Find file_ids already attached to this transport (active rows only).
+        existing_rows = (
+            self.db.query(TransportTransactionFile.file_id)
+            .filter(
+                TransportTransactionFile.transport_transaction_id == transport_transaction_id,
+                TransportTransactionFile.is_active == True,
+                TransportTransactionFile.deleted_date.is_(None),
+            )
+            .all()
+        )
+        existing_ids = {r[0] for r in existing_rows if r[0] is not None}
+
+        to_insert = [fid for fid in normalised_ids if fid not in existing_ids]
+        if not to_insert:
+            return
+
+        for idx, fid in enumerate(to_insert):
+            self.db.add(TransportTransactionFile(
+                transport_transaction_id=transport_transaction_id,
+                file_id=fid,
+                ordering=idx,
+                uploaded_by=uploaded_by,
+            ))
+        self.db.flush()
+
+    def consolidate_transports(
+        self,
+        source_transport_ids: List[Any],
+        requests: List[Dict[str, Any]],
+        organization_id: int,
+        current_user_id: int,
+        source_group_ids: Optional[List[Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Merge N arrived TransportTransactions into one (or more, one per request)
+        onward consolidated TransportTransaction(s).
+
+        Each entry in ``requests`` describes one onward leg. The minimal shape:
+            {
+              "material_id": int,                # required
+              "destination_id": int (optional),  # where the onward leg ships to
+              "vehicle_info": str (optional),
+              "messenger_info": str (optional),
+              "disposal_method": str (optional),
+              "is_final_destination": bool (optional),
+              "attachments": [file_id, ...] (optional),
+              "source_contributions": [          # optional — defaults to all
+                {"source_transport_id": int, "weight": float}
+              ],
+            }
+
+        Validation (raises ``APIException`` on failure):
+          • each source must exist, belong to ``organization_id``, be active,
+            status='arrived', have no children, and no disposal_method set
+          • the user must have access (via _get_assigned_location_ids) to every
+            source's destination location (the place the material is sitting)
+
+        For each request we:
+          1. pick the set of contributing sources (explicit list OR all
+             matching the request's material_id)
+          2. compute the total weight = sum of contributed_weight
+          3. pick a "primary" source = max contributed_weight (tie → min id);
+             the primary supplies parent_id + transaction_group_id + origin
+          4. create the new TransportTransaction (the onward leg)
+          5. create one TraceabilityConsolidation header + N source rows
+          6. attach any files supplied via request["attachments"]
+
+        After all requests are processed, every group_id touched gets its
+        absolute_percentage recalculated, then we commit.
+        """
+        # ── 1) Coerce + validate input shape ──────────────────────────────
+        # At least one of source_transport_ids / source_group_ids must be supplied.
+        if not isinstance(source_transport_ids, list):
+            source_transport_ids = []
+        if not isinstance(source_group_ids, list):
+            source_group_ids = []
+        if not source_transport_ids and not source_group_ids:
+            raise APIException(
+                "Either source_transport_ids or source_group_ids must be a non-empty list",
+                400,
+                "INVALID_SOURCE",
+            )
+        if not isinstance(requests, list) or not requests:
+            raise APIException("requests must be a non-empty list", 400, "INVALID_REQUEST")
+
+        normalised_source_ids: List[int] = []
+        for sid in source_transport_ids:
+            try:
+                normalised_source_ids.append(int(sid))
+            except (TypeError, ValueError):
+                raise APIException(f"Invalid source_transport_id: {sid!r}", 400, "INVALID_SOURCE_TRANSPORT")
+
+        normalised_group_ids: List[int] = []
+        for gid in source_group_ids:
+            try:
+                normalised_group_ids.append(int(gid))
+            except (TypeError, ValueError):
+                raise APIException(f"Invalid source_group_id: {gid!r}", 400, "INVALID_SOURCE_GROUP")
+
+        # ── 2a) Load + validate transport sources (arrived) ───────────────
+        sources: List[TransportTransaction] = []
+        if normalised_source_ids:
+            sources = (
+                self.db.query(TransportTransaction)
+                .filter(
+                    TransportTransaction.id.in_(normalised_source_ids),
+                    TransportTransaction.organization_id == organization_id,
+                    TransportTransaction.is_active == True,
+                    TransportTransaction.deleted_date.is_(None),
+                )
+                .all()
+            )
+            found_ids = {s.id for s in sources}
+            missing = [sid for sid in normalised_source_ids if sid not in found_ids]
+            if missing:
+                raise APIException(
+                    f"Source transports not found or access denied: {missing}",
+                    400,
+                    "INVALID_SOURCE_TRANSPORT",
+                )
+
+            for s in sources:
+                if s.status != "arrived":
+                    raise APIException(
+                        f"Source transport {s.id} must have status='arrived' (got {s.status!r})",
+                        400,
+                        "INVALID_SOURCE_TRANSPORT",
+                    )
+                if s.disposal_method:
+                    raise APIException(
+                        f"Source transport {s.id} already has disposal_method set; cannot consolidate",
+                        400,
+                        "INVALID_SOURCE_TRANSPORT",
+                    )
+
+            child_count_rows = (
+                self.db.query(TransportTransaction.parent_id, func.count(TransportTransaction.id))
+                .filter(
+                    TransportTransaction.parent_id.in_(normalised_source_ids),
+                    TransportTransaction.is_active == True,
+                    TransportTransaction.deleted_date.is_(None),
+                )
+                .group_by(TransportTransaction.parent_id)
+                .all()
+            )
+            sources_with_children = [pid for pid, cnt in child_count_rows if cnt and cnt > 0]
+            if sources_with_children:
+                raise APIException(
+                    f"Source transports already have children, cannot consolidate: {sources_with_children}",
+                    400,
+                    "INVALID_SOURCE_TRANSPORT",
+                )
+
+        # ── 2b) Load + validate transaction-group sources (origin column) ──
+        groups: List[TraceabilityTransactionGroup] = []
+        if normalised_group_ids:
+            groups = (
+                self.db.query(TraceabilityTransactionGroup)
+                .filter(
+                    TraceabilityTransactionGroup.id.in_(normalised_group_ids),
+                    TraceabilityTransactionGroup.organization_id == organization_id,
+                    TraceabilityTransactionGroup.is_active == True,
+                    TraceabilityTransactionGroup.deleted_date.is_(None),
+                )
+                .all()
+            )
+            found_gids = {g.id for g in groups}
+            missing_gids = [gid for gid in normalised_group_ids if gid not in found_gids]
+            if missing_gids:
+                raise APIException(
+                    f"Source transaction groups not found or access denied: {missing_gids}",
+                    400,
+                    "INVALID_SOURCE_GROUP",
+                )
+
+        # ── 3) Access control ─────────────────────────────────────────────
+        # Transport sources: user needs access to the destination (where material sits).
+        # Group sources: user needs access to the origin (where the records belong).
+        assigned_ids = self._get_assigned_location_ids(organization_id, int(current_user_id))
+        if assigned_ids is not None:
+            for s in sources:
+                if s.destination_id is None or s.destination_id not in assigned_ids:
+                    raise APIException(
+                        f"User does not have access to source {s.id}'s current location",
+                        403,
+                        "FORBIDDEN_SOURCE_LOCATION",
+                    )
+            for g in groups:
+                if g.origin_id is None or g.origin_id not in assigned_ids:
+                    raise APIException(
+                        f"User does not have access to source group {g.id}'s origin",
+                        403,
+                        "FORBIDDEN_SOURCE_GROUP",
+                    )
+
+        sources_by_id: Dict[int, TransportTransaction] = {s.id: s for s in sources}
+        groups_by_id: Dict[int, TraceabilityTransactionGroup] = {g.id: g for g in groups}
+
+        # Reject duplicate or circular consolidation at the API boundary. The
+        # kanban may still show consolidated result transports for normal onward
+        # pickup, but those rows are not valid inputs for another consolidation.
+        if normalised_source_ids:
+            consumed_transport_rows = (
+                self.db.query(TraceabilityConsolidationSource.source_transport_id)
+                .join(
+                    TraceabilityConsolidation,
+                    TraceabilityConsolidation.id == TraceabilityConsolidationSource.consolidation_id,
+                )
+                .filter(
+                    TraceabilityConsolidationSource.source_transport_id.in_(normalised_source_ids),
+                    TraceabilityConsolidationSource.is_active == True,
+                    TraceabilityConsolidationSource.deleted_date.is_(None),
+                    TraceabilityConsolidation.is_active == True,
+                    TraceabilityConsolidation.deleted_date.is_(None),
+                )
+                .distinct()
+                .all()
+            )
+            consumed_transport_ids = [r[0] for r in consumed_transport_rows if r[0] is not None]
+            if consumed_transport_ids:
+                raise APIException(
+                    f"Source transports already consolidated: {consumed_transport_ids}",
+                    400,
+                    "SOURCE_ALREADY_CONSOLIDATED",
+                )
+
+            result_transport_rows = (
+                self.db.query(TraceabilityConsolidation.consolidated_transport_id)
+                .filter(
+                    TraceabilityConsolidation.consolidated_transport_id.in_(normalised_source_ids),
+                    TraceabilityConsolidation.is_active == True,
+                    TraceabilityConsolidation.deleted_date.is_(None),
+                )
+                .distinct()
+                .all()
+            )
+            result_transport_ids = [r[0] for r in result_transport_rows if r[0] is not None]
+            if result_transport_ids:
+                raise APIException(
+                    f"Consolidated result transports cannot be used as consolidation sources: {result_transport_ids}",
+                    400,
+                    "CONSOLIDATED_RESULT_NOT_SOURCE",
+                )
+
+        if normalised_group_ids:
+            consumed_group_rows = (
+                self.db.query(TraceabilityConsolidationSource.source_group_id)
+                .join(
+                    TraceabilityConsolidation,
+                    TraceabilityConsolidation.id == TraceabilityConsolidationSource.consolidation_id,
+                )
+                .filter(
+                    TraceabilityConsolidationSource.source_group_id.in_(normalised_group_ids),
+                    TraceabilityConsolidationSource.is_active == True,
+                    TraceabilityConsolidationSource.deleted_date.is_(None),
+                    TraceabilityConsolidation.is_active == True,
+                    TraceabilityConsolidation.deleted_date.is_(None),
+                )
+                .distinct()
+                .all()
+            )
+            consumed_group_ids = [r[0] for r in consumed_group_rows if r[0] is not None]
+            if consumed_group_ids:
+                raise APIException(
+                    f"Source groups already consolidated: {consumed_group_ids}",
+                    400,
+                    "SOURCE_ALREADY_CONSOLIDATED",
+                )
+
+        # Pre-compute weights for groups: sum of approved transaction_records
+        # in each group (record_ids stored in the group row).
+        group_weights: Dict[int, Decimal] = {}
+        if groups:
+            all_record_ids: List[int] = []
+            for g in groups:
+                all_record_ids.extend(g.transaction_record_id or [])
+            if all_record_ids:
+                rows = (
+                    self.db.query(TransactionRecord.id, TransactionRecord.origin_weight_kg)
+                    .filter(
+                        TransactionRecord.id.in_(all_record_ids),
+                        TransactionRecord.is_active == True,
+                        TransactionRecord.deleted_date.is_(None),
+                    )
+                    .all()
+                )
+                weight_by_record = {rid: Decimal(str(w or 0)) for rid, w in rows}
+                for g in groups:
+                    total = Decimal("0")
+                    for rid in (g.transaction_record_id or []):
+                        total += weight_by_record.get(rid, Decimal("0"))
+                    group_weights[g.id] = total
+            else:
+                for g in groups:
+                    group_weights[g.id] = Decimal("0")
+
+        # ── 4) Process each request → produce one onward TransportTransaction ─
+        now = datetime.now(timezone.utc)
+        consolidation_ids: List[int] = []
+        consolidated_transport_ids: List[int] = []
+        affected_group_ids: set = set()
+
+        for req in requests:
+            if not isinstance(req, dict):
+                raise APIException("Each request must be an object", 400, "INVALID_REQUEST")
+
+            material_id_raw = req.get("material_id")
+            if material_id_raw is None:
+                raise APIException("Each request requires material_id", 400, "INVALID_REQUEST")
+            try:
+                req_material_id = int(material_id_raw)
+            except (TypeError, ValueError):
+                raise APIException(f"Invalid material_id: {material_id_raw!r}", 400, "INVALID_REQUEST")
+
+            # 4a) Determine contributing sources — split into transport and group lists.
+            transport_contribs: List[Tuple[TransportTransaction, Decimal]] = []
+            group_contribs: List[Tuple[TraceabilityTransactionGroup, Decimal]] = []
+
+            # 4a-i) Explicit transport contributions
+            explicit = req.get("source_contributions")
+            if isinstance(explicit, list) and explicit:
+                for c in explicit:
+                    if not isinstance(c, dict):
+                        raise APIException("source_contributions items must be objects", 400, "INVALID_REQUEST")
+                    try:
+                        c_sid = int(c.get("source_transport_id"))
+                    except (TypeError, ValueError):
+                        raise APIException("Invalid source_transport_id in contribution", 400, "INVALID_REQUEST")
+                    src = sources_by_id.get(c_sid)
+                    if src is None:
+                        raise APIException(
+                            f"source_contribution refers to unknown source {c_sid}",
+                            400,
+                            "INVALID_REQUEST",
+                        )
+                    raw_w = c.get("weight")
+                    if raw_w is None:
+                        contributed = Decimal(str(src.weight or 0))
+                    else:
+                        try:
+                            contributed = Decimal(str(raw_w))
+                        except (TypeError, ValueError):
+                            raise APIException(
+                                f"Invalid weight in source_contribution: {raw_w!r}",
+                                400,
+                                "INVALID_REQUEST",
+                            )
+                    transport_contribs.append((src, contributed))
+
+            # 4a-ii) Explicit group contributions
+            group_explicit = req.get("source_group_contributions")
+            if isinstance(group_explicit, list) and group_explicit:
+                for c in group_explicit:
+                    if not isinstance(c, dict):
+                        raise APIException("source_group_contributions items must be objects", 400, "INVALID_REQUEST")
+                    try:
+                        c_gid = int(c.get("source_group_id"))
+                    except (TypeError, ValueError):
+                        raise APIException("Invalid source_group_id in contribution", 400, "INVALID_REQUEST")
+                    g = groups_by_id.get(c_gid)
+                    if g is None:
+                        raise APIException(
+                            f"source_group_contribution refers to unknown group {c_gid}",
+                            400,
+                            "INVALID_REQUEST",
+                        )
+                    raw_w = c.get("weight")
+                    if raw_w is None:
+                        contributed = group_weights.get(g.id, Decimal("0"))
+                    else:
+                        try:
+                            contributed = Decimal(str(raw_w))
+                        except (TypeError, ValueError):
+                            raise APIException(
+                                f"Invalid weight in source_group_contribution: {raw_w!r}",
+                                400,
+                                "INVALID_REQUEST",
+                            )
+                    group_contribs.append((g, contributed))
+
+            # 4a-iii) Fallback: if no explicit contributions, take everything matching material_id
+            if not transport_contribs and not group_contribs:
+                for s in sources:
+                    if s.material_id == req_material_id:
+                        transport_contribs.append((s, Decimal(str(s.weight or 0))))
+                for g in groups:
+                    if g.material_id == req_material_id:
+                        group_contribs.append((g, group_weights.get(g.id, Decimal("0"))))
+
+            if not transport_contribs and not group_contribs:
+                raise APIException(
+                    f"No source transports or groups match material_id={req_material_id}",
+                    400,
+                    "INVALID_REQUEST",
+                )
+
+            total_weight = (
+                sum((c[1] for c in transport_contribs), Decimal("0"))
+                + sum((c[1] for c in group_contribs), Decimal("0"))
+            )
+
+            # 4b) Pick primary — prefer transport (it has parent lineage); otherwise group.
+            primary_transport: Optional[TransportTransaction] = None
+            primary_group: Optional[TraceabilityTransactionGroup] = None
+            if transport_contribs:
+                primary_transport, _ = max(
+                    transport_contribs,
+                    key=lambda pair: (pair[1], -pair[0].id),
+                )
+            else:
+                primary_group, _ = max(
+                    group_contribs,
+                    key=lambda pair: (pair[1], -pair[0].id),
+                )
+
+            # 4c) Build the onward TransportTransaction
+            destination_id_raw = req.get("destination_id")
+            destination_id_val: Optional[int] = None
+            if destination_id_raw is not None:
+                try:
+                    destination_id_val = int(destination_id_raw)
+                except (TypeError, ValueError):
+                    raise APIException(
+                        f"Invalid destination_id: {destination_id_raw!r}",
+                        400,
+                        "INVALID_REQUEST",
+                    )
+            if destination_id_val is not None:
+                source_location_ids = set()
+                for src, _w in transport_contribs:
+                    if src.destination_id is not None:
+                        source_location_ids.add(int(src.destination_id))
+                for g, _w in group_contribs:
+                    if g.origin_id is not None:
+                        source_location_ids.add(int(g.origin_id))
+                if destination_id_val in source_location_ids:
+                    raise APIException(
+                        "Consolidation point cannot be one of the selected source locations",
+                        400,
+                        "CONSOLIDATION_POINT_IS_SOURCE",
+                    )
+
+            disposal_method_val = (req.get("disposal_method") or "").strip() or None
+            # Consolidation produces an "arrived" transport with arrival_date=now.
+            # Rationale: the consolidate step doesn't track transit (no messenger,
+            # vehicle, or destination); the merged shipment lands directly in
+            # "Await Continue Shipment" so the user can call for pickup later.
+            status = "arrived"
+
+            meta_data: Dict[str, Any] = {
+                "consolidation": True,
+                "is_final_destination": bool(req.get("is_final_destination", False)),
+            }
+            if req.get("vehicle_info") is not None:
+                meta_data["vehicle_info"] = req["vehicle_info"]
+            if req.get("messenger_info") is not None:
+                meta_data["messenger_info"] = req["messenger_info"]
+            if destination_id_val is not None:
+                meta_data["destination_id"] = destination_id_val
+            # Batch origin name (user-supplied label for the merged origin set).
+            # Stored here so the Summary tree can show it instead of any one source's origin.
+            batch_name_raw = req.get("batch_origin_name")
+            if isinstance(batch_name_raw, str) and batch_name_raw.strip():
+                meta_data["batch_origin_name"] = batch_name_raw.strip()
+
+            if primary_transport is not None:
+                # Arrived-source consolidation: ship from where the primary arrived,
+                # inherit its transaction_group_id, point parent_id at it.
+                origin_id_val = primary_transport.destination_id
+                transaction_group_id_val = primary_transport.transaction_group_id
+                parent_id_val: Optional[int] = primary_transport.id
+                is_root_val = False
+            else:
+                # Origin-group consolidation: ship from the primary group's origin,
+                # tie to that group; no parent transport (this IS the first leg).
+                assert primary_group is not None
+                origin_id_val = primary_group.origin_id
+                transaction_group_id_val = primary_group.id
+                parent_id_val = None
+                is_root_val = True
+
+            new_transport = TransportTransaction(
+                origin_id=origin_id_val,
+                destination_id=destination_id_val,
+                material_id=req_material_id,
+                weight=total_weight,
+                meta_data=meta_data,
+                organization_id=organization_id,
+                transaction_group_id=transaction_group_id_val,
+                disposal_method=disposal_method_val,
+                arrival_date=now,         # consolidation is an immediate "arrived" event
+                status=status,
+                is_root=is_root_val,
+                parent_id=parent_id_val,
+            )
+            self.db.add(new_transport)
+            self.db.flush()
+            consolidated_transport_ids.append(new_transport.id)
+            if transaction_group_id_val is not None:
+                affected_group_ids.add(transaction_group_id_val)
+            # All contributing groups also need percentage recalc since their weight
+            # is being "consumed" into the consolidated transport.
+            for g, _w in group_contribs:
+                affected_group_ids.add(g.id)
+
+            # 4d) Header row — all event-level facts (point, batch_name, status)
+            #     live on the header, NOT on the consolidated transport's meta_data.
+            consolidation = TraceabilityConsolidation(
+                organization_id=organization_id,
+                consolidated_transport_id=new_transport.id,
+                consolidation_point_id=destination_id_val,
+                material_id=req_material_id,
+                total_weight=total_weight,
+                batch_name=(req.get("batch_origin_name") or None),
+                status="active",
+                created_by=current_user_id,
+            )
+            self.db.add(consolidation)
+            self.db.flush()
+            consolidation_ids.append(consolidation.id)
+
+            # 4e) Patch meta_data with consolidation id for fast reverse-lookup
+            patched_meta = dict(new_transport.meta_data or {})
+            patched_meta["consolidation_id"] = consolidation.id
+            new_transport.meta_data = patched_meta
+            new_transport.updated_date = now
+
+            # 4f) Source-join rows — one per contribution. ``source_kind`` is the
+            #     canonical discriminator; the legacy NULL-FK pair stays valid via
+            #     the chk_consolidation_source_kind constraint.
+            ordering = 0
+            for src, contributed in transport_contribs:
+                self.db.add(TraceabilityConsolidationSource(
+                    consolidation_id=consolidation.id,
+                    source_kind="transport",
+                    source_transport_id=src.id,
+                    source_group_id=None,
+                    contributed_weight=contributed,
+                    ordering=ordering,
+                ))
+                ordering += 1
+            for g, contributed in group_contribs:
+                self.db.add(TraceabilityConsolidationSource(
+                    consolidation_id=consolidation.id,
+                    source_kind="group",
+                    source_transport_id=None,
+                    source_group_id=g.id,
+                    contributed_weight=contributed,
+                    ordering=ordering,
+                ))
+                ordering += 1
+
+            # 4g) Per-transport attachments
+            attachments = req.get("attachments") or []
+            if attachments:
+                self.db.flush()  # ensure new_transport.id exists before FK insert
+                self._attach_files_to_transport(
+                    new_transport.id,
+                    attachments,
+                    current_user_id,
+                )
+
+            self.db.flush()
+
+        # ── 5) Recompute absolute_percentage for every group touched ──────
+        for gid in affected_group_ids:
+            self._recalculate_absolute_percentage(gid)
+
+        # ── 6) Flush (request-boundary commit happens in the dispatcher) ──
+        self.db.flush()
+
+        # ── 7) Fire CRM event (non-fatal) ─────────────────────────────────
+        _emit_traceability_event(
+            self.db,
+            'transports_consolidated',
+            organization_id=organization_id,
+            user_id=current_user_id,
+            properties={
+                'consolidation_ids': consolidation_ids,
+                'consolidated_transport_ids': consolidated_transport_ids,
+                'source_transport_ids': normalised_source_ids,
+                'source_group_ids': normalised_group_ids,
+            },
+        )
+
+        return {
+            "consolidation_ids": consolidation_ids,
+            "consolidated_transport_ids": consolidated_transport_ids,
+        }
+
     def update_transport_transactions(
         self,
         data: List[Dict[str, Any]],
         organization_id: int,
+        current_user_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Update transport transaction rows.
         Each item must have transport_transaction_id plus optional fields to update.
         If the transaction has descendants (children, grandchildren, etc.), all are soft-deleted first.
+
+        Per item: if the item dict carries an "attachments" key (list of file
+        IDs), all *existing* active attachments for that transport are first
+        soft-deleted (is_active=False), then the new attachment list is added
+        via :meth:`_attach_files_to_transport`. This semantics matches a
+        "replace the attachment set" UX — passing an empty list will detach
+        all current files; omitting the key leaves attachments untouched.
+        ``current_user_id`` is recorded on each new attachment as
+        ``uploaded_by``.
         """
         if not data:
             return {"success": False, "message": "data array is required and must not be empty"}
@@ -1853,6 +2653,32 @@ class TraceabilityService:
             self.db.flush()
             updated_ids.append(tt_id)
 
+            # Optional: replace per-transport attachment set
+            if "attachments" in item:
+                # Soft-delete every existing active row first so the new list
+                # represents the full set (allows detach-all by passing []).
+                now_dt = datetime.now(timezone.utc)
+                (
+                    self.db.query(TransportTransactionFile)
+                    .filter(
+                        TransportTransactionFile.transport_transaction_id == tt_id,
+                        TransportTransactionFile.is_active == True,
+                        TransportTransactionFile.deleted_date.is_(None),
+                    )
+                    .update(
+                        {
+                            TransportTransactionFile.is_active: False,
+                            TransportTransactionFile.deleted_date: now_dt,
+                            TransportTransactionFile.updated_date: now_dt,
+                        },
+                        synchronize_session=False,
+                    )
+                )
+                self.db.flush()
+                new_attachments = item.get("attachments") or []
+                if new_attachments:
+                    self._attach_files_to_transport(tt_id, new_attachments, current_user_id)
+
         # IMPORTANT: Recalculate absolute_percentage for all affected groups after updates.
         # Any future code that updates transport transactions must also trigger this recalculation.
         for gid in affected_group_ids:
@@ -1938,6 +2764,232 @@ class TraceabilityService:
                     queue.append(node.id)
 
         self.db.flush()
+
+    def _enrich_nodes_with_consolidation_and_files(
+        self,
+        nodes_by_transport_id: Dict[int, Dict[str, Any]],
+        transport_ids: List[int],
+    ) -> None:
+        """
+        Mutate transport node dicts in place, adding two new keys per node:
+          • ``consolidation_sources`` — list of source-transport summaries when
+            the node was produced by a consolidation event; empty list otherwise.
+            Shape per item:
+              {
+                "source_transport_id": int,
+                "contributed_weight": float,
+                "source_origin": {"id", "name_en", "name_th", "display_name"} | None,
+                "source_material": {"id", "name_en", "name_th"} | None,
+              }
+          • ``attachments`` — list of files attached to *this* transport
+            (regardless of whether it's a consolidation). Shape per item:
+              {"file_id": int, "name": str | None, "url": str | None}
+
+        Implemented with two batch queries (one for sources, one for files)
+        to avoid N+1 against deeply nested hierarchies.
+        """
+        if not transport_ids:
+            return
+
+        # ── Pre-seed empty lists on every node so callers always see the keys ──
+        for node in nodes_by_transport_id.values():
+            node.setdefault("consolidation_sources", [])
+            node.setdefault("attachments", [])
+
+        # ── 1) Consolidation sources ──────────────────────────────────────
+        # A source row is EITHER a transport (source_transport_id set) OR a
+        # transaction group (source_group_id set). Handle both kinds.
+        consol_rows = (
+            self.db.query(
+                TraceabilityConsolidation.consolidated_transport_id,
+                TraceabilityConsolidationSource.source_transport_id,
+                TraceabilityConsolidationSource.source_group_id,
+                TraceabilityConsolidationSource.contributed_weight,
+                TraceabilityConsolidationSource.ordering,
+            )
+            .join(
+                TraceabilityConsolidationSource,
+                TraceabilityConsolidationSource.consolidation_id == TraceabilityConsolidation.id,
+            )
+            .filter(
+                TraceabilityConsolidation.consolidated_transport_id.in_(transport_ids),
+                TraceabilityConsolidation.is_active == True,
+                TraceabilityConsolidation.deleted_date.is_(None),
+                TraceabilityConsolidationSource.is_active == True,
+                TraceabilityConsolidationSource.deleted_date.is_(None),
+            )
+            .all()
+        )
+
+        # source_list tuples: (kind, ref_id, weight, ordering)
+        # kind ∈ {"transport", "group"}; ref_id is the corresponding transport/group id.
+        sources_by_consolidated: Dict[int, List[Tuple[str, int, Any, int]]] = {}
+        source_transport_ids: set = set()
+        source_group_ids: set = set()
+        for cid, sid, gid, weight, ordering in consol_rows:
+            if sid is not None:
+                sources_by_consolidated.setdefault(int(cid), []).append(
+                    ("transport", int(sid), weight, ordering or 0)
+                )
+                source_transport_ids.add(int(sid))
+            elif gid is not None:
+                sources_by_consolidated.setdefault(int(cid), []).append(
+                    ("group", int(gid), weight, ordering or 0)
+                )
+                source_group_ids.add(int(gid))
+
+        # Hydrate source transports
+        src_transports: Dict[int, TransportTransaction] = {}
+        location_ids: set = set()
+        material_ids: set = set()
+        if source_transport_ids:
+            for st in (
+                self.db.query(TransportTransaction)
+                .filter(
+                    TransportTransaction.id.in_(list(source_transport_ids)),
+                    TransportTransaction.is_active == True,
+                    TransportTransaction.deleted_date.is_(None),
+                )
+                .all()
+            ):
+                src_transports[st.id] = st
+                if st.origin_id is not None:
+                    location_ids.add(st.origin_id)
+                if st.material_id is not None:
+                    material_ids.add(st.material_id)
+
+        # Hydrate source transaction groups (origin-side consolidation)
+        src_groups: Dict[int, TraceabilityTransactionGroup] = {}
+        if source_group_ids:
+            for g in (
+                self.db.query(TraceabilityTransactionGroup)
+                .filter(
+                    TraceabilityTransactionGroup.id.in_(list(source_group_ids)),
+                    TraceabilityTransactionGroup.is_active == True,
+                    TraceabilityTransactionGroup.deleted_date.is_(None),
+                )
+                .all()
+            ):
+                src_groups[g.id] = g
+                if g.origin_id is not None:
+                    location_ids.add(g.origin_id)
+                if g.material_id is not None:
+                    material_ids.add(g.material_id)
+
+        loc_map: Dict[int, Any] = {}
+        loc_path_map: Dict[int, str] = {}
+        if location_ids:
+            for loc in (
+                self.db.query(UserLocation)
+                .filter(UserLocation.id.in_(list(location_ids)))
+                .all()
+            ):
+                loc_map[loc.id] = loc
+            try:
+                from ..users.user_service import UserService
+                _user_svc = UserService(self.db)
+                # _build_location_paths needs organization_id, but this enrichment
+                # function doesn't take it directly — pull from any source row.
+                _org_id: Optional[int] = None
+                for lid_any in loc_map:
+                    _org_id = getattr(loc_map[lid_any], "organization_id", None)
+                    if _org_id:
+                        break
+                if _org_id:
+                    loc_path_map = _user_svc._build_location_paths(
+                        _org_id,
+                        [{"id": lid} for lid in location_ids],
+                    ) or {}
+            except Exception:
+                loc_path_map = {}
+
+        from ....models.cores.references import Material  # local import; same pattern as elsewhere
+        mat_map: Dict[int, Any] = {}
+        if material_ids:
+            for m in self.db.query(Material).filter(Material.id.in_(list(material_ids))).all():
+                mat_map[m.id] = m
+
+        def _loc_payload(origin_id: Optional[int]) -> Optional[Dict[str, Any]]:
+            if origin_id is None or origin_id not in loc_map:
+                return None
+            loc = loc_map[origin_id]
+            return {
+                "id": loc.id,
+                "name_en": getattr(loc, "name_en", None),
+                "name_th": getattr(loc, "name_th", None),
+                "display_name": getattr(loc, "display_name", None),
+                "path": loc_path_map.get(loc.id, ""),
+            }
+
+        def _mat_payload(material_id: Optional[int]) -> Optional[Dict[str, Any]]:
+            if material_id is None or material_id not in mat_map:
+                return None
+            m = mat_map[material_id]
+            return {
+                "id": m.id,
+                "name_en": getattr(m, "name_en", None),
+                "name_th": getattr(m, "name_th", None),
+            }
+
+        for consolidated_id, source_list in sources_by_consolidated.items():
+            node = nodes_by_transport_id.get(consolidated_id)
+            if node is None:
+                continue
+            source_list.sort(key=lambda t: t[3])
+            enriched: List[Dict[str, Any]] = []
+            for kind, ref_id, weight, _ord in source_list:
+                if kind == "transport":
+                    src = src_transports.get(ref_id)
+                    enriched.append({
+                        "kind": "transport",
+                        "source_transport_id": ref_id,
+                        "contributed_weight": float(weight) if weight is not None else 0.0,
+                        "source_origin": _loc_payload(src.origin_id) if src is not None else None,
+                        "source_material": _mat_payload(src.material_id) if src is not None else None,
+                    })
+                else:
+                    grp = src_groups.get(ref_id)
+                    enriched.append({
+                        "kind": "group",
+                        "source_group_id": ref_id,
+                        "contributed_weight": float(weight) if weight is not None else 0.0,
+                        "source_origin": _loc_payload(grp.origin_id) if grp is not None else None,
+                        "source_material": _mat_payload(grp.material_id) if grp is not None else None,
+                    })
+            node["consolidation_sources"] = enriched
+
+        # ── 2) Attachments ────────────────────────────────────────────────
+        from ....models.cores.files import File
+        file_rows = (
+            self.db.query(
+                TransportTransactionFile.transport_transaction_id,
+                File.id,
+                File.original_filename,
+                File.url,
+                TransportTransactionFile.ordering,
+            )
+            .join(File, File.id == TransportTransactionFile.file_id)
+            .filter(
+                TransportTransactionFile.transport_transaction_id.in_(transport_ids),
+                TransportTransactionFile.is_active == True,
+                TransportTransactionFile.deleted_date.is_(None),
+            )
+            .all()
+        )
+        attachments_by_transport: Dict[int, List[Tuple[int, Any, Any, int]]] = {}
+        for ttid, fid, fname, furl, fordering in file_rows:
+            attachments_by_transport.setdefault(int(ttid), []).append(
+                (int(fid), fname, furl, fordering or 0)
+            )
+        for ttid, items in attachments_by_transport.items():
+            node = nodes_by_transport_id.get(ttid)
+            if node is None:
+                continue
+            items.sort(key=lambda tup: tup[3])
+            node["attachments"] = [
+                {"file_id": fid, "name": fname, "url": furl}
+                for fid, fname, furl, _ord in items
+            ]
 
     def confirm_arrival(
         self,
@@ -2053,6 +3105,53 @@ class TraceabilityService:
         deleted_ids.append(row.id)
 
         self.db.flush()
+
+        # 3a. Soft-delete any consolidation headers + sources that produced the
+        #     transports we just reverted. This is what makes the contributing
+        #     origin groups (and arrived sources) reappear as pickable items —
+        #     the column-0 filter excludes groups referenced by an ACTIVE
+        #     consolidation, so removing the header restores them.
+        if deleted_ids:
+            consol_headers = (
+                self.db.query(TraceabilityConsolidation)
+                .filter(
+                    TraceabilityConsolidation.consolidated_transport_id.in_(deleted_ids),
+                    TraceabilityConsolidation.is_active == True,
+                    TraceabilityConsolidation.deleted_date.is_(None),
+                )
+                .all()
+            )
+            if consol_headers:
+                header_ids = [h.id for h in consol_headers]
+                # Collect source group ids before soft-deleting so we can recompute
+                # their absolute_percentage (their weight is "returned" to the group).
+                affected_groups: set = set()
+                src_rows = (
+                    self.db.query(TraceabilityConsolidationSource)
+                    .filter(
+                        TraceabilityConsolidationSource.consolidation_id.in_(header_ids),
+                        TraceabilityConsolidationSource.is_active == True,
+                        TraceabilityConsolidationSource.deleted_date.is_(None),
+                    )
+                    .all()
+                )
+                for sr in src_rows:
+                    if sr.source_group_id is not None:
+                        affected_groups.add(int(sr.source_group_id))
+                    sr.is_active = False
+                    sr.deleted_date = now
+                for h in consol_headers:
+                    h.is_active = False
+                    h.deleted_date = now
+                    # Explicit business state — readers can detect a reverted
+                    # event without inferring from soft-delete fields.
+                    h.status = "reverted"
+                self.db.flush()
+                for gid in affected_groups:
+                    try:
+                        self._recalculate_absolute_percentage(gid)
+                    except Exception:
+                        pass
 
         # IMPORTANT: Recalculate absolute_percentage after revert changes sibling structure.
         # Any future code that reverts transport transactions must also trigger this recalculation.

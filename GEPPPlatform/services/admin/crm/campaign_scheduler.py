@@ -1,7 +1,7 @@
 """
 CRM Campaign Scheduler — tick function.
 
-Called every minute by `campaign_scheduler_lambda.lambda_handler`.
+Called every minute by `GEPPPlatform.entry_points.campaign_scheduler.lambda_handler`.
 
 Public API:
     tick(db, max_campaigns=50, max_events_per_campaign=500) -> dict

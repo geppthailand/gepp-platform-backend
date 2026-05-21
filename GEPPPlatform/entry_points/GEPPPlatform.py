@@ -39,9 +39,9 @@ import jwt
 from GEPPPlatform.services.auth import handle_auth_routes
 from GEPPPlatform.services.auth.auth_handlers import AuthHandlers
 from GEPPPlatform.libs import authGuard
-from GEPPPlatform.exceptions import APIException, UnauthorizedException
-from GEPPPlatform.database import get_session
-from GEPPPlatform import config as app_config
+from GEPPPlatform.libs.exceptions import APIException, UnauthorizedException
+from GEPPPlatform.libs.database import get_session
+from GEPPPlatform.libs import config as app_config
 
 import random
 import string
@@ -97,6 +97,43 @@ def main(event, context):
         # and never forwards to Lambda. If OPTIONS reaches here, API Gateway CORS is
         # not configured — so we handle it in Lambda.
         if http_method == "OPTIONS":
+            # Origin-restricted preflight for customer-leads (marketing site).
+            # Browser will refuse the actual POST unless this preflight echoes
+            # back the exact Origin from the allowlist — `*` is rejected when
+            # the request needs credentials/origin trust.
+            if "/api/public/customer-leads" in path:
+                from GEPPPlatform.services.public.customer_leads_handler import (
+                    ALLOWED_ORIGINS, is_origin_allowed,
+                )
+                origin = (event.get("headers") or {}).get("origin") \
+                      or (event.get("headers") or {}).get("Origin")
+                if is_origin_allowed(origin):
+                    return {
+                        "statusCode": 200,
+                        "headers": {
+                            "Access-Control-Allow-Origin": origin,
+                            "Access-Control-Allow-Methods": "POST, OPTIONS",
+                            "Access-Control-Allow-Headers": "Content-Type",
+                            "Access-Control-Max-Age": "86400",
+                            "Vary": "Origin",
+                            "Content-Type": "application/json",
+                            **_VERSION_HEADERS,
+                        },
+                        "body": json.dumps({"message": "CORS preflight"})
+                    }
+                return {
+                    "statusCode": 403,
+                    "headers": {
+                        "Vary": "Origin",
+                        "Content-Type": "application/json",
+                        **_VERSION_HEADERS,
+                    },
+                    "body": json.dumps({
+                        "error": "origin_not_allowed",
+                        "allowed_origins": sorted(ALLOWED_ORIGINS),
+                    }),
+                }
+
             return {
                 "statusCode": 200,
                 "headers": {
@@ -189,7 +226,7 @@ def main(event, context):
 
             elif "/documents/api-docs" in raw_path or "/docs/bma/" in raw_path:
                 # Handle documentation routes (no authorization required)
-                from .docs.docs_handlers import handle_docs_routes
+                from GEPPPlatform.docs.docs_handlers import handle_docs_routes
 
                 docs_result = handle_docs_routes(event, **commonParams)
                 content_type = docs_result.get('content_type', 'application/json')
@@ -238,6 +275,46 @@ def main(event, context):
                 }
                 lead_result = handle_public_lead_capture(body, session, request_meta=request_meta)
                 results = {"success": True, "data": lead_result}
+
+            elif "/api/public/customer-leads" in path and http_method == "POST":
+                # Marketing-site lead capture (gepp.me Contact form).
+                # Origin-allowlisted; rejects requests from anywhere else.
+                from GEPPPlatform.services.public.customer_leads_handler import (
+                    handle_customer_lead_capture, is_origin_allowed, ALLOWED_ORIGINS,
+                )
+                req_headers = event.get("headers") or {}
+                origin = req_headers.get("origin") or req_headers.get("Origin")
+                if not is_origin_allowed(origin):
+                    return {
+                        "statusCode": 403,
+                        "headers": {
+                            "Vary": "Origin",
+                            "Content-Type": "application/json",
+                            **_VERSION_HEADERS,
+                        },
+                        "body": json.dumps({
+                            "success": False,
+                            "error": "origin_not_allowed",
+                            "allowed_origins": sorted(ALLOWED_ORIGINS),
+                        }),
+                    }
+                request_meta = {
+                    "origin":     origin,
+                    "ip_address": (event.get("requestContext", {}).get("http", {}) or {}).get("sourceIp"),
+                    "user_agent": req_headers.get("user-agent") or req_headers.get("User-Agent"),
+                    "referrer":   req_headers.get("referer")   or req_headers.get("Referer"),
+                }
+                lead_result = handle_customer_lead_capture(body, session, request_meta=request_meta)
+                return {
+                    "statusCode": 200,
+                    "headers": {
+                        "Access-Control-Allow-Origin": origin,
+                        "Vary": "Origin",
+                        "Content-Type": "application/json",
+                        **_VERSION_HEADERS,
+                    },
+                    "body": json.dumps({"success": True, "data": lead_result}),
+                }
 
             elif "/api/userapi/documents/" in path:
                 # PUBLIC: Handle API documentation routes (no authentication required)
@@ -601,7 +678,7 @@ def main(event, context):
 
             elif "/api/rewards/public" in path:
                 # Public reward/LIFF endpoints (no JWT required, auth via LINE user_id)
-                from .services.rewards.reward_handlers import handle_reward_routes
+                from GEPPPlatform.services.rewards.reward_handlers import handle_reward_routes
 
                 reward_result = handle_reward_routes(event, data=body, **commonParams)
                 results = {
@@ -754,7 +831,7 @@ def main(event, context):
 
                     elif "/api/organizations" in path:
                         # Handle all organization management routes
-                        from .services.cores.organizations.organization_handlers import organization_routes
+                        from GEPPPlatform.services.cores.organizations.organization_handlers import organization_routes
 
                         org_result = organization_routes(event, context, **commonParams)
                         results = {
@@ -764,7 +841,7 @@ def main(event, context):
 
                     elif "/api/materials" in path:
                         # Handle all materials management routes
-                        from .services.cores.materials.materials_handlers import handle_materials_routes
+                        from GEPPPlatform.services.cores.materials.materials_handlers import handle_materials_routes
 
                         materials_result = handle_materials_routes(event, **commonParams)
                         results = {
@@ -774,7 +851,7 @@ def main(event, context):
 
                     elif "/api/reports" in path:
                         # Handle all materials management routes
-                        from .services.cores.reports.reports_handlers import handle_reports_routes
+                        from GEPPPlatform.services.cores.reports.reports_handlers import handle_reports_routes
 
                         reports_result = handle_reports_routes(event, **commonParams)
                         # If handler returned an API Gateway proxy response (e.g., raw PDF),
@@ -791,7 +868,7 @@ def main(event, context):
                             }
                     elif "/api/gri" in path:
                         # Handle all GRI routes
-                        from .services.cores.gri.gri_handlers import handle_gri_routes
+                        from GEPPPlatform.services.cores.gri.gri_handlers import handle_gri_routes
 
                         gri_result = handle_gri_routes(event, **commonParams)
                         results = {
@@ -801,7 +878,7 @@ def main(event, context):
                         
                     elif "/api/rewards" in path:
                         # Handle all reward management routes
-                        from .services.rewards.reward_handlers import handle_reward_routes
+                        from GEPPPlatform.services.rewards.reward_handlers import handle_reward_routes
 
                         reward_result = handle_reward_routes(event, data=body, **commonParams)
                         results = {
@@ -811,7 +888,7 @@ def main(event, context):
 
                     elif "/api/transactions" in path:
                         # Handle all transaction management routes
-                        from .services.cores.transactions.transaction_handlers import handle_transaction_routes
+                        from GEPPPlatform.services.cores.transactions.transaction_handlers import handle_transaction_routes
 
                         transaction_result = handle_transaction_routes(event, data=body, **commonParams)
                         # Transaction handlers return complete response structure, don't double-wrap
@@ -822,7 +899,7 @@ def main(event, context):
 
                     elif "/api/transaction_audit" in path:
                         # Handle all transaction audit routes
-                        from .services.cores.transaction_audit.transaction_audit_handlers import handle_transaction_audit_routes
+                        from GEPPPlatform.services.cores.transaction_audit.transaction_audit_handlers import handle_transaction_audit_routes
 
                         audit_result = handle_transaction_audit_routes(event, data=body, **commonParams)
                         results = {
@@ -832,7 +909,7 @@ def main(event, context):
 
                     elif "/api/traceability" in path:
                         # Handle all traceability routes
-                        from .services.cores.traceability.traceability_handlers import handle_traceability_routes
+                        from GEPPPlatform.services.cores.traceability.traceability_handlers import handle_traceability_routes
 
                         traceability_result = handle_traceability_routes(event, data=body, **commonParams)
                         results = {
@@ -842,7 +919,7 @@ def main(event, context):
 
                     elif "/api/audit-settings" in path:
                         # Handle AI audit settings routes (doc types, doc requires, check columns)
-                        from .services.cores.audit_settings.audit_settings_handlers import handle_audit_settings_routes
+                        from GEPPPlatform.services.cores.audit_settings.audit_settings_handlers import handle_audit_settings_routes
 
                         settings_result = handle_audit_settings_routes(event, data=body, **commonParams)
                         results = {
@@ -853,7 +930,7 @@ def main(event, context):
                     elif "/api/audit" in path:
                         if "/api/audit/manual" in path:
                             # Handle all manual audit routes
-                            from .services.cores.transaction_audit.manual_audit_handlers import handle_manual_audit_routes
+                            from GEPPPlatform.services.cores.transaction_audit.manual_audit_handlers import handle_manual_audit_routes
 
                             manual_audit_result = handle_manual_audit_routes(event, data=body, **commonParams)
                             results = {
@@ -862,7 +939,7 @@ def main(event, context):
                             }
                         else:
                             # Handle all audit rules management routes
-                            from .services.cores.audit_rules.audit_rules_handlers import handle_audit_rules_routes
+                            from GEPPPlatform.services.cores.audit_rules.audit_rules_handlers import handle_audit_rules_routes
 
                             rules_result = handle_audit_rules_routes(event, data=body, **commonParams)
                             results = {
@@ -872,7 +949,7 @@ def main(event, context):
 
                     elif "/api/esg" in path:
                         # Handle all ESG routes (settings, documents, waste records, dashboard)
-                        from .services.esg.esg_handlers import handle_esg_routes
+                        from GEPPPlatform.services.esg.esg_handlers import handle_esg_routes
 
                         esg_result = handle_esg_routes(event, data=body, **commonParams)
                         results = {
@@ -882,7 +959,7 @@ def main(event, context):
 
                     elif "/api/debug" in path:
                         # Handle all debug routes (development only)
-                        from .services.debug.debug_handlers import handle_debug_routes
+                        from GEPPPlatform.services.debug.debug_handlers import handle_debug_routes
 
                         debug_result = handle_debug_routes(event, data=body, **commonParams)
                         results = {
@@ -894,7 +971,7 @@ def main(event, context):
                         # Handle all integration routes
                         if "/api/integration/bma" in path:
                             # Handle BMA integration routes
-                            from .services.integrations.bma.bma_handlers import handle_bma_routes
+                            from GEPPPlatform.services.integrations.bma.bma_handlers import handle_bma_routes
 
                             bma_result = handle_bma_routes(event, data=body, **commonParams)
                             results = {
@@ -919,8 +996,8 @@ def main(event, context):
 
                     elif "/api/userapi/" in path:
                         # Handle custom API routes: /api/userapi/{api_path}/{service_path}/...
-                        from .services.custom.custom_api_service import CustomApiService
-                        from .services.custom import execute_custom_function
+                        from GEPPPlatform.services.custom.custom_api_service import CustomApiService
+                        from GEPPPlatform.services.custom import execute_custom_function
                         
                         try:
                             # Extract api_path and service_path from URL

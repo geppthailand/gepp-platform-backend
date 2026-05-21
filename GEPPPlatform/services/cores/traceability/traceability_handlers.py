@@ -60,6 +60,30 @@ def handle_traceability_routes(event: Dict[str, Any], data: Dict[str, Any], **pa
         result = traceability_service.get_traceability_hierarchy(organization_id=current_user_organization_id, current_user_id=current_user_id, **query_params)
         return {"message": "Traceability hierarchy (tree)", "data": result["data"]}
 
+    if path == "/api/traceability/consolidate" and method == "POST":
+        # Body: { source_transport_ids?: [int, ...], source_group_ids?: [int, ...],
+        #         requests: [{ material_id, source_group_contributions?, source_contributions?, ... }, ...] }
+        # At least one of source_transport_ids / source_group_ids must be non-empty.
+        # Each entry in `requests` produces one onward consolidated TransportTransaction.
+        body = data or {}
+        source_transport_ids = body.get("source_transport_ids") or []
+        source_group_ids = body.get("source_group_ids") or []
+        requests_list = body.get("requests") or []
+        if (not source_transport_ids and not source_group_ids) or not requests_list:
+            raise APIException(
+                "Either source_transport_ids or source_group_ids is required, plus requests",
+                status_code=400,
+                error_code="MISSING_FIELDS",
+            )
+        result = traceability_service.consolidate_transports(
+            source_transport_ids=source_transport_ids,
+            source_group_ids=source_group_ids,
+            requests=requests_list,
+            organization_id=current_user_organization_id,
+            current_user_id=current_user_id,
+        )
+        return {"message": "Transports consolidated", "data": result}
+
     if path == "/api/traceability" and method == "POST":
         # Body: either "transaction_group_id" (root), "transport_transaction_id" (children of an arrived transport),
         # or "tentative_group_key" (materializes a tentative group first, then creates transport).
@@ -90,6 +114,7 @@ def handle_traceability_routes(event: Dict[str, Any], data: Dict[str, Any], **pa
             transaction_group_id=int(transaction_group_id) if transaction_group_id is not None else None,
             organization_id=current_user_organization_id,
             transport_transaction_id=int(transport_transaction_id) if transport_transaction_id is not None else None,
+            current_user_id=current_user_id,
         )
         if not result.get("success"):
             raise APIException(result.get("message", "Failed to create transport transactions"), status_code=400)
@@ -121,6 +146,7 @@ def handle_traceability_routes(event: Dict[str, Any], data: Dict[str, Any], **pa
         result = traceability_service.update_transport_transactions(
             data=data_list,
             organization_id=current_user_organization_id,
+            current_user_id=current_user_id,
         )
         if not result.get("success"):
             raise APIException(result.get("message", "Failed to update transport transactions"), status_code=400)

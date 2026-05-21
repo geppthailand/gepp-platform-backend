@@ -647,8 +647,16 @@ def _handle_materials_report(
     # 13: material_id, 14: material_name_en, 15: material_name_th,
     # 16: disposal_method, 17: record_status
 
-    # Single pass: aggregate by main material AND sub material
-    main_material_agg_map: Dict[int, Dict[str, float]] = {}
+    # Single pass: aggregate by main material AND sub material.
+    # Group keys are EITHER an int main_material_id OR the sentinel string
+    # WTE_KEY for waste-to-energy items. WTE items share main_material_id
+    # with their disposal-route source (e.g. CDs and dirty plastic bags
+    # carry main_material_id=Plastic), but they're *not* recyclable plastic
+    # and grouping them under "พลาสติก" reads as a data error. Split them
+    # into their own group keyed by category instead.
+    WTE_KEY = '__wte__'
+
+    main_material_agg_map: Dict[Any, Dict[str, float]] = {}
     sub_material_agg_map: Dict[int, Dict[str, Any]] = {}
     total_waste_main = 0.0
     sub_total_waste = 0.0
@@ -658,6 +666,7 @@ def _handle_materials_report(
         status = row[4]
         unit_weight = float(row[5] or 0)
         calc_ghg = float(row[6] or 0)
+        cat_id = row[7] or row[11]   # mat_category_id || record_category_id
         main_id = row[8] or row[12]  # mat_main_material_id || record_main_material_id
         material_id = row[13]
         mat_name_en = row[14]
@@ -669,58 +678,96 @@ def _handle_materials_report(
         weight = origin_qty * unit_weight
         ghg = weight * calc_ghg
 
-        # Aggregate by main material
-        if main_id is not None:
+        try:
+            cat_id_int = int(cat_id) if cat_id is not None else None
+        except Exception:
+            cat_id_int = None
+        is_wte = cat_id_int == _WASTE_TO_ENERGY_CAT_ID
+
+        # Resolve the effective group key: WTE items get their own bucket,
+        # everyone else groups by their main_material_id as before.
+        if is_wte:
+            effective_key: Any = WTE_KEY
+            try:
+                main_id_int = int(main_id) if main_id is not None else None
+            except Exception:
+                main_id_int = None
+        else:
+            if main_id is None:
+                continue
             try:
                 main_id_int = int(main_id)
             except Exception:
                 continue
-            total_waste_main += weight
-            if main_id_int not in main_material_agg_map:
-                main_material_agg_map[main_id_int] = {'total_waste': 0.0, 'ghg_reduction': 0.0}
-            main_material_agg_map[main_id_int]['total_waste'] += weight
-            main_material_agg_map[main_id_int]['ghg_reduction'] += ghg
+            effective_key = main_id_int
 
-            # Aggregate by sub material (material_id)
-            if material_id is not None:
-                try:
-                    mat_id_int = int(material_id)
-                except Exception:
-                    continue
-                sub_total_waste += weight
-                if mat_id_int not in sub_material_agg_map:
-                    sub_material_agg_map[mat_id_int] = {
-                        'material_id': mat_id_int,
-                        'material_name': mat_name_en or mat_name_th,
-                        'material_name_en': mat_name_en,
-                        'material_name_th': mat_name_th,
-                        'main_material_id': main_id_int,
-                        'total_waste': 0.0,
-                        'ghg_reduction': 0.0,
-                    }
-                sub_material_agg_map[mat_id_int]['total_waste'] += weight
-                sub_material_agg_map[mat_id_int]['ghg_reduction'] += ghg
+        # Aggregate by group (main material or WTE)
+        total_waste_main += weight
+        if effective_key not in main_material_agg_map:
+            main_material_agg_map[effective_key] = {'total_waste': 0.0, 'ghg_reduction': 0.0}
+        main_material_agg_map[effective_key]['total_waste'] += weight
+        main_material_agg_map[effective_key]['ghg_reduction'] += ghg
 
-    # Fetch main material names (bilingual)
-    name_map = _fetch_main_material_names_bilingual(reports_service.db, set(main_material_agg_map.keys()))
+        # Aggregate by sub material (material_id)
+        if material_id is not None:
+            try:
+                mat_id_int = int(material_id)
+            except Exception:
+                continue
+            sub_total_waste += weight
+            if mat_id_int not in sub_material_agg_map:
+                sub_material_agg_map[mat_id_int] = {
+                    'material_id': mat_id_int,
+                    'material_name': mat_name_en or mat_name_th,
+                    'material_name_en': mat_name_en,
+                    'material_name_th': mat_name_th,
+                    'main_material_id': main_id_int,
+                    'category_id': cat_id_int,
+                    'effective_key': effective_key,
+                    'total_waste': 0.0,
+                    'ghg_reduction': 0.0,
+                }
+            sub_material_agg_map[mat_id_int]['total_waste'] += weight
+            sub_material_agg_map[mat_id_int]['ghg_reduction'] += ghg
 
-    # Build proportions for main materials
-    proportions = [
-        {
-            'main_material_id': mid,
-            'main_material_name': (name_map.get(mid) or {}).get('name_en') or (name_map.get(mid) or {}).get('name_th'),
-            'main_material_name_en': (name_map.get(mid) or {}).get('name_en'),
-            'main_material_name_th': (name_map.get(mid) or {}).get('name_th'),
+    # Fetch main material names (bilingual) — only for real int keys
+    real_main_ids = {k for k in main_material_agg_map.keys() if isinstance(k, int)}
+    name_map = _fetch_main_material_names_bilingual(reports_service.db, real_main_ids)
+
+    # Fetch the WTE category's bilingual display name so the synthetic group
+    # surface area in the response carries proper Thai + English labels.
+    wte_names = _fetch_category_names_bilingual(
+        reports_service.db, {_WASTE_TO_ENERGY_CAT_ID}
+    ).get(_WASTE_TO_ENERGY_CAT_ID, {}) if WTE_KEY in main_material_agg_map else {}
+    wte_name_en = wte_names.get('name_en') or 'Waste To Energy'
+    wte_name_th = wte_names.get('name_th') or 'ขยะเพื่อพลังงาน'
+
+    def _group_labels(key: Any) -> Dict[str, Optional[str]]:
+        """Return the bilingual display labels for a group key."""
+        if key == WTE_KEY:
+            return {'name_en': wte_name_en, 'name_th': wte_name_th}
+        if isinstance(key, int):
+            return name_map.get(key) or {'name_en': None, 'name_th': None}
+        return {'name_en': None, 'name_th': None}
+
+    # Build proportions for main material rollup (incl. WTE as its own row)
+    proportions = []
+    for key, agg in sorted(
+        main_material_agg_map.items(),
+        key=lambda kv: kv[1]['total_waste'],
+        reverse=True,
+    ):
+        labels = _group_labels(key)
+        proportions.append({
+            'main_material_id': key if isinstance(key, int) else None,
+            'main_material_name': labels.get('name_en') or labels.get('name_th'),
+            'main_material_name_en': labels.get('name_en'),
+            'main_material_name_th': labels.get('name_th'),
+            'is_waste_to_energy': key == WTE_KEY,
             'total_waste': agg['total_waste'],
             'ghg_reduction': agg['ghg_reduction'],
             'proportion_percent': (agg['total_waste'] / total_waste_main * 100) if total_waste_main > 0 else 0.0,
-        }
-        for mid, agg in sorted(
-            main_material_agg_map.items(),
-            key=lambda kv: kv[1]['total_waste'],
-            reverse=True
-        )
-    ]
+        })
 
     # Build sub proportions
     sub_proportions = []
@@ -729,12 +776,16 @@ def _handle_materials_report(
         sub_proportions.append(item)
     sub_proportions.sort(key=lambda x: x['total_waste'], reverse=True)
 
-    # Group sub materials by main material name
+    # Group sub materials by effective key (main material or WTE bucket)
     grouped_by_main: Dict[str, list] = {}
     for item in sub_proportions:
-        main_id = item.get('main_material_id')
-        main_names = name_map.get(main_id) if main_id is not None else None
-        key_name = (main_names or {}).get('name_en') or (main_names or {}).get('name_th') or (f"Material {main_id}" if main_id is not None else "Unknown")
+        key = item.get('effective_key')
+        labels = _group_labels(key)
+        key_name = (
+            labels.get('name_en')
+            or labels.get('name_th')
+            or (f"Material {key}" if isinstance(key, int) else "Unknown")
+        )
         if key_name not in grouped_by_main:
             grouped_by_main[key_name] = []
         grouped_by_main[key_name].append({

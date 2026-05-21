@@ -8,7 +8,7 @@ Function exported: lambda_handler(event, context)
 
 Local smoke test:
     python -c "
-    from GEPPPlatform.services.admin.crm.profile_refresher_lambda import lambda_handler
+    from GEPPPlatform.entry_points.profile_refresher import lambda_handler
     print(lambda_handler.__doc__ or 'imported OK')
     "
 """
