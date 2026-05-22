@@ -61,11 +61,11 @@ HANDLER=""
 case "$lower_name" in
   platform|geppplatform)
     FUNCTION_NAME="${ENV_NAME}-GEPPPlatform"
-    HANDLER="GEPPPlatform.entry_points.app.main"
+    HANDLER="GEPPPlatform.entry_points.GEPPPlatform.main"
     ;;
   export|report|report-export|geppgeneratev3report)
     FUNCTION_NAME="${ENV_NAME}-GEPPGenerateV3Report"
-    HANDLER="GEPPPlatform.entry_points.pdf_export_hub.lambda_handler"
+    HANDLER="GEPPPlatform.entry_points.GEPPGenerateV3Report.lambda_handler"
     ;;
   iot|iot-health|iot-health-cron|geppplatform-iothealthcron)
     FUNCTION_NAME="${ENV_NAME}-GEPPPlatform-IOTHEALTHCRON"
@@ -97,12 +97,12 @@ aws lambda update-function-code \
   --zip-file fileb://deploy_functions.zip \
   "${AWS_ARGS[@]}" > /dev/null
 
-# if [ -n "$HANDLER" ]; then
-#   echo "HANDLER ${FUNCTION_NAME} -> ${HANDLER}"
-#   aws lambda update-function-configuration \
-#     --function-name "$FUNCTION_NAME" \
-#     --handler "$HANDLER" \
-#     "${AWS_ARGS[@]}" > /dev/null
-# fi
+if [ -n "$HANDLER" ]; then
+  echo "HANDLER ${FUNCTION_NAME} -> ${HANDLER}"
+  aws lambda update-function-configuration \
+    --function-name "$FUNCTION_NAME" \
+    --handler "$HANDLER" \
+    "${AWS_ARGS[@]}" > /dev/null
+fi
 
 echo "DONE ${FUNCTION_NAME}"
