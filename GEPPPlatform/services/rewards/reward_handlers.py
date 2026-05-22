@@ -680,6 +680,14 @@ def handle_reward_routes(event: Dict[str, Any], data: Dict[str, Any], **params) 
             svc = RedeemService(db_session)
             return svc.get_user_organizations(_resolve_user())
 
+        if path == "/api/rewards/public/balance/summary" and method == "GET":
+            svc = RedeemService(db_session)
+            return svc.get_user_balance_summary(_resolve_user())
+
+        if path == "/api/rewards/public/gamification/summary" and method == "GET":
+            svc = RedeemService(db_session)
+            return svc.get_gamification_summary(_resolve_user())
+
         if path == "/api/rewards/public/redeem/campaigns" and method == "GET":
             svc = RedeemService(db_session)
             org_id = query_params.get("organization_id")
