@@ -69,24 +69,37 @@ def compute_recycling_rate(
                 has_incomplete = True
             leaves = group_leaf_data[group_id]
 
-            # Traced portion: sum absolute_percentage of diverted leaves
-            traced_recyclable_pct = 0.0
+            # Completed traceability uses destination leaf weights. When a
+            # group has multiple source records, allocate each terminal leaf
+            # back to the record by its share of the group's origin weight.
+            completed_weight = 0.0
+            traced_recyclable_weight = 0.0
             for leaf in leaves:
                 method = (leaf.get("disposal_method") or "").strip()
-                abs_pct = float(leaf.get("absolute_percentage") or 0)
                 status = leaf.get("status") or ""
-                if status == "arrived" and method and method in DIVERTED_METHODS:
-                    traced_recyclable_pct += abs_pct
+                if status != "arrived" or not method:
+                    continue
+                group_total = float(leaf.get("group_total_weight") or 0)
+                leaf_weight = leaf.get("leaf_weight")
+                if leaf_weight is None:
+                    leaf_weight = weight * (float(leaf.get("absolute_percentage") or 0) / 100.0)
+                    record_leaf_weight = float(leaf_weight or 0)
+                else:
+                    record_share = (weight / group_total) if group_total > 0 else 1.0
+                    record_leaf_weight = float(leaf_weight or 0) * record_share
+                completed_weight += record_leaf_weight
+                if method in DIVERTED_METHODS:
+                    traced_recyclable_weight += record_leaf_weight
 
-            recyclable_from_traced = weight * (traced_recyclable_pct / 100.0)
+            recyclable_from_traced = traced_recyclable_weight
             ghg_from_traced = recyclable_from_traced * calc_ghg
 
             # Untraced portion: fallback to category
-            untraced_fraction = 1.0 - completion
+            untraced_weight = max(0.0, weight - completed_weight)
             recyclable_from_untraced = 0.0
             ghg_from_untraced = 0.0
-            if untraced_fraction > 0 and cat_id in _RECYCLABLE_CATEGORIES:
-                recyclable_from_untraced = weight * untraced_fraction
+            if untraced_weight > 0 and cat_id in _RECYCLABLE_CATEGORIES:
+                recyclable_from_untraced = untraced_weight
                 ghg_from_untraced = recyclable_from_untraced * calc_ghg
 
             recyclable_weight += recyclable_from_traced + recyclable_from_untraced
@@ -119,19 +132,29 @@ def is_record_recyclable(
         completion = group_completion.get(group_id, 0.0)
         leaves = group_leaf_data[group_id]
 
-        traced_recyclable_pct = 0.0
+        completed_weight = 0.0
+        traced_recyclable_weight = 0.0
         for leaf in leaves:
             method = (leaf.get("disposal_method") or "").strip()
-            abs_pct = float(leaf.get("absolute_percentage") or 0)
             status = leaf.get("status") or ""
-            if status == "arrived" and method and method in DIVERTED_METHODS:
-                traced_recyclable_pct += abs_pct
+            if status != "arrived" or not method:
+                continue
+            group_total = float(leaf.get("group_total_weight") or 0)
+            leaf_weight = leaf.get("leaf_weight")
+            if leaf_weight is None:
+                record_leaf_weight = weight * (float(leaf.get("absolute_percentage") or 0) / 100.0)
+            else:
+                record_share = (weight / group_total) if group_total > 0 else 1.0
+                record_leaf_weight = float(leaf_weight or 0) * record_share
+            completed_weight += record_leaf_weight
+            if method in DIVERTED_METHODS:
+                traced_recyclable_weight += record_leaf_weight
 
-        recyclable = weight * (traced_recyclable_pct / 100.0)
+        recyclable = traced_recyclable_weight
 
-        untraced_fraction = 1.0 - completion
-        if untraced_fraction > 0 and cat_id in _RECYCLABLE_CATEGORIES:
-            recyclable += weight * untraced_fraction
+        untraced_weight = max(0.0, weight - completed_weight)
+        if untraced_weight > 0 and cat_id in _RECYCLABLE_CATEGORIES:
+            recyclable += untraced_weight
 
         return recyclable
     else:
@@ -159,7 +182,7 @@ def fetch_group_leaf_data(db, group_ids: Set[int]) -> Tuple[Dict[int, List[dict]
         TraceabilityConsolidationSource,
     )
     from ....models.transactions.traceability_transaction_group import TraceabilityTransactionGroup
-    from ....models.transactions.transaction_record import TransactionRecord
+    from ....models.transactions.transaction_records import TransactionRecord
     from sqlalchemy import or_
 
     rows = db.query(
@@ -277,6 +300,8 @@ def fetch_group_leaf_data(db, group_ids: Set[int]) -> Tuple[Dict[int, List[dict]
             for gid, rec_ids in group_record_ids.items()
         }
 
+    group_total_weights = _group_weights_for_source_groups(group_ids)
+
     def _terminal_leaves_for_consolidated_roots(root_ids: Set[int]) -> Dict[int, List[dict]]:
         if not root_ids:
             return {}
@@ -383,6 +408,8 @@ def fetch_group_leaf_data(db, group_ids: Set[int]) -> Tuple[Dict[int, List[dict]
                 "id": f"consolidation:{int(consolidated_tid)}",
                 "disposal_method": leaf.get("disposal_method"),
                 "absolute_percentage": source_pct * float(leaf.get("downstream_fraction") or 0),
+                "leaf_weight": contributed * float(leaf.get("downstream_fraction") or 0),
+                "group_total_weight": group_total_weights.get(target_gid, 0.0),
                 "status": leaf.get("status"),
                 "is_consolidation": True,
             })
@@ -406,7 +433,15 @@ def fetch_group_leaf_data(db, group_ids: Set[int]) -> Tuple[Dict[int, List[dict]
                 remaining_pct = max(0.0, float(leaf.get("absolute_percentage") or 0) - consumed_pct)
                 if remaining_pct <= 0.0001:
                     continue
+                original_pct = float(leaf.get("absolute_percentage") or 0)
                 leaf["absolute_percentage"] = remaining_pct
+                if original_pct > 0:
+                    leaf["leaf_weight"] = float(leaf.get("weight") or 0) * (remaining_pct / original_pct)
+                else:
+                    leaf["leaf_weight"] = float(leaf.get("weight") or 0)
+            else:
+                leaf["leaf_weight"] = float(leaf.get("weight") or 0)
+            leaf["group_total_weight"] = group_total_weights.get(int(gid), 0.0)
             leaves.append(leaf)
         leaves.extend(pseudo_leaves_by_group.get(gid, []))
         total_known_pct = sum(float(l.get("absolute_percentage") or 0) for l in leaves)
@@ -415,17 +450,28 @@ def fetch_group_leaf_data(db, group_ids: Set[int]) -> Tuple[Dict[int, List[dict]
                 "id": f"untraced:{gid}",
                 "disposal_method": None,
                 "absolute_percentage": 100.0 - total_known_pct,
+                "leaf_weight": max(0.0, group_total_weights.get(int(gid), 0.0) * ((100.0 - total_known_pct) / 100.0)),
+                "group_total_weight": group_total_weights.get(int(gid), 0.0),
                 "status": "untraced",
             })
         group_leaf_data[gid] = leaves
 
-        total_leaf_pct = sum(float(l.get("absolute_percentage") or 0) for l in leaves)
-        completed_pct = sum(
-            float(l.get("absolute_percentage") or 0)
+        group_total_weight = group_total_weights.get(int(gid), 0.0)
+        completed_weight = sum(
+            float(l.get("leaf_weight") or 0)
             for l in leaves
             if l.get("status") == "arrived" and l.get("disposal_method")
         )
-        group_completion[gid] = (completed_pct / total_leaf_pct) if total_leaf_pct > 0 else 0.0
+        if group_total_weight > 0:
+            group_completion[gid] = min(1.0, max(0.0, completed_weight / group_total_weight))
+        else:
+            total_leaf_pct = sum(float(l.get("absolute_percentage") or 0) for l in leaves)
+            completed_pct = sum(
+                float(l.get("absolute_percentage") or 0)
+                for l in leaves
+                if l.get("status") == "arrived" and l.get("disposal_method")
+            )
+            group_completion[gid] = (completed_pct / total_leaf_pct) if total_leaf_pct > 0 else 0.0
 
     # Groups that only appear as direct consolidation sources may have no
     # transport rows of their own. They still need leaf data so records in those
@@ -439,15 +485,26 @@ def fetch_group_leaf_data(db, group_ids: Set[int]) -> Tuple[Dict[int, List[dict]
                 "id": f"untraced:{gid}",
                 "disposal_method": None,
                 "absolute_percentage": 100.0 - total_known_pct,
+                "leaf_weight": max(0.0, group_total_weights.get(int(gid), 0.0) * ((100.0 - total_known_pct) / 100.0)),
+                "group_total_weight": group_total_weights.get(int(gid), 0.0),
                 "status": "untraced",
             }]
         group_leaf_data[gid] = leaves
-        total_leaf_pct = sum(float(l.get("absolute_percentage") or 0) for l in leaves)
-        completed_pct = sum(
-            float(l.get("absolute_percentage") or 0)
+        group_total_weight = group_total_weights.get(int(gid), 0.0)
+        completed_weight = sum(
+            float(l.get("leaf_weight") or 0)
             for l in leaves
             if l.get("status") == "arrived" and l.get("disposal_method")
         )
-        group_completion[gid] = (completed_pct / total_leaf_pct) if total_leaf_pct > 0 else 0.0
+        if group_total_weight > 0:
+            group_completion[gid] = min(1.0, max(0.0, completed_weight / group_total_weight))
+        else:
+            total_leaf_pct = sum(float(l.get("absolute_percentage") or 0) for l in leaves)
+            completed_pct = sum(
+                float(l.get("absolute_percentage") or 0)
+                for l in leaves
+                if l.get("status") == "arrived" and l.get("disposal_method")
+            )
+            group_completion[gid] = (completed_pct / total_leaf_pct) if total_leaf_pct > 0 else 0.0
 
     return group_leaf_data, group_completion

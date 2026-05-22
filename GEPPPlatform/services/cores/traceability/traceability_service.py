@@ -237,8 +237,8 @@ class TraceabilityService:
 
         treatment_w = 0.0
         disposal_w = 0.0
+        in_progress_w = 0.0
         total_origin_weight = 0.0
-        managed_origin_weight = 0.0
         hierarchy_group_ids: set = set()
 
         def _collect_subtree_consolidated_weight(node: Dict[str, Any]) -> float:
@@ -260,7 +260,7 @@ class TraceabilityService:
             return round(total, 2)
 
         def _sum_leaves(nodes):
-            nonlocal treatment_w, disposal_w
+            nonlocal treatment_w, disposal_w, in_progress_w
             for t in nodes:
                 if not isinstance(t, dict):
                     continue
@@ -270,9 +270,10 @@ class TraceabilityService:
                 else:
                     status = t.get("status") or ""
                     method = t.get("disposal_method") or ""
-                    if status != "arrived" or not method:
-                        continue
                     w = float(t.get("weight") or 0)
+                    if status != "arrived" or not method:
+                        in_progress_w += w
+                        continue
                     if method in _DIVERTED:
                         treatment_w += w
                     elif method in _DIRECTED:
@@ -290,11 +291,7 @@ class TraceabilityService:
                 raw_weight = float(group_node.get("weight") or group_node.get("total_weight_kg") or 0)
                 consolidated_weight = _collect_subtree_consolidated_weight(group_node)
                 origin_weight = consolidated_weight if consolidated_weight > 0 else raw_weight
-                # Hierarchy only contains groups with at least one non-idle hop.
-                # Count those origin-side weights as managed, rather than summing
-                # terminal nodes, so split/completed leaves never inflate the card.
                 total_origin_weight += origin_weight
-                managed_origin_weight += origin_weight
                 _sum_leaves(group_node.get("children") or [])
 
         # Include original origin groups that are not in any flow yet. Arrived
@@ -313,7 +310,7 @@ class TraceabilityService:
         total_waste_weight = round(total_origin_weight, 2)
         total_treatment = round(treatment_w, 2)
         total_disposal = round(disposal_w, 2)
-        total_managed_waste = round(managed_origin_weight, 2)
+        total_managed_waste = round(in_progress_w, 2)
 
         return {
             "data": [arr0, arr1, arr2],
