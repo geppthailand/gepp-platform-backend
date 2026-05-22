@@ -98,6 +98,12 @@ aws lambda update-function-code \
   "${AWS_ARGS[@]}" > /dev/null
 
 if [ -n "$HANDLER" ]; then
+  # Lambda needs the code update to settle before another configuration change
+  # is accepted — otherwise UpdateFunctionConfiguration returns ResourceConflictException.
+  aws lambda wait function-updated \
+    --function-name "$FUNCTION_NAME" \
+    "${AWS_ARGS[@]}"
+
   echo "HANDLER ${FUNCTION_NAME} -> ${HANDLER}"
   aws lambda update-function-configuration \
     --function-name "$FUNCTION_NAME" \
