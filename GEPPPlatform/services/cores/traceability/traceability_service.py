@@ -2286,6 +2286,98 @@ class TraceabilityService:
         consolidated_transport_ids: List[int] = []
         affected_group_ids: set = set()
 
+        def _line_key(req: Dict[str, Any]) -> Tuple[Any, ...]:
+            try:
+                material_id = int(req.get("material_id"))
+            except (TypeError, ValueError):
+                material_id = req.get("material_id")
+            destination_raw = req.get("destination_id")
+            try:
+                destination_id = int(destination_raw) if destination_raw is not None else None
+            except (TypeError, ValueError):
+                destination_id = destination_raw
+            return (
+                material_id,
+                destination_id,
+                bool(req.get("is_final_destination", False)),
+                (req.get("disposal_method") or "").strip(),
+            )
+
+        def _merge_contribution_rows(rows: List[Dict[str, Any]], id_field: str, label: str) -> List[Dict[str, Any]]:
+            weights: Dict[int, Decimal] = {}
+            for row in rows:
+                if not isinstance(row, dict):
+                    raise APIException(f"{label} items must be objects", 400, "INVALID_REQUEST")
+                try:
+                    row_id = int(row.get(id_field))
+                except (TypeError, ValueError):
+                    raise APIException(f"Invalid {id_field} in contribution", 400, "INVALID_REQUEST")
+                raw_weight = row.get("weight")
+                if raw_weight is None:
+                    weight = Decimal("0")
+                else:
+                    try:
+                        weight = Decimal(str(raw_weight))
+                    except (TypeError, ValueError, ArithmeticError):
+                        raise APIException(
+                            f"Invalid weight in {label}: {raw_weight!r}",
+                            400,
+                            "INVALID_REQUEST",
+                        )
+                weights[row_id] = weights.get(row_id, Decimal("0")) + weight
+            return [
+                {id_field: row_id, "weight": float(weight)}
+                for row_id, weight in weights.items()
+                if weight > 0
+            ]
+
+        # Multiple request cards can intentionally resolve to the same onward
+        # line after the user changes material type. Collapse those cards before
+        # creating TransportTransaction rows so the traceability graph has one
+        # shipment line per final material/status/method.
+        merged_requests_by_line: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
+        for req in requests:
+            if not isinstance(req, dict):
+                raise APIException("Each request must be an object", 400, "INVALID_REQUEST")
+            key = _line_key(req)
+            existing = merged_requests_by_line.get(key)
+            if existing is None:
+                clone = dict(req)
+                clone["source_contributions"] = list(req.get("source_contributions") or [])
+                clone["source_group_contributions"] = list(req.get("source_group_contributions") or [])
+                attachments = req.get("attachments")
+                clone["attachments"] = list(attachments) if isinstance(attachments, list) else attachments
+                merged_requests_by_line[key] = clone
+                continue
+
+            existing["source_contributions"] = _merge_contribution_rows(
+                list(existing.get("source_contributions") or []) + list(req.get("source_contributions") or []),
+                "source_transport_id",
+                "source_contributions",
+            )
+            existing["source_group_contributions"] = _merge_contribution_rows(
+                list(existing.get("source_group_contributions") or []) + list(req.get("source_group_contributions") or []),
+                "source_group_id",
+                "source_group_contributions",
+            )
+            existing_attachments = existing.get("attachments")
+            incoming_attachments = req.get("attachments")
+            if isinstance(existing_attachments, list) or isinstance(incoming_attachments, list):
+                merged_attachments: List[Any] = []
+                seen_attachment_keys = set()
+                for fid in (
+                    (existing_attachments if isinstance(existing_attachments, list) else [])
+                    + (incoming_attachments if isinstance(incoming_attachments, list) else [])
+                ):
+                    key_str = str(fid)
+                    if key_str in seen_attachment_keys:
+                        continue
+                    seen_attachment_keys.add(key_str)
+                    merged_attachments.append(fid)
+                existing["attachments"] = merged_attachments
+
+        requests = list(merged_requests_by_line.values())
+
         for req in requests:
             if not isinstance(req, dict):
                 raise APIException("Each request must be an object", 400, "INVALID_REQUEST")
