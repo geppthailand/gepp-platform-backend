@@ -283,6 +283,27 @@ _FLOW_ROW_H = 0.85 * inch
 _FLOW_ROW_GAP = 0.20 * inch
 _FLOW_INNER_PAD = 0.20 * inch
 _FLOW_MIN_INNER_PAD = 0.12 * inch
+_FLOW_NODE_H = _FLOW_ROW_H - 0.08 * inch
+_FLOW_ORIGIN_EXTRA_H = 0.40 * inch
+_FLOW_ORIGIN_CARD_H = _FLOW_NODE_H + _FLOW_ORIGIN_EXTRA_H
+
+
+def _normalize_flow_row_heights(row_heights: list, groups: list) -> list:
+    """Reserve enough vertical space for origin cards before paginating/drawing."""
+    normalized = [float(h or _FLOW_ROW_H) for h in (row_heights or [])]
+    for group in groups or []:
+        valid_indices = [i for i in group if 0 <= i < len(normalized)]
+        if not valid_indices:
+            continue
+        group_span = sum(normalized[i] for i in valid_indices)
+        group_span += max(0, len(valid_indices) - 1) * _FLOW_ROW_GAP
+        if group_span >= _FLOW_ORIGIN_CARD_H:
+            continue
+        deficit = _FLOW_ORIGIN_CARD_H - group_span
+        add_each = deficit / len(valid_indices)
+        for i in valid_indices:
+            normalized[i] += add_each
+    return normalized
 
 
 def _flow_content_height_for_rows(row_heights: list) -> float:
@@ -618,10 +639,12 @@ def _draw_flow_chart(
     col_w0 = col_w
     col_w_rest = col_w - shrink_rest
     col_gap_plus = col_gap + shrink_rest
-    per_row_h = [rec.get("row_height", _FLOW_ROW_H) for rec in records]
-    node_h = _FLOW_ROW_H - 0.08 * inch
-    origin_extra_h = 0.40 * inch
-    origin_h = node_h + origin_extra_h
+    per_row_h = _normalize_flow_row_heights(
+        [rec.get("row_height", _FLOW_ROW_H) for rec in records],
+        groups,
+    )
+    node_h = _FLOW_NODE_H
+    origin_h = _FLOW_ORIGIN_CARD_H
     raw_content_h = sum(per_row_h) + (n - 1) * row_gap if n > 1 else per_row_h[0]
 
     top_overflow = 0.0
@@ -2176,7 +2199,10 @@ def _draw_diagram_section(pdf, page_width_points: float, page_height_points: flo
     def _draw_standard_flow_records(records: list, origin_groups: list, header_y_first: float) -> float:
         original_indices = list(range(len(records)))
         n_rows = len(records)
-        all_row_heights = [rec.get("row_height", _FLOW_ROW_H) for rec in records]
+        all_row_heights = _normalize_flow_row_heights(
+            [rec.get("row_height", _FLOW_ROW_H) for rec in records],
+            origin_groups,
+        )
         box_top_first = header_y_first - section_gap
         box_bottom_first = padding
         box_height_first = box_top_first - box_bottom_first
@@ -2193,7 +2219,10 @@ def _draw_diagram_section(pdf, page_width_points: float, page_height_points: flo
         last_box_bottom = box_bottom_first
 
         for page_idx, page_info in enumerate(pages):
-            page_rh = [all_row_heights[i] for i in page_info["global_indices"]]
+            page_rh = _normalize_flow_row_heights(
+                [all_row_heights[i] for i in page_info["global_indices"]],
+                page_info["page_groups"],
+            )
             page_content_h = _flow_content_height_for_rows(page_rh)
             if page_idx > 0:
                 pdf.showPage()
@@ -2222,7 +2251,11 @@ def _draw_diagram_section(pdf, page_width_points: float, page_height_points: flo
             pdf.setStrokeColor(colors.HexColor("#d9d9d9"))
             pdf.setLineWidth(1)
             pdf.roundRect(box_left, box_bottom, box_width, box_height, radius)
-            page_records = [records[i] for i in page_info["global_indices"]]
+            page_records = []
+            for local_idx, i in enumerate(page_info["global_indices"]):
+                rec = dict(records[i])
+                rec["row_height"] = page_rh[local_idx]
+                page_records.append(rec)
             page_orig = [original_indices[i] for i in page_info["global_indices"]]
             _draw_flow_chart(
                 pdf, box_left, box_bottom, box_width, box_height,
@@ -2311,7 +2344,10 @@ def _draw_diagram_section(pdf, page_width_points: float, page_height_points: flo
 
     original_indices = list(range(len(records)))
     n_rows = len(records)
-    all_row_heights = [rec.get("row_height", _FLOW_ROW_H) for rec in records]
+    all_row_heights = _normalize_flow_row_heights(
+        [rec.get("row_height", _FLOW_ROW_H) for rec in records],
+        origin_groups,
+    )
     header_y_first = y_below_cards - 0.15 * inch
     box_top_first = header_y_first - section_gap
     box_bottom_first = padding
@@ -2330,7 +2366,10 @@ def _draw_diagram_section(pdf, page_width_points: float, page_height_points: flo
     last_box_bottom = box_bottom_first
 
     for page_idx, page_info in enumerate(pages):
-        page_rh = [all_row_heights[i] for i in page_info["global_indices"]]
+        page_rh = _normalize_flow_row_heights(
+            [all_row_heights[i] for i in page_info["global_indices"]],
+            page_info["page_groups"],
+        )
         page_content_h = _flow_content_height_for_rows(page_rh)
 
         if page_idx > 0:
@@ -2352,7 +2391,11 @@ def _draw_diagram_section(pdf, page_width_points: float, page_height_points: flo
             pdf.setStrokeColor(colors.HexColor("#d9d9d9"))
             pdf.setLineWidth(1)
             pdf.roundRect(box_left, box_bottom_page, box_width, box_height_page, radius)
-            page_records = [records[i] for i in page_info["global_indices"]]
+            page_records = []
+            for local_idx, i in enumerate(page_info["global_indices"]):
+                rec = dict(records[i])
+                rec["row_height"] = page_rh[local_idx]
+                page_records.append(rec)
             page_orig = [original_indices[i] for i in page_info["global_indices"]]
             _draw_flow_chart(
                 pdf, box_left, box_bottom_page, box_width, box_height_page,
@@ -2378,7 +2421,11 @@ def _draw_diagram_section(pdf, page_width_points: float, page_height_points: flo
         pdf.setStrokeColor(colors.HexColor("#d9d9d9"))
         pdf.setLineWidth(1)
         pdf.roundRect(box_left, box_bottom, box_width, box_height, radius)
-        page_records = [records[i] for i in page_info["global_indices"]]
+        page_records = []
+        for local_idx, i in enumerate(page_info["global_indices"]):
+            rec = dict(records[i])
+            rec["row_height"] = page_rh[local_idx]
+            page_records.append(rec)
         page_orig = [original_indices[i] for i in page_info["global_indices"]]
         _draw_flow_chart(
             pdf, box_left, box_bottom, box_width, box_height,

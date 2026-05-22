@@ -68,6 +68,7 @@ def handle_traceability_routes(event: Dict[str, Any], data: Dict[str, Any], **pa
         body = data or {}
         source_transport_ids = body.get("source_transport_ids") or []
         source_group_ids = body.get("source_group_ids") or []
+        consolidation_point_candidate_ids = body.get("consolidation_point_candidate_ids") or []
         requests_list = body.get("requests") or []
         if (not source_transport_ids and not source_group_ids) or not requests_list:
             raise APIException(
@@ -81,6 +82,7 @@ def handle_traceability_routes(event: Dict[str, Any], data: Dict[str, Any], **pa
             requests=requests_list,
             organization_id=current_user_organization_id,
             current_user_id=current_user_id,
+            consolidation_point_candidate_ids=consolidation_point_candidate_ids,
         )
         return {"message": "Transports consolidated", "data": result}
 

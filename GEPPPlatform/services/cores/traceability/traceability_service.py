@@ -2013,6 +2013,7 @@ class TraceabilityService:
         organization_id: int,
         current_user_id: int,
         source_group_ids: Optional[List[Any]] = None,
+        consolidation_point_candidate_ids: Optional[List[Any]] = None,
     ) -> Dict[str, Any]:
         """
         Merge N arrived TransportTransactions into one (or more, one per request)
@@ -2065,6 +2066,13 @@ class TraceabilityService:
             )
         if not isinstance(requests, list) or not requests:
             raise APIException("requests must be a non-empty list", 400, "INVALID_REQUEST")
+
+        allowed_consolidation_point_ids: set[int] = set()
+        for cid in consolidation_point_candidate_ids or []:
+            try:
+                allowed_consolidation_point_ids.add(int(cid))
+            except (TypeError, ValueError):
+                continue
 
         normalised_source_ids: List[int] = []
         for sid in source_transport_ids:
@@ -2500,20 +2508,12 @@ class TraceabilityService:
                         400,
                         "INVALID_REQUEST",
                     )
-            if destination_id_val is not None:
-                source_location_ids = set()
-                for src, _w in transport_contribs:
-                    if src.destination_id is not None:
-                        source_location_ids.add(int(src.destination_id))
-                for g, _w in group_contribs:
-                    if g.origin_id is not None:
-                        source_location_ids.add(int(g.origin_id))
-                if destination_id_val in source_location_ids:
-                    raise APIException(
-                        "Consolidation point cannot be one of the selected source locations",
-                        400,
-                        "CONSOLIDATION_POINT_IS_SOURCE",
-                    )
+            # A consolidation point may intentionally be one of the selected
+            # source locations, e.g. consolidating floors into the same
+            # building. The consumed source groups/transports are removed from
+            # future pickable sources, and consolidated result transports are
+            # excluded from the consolidate picker, so this no longer creates
+            # the old re-consolidation loop.
 
             disposal_method_val = (req.get("disposal_method") or "").strip() or None
             # Consolidation produces an "arrived" transport with arrival_date=now.
