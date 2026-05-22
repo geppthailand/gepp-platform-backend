@@ -156,15 +156,14 @@ def _safe(s):
 
 
 def _fmt_num(value):
-    """Format a number with comma as thousand separator. Non-numeric returns '-' or string."""
+    """Format a number with comma thousand separators and two decimals."""
     if value is None:
         return "-"
     try:
         n = float(value)
         if n != n:  # NaN
             return "-"
-        s = f"{n:,.2f}"
-        return s.rstrip("0").rstrip(".")  # 1,234.00 -> 1,234; 1,234.50 -> 1,234.5
+        return f"{n:,.2f}"
     except (TypeError, ValueError):
         return str(value) if value != "" else "-"
 
@@ -2400,10 +2399,10 @@ _DIRECTED_METHODS = {
 
 
 def _compute_card_values_from_hierarchy(hierarchy_data: list, traceability_data: list | None = None) -> list:
-    """Compute cards from origin-side weights, matching the traceability cards."""
+    """Compute cards from hierarchy leaves, matching the traceability cards."""
     treatment_w = 0.0
     disposal_w = 0.0
-    managed_w = 0.0
+    in_progress_w = 0.0
     total_quantity = 0.0
     hierarchy_group_ids = set()
 
@@ -2427,7 +2426,7 @@ def _compute_card_values_from_hierarchy(hierarchy_data: list, traceability_data:
         return round(total, 2)
 
     def _sum_leaves(nodes):
-        nonlocal treatment_w, disposal_w
+        nonlocal treatment_w, disposal_w, in_progress_w
         for t in nodes:
             if not isinstance(t, dict):
                 continue
@@ -2437,9 +2436,10 @@ def _compute_card_values_from_hierarchy(hierarchy_data: list, traceability_data:
             else:
                 status = t.get("status") or ""
                 method = t.get("disposal_method") or ""
-                if status != "arrived" or not method:
-                    continue
                 w = float(t.get("weight") or 0)
+                if status != "arrived" or not method:
+                    in_progress_w += w
+                    continue
                 if method in _DIVERTED_METHODS:
                     treatment_w += w
                 elif method in _DIRECTED_METHODS:
@@ -2458,9 +2458,6 @@ def _compute_card_values_from_hierarchy(hierarchy_data: list, traceability_data:
             raw_w = float(group_node.get("weight") or group_node.get("total_weight_kg") or 0)
             origin_w = consolidated_w if consolidated_w > 0 else raw_w
             total_quantity += origin_w
-            # Hierarchy groups have at least one non-idle hop. Count the origin
-            # weight once, instead of terminal leaves that can split/recombine.
-            managed_w += origin_w
             _sum_leaves(group_node.get("children") or [])
 
     if isinstance(traceability_data, list) and traceability_data:
@@ -2478,7 +2475,7 @@ def _compute_card_values_from_hierarchy(hierarchy_data: list, traceability_data:
     total_waste = round(total_quantity, 2)
     total_treatment = round(treatment_w, 2)
     total_disposal = round(disposal_w, 2)
-    total_managed = round(managed_w, 2)
+    total_managed = round(in_progress_w, 2)
     return [total_waste, total_managed, total_treatment, total_disposal]
 
 
