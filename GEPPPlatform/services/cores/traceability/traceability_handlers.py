@@ -129,6 +129,7 @@ def handle_traceability_routes(event: Dict[str, Any], data: Dict[str, Any], **pa
             "language": language,
             "hierarchy": hierarchy_result["data"],
             "summary": summary_result.get("summary"),
+            "traceability_data": summary_result.get("data"),
             "date_from": query_params.get("date_from"),
             "date_to": query_params.get("date_to"),
         }

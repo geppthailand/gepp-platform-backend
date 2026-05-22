@@ -524,20 +524,14 @@ def _handle_overview_report(
         (oid, w, ghg, cat, record_to_group.get(rid))
         for oid, w, ghg, cat, rid in record_origins
     ]
-    group_ids = {gid for gid in record_to_group.values() if gid is not None}
+    group_ids = {gid for _, _, _, gid in record_weights if gid is not None}
 
     # 3-tier recycling rate calculation using traceability data
-    print(f"[RECYCLE_DEBUG] group_ids from mapping: {group_ids}")
-    print(f"[RECYCLE_DEBUG] total records: {len(record_weights)}, records with group_id: {sum(1 for _,_,_,g in record_weights if g is not None)}")
-
     group_leaf_data, group_completion = fetch_group_leaf_data(reports_service.db, group_ids)
-    print(f"[RECYCLE_DEBUG] group_leaf_data keys: {list(group_leaf_data.keys())}")
-    print(f"[RECYCLE_DEBUG] group_completion: {group_completion}")
     recyclable_waste, recyclable_ghg_reduction, _, traceability_fully_managed = compute_recycling_rate(
         record_weights, group_leaf_data, group_completion
     )
     recycle_rate = ((recyclable_waste / total_waste) * 100) if total_waste > 0 else 0.0
-    print(f"[RECYCLE_DEBUG] recyclable_waste={recyclable_waste}, total_waste={total_waste}, recycle_rate={recycle_rate}%, fully_managed={traceability_fully_managed}")
 
     # Build origin_waste_map using 3-tier recyclable logic
     origin_waste_map = {}
@@ -604,7 +598,8 @@ def _handle_overview_report(
         'key_indicators': {
             'total_waste': round(total_waste * 100) / 100,
             'recycle_rate': recycle_rate,
-            'ghg_reduction': round(ghg_reduction * 100) / 100,
+            'ghg_reduction': round(recyclable_ghg_reduction * 100) / 100,
+            'total_ghg_generated': round(ghg_reduction * 100) / 100,
         },
         'top_recyclables': top_recyclables,
         'overall_charts': {
@@ -916,6 +911,39 @@ def _handle_diversion_report(
                 leaves.append(n)
         return leaves
 
+    def _collect_subtree_consolidated_weight(node: dict) -> float:
+        total = 0.0
+
+        def walk(n: dict) -> None:
+            nonlocal total
+            if not isinstance(n, dict):
+                return
+            sources = n.get("consolidation_sources")
+            if isinstance(sources, list):
+                for source in sources:
+                    if isinstance(source, dict):
+                        total += float(source.get("contributed_weight") or 0)
+            for child in n.get("children") or []:
+                walk(child)
+
+        walk(node)
+        return round(total, 2)
+
+    def _add_consolidation_source_origins(node: dict) -> None:
+        if not isinstance(node, dict):
+            return
+        sources = node.get("consolidation_sources")
+        if isinstance(sources, list):
+            for source in sources:
+                if not isinstance(source, dict):
+                    continue
+                origin = source.get("source_origin") or {}
+                origin_id = origin.get("id") if isinstance(origin, dict) else None
+                if origin_id is not None:
+                    unique_origins.add(origin_id)
+        for child in node.get("children") or []:
+            _add_consolidation_source_origins(child)
+
     for origin_node in all_hierarchy:
         if not isinstance(origin_node, dict):
             continue
@@ -927,13 +955,15 @@ def _handle_diversion_report(
         for group_node in group_children:
             if not isinstance(group_node, dict):
                 continue
-            group_weight = float(group_node.get("weight") or group_node.get("total_weight_kg") or 0)
+            consolidated_weight = _collect_subtree_consolidated_weight(group_node)
+            group_weight = consolidated_weight if consolidated_weight > 0 else float(group_node.get("weight") or group_node.get("total_weight_kg") or 0)
             group_month = group_node.get("transaction_month")
             # Use the group's (original) material for sankey / material_table
             group_mat_info = group_node.get("material") or {}
             main_material_id = group_mat_info.get("main_material_id")
             category_id = group_mat_info.get("category_id")
             leaves = _get_leaves(group_node.get("children") or [])
+            _add_consolidation_source_origins(group_node)
 
             # Track category -> main_material mapping once per group
             if main_material_id is not None and category_id is not None:
@@ -1153,7 +1183,12 @@ def _handle_performance_report(
             (qty, uw, cat, mm, ghg, perf_record_to_group.get(rid))
             for qty, uw, cat, mm, ghg, rid in location_records_map[loc_id]
         ]
-    all_group_ids = set(perf_record_to_group.values())
+    all_group_ids = {
+        group_id
+        for records in location_records_map.values()
+        for *_prefix, group_id in records
+        if group_id is not None
+    }
 
     # Pre-fetch traceability leaf data for all groups across all locations (single query)
     perf_group_leaf_data, perf_group_completion = fetch_group_leaf_data(reports_service.db, all_group_ids)

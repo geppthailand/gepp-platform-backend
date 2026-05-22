@@ -156,15 +156,14 @@ def _safe(s):
 
 
 def _fmt_num(value):
-    """Format a number with comma as thousand separator. Non-numeric returns '-' or string."""
+    """Format a number with comma thousand separators and two decimals."""
     if value is None:
         return "-"
     try:
         n = float(value)
         if n != n:  # NaN
             return "-"
-        s = f"{n:,.2f}"
-        return s.rstrip("0").rstrip(".")  # 1,234.00 -> 1,234; 1,234.50 -> 1,234.5
+        return f"{n:,.2f}"
     except (TypeError, ValueError):
         return str(value) if value != "" else "-"
 
@@ -529,7 +528,16 @@ def _method_stack_height(disposal_methods: list) -> float:
     return sum(heights) + (len(heights) - 1) * gap
 
 
-def _build_chart_rows(hierarchy_data: list, data: dict = None):
+def _has_consolidation_transport(node: dict) -> bool:
+    if not isinstance(node, dict):
+        return False
+    cs = node.get("consolidation_sources")
+    if isinstance(cs, list) and len(cs) > 0:
+        return True
+    return any(_has_consolidation_transport(child) for child in (node.get("children") or []))
+
+
+def _build_chart_rows(hierarchy_data: list, data: dict = None, skip_consolidated: bool = False):
     """Build flat rows and origin-groups from hierarchy data for the flow chart.
     Returns (rows, groups) where rows is a flat list of dicts and groups is a list of lists of indices (grouped by origin).
     """
@@ -542,6 +550,8 @@ def _build_chart_rows(hierarchy_data: list, data: dict = None):
         group_indices = []
         for group_node in origin_node.get("children") or []:
             if not isinstance(group_node, dict):
+                continue
+            if skip_consolidated and _has_consolidation_transport(group_node):
                 continue
             idx = len(rows)
             group_indices.append(idx)
@@ -601,7 +611,7 @@ def _draw_flow_chart(
     inner_pad = _FLOW_INNER_PAD
     col_gap = 0.12 * inch
     row_gap = _FLOW_ROW_GAP
-    n_cols = 4
+    n_cols = 3
     usable_width = box_width - 2 * inner_pad - (n_cols - 1) * col_gap
     col_w = usable_width / n_cols
     shrink_rest = 0.4 * inch
@@ -644,7 +654,7 @@ def _draw_flow_chart(
     cx0 = box_left + inner_pad
     cx1 = box_left + inner_pad + col_w0 + col_gap_plus
     cx2 = cx1 + col_w_rest + col_gap_plus
-    cx3 = cx2 + col_w_rest + col_gap_plus
+    cx3 = cx2
     x_end0 = cx0 + col_w0
     x_junction = (x_end0 + cx1) / 2
     x_start1 = cx1
@@ -793,49 +803,7 @@ def _draw_flow_chart(
                 ptw = pdf.stringWidth(pill_text, "Helvetica-Bold", 7)
             pdf.drawString(pill_x + (pill_w - ptw) / 2, pill_y_m + 0.07 * inch, pill_text)
 
-            # --- Column 2: Delivered By (per group, height fits content) ---
-            transit_info_list = rec.get("transit_info") or []
-            n_info = len(transit_info_list)
-            max_display = min(n_info, 8)
-            has_overflow = n_info > max_display
-            line_spacing_t = 0.12 * inch
-            top_pad_t = 0.20 * inch
-            bottom_pad_t = 0.20 * inch
-            title_gap_t = 0.16 * inch
-            if max_display > 0:
-                n_lines = max_display + (1 if has_overflow else 0)
-                content_h = title_gap_t + (n_lines - 1) * line_spacing_t
-                transit_card_h = top_pad_t + content_h + bottom_pad_t
-            else:
-                transit_card_h = 0.35 * inch
-            transit_card_y = mid_y - transit_card_h / 2
-            pdf.setFillColor(fill_white)
-            pdf.setStrokeColor(stroke_orange)
-            pdf.setLineWidth(0.5)
-            pdf.roundRect(cx2, transit_card_y, col_w_rest, transit_card_h, node_radius)
-            pdf.setFillColor(stroke_orange)
-            try:
-                pdf.setFont("IBMPlexSansThai-Bold", 7)
-            except Exception:
-                pdf.setFont("Helvetica-Bold", 7)
-            transit_title = _t('deliverer', data or {})
-            title_y_t = transit_card_y + transit_card_h - top_pad_t
-            pdf.drawString(cx2 + 0.08 * inch, title_y_t, transit_title)
-            if max_display > 0:
-                try:
-                    pdf.setFont("IBMPlexSansThai-Regular", 6)
-                except Exception:
-                    pdf.setFont("Helvetica", 6)
-                pdf.setFillColor(colors.HexColor("#595959"))
-                line_y_t = title_y_t - title_gap_t
-                for ti in range(max_display):
-                    pdf.drawString(cx2 + 0.08 * inch, line_y_t, f"\u2022 {_safe(transit_info_list[ti])[:28]}")
-                    line_y_t -= line_spacing_t
-                if has_overflow:
-                    pdf.setFillColor(colors.HexColor("#999999"))
-                    pdf.drawString(cx2 + 0.08 * inch, line_y_t, f"+{n_info - max_display} {_t('more', data or {})}")
-
-            # --- Column 3: Disposal Method(s) ---
+            # --- Column 2: Disposal Method(s) ---
             disposal_methods = rec.get("disposal_methods") or []
             status_border = colors.HexColor("#a4e1af")
             status_text_color = colors.HexColor("#7bbfa5")
@@ -981,7 +949,7 @@ def _draw_flow_chart(
                     pdf.drawString(pill_x_s + (pill_w_s - pw) / 2, pill_y_s + 0.04 * inch, pct_text)
 
                 if n_methods > 1:
-                    x_junc_s = (x_end2 + cx3) / 2
+                    x_junc_s = (x_end1 + cx3) / 2
                     pdf.setStrokeColor(stroke_green)
                     pdf.setLineWidth(0.8)
                     pdf.line(x_junc_s, method_mid_ys[-1], x_junc_s, method_mid_ys[0])
@@ -995,25 +963,24 @@ def _draw_flow_chart(
                         else:
                             pdf.line(x_junc_s, m_mid, cx3, m_mid)
 
-            # --- Connector lines: Material -> Delivered By -> Status ---
+            # --- Connector lines: Material -> Status ---
             pdf.setStrokeColor(stroke_green)
             pdf.setLineWidth(0.8)
-            pdf.line(x_end1, mid_y, x_start2, mid_y)
             if not disposal_methods:
                 pdf.setStrokeColor(stroke_grey)
                 pdf.setDash(3, 3)
-                pdf.line(x_end2, mid_y, x_start3, mid_y)
+                pdf.line(x_end1, mid_y, cx3, mid_y)
                 pdf.setDash()
             elif len(disposal_methods) == 1:
                 if disposal_methods[0].get("pending"):
                     pdf.setStrokeColor(stroke_grey)
                     pdf.setDash(3, 3)
-                    pdf.line(x_end2, mid_y, cx3, mid_y)
+                    pdf.line(x_end1, mid_y, cx3, mid_y)
                     pdf.setDash()
                 else:
-                    pdf.line(x_end2, mid_y, cx3, mid_y)
+                    pdf.line(x_end1, mid_y, cx3, mid_y)
             else:
-                pdf.line(x_end2, mid_y, x_junc_s, mid_y)
+                pdf.line(x_end1, mid_y, x_junc_s, mid_y)
 
 
 # Item details table: full hierarchy tree
@@ -1046,6 +1013,638 @@ def _loc_name(loc) -> str:
     if not isinstance(loc, dict):
         return "-"
     return _safe(loc.get("display_name") or loc.get("name_en") or loc.get("name_th") or "-")
+
+
+def _node_material_name(node: dict, lang: str) -> str:
+    if not isinstance(node, dict):
+        return "-"
+    mat = node.get("material") or {}
+    if isinstance(mat, str):
+        return _safe(mat) or "-"
+    if not isinstance(mat, dict):
+        return "-"
+    return _safe(mat.get(f"name_{lang}") or mat.get("name_th") or mat.get("name_en") or "-")
+
+
+def _parse_meta(node: dict) -> dict:
+    meta = node.get("meta_data") if isinstance(node, dict) else {}
+    if isinstance(meta, str):
+        try:
+            import json as _json
+            meta = _json.loads(meta)
+        except Exception:
+            meta = {}
+    return meta if isinstance(meta, dict) else {}
+
+
+def _delivered_by(node: dict) -> str:
+    meta = _parse_meta(node)
+    raw_m = meta.get("messenger_info")
+    if isinstance(raw_m, str):
+        m_name = raw_m
+    elif isinstance(raw_m, dict):
+        m_name = raw_m.get("name") or raw_m.get("messenger_name") or ""
+    else:
+        m_name = ""
+    raw_v = meta.get("vehicle_info")
+    if isinstance(raw_v, str):
+        v_plate = raw_v
+    elif isinstance(raw_v, dict):
+        v_plate = raw_v.get("license_plate") or raw_v.get("plate") or raw_v.get("name") or ""
+    else:
+        v_plate = ""
+    if m_name and v_plate:
+        return f"{m_name} ({v_plate})"
+    return m_name or v_plate or "-"
+
+
+def _status_label(node: dict, lang: str) -> str:
+    status = str(node.get("status") or "").lower() if isinstance(node, dict) else ""
+    has_disposal = bool(node.get("disposal_method")) if isinstance(node, dict) else False
+    if lang == "th":
+        if status == "arrived" and has_disposal:
+            return "เสร็จสิ้น"
+        if status == "arrived":
+            return "มาถึงแล้ว"
+        if status == "in_transit":
+            return "อยู่ระหว่างขนส่ง"
+        if status == "idle":
+            return "รอจัดส่งต่อ"
+    else:
+        if status == "arrived" and has_disposal:
+            return "Completed"
+        if status == "arrived":
+            return "Arrived"
+        if status == "in_transit":
+            return "In transit"
+        if status == "idle":
+            return "Processing"
+    return status or "-"
+
+
+def _extract_consolidation_batches(hierarchy_data: list, data: dict = None) -> list:
+    """Mirror the frontend extraction: one batch per consolidation point."""
+    lang = (data or {}).get("language", "th") or "th"
+    by_batch = {}
+    order = []
+
+    def _source_name(src_origin: dict) -> str:
+        if not isinstance(src_origin, dict):
+            return ""
+        return (
+            src_origin.get(f"name_{lang}")
+            or src_origin.get("display_name")
+            or src_origin.get("name_th")
+            or src_origin.get("name_en")
+            or ""
+        )
+
+    def _fallback_batch_name(node: dict) -> str:
+        origin = node.get("origin") if isinstance(node, dict) else {}
+        return _loc_name(origin)
+
+    def _walk(node: dict) -> None:
+        if not isinstance(node, dict):
+            return
+        sources_raw = node.get("consolidation_sources")
+        meta = _parse_meta(node)
+        batch_name = meta.get("batch_origin_name") or _fallback_batch_name(node)
+        if batch_name and isinstance(sources_raw, list) and sources_raw:
+            lane_sources = []
+            lane_weight = 0.0
+            for src in sources_raw:
+                if not isinstance(src, dict):
+                    continue
+                w = float(src.get("contributed_weight") or 0)
+                lane_weight += w
+                src_origin = src.get("source_origin") or {}
+                name = _source_name(src_origin)
+                if name:
+                    lane_sources.append({
+                        "id": src_origin.get("id") if isinstance(src_origin, dict) else None,
+                        "name": _safe(name),
+                        "path": src_origin.get("path") if isinstance(src_origin, dict) else None,
+                        "contributed_weight": w,
+                    })
+            transport_weight = float(node.get("weight") or lane_weight or 0)
+            batch = by_batch.get(batch_name)
+            if batch is None:
+                batch = {
+                    "batchName": _safe(batch_name),
+                    "allSources": [],
+                    "lanes": [],
+                    "totalWeight": 0.0,
+                }
+                by_batch[batch_name] = batch
+                order.append(batch_name)
+            batch["lanes"].append({
+                "transport": node,
+                "material_name": _node_material_name(node, lang),
+                "material_id": (node.get("material") or {}).get("id") if isinstance(node.get("material"), dict) else None,
+                "weight": transport_weight,
+                "sources": lane_sources,
+            })
+            batch["totalWeight"] += transport_weight
+            seen = {s.get("id") if s.get("id") is not None else f"name:{s.get('name')}" for s in batch["allSources"]}
+            for src in lane_sources:
+                key = src.get("id") if src.get("id") is not None else f"name:{src.get('name')}"
+                if key not in seen:
+                    batch["allSources"].append(src)
+                    seen.add(key)
+        for child in node.get("children") or []:
+            _walk(child)
+
+    for root in hierarchy_data or []:
+        _walk(root)
+    return [by_batch[k] for k in order]
+
+
+def _draw_text_fit(pdf, text: str, x: float, y: float, max_width: float, font: str, size: float, color) -> None:
+    display = _safe(text)
+    pdf.setFillColor(color)
+    try:
+        pdf.setFont(font, size)
+    except Exception:
+        font = "Helvetica-Bold" if "Bold" in font else "Helvetica"
+        pdf.setFont(font, size)
+    try:
+        while display and pdf.stringWidth(display, font, size) > max_width:
+            display = display[:-1]
+    except Exception:
+        display = display[:24]
+    if display != _safe(text):
+        display = display.rstrip(". ") + "..."
+    pdf.drawString(x, y, display)
+
+
+def _draw_centered_text_fit(pdf, text: str, center_x: float, y: float, max_width: float, font: str, size: float, color) -> None:
+    display = _safe(text)
+    try:
+        pdf.setFont(font, size)
+    except Exception:
+        font = "Helvetica-Bold" if "Bold" in font else "Helvetica"
+        pdf.setFont(font, size)
+    try:
+        while display and pdf.stringWidth(display, font, size) > max_width:
+            display = display[:-1]
+    except Exception:
+        display = display[:24]
+    if display != _safe(text):
+        display = display.rstrip(". ") + "..."
+    try:
+        text_w = pdf.stringWidth(display, font, size)
+    except Exception:
+        text_w = len(display) * size * 0.45
+    pdf.setFillColor(color)
+    pdf.drawString(center_x - text_w / 2, y, display)
+
+
+def _draw_wrapped_text_fit(
+    pdf,
+    text: str,
+    x: float,
+    center_y: float,
+    max_width: float,
+    font: str,
+    size: float,
+    color,
+    max_lines: int = 2,
+) -> None:
+    """Draw bounded text with word wrapping, falling back to character breaks for long tokens/Thai."""
+    raw = _safe(text) or "-"
+    try:
+        pdf.setFont(font, size)
+    except Exception:
+        font = "Helvetica-Bold" if "Bold" in font else "Helvetica"
+        pdf.setFont(font, size)
+
+    def width(s: str) -> float:
+        try:
+            return pdf.stringWidth(s, font, size)
+        except Exception:
+            return len(s) * size * 0.45
+
+    def clip_line(s: str) -> str:
+        if width(s) <= max_width:
+            return s
+        suffix = "..."
+        base = s
+        while base and width(base + suffix) > max_width:
+            base = base[:-1]
+        return (base.rstrip() + suffix) if base else suffix
+
+    tokens = raw.split()
+    if len(tokens) <= 1:
+        # Thai and long location names often have no useful spaces. Break by
+        # character so they stay inside the location column instead of bleeding
+        # into the material column.
+        tokens = list(raw)
+        joiner = ""
+    else:
+        joiner = " "
+
+    lines = []
+    current = ""
+    for token in tokens:
+        candidate = token if not current else current + joiner + token
+        if width(candidate) <= max_width:
+            current = candidate
+            continue
+        if current:
+            lines.append(current)
+            current = token
+        else:
+            current = token
+        if len(lines) >= max_lines:
+            break
+    if current and len(lines) < max_lines:
+        lines.append(current)
+    if not lines:
+        lines = [raw]
+
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+    consumed = "".join(lines) if joiner == "" else " ".join(lines)
+    if len(consumed) < len(raw):
+        lines[-1] = clip_line(lines[-1] + raw[len(consumed):])
+    else:
+        lines[-1] = clip_line(lines[-1])
+
+    line_gap = size * 1.16
+    first_y = center_y + ((len(lines) - 1) * line_gap / 2) - size * 0.34
+    pdf.setFillColor(color)
+    for i, line in enumerate(lines):
+        pdf.drawString(x, first_y - i * line_gap, line)
+
+
+def _draw_weight_pill(pdf, x: float, y: float, text: str, bg_color, width: float = None, text_color=colors.white) -> float:
+    try:
+        pdf.setFont("IBMPlexSansThai-Bold", 8)
+        text_w = pdf.stringWidth(text, "IBMPlexSansThai-Bold", 8)
+    except Exception:
+        pdf.setFont("Helvetica-Bold", 8)
+        text_w = pdf.stringWidth(text, "Helvetica-Bold", 8)
+    pill_w = width or max(0.48 * inch, text_w + 0.16 * inch)
+    pill_h = 0.18 * inch
+    pdf.setFillColor(bg_color)
+    pdf.roundRect(x, y, pill_w, pill_h, pill_h / 2, fill=1, stroke=0)
+    pdf.setFillColor(text_color)
+    pdf.drawString(x + (pill_w - text_w) / 2, y + 0.055 * inch, text)
+    return pill_w
+
+
+def _draw_soft_shadow(pdf, x: float, y: float, w: float, h: float, radius: float, alpha: float = 0.08) -> None:
+    """Very light depth cue; avoid PDF alpha because Lambda renderers can flatten it to black."""
+    pdf.saveState()
+    pdf.setFillColor(colors.HexColor("#f7f8f7"))
+    pdf.setStrokeColor(colors.HexColor("#eef1ef"))
+    pdf.setLineWidth(0.25)
+    pdf.roundRect(x + 0.012 * inch, y - 0.012 * inch, w, h, radius, fill=1, stroke=0)
+    pdf.restoreState()
+
+
+def _draw_pin_icon(pdf, cx: float, cy: float, color) -> None:
+    pdf.saveState()
+    pdf.setStrokeColor(color)
+    pdf.setLineWidth(1.1)
+    r = 0.045 * inch
+    pdf.circle(cx, cy + 0.018 * inch, r, fill=0, stroke=1)
+    pdf.circle(cx, cy + 0.018 * inch, r * 0.35, fill=0, stroke=1)
+    pdf.line(cx - r * 0.42, cy - r * 0.60, cx, cy - r * 1.25)
+    pdf.line(cx + r * 0.42, cy - r * 0.60, cx, cy - r * 1.25)
+    pdf.restoreState()
+
+
+def _draw_merge_icon(pdf, cx: float, cy: float, radius: float, color) -> None:
+    _draw_soft_shadow(pdf, cx - radius, cy - radius, radius * 2, radius * 2, radius, alpha=0.14)
+    pdf.setFillColor(color)
+    pdf.circle(cx, cy, radius, fill=1, stroke=0)
+    pdf.saveState()
+    pdf.setStrokeColor(colors.white)
+    pdf.setLineWidth(1.5)
+    arm = radius * 0.44
+    wing = radius * 0.18
+    for sx, sy in [(-1, -1), (-1, 1), (1, -1), (1, 1)]:
+        end_x = cx + sx * arm
+        end_y = cy + sy * arm
+        pdf.line(cx + sx * radius * 0.12, cy + sy * radius * 0.12, end_x, end_y)
+        pdf.line(end_x, end_y, end_x - sx * wing, end_y)
+        pdf.line(end_x, end_y, end_x, end_y - sy * wing)
+    pdf.restoreState()
+
+
+def _draw_dashed_card_border(pdf, x: float, y: float, w: float, h: float, radius: float, color) -> None:
+    """Draw a stable dashed rounded-card border without ReportLab roundRect dash artifacts."""
+    inset = 0.015 * inch
+    x0 = x + inset
+    y0 = y + inset
+    x1 = x + w - inset
+    y1 = y + h - inset
+    r = min(radius * 0.72, (x1 - x0) / 4, (y1 - y0) / 4)
+    pdf.saveState()
+    pdf.setStrokeColor(color)
+    pdf.setLineWidth(0.8)
+    pdf.setDash(3, 2)
+    pdf.line(x0 + r, y1, x1 - r, y1)
+    pdf.line(x1, y1 - r, x1, y0 + r)
+    pdf.line(x1 - r, y0, x0 + r, y0)
+    pdf.line(x0, y0 + r, x0, y1 - r)
+    pdf.setDash()
+    # Tiny solid corner arcs keep the visual rounded while avoiding dashed arc glitches.
+    pdf.setLineWidth(0.6)
+    pdf.arc(x0, y1 - 2 * r, x0 + 2 * r, y1, 90, 90)
+    pdf.arc(x1 - 2 * r, y1 - 2 * r, x1, y1, 0, 90)
+    pdf.arc(x1 - 2 * r, y0, x1, y0 + 2 * r, 270, 90)
+    pdf.arc(x0, y0, x0 + 2 * r, y0 + 2 * r, 180, 90)
+    pdf.restoreState()
+
+
+def _terminal_style(method_en: str, pending: bool = False) -> dict:
+    if pending:
+        return {
+            "accent": colors.HexColor("#b8b8b8"),
+            "border": colors.HexColor("#cfcfcf"),
+            "title": colors.HexColor("#8c8c8c"),
+            "pill": colors.HexColor("#cfcfcf"),
+        }
+    if method_en in _DIRECTED_METHODS:
+        return {
+            "accent": colors.HexColor("#ef6f6c"),
+            "border": colors.HexColor("#ff8c8c"),
+            "title": colors.HexColor("#ef6f6c"),
+            "pill": colors.HexColor("#ef6f6c"),
+        }
+    if method_en in _DIVERTED_METHODS:
+        return {
+            "accent": colors.HexColor("#8bbcf4"),
+            "border": colors.HexColor("#c6dcf9"),
+            "title": colors.HexColor("#4f82d7"),
+            "pill": colors.HexColor("#c6dcf9"),
+        }
+    return {
+        "accent": colors.HexColor("#85BBAE"),
+        "border": colors.HexColor("#a9cfc0"),
+        "title": PRIMARY,
+        "pill": colors.HexColor("#85BBAE"),
+    }
+
+
+def _collect_terminal_nodes(node: dict, lang: str, material_override: str = None) -> list:
+    """Collapse a transport chain to its terminal leaves, skipping middlemen."""
+    if not isinstance(node, dict):
+        return []
+    children = [c for c in (node.get("children") or []) if isinstance(c, dict)]
+    if not children:
+        method_en = node.get("disposal_method") or ""
+        method_label = _translate_method(method_en, lang) if method_en else ("รอจัดส่งต่อ" if lang == "th" else "Awaiting delivery")
+        return [{
+            "weight": float(node.get("weight") or 0),
+            "material": material_override or _node_material_name(node, lang),
+            "destination": _loc_name(node.get("destination")),
+            "origin": _loc_name(node.get("origin")),
+            "method": method_label,
+            "method_en": method_en,
+            "pending": not bool(method_en),
+        }]
+
+    leaves = []
+    for child in children:
+        if child.get("destination") is None:
+            group_material = _node_material_name(child, lang)
+            for grand in child.get("children") or []:
+                leaves.extend(_collect_terminal_nodes(grand, lang, group_material))
+        else:
+            leaves.extend(_collect_terminal_nodes(child, lang, material_override))
+    return leaves
+
+
+def _build_terminal_groups(batch: dict, data: dict) -> list:
+    lang = (data or {}).get("language", "th") or "th"
+    groups = []
+    lanes = sorted(batch.get("lanes") or [], key=lambda l: float(l.get("weight") or 0), reverse=True)
+    for lane in lanes:
+        transport = lane.get("transport") or {}
+        leaves = _collect_terminal_nodes(transport, lang, lane.get("material_name"))
+        if not leaves:
+            leaves = [{
+                "weight": float(lane.get("weight") or 0),
+                "material": lane.get("material_name") or "-",
+                "destination": "-",
+                "origin": batch.get("batchName") or "-",
+                "method": "-",
+                "method_en": "",
+                "pending": True,
+            }]
+        groups.append({"lane": lane, "leaves": leaves})
+    return groups or [{"lane": {"material_name": _t("no_data", data), "weight": 0}, "leaves": []}]
+
+
+def _paginate_terminal_groups(groups: list, max_rows: int) -> list:
+    max_rows = max(1, max_rows)
+    pages = []
+    current = []
+    current_rows = 0
+    for group in groups:
+        leaves = group.get("leaves") or []
+        if not leaves:
+            leaves = [{}]
+        start = 0
+        while start < len(leaves):
+            remaining = max_rows - current_rows
+            if remaining <= 0:
+                pages.append(current)
+                current = []
+                current_rows = 0
+                remaining = max_rows
+            take = min(remaining, len(leaves) - start)
+            current.append({"lane": group.get("lane") or {}, "leaves": leaves[start:start + take]})
+            current_rows += take
+            start += take
+            if current_rows >= max_rows:
+                pages.append(current)
+                current = []
+                current_rows = 0
+    if current:
+        pages.append(current)
+    return pages or [[]]
+
+
+def _draw_consolidation_batch_flow(pdf, box_left: float, box_bottom: float, box_width: float, box_height: float, batch: dict, data: dict, terminal_groups: list = None) -> None:
+    lang = (data or {}).get("language", "th") or "th"
+    kg = _t("kg", data or {})
+    line_color = colors.HexColor("#9bcabe")
+    batch_color = colors.HexColor("#2f6b53")
+    primary = PRIMARY
+    border = colors.HexColor("#dedede")
+    text_dark = colors.HexColor("#262626")
+    muted = colors.HexColor("#8c8c8c")
+    bg_batch = colors.HexColor("#f3faf6")
+
+    left_w = 2.03 * inch
+    center_w = 1.86 * inch
+    material_w = 1.44 * inch
+    terminal_w = 2.72 * inch
+    gap = 0.20 * inch
+    diagram_w = left_w + center_w + material_w + terminal_w + 3 * gap
+    left_x = box_left + max(0.16 * inch, (box_width - diagram_w) / 2)
+    center_x = left_x + left_w + gap
+    material_x = center_x + center_w + gap
+    terminal_x = material_x + material_w + gap
+    center_y = box_bottom + box_height / 2
+
+    sources = sorted(batch.get("allSources") or [], key=lambda s: float(s.get("contributed_weight") or 0), reverse=True)
+    visible_sources = sources[:10]
+    overflow_sources = sources[10:]
+    if overflow_sources:
+        visible_sources.append({
+            "name": f"+{len(overflow_sources)} {_t('more', data or {})}",
+            "contributed_weight": sum(float(s.get("contributed_weight") or 0) for s in overflow_sources),
+            "overflow": True,
+        })
+    visible_groups = terminal_groups if terminal_groups is not None else _build_terminal_groups(batch, data)
+
+    row_h = 0.25 * inch
+    row_gap = 0.07 * inch
+    source_count = max(1, len(visible_sources))
+    source_stack_h = source_count * row_h + max(0, source_count - 1) * row_gap
+    source_top = center_y + source_stack_h / 2
+    source_mids = []
+    for i, src in enumerate(visible_sources or [{"name": _t("no_data", data), "contributed_weight": 0}]):
+        y = source_top - (i + 1) * row_h - i * row_gap
+        source_mids.append(y + row_h / 2)
+        _draw_soft_shadow(pdf, left_x, y, left_w, row_h, 0.06 * inch, alpha=0.045)
+        pdf.setFillColor(colors.HexColor("#ffffff") if not src.get("overflow") else colors.HexColor("#f4faf6"))
+        if src.get("overflow"):
+            pdf.setDash(3, 2)
+            pdf.setStrokeColor(colors.HexColor("#b7d6ca"))
+        else:
+            pdf.setStrokeColor(colors.HexColor("#eeeeee"))
+        pdf.setLineWidth(0.6)
+        pdf.roundRect(left_x, y, left_w, row_h, 0.06 * inch, fill=1, stroke=1)
+        pdf.setDash()
+        _draw_pin_icon(pdf, left_x + 0.18 * inch, y + row_h / 2, batch_color if src.get("overflow") else primary)
+        _draw_text_fit(pdf, src.get("name") or "-", left_x + 0.34 * inch, y + 0.078 * inch, left_w - 0.96 * inch, "IBMPlexSansThai-Regular", 7.5, batch_color if src.get("overflow") else text_dark)
+        weight_text = f"{_fmt_num(src.get('contributed_weight'))}{kg}"
+        _draw_text_fit(pdf, weight_text, left_x + left_w - 0.68 * inch, y + 0.078 * inch, 0.59 * inch, "IBMPlexSansThai-Bold", 6.7, batch_color if src.get("overflow") else muted)
+
+    center_h = 1.12 * inch
+    center_bottom = center_y - center_h / 2
+    _draw_soft_shadow(pdf, center_x, center_bottom, center_w, center_h, 0.10 * inch, alpha=0.06)
+    pdf.setFillColor(bg_batch)
+    pdf.setStrokeColor(bg_batch)
+    pdf.setLineWidth(0.1)
+    pdf.roundRect(center_x, center_bottom, center_w, center_h, 0.10 * inch, fill=1, stroke=0)
+    _draw_dashed_card_border(pdf, center_x, center_bottom, center_w, center_h, 0.10 * inch, batch_color)
+    card_cx = center_x + center_w / 2
+    _draw_merge_icon(pdf, card_cx, center_bottom + center_h - 0.28 * inch, 0.145 * inch, primary)
+    _draw_centered_text_fit(pdf, batch.get("batchName") or "-", card_cx, center_bottom + 0.43 * inch, center_w - 0.24 * inch, "IBMPlexSansThai-Bold", 9.4, text_dark)
+    total_text = f"{_fmt_num(batch.get('totalWeight'))} {kg}"
+    pill_width = 0.86 * inch
+    pill_x = card_cx - pill_width / 2
+    pill_w = _draw_weight_pill(
+        pdf,
+        pill_x,
+        center_bottom + 0.23 * inch,
+        total_text,
+        colors.HexColor("#ffffff"),
+        width=pill_width,
+        text_color=primary,
+    )
+    pdf.setStrokeColor(colors.HexColor("#a9cfc0"))
+    pdf.setLineWidth(0.6)
+    pdf.roundRect(pill_x, center_bottom + 0.23 * inch, pill_w, 0.18 * inch, 0.09 * inch, fill=0, stroke=1)
+    _draw_centered_text_fit(pdf, _t("total_weight", data), card_cx, center_bottom + 0.09 * inch, center_w - 0.24 * inch, "IBMPlexSansThai-Regular", 6.4, muted)
+
+    terminal_h = 0.50 * inch
+    terminal_gap = 0.10 * inch
+    row_count = sum(max(1, len(g.get("leaves") or [])) for g in visible_groups)
+    row_stack_h = row_count * terminal_h + max(0, row_count - 1) * terminal_gap
+    row_top = center_y + row_stack_h / 2
+    row_cursor = row_top
+    material_mids = []
+    material_right = material_x + material_w
+    terminal_mids = []
+
+    for group in visible_groups:
+        lane = group.get("lane") or {}
+        leaves = group.get("leaves") or [{}]
+        group_mids = []
+        for leaf in leaves:
+            y = row_cursor - terminal_h
+            mid_y = y + terminal_h / 2
+            group_mids.append(mid_y)
+            terminal_mids.append(mid_y)
+            row_cursor = y - terminal_gap
+
+            style = _terminal_style(leaf.get("method_en") or "", bool(leaf.get("pending")))
+            _draw_soft_shadow(pdf, terminal_x, y, terminal_w, terminal_h, 0.07 * inch, alpha=0.055)
+            pdf.setFillColor(colors.white)
+            pdf.setStrokeColor(style["border"])
+            pdf.setLineWidth(0.65)
+            pdf.roundRect(terminal_x, y, terminal_w, terminal_h, 0.07 * inch, fill=1, stroke=1)
+            pdf.setFillColor(style["accent"])
+            pdf.roundRect(terminal_x, y, 0.10 * inch, terminal_h, 0.07 * inch, fill=1, stroke=0)
+            pdf.rect(terminal_x + 0.07 * inch, y, 0.04 * inch, terminal_h, fill=1, stroke=0)
+
+            pill_w_leaf = 0.76 * inch
+            pill_x_leaf = terminal_x + terminal_w - pill_w_leaf - 0.12 * inch
+            _draw_text_fit(pdf, leaf.get("material") or "-", terminal_x + 0.22 * inch, y + terminal_h - 0.16 * inch, pill_x_leaf - terminal_x - 0.30 * inch, "IBMPlexSansThai-Regular", 7.5, style["title"])
+            _draw_weight_pill(pdf, pill_x_leaf, y + terminal_h - 0.23 * inch, f"{_fmt_num(leaf.get('weight'))} {kg}", style["pill"], width=pill_w_leaf)
+            _draw_text_fit(pdf, leaf.get("destination") or "-", terminal_x + 0.22 * inch, y + 0.23 * inch, terminal_w - 0.42 * inch, "IBMPlexSansThai-Bold", 8.2, style["title"])
+            _draw_text_fit(pdf, leaf.get("origin") or "-", terminal_x + 0.22 * inch, y + 0.08 * inch, 1.22 * inch, "IBMPlexSansThai-Regular", 5.8, colors.HexColor("#b0b0b0"))
+            _draw_text_fit(pdf, leaf.get("method") or "-", terminal_x + terminal_w - 0.95 * inch, y + 0.08 * inch, 0.82 * inch, "IBMPlexSansThai-Regular", 6.4, colors.HexColor("#8c8c8c"))
+
+        lane_mid = (group_mids[0] + group_mids[-1]) / 2
+        material_mids.append(lane_mid)
+        lane_h = 0.40 * inch
+        lane_y = lane_mid - lane_h / 2
+        _draw_soft_shadow(pdf, material_x, lane_y, material_w, lane_h, 0.07 * inch, alpha=0.055)
+        pdf.setFillColor(colors.white)
+        pdf.setStrokeColor(border)
+        pdf.setLineWidth(0.65)
+        pdf.roundRect(material_x, lane_y, material_w, lane_h, 0.07 * inch, fill=1, stroke=1)
+        pdf.setFillColor(colors.HexColor("#85BBAE"))
+        pdf.roundRect(material_x, lane_y, 0.09 * inch, lane_h, 0.07 * inch, fill=1, stroke=0)
+        pdf.rect(material_x + 0.06 * inch, lane_y, 0.04 * inch, lane_h, fill=1, stroke=0)
+        pill_w_lane = 0.68 * inch
+        pill_x_lane = material_x + material_w - pill_w_lane - 0.10 * inch
+        _draw_text_fit(pdf, lane.get("material_name") or "-", material_x + 0.20 * inch, lane_y + 0.145 * inch, pill_x_lane - material_x - 0.28 * inch, "IBMPlexSansThai-Regular", 7.2, colors.HexColor("#595959"))
+        _draw_weight_pill(pdf, pill_x_lane, lane_y + 0.11 * inch, f"{_fmt_num(lane.get('weight'))} {kg}", colors.HexColor("#85BBAE"), width=pill_w_lane)
+
+        pdf.setStrokeColor(line_color)
+        pdf.setLineWidth(0.75)
+        x_junc_leaf = (material_right + terminal_x) / 2
+        if len(group_mids) == 1:
+            pdf.line(material_right, lane_mid, terminal_x, lane_mid)
+        else:
+            pdf.line(material_right, lane_mid, x_junc_leaf, lane_mid)
+            pdf.line(x_junc_leaf, min(group_mids), x_junc_leaf, max(group_mids))
+            for mid_y in group_mids:
+                pdf.line(x_junc_leaf, mid_y, terminal_x, mid_y)
+
+    pdf.setStrokeColor(line_color)
+    pdf.setLineWidth(0.75)
+    left_end = left_x + left_w
+    center_left = center_x
+    center_right = center_x + center_w
+    material_start = material_x
+    card_gap = 0.035 * inch
+    if len(source_mids) == 1:
+        pdf.line(left_end, center_y, center_left - card_gap, center_y)
+    else:
+        junction_x = (left_end + center_left - card_gap) / 2
+        pdf.line(junction_x, min(source_mids), junction_x, max(source_mids))
+        for mid in source_mids:
+            pdf.line(left_end, mid, junction_x, mid)
+        pdf.line(junction_x, center_y, center_left - card_gap, center_y)
+    if len(material_mids) == 1:
+        pdf.line(center_right + card_gap, center_y, material_start, center_y)
+    else:
+        junction_x = (center_right + card_gap + material_start) / 2
+        pdf.line(center_right + card_gap, center_y, junction_x, center_y)
+        pdf.line(junction_x, min(material_mids), junction_x, max(material_mids))
+        for mid in material_mids:
+            pdf.line(junction_x, mid, material_start, mid)
 
 
 def _transport_status_key(t) -> str:
@@ -1346,6 +1945,222 @@ def _draw_item_details_table(
             need_title = True
 
 
+def _build_consolidation_detail_sections(hierarchy_data: list, data: dict = None) -> list:
+    lang = (data or {}).get("language", "th") or "th"
+    sections = []
+    for batch in _extract_consolidation_batches(hierarchy_data, data=data):
+        rows = []
+
+        def walk_transport(node: dict, depth: int, material_override: str = None) -> None:
+            if not isinstance(node, dict):
+                return
+            has_disposal = bool(node.get("disposal_method"))
+            rows.append({
+                "depth": depth,
+                "location": _loc_name(node.get("destination")),
+                "material": material_override or _node_material_name(node, lang),
+                "weight": node.get("weight") or 0,
+                "delivered_by": _delivered_by(node),
+                "disposal_method": _translate_method(node.get("disposal_method") or "", lang) if has_disposal else "-",
+                "status": _status_label(node, lang),
+            })
+            for child in node.get("children") or []:
+                if not isinstance(child, dict):
+                    continue
+                if child.get("destination") is not None:
+                    walk_transport(child, depth + 1)
+                else:
+                    group_mat = _node_material_name(child, lang)
+                    for grand in child.get("children") or []:
+                        if isinstance(grand, dict) and grand.get("destination") is not None:
+                            walk_transport(grand, depth + 1, group_mat)
+
+        lanes = sorted(batch.get("lanes") or [], key=lambda l: float(l.get("weight") or 0), reverse=True)
+        for lane in lanes:
+            transport = lane.get("transport") or {}
+            has_disposal = bool(transport.get("disposal_method"))
+            rows.append({
+                "depth": 0,
+                "location": batch.get("batchName") or "-",
+                "material": lane.get("material_name") or _node_material_name(transport, lang),
+                "weight": lane.get("weight") or transport.get("weight") or 0,
+                "delivered_by": _delivered_by(transport),
+                "disposal_method": _translate_method(transport.get("disposal_method") or "", lang) if has_disposal else "-",
+                "status": _status_label(transport, lang),
+            })
+            for child in transport.get("children") or []:
+                if not isinstance(child, dict):
+                    continue
+                if child.get("destination") is not None:
+                    walk_transport(child, 1)
+                else:
+                    group_mat = _node_material_name(child, lang)
+                    for grand in child.get("children") or []:
+                        if isinstance(grand, dict) and grand.get("destination") is not None:
+                            walk_transport(grand, 1, group_mat)
+        if rows:
+            sections.append({
+                "point": batch.get("batchName") or "-",
+                "grand_total": batch.get("totalWeight") or 0,
+                "rows": rows,
+            })
+    return sections
+
+
+def _draw_consolidation_details_table(
+    pdf,
+    page_width_points: float,
+    page_height_points: float,
+    start_y: float,
+    data: dict,
+) -> bool:
+    hierarchy_data = data.get("hierarchy") or []
+    sections = _build_consolidation_detail_sections(hierarchy_data, data=data)
+    if not sections:
+        return False
+
+    lang = (data or {}).get("language", "th") or "th"
+    kg = _t("kg", data)
+    table_left = padding
+    table_width = page_width_points - 2 * padding
+    bottom_margin = padding
+    row_h = 0.50 * inch
+    section_h = 0.58 * inch
+    header_h = 0.45 * inch
+    col_ratios = [2.45, 3.05, 1.2, 1.65, 1.75, 1.1]
+    total_ratio = sum(col_ratios)
+    col_w = [table_width * r / total_ratio for r in col_ratios]
+    green = colors.HexColor("#2f6b53")
+    primary = PRIMARY
+    border = colors.HexColor("#eef1f0")
+    row_line = colors.HexColor("#edf0ef")
+    text = colors.HexColor("#365348")
+    muted = colors.HexColor("#8c9c95")
+
+    headers = (
+        ["LOCATION", "ประเภทวัสดุ", "น้ำหนัก กก.", "DELIVERED BY", "วิธีกำจัด", "สถานะ"]
+        if lang == "th"
+        else ["LOCATION", "Material Type", "Weight kg.", "DELIVERED BY", "Method", "Status"]
+    )
+    consolidated_at = "CONSOLIDATED AT" if lang != "th" else "CONSOLIDATED AT"
+    grand_total = "GRAND TOTAL" if lang != "th" else "GRAND TOTAL"
+
+    def new_page() -> float:
+        pdf.showPage()
+        pdf.setPageSize((page_width_points, page_height_points))
+        _draw_header(pdf, page_width_points, page_height_points, data)
+        return page_height_points - 1.9 * inch
+
+    def ensure(y: float, needed: float) -> float:
+        return new_page() if y - needed < bottom_margin else y
+
+    def draw_title(y: float) -> float:
+        pdf.setFillColor(primary)
+        try:
+            pdf.setFont("IBMPlexSansThai-Bold", 18)
+        except Exception:
+            pdf.setFont("Helvetica-Bold", 18)
+        pdf.drawString(table_left, y, _t("item_details", data))
+        return y - 0.34 * inch
+
+    def draw_section_header(y: float, section: dict) -> float:
+        pdf.setFillColor(colors.HexColor("#f5fbf8"))
+        pdf.setStrokeColor(border)
+        pdf.roundRect(table_left, y - section_h, table_width, section_h, 0.08 * inch, fill=1, stroke=1)
+        pdf.setFillColor(muted)
+        try:
+            pdf.setFont("IBMPlexSansThai-Bold", 8)
+        except Exception:
+            pdf.setFont("Helvetica-Bold", 8)
+        pdf.drawString(table_left + 0.25 * inch, y - 0.19 * inch, consolidated_at)
+        _draw_text_fit(pdf, section.get("point") or "-", table_left + 0.25 * inch, y - 0.40 * inch, table_width * 0.48, "IBMPlexSansThai-Bold", 13, green)
+        pdf.setFillColor(muted)
+        try:
+            pdf.setFont("IBMPlexSansThai-Bold", 8)
+        except Exception:
+            pdf.setFont("Helvetica-Bold", 8)
+        gt = grand_total
+        gt_x = table_left + table_width - 2.65 * inch
+        pdf.drawString(gt_x, y - 0.30 * inch, gt)
+        total_text = f"{_fmt_num(section.get('grand_total'))} {kg}"
+        _draw_text_fit(pdf, total_text, table_left + table_width - 1.55 * inch, y - 0.31 * inch, 1.35 * inch, "IBMPlexSansThai-Bold", 13, green)
+        return y - section_h
+
+    def draw_columns(y: float) -> float:
+        pdf.setFillColor(colors.white)
+        pdf.rect(table_left, y - header_h, table_width, header_h, fill=1, stroke=0)
+        pdf.setFillColor(colors.HexColor("#6f827b"))
+        try:
+            pdf.setFont("IBMPlexSansThai-Bold", 8)
+        except Exception:
+            pdf.setFont("Helvetica-Bold", 8)
+        x = table_left + 0.25 * inch
+        for i, h in enumerate(headers):
+            pdf.drawString(x, y - 0.28 * inch, h)
+            x += col_w[i]
+        pdf.setStrokeColor(row_line)
+        pdf.line(table_left, y - header_h, table_left + table_width, y - header_h)
+        return y - header_h
+
+    def draw_row(y: float, row: dict, idx: int) -> float:
+        if idx % 2 == 1:
+            pdf.setFillColor(colors.HexColor("#fbfcfb"))
+            pdf.rect(table_left, y - row_h, table_width, row_h, fill=1, stroke=0)
+        pdf.setStrokeColor(row_line)
+        pdf.line(table_left, y - row_h, table_left + table_width, y - row_h)
+        mid = y - row_h / 2
+        x = table_left + 0.25 * inch
+        depth = int(row.get("depth") or 0)
+        location_col_left = x
+        location_col_right = table_left + 0.25 * inch + col_w[0] - 0.06 * inch
+        indent_step = 0.18 * inch
+        dot_x = x + depth * indent_step
+        location_text_x = x + 0.18 * inch + depth * indent_step
+        location_max_w = max(0.45 * inch, location_col_right - location_text_x)
+        pdf.setFillColor(primary)
+        pdf.circle(dot_x, mid, 0.035 * inch, fill=1, stroke=0)
+        _draw_wrapped_text_fit(
+            pdf,
+            row.get("location") or "-",
+            location_text_x,
+            mid,
+            location_max_w,
+            "IBMPlexSansThai-Bold",
+            8.2,
+            green,
+            max_lines=2,
+        )
+        x += col_w[0]
+        pdf.setFillColor(colors.HexColor("#cfd6dc"))
+        pdf.roundRect(x, mid - 0.045 * inch, 0.09 * inch, 0.09 * inch, 0.025 * inch, fill=1, stroke=0)
+        _draw_text_fit(pdf, row.get("material") or "-", x + 0.20 * inch, mid - 0.04 * inch, col_w[1] - 0.28 * inch, "IBMPlexSansThai-Regular", 8.6, text)
+        x += col_w[1]
+        _draw_weight_pill(pdf, x, mid - 0.09 * inch, _fmt_num(row.get("weight")), primary, width=0.74 * inch)
+        x += col_w[2]
+        _draw_text_fit(pdf, row.get("delivered_by") or "-", x, mid - 0.04 * inch, col_w[3] - 0.12 * inch, "IBMPlexSansThai-Regular", 8, colors.HexColor("#6b6b6b"))
+        x += col_w[3]
+        _draw_text_fit(pdf, row.get("disposal_method") or "-", x, mid - 0.04 * inch, col_w[4] - 0.12 * inch, "IBMPlexSansThai-Regular", 8, colors.HexColor("#6b6b6b"))
+        x += col_w[4]
+        pdf.setFillColor(primary)
+        pdf.circle(x + 0.04 * inch, mid, 0.025 * inch, fill=1, stroke=0)
+        _draw_text_fit(pdf, row.get("status") or "-", x + 0.13 * inch, mid - 0.04 * inch, col_w[5] - 0.16 * inch, "IBMPlexSansThai-Bold", 8, green)
+        return y - row_h
+
+    y = start_y
+    y = ensure(y, 0.75 * inch)
+    y = draw_title(y)
+    for section in sections:
+        needed = section_h + header_h + min(len(section["rows"]), 1) * row_h
+        y = ensure(y, needed)
+        y = draw_section_header(y, section)
+        y = draw_columns(y)
+        for idx, row in enumerate(section["rows"]):
+            y = ensure(y, row_h)
+            y = draw_row(y, row, idx)
+        y -= 0.20 * inch
+    return True
+
+
 def _draw_diagram_section(pdf, page_width_points: float, page_height_points: float, y_below_cards: float, data: dict):
     """
     Section title + rounded box with flow chart from hierarchy data.
@@ -1357,6 +2172,123 @@ def _draw_diagram_section(pdf, page_width_points: float, page_height_points: flo
     box_left = padding
     box_width = page_width_points - 2 * padding
     hierarchy_data = data.get("hierarchy") or []
+
+    def _draw_standard_flow_records(records: list, origin_groups: list, header_y_first: float) -> float:
+        original_indices = list(range(len(records)))
+        n_rows = len(records)
+        all_row_heights = [rec.get("row_height", _FLOW_ROW_H) for rec in records]
+        box_top_first = header_y_first - section_gap
+        box_bottom_first = padding
+        box_height_first = box_top_first - box_bottom_first
+        all_content_h = _flow_content_height_for_rows(all_row_heights)
+        if all_content_h + 2 * _FLOW_MIN_INNER_PAD <= box_height_first:
+            pages = _build_flow_chart_pages(origin_groups, n_rows, n_rows)
+        else:
+            rows_per_page = _rows_that_fit_in_box_var(box_height_first, all_row_heights)
+            pages = _build_flow_chart_pages(
+                origin_groups, n_rows, rows_per_page,
+                row_heights=all_row_heights,
+                page_available=box_height_first - 2 * _FLOW_INNER_PAD,
+            )
+        last_box_bottom = box_bottom_first
+
+        for page_idx, page_info in enumerate(pages):
+            page_rh = [all_row_heights[i] for i in page_info["global_indices"]]
+            page_content_h = _flow_content_height_for_rows(page_rh)
+            if page_idx > 0:
+                pdf.showPage()
+                pdf.setPageSize((page_width_points, page_height_points))
+                _draw_header(pdf, page_width_points, page_height_points, data)
+                page_header_y = page_height_points - (1.8 * inch) - 0.15 * inch
+            else:
+                page_header_y = header_y_first
+
+            pdf.setFillColor(PRIMARY)
+            try:
+                pdf.setFont("IBMPlexSansThai-Bold", 16)
+            except Exception:
+                pdf.setFont("Helvetica-Bold", 16)
+            page_title = section_title if len(pages) <= 1 else f"{section_title} ({page_idx + 1}/{len(pages)})"
+            pdf.drawString(padding, page_header_y, page_title)
+
+            if page_idx == 0 and len(pages) == 1:
+                box_height = box_height_first
+                box_bottom = box_bottom_first
+            else:
+                box_height = page_content_h + 2 * _FLOW_INNER_PAD
+                box_bottom = page_header_y - section_gap - box_height
+            last_box_bottom = box_bottom
+            pdf.setFillColor(colors.HexColor("#fafafa"))
+            pdf.setStrokeColor(colors.HexColor("#d9d9d9"))
+            pdf.setLineWidth(1)
+            pdf.roundRect(box_left, box_bottom, box_width, box_height, radius)
+            page_records = [records[i] for i in page_info["global_indices"]]
+            page_orig = [original_indices[i] for i in page_info["global_indices"]]
+            _draw_flow_chart(
+                pdf, box_left, box_bottom, box_width, box_height,
+                page_records, groups_override=page_info["page_groups"], original_indices_override=page_orig,
+                data=data,
+            )
+        return last_box_bottom
+
+    consolidation_batches = _extract_consolidation_batches(hierarchy_data, data=data)
+    if consolidation_batches:
+        header_y = y_below_cards - 0.15 * inch
+        last_box_bottom = padding
+        page_started = False
+
+        def _draw_consolidation_page(batch: dict, groups_page: list, page_no: int, total_pages: int, current_header_y: float) -> float:
+            pdf.setFillColor(PRIMARY)
+            try:
+                pdf.setFont("IBMPlexSansThai-Bold", 16)
+            except Exception:
+                pdf.setFont("Helvetica-Bold", 16)
+            title = section_title if total_pages <= 1 else f"{section_title} ({page_no}/{total_pages})"
+            pdf.drawString(padding, current_header_y, title)
+            try:
+                pdf.setFont("IBMPlexSansThai-Regular", 10)
+            except Exception:
+                pdf.setFont("Helvetica", 10)
+            pdf.setFillColor(colors.HexColor("#8c8c8c"))
+            subtitle = "แสดงจุดกำเนิด การแยกประเภทของเสีย และปลายทางสุดท้ายของแต่ละเส้นทาง" if (data or {}).get("language") == "th" else "Shows origins, material split, and the final destination of each path"
+            pdf.drawString(padding, current_header_y - 0.22 * inch, subtitle)
+            box_top = current_header_y - section_gap - 0.16 * inch
+            box_bottom = padding
+            box_height = box_top - box_bottom
+            pdf.setFillColor(colors.HexColor("#ffffff"))
+            pdf.setStrokeColor(colors.HexColor("#d9d9d9"))
+            pdf.setLineWidth(1)
+            pdf.roundRect(box_left, box_bottom, box_width, box_height, radius)
+            _draw_consolidation_batch_flow(pdf, box_left, box_bottom, box_width, box_height, batch, data, groups_page)
+            return box_bottom
+
+        for batch in consolidation_batches:
+            first_page_header = header_y if not page_started else page_height_points - 1.90 * inch
+            first_box_top = first_page_header - section_gap - 0.16 * inch
+            first_box_height = first_box_top - padding
+            max_rows_first = max(1, int((first_box_height - 0.30 * inch + 0.10 * inch) // (0.50 * inch + 0.10 * inch)))
+            terminal_groups = _build_terminal_groups(batch, data)
+            group_pages = _paginate_terminal_groups(terminal_groups, max_rows_first)
+            for page_idx, groups_page in enumerate(group_pages):
+                if page_started:
+                    pdf.showPage()
+                    pdf.setPageSize((page_width_points, page_height_points))
+                    _draw_header(pdf, page_width_points, page_height_points, data)
+                    page_header_y = page_height_points - 1.90 * inch
+                else:
+                    page_header_y = header_y
+                last_box_bottom = _draw_consolidation_page(batch, groups_page, page_idx + 1, len(group_pages), page_header_y)
+                page_started = True
+
+        normal_records, normal_groups = _build_chart_rows(hierarchy_data, data=data, skip_consolidated=True)
+        if normal_records:
+            pdf.showPage()
+            pdf.setPageSize((page_width_points, page_height_points))
+            _draw_header(pdf, page_width_points, page_height_points, data)
+            normal_header_y = page_height_points - 1.90 * inch
+            last_box_bottom = _draw_standard_flow_records(normal_records, normal_groups, normal_header_y)
+        return (last_box_bottom, normal_records)
+
     records, origin_groups = _build_chart_rows(hierarchy_data, data=data)
 
     if not records:
@@ -1466,18 +2398,35 @@ _DIRECTED_METHODS = {
 }
 
 
-def _compute_card_values_from_hierarchy(hierarchy_data: list) -> list:
-    """Compute [total_waste, total_managed, treatment, disposal] from leaf transports in the hierarchy.
-
-    Mirrors the logic in GET /api/traceability: only counts arrived leaves
-    using raw weight.
-    """
+def _compute_card_values_from_hierarchy(hierarchy_data: list, traceability_data: list | None = None) -> list:
+    """Compute cards from hierarchy leaves, matching the traceability cards."""
     treatment_w = 0.0
     disposal_w = 0.0
-    total_group_weight = 0.0
+    in_progress_w = 0.0
+    total_quantity = 0.0
+    hierarchy_group_ids = set()
+
+    def _collect_subtree_consolidated_weight(node: dict) -> float:
+        total = 0.0
+
+        def _walk(n):
+            nonlocal total
+            if not isinstance(n, dict):
+                return
+            cs = n.get("consolidation_sources")
+            if isinstance(cs, list) and cs:
+                for source in cs:
+                    if not isinstance(source, dict):
+                        continue
+                    total += float(source.get("contributed_weight") or 0)
+            for child in n.get("children") or []:
+                _walk(child)
+
+        _walk(node)
+        return round(total, 2)
 
     def _sum_leaves(nodes):
-        nonlocal treatment_w, disposal_w
+        nonlocal treatment_w, disposal_w, in_progress_w
         for t in nodes:
             if not isinstance(t, dict):
                 continue
@@ -1487,9 +2436,10 @@ def _compute_card_values_from_hierarchy(hierarchy_data: list) -> list:
             else:
                 status = t.get("status") or ""
                 method = t.get("disposal_method") or ""
-                if status != "arrived" or not method:
-                    continue
                 w = float(t.get("weight") or 0)
+                if status != "arrived" or not method:
+                    in_progress_w += w
+                    continue
                 if method in _DIVERTED_METHODS:
                     treatment_w += w
                 elif method in _DIRECTED_METHODS:
@@ -1501,15 +2451,49 @@ def _compute_card_values_from_hierarchy(hierarchy_data: list) -> list:
         for group_node in origin_node.get("children") or []:
             if not isinstance(group_node, dict):
                 continue
-            gw = float(group_node.get("weight") or group_node.get("total_weight_kg") or 0)
-            total_group_weight += gw
+            group_id = group_node.get("group_id") or group_node.get("id")
+            if group_id is not None:
+                hierarchy_group_ids.add(str(group_id))
+            consolidated_w = _collect_subtree_consolidated_weight(group_node)
+            raw_w = float(group_node.get("weight") or group_node.get("total_weight_kg") or 0)
+            origin_w = consolidated_w if consolidated_w > 0 else raw_w
+            total_quantity += origin_w
             _sum_leaves(group_node.get("children") or [])
 
-    total_waste = round(total_group_weight, 2)
+    if isinstance(traceability_data, list) and traceability_data:
+        first_column = traceability_data[0] if isinstance(traceability_data[0], list) else []
+        for item in first_column:
+            if not isinstance(item, dict):
+                continue
+            if item.get("source") not in {"group", "tentative"}:
+                continue
+            group_id = item.get("group_id") or item.get("id")
+            if group_id is not None and str(group_id) in hierarchy_group_ids:
+                continue
+            total_quantity += float(item.get("weight") or item.get("total_weight_kg") or 0)
+
+    total_waste = round(total_quantity, 2)
     total_treatment = round(treatment_w, 2)
     total_disposal = round(disposal_w, 2)
-    total_managed = round(total_treatment + total_disposal, 2)
+    total_managed = round(in_progress_w, 2)
     return [total_waste, total_managed, total_treatment, total_disposal]
+
+
+def _compute_card_values(data: dict, hierarchy_data: list) -> list:
+    """Use hierarchy-derived card values so PDF and web diagram summaries match."""
+    if hierarchy_data:
+        return _compute_card_values_from_hierarchy(hierarchy_data, data.get("traceability_data") if isinstance(data, dict) else None)
+    summary = data.get("summary") if isinstance(data, dict) else None
+    if isinstance(summary, dict):
+        keys = ["total_waste_weight", "total_managed_waste", "total_treatment", "total_disposal"]
+        values = []
+        for key in keys:
+            try:
+                values.append(round(float(summary.get(key) or 0), 2))
+            except (TypeError, ValueError):
+                values.append(0)
+        return values
+    return _compute_card_values_from_hierarchy(hierarchy_data, data.get("traceability_data") if isinstance(data, dict) else None)
 
 
 def generate_pdf_bytes(data: dict) -> bytes:
@@ -1526,7 +2510,7 @@ def generate_pdf_bytes(data: dict) -> bytes:
     """
     data = dict(data)
     hierarchy = data.get("hierarchy") or []
-    data["card_values"] = _compute_card_values_from_hierarchy(hierarchy)
+    data["card_values"] = _compute_card_values(data, hierarchy)
     _register_fonts()
     width_pt = PAGE_WIDTH_IN * inch
     height_pt = PAGE_HEIGHT_IN * inch
@@ -1537,7 +2521,8 @@ def generate_pdf_bytes(data: dict) -> bytes:
     y_below_cards = _draw_card_row(c, width_pt, height_pt, data)
     y_below_diagram, chart_rows = _draw_diagram_section(c, width_pt, height_pt, y_below_cards, data)
     table_start_y = y_below_diagram - 0.35 * inch
-    _draw_item_details_table(c, width_pt, height_pt, chart_rows, table_start_y, data)
+    if not _draw_consolidation_details_table(c, width_pt, height_pt, table_start_y, data):
+        _draw_item_details_table(c, width_pt, height_pt, chart_rows, table_start_y, data)
 
     c.save()
     return buffer.getvalue()
