@@ -2013,7 +2013,6 @@ class TraceabilityService:
         organization_id: int,
         current_user_id: int,
         source_group_ids: Optional[List[Any]] = None,
-        consolidation_point_candidate_ids: Optional[List[Any]] = None,
     ) -> Dict[str, Any]:
         """
         Merge N arrived TransportTransactions into one (or more, one per request)
@@ -2066,13 +2065,6 @@ class TraceabilityService:
             )
         if not isinstance(requests, list) or not requests:
             raise APIException("requests must be a non-empty list", 400, "INVALID_REQUEST")
-
-        allowed_consolidation_point_ids: set[int] = set()
-        for cid in consolidation_point_candidate_ids or []:
-            try:
-                allowed_consolidation_point_ids.add(int(cid))
-            except (TypeError, ValueError):
-                continue
 
         normalised_source_ids: List[int] = []
         for sid in source_transport_ids:
