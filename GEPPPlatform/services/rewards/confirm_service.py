@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from ...models.rewards.redemptions import RewardRedemption, RewardUser, OrganizationRewardUser
 from ...models.rewards.catalog import RewardCatalog, RewardStock
 from ...models.rewards.management import RewardCampaign
+from ...models.rewards.points import RewardPointTransaction
 from ...exceptions import NotFoundException, BadRequestException
 
 
@@ -155,9 +156,18 @@ class ConfirmService:
                 return self._already_completed_response(redemption)
             raise BadRequestException(f"Unexpected status: {redemption.status}")
 
-        # Deduct stock (status already set to 'completed' atomically)
+        # Deduct stock (status already set to 'completed' atomically).
+        # If stock turns out to be insufficient (TOCTOU between submit and confirm),
+        # _deduct_stock auto-cancels the redemption + refunds points and returns the
+        # cancellation info; we surface that to staff instead of raising 500.
         self.db.refresh(redemption)
-        self._deduct_stock(redemption)
+        cancel_info = self._deduct_stock(redemption)
+        if cancel_info is not None:
+            return {
+                "success": False,
+                "auto_canceled": [cancel_info],
+                "confirmed_items": [],
+            }
 
         return {
             "success": True,
@@ -201,21 +211,28 @@ class ConfirmService:
         if not pending:
             raise BadRequestException("No items to confirm in this group")
 
-        # Atomic status transition + stock deduction for each item
+        # Atomic status transition + stock deduction for each item.
+        # Auto-canceled items (insufficient stock at confirm time) are reported
+        # alongside successfully-confirmed ones so staff can communicate to the member.
         confirmed_items = []
+        auto_canceled = []
         for redemption in pending:
             if self._atomic_claim_status(redemption.id, staff_org_user_id):
                 self.db.refresh(redemption)
-                self._deduct_stock(redemption)
-                confirmed_items.append(self._item_dict(redemption))
+                cancel_info = self._deduct_stock(redemption)
+                if cancel_info is not None:
+                    auto_canceled.append(cancel_info)
+                else:
+                    confirmed_items.append(self._item_dict(redemption))
 
-        if not confirmed_items:
+        if not confirmed_items and not auto_canceled:
             raise BadRequestException("All items were already confirmed by another request")
 
         return {
-            "success": True,
+            "success": len(confirmed_items) > 0,
             "group_hash": group_hash,
             "confirmed_items": confirmed_items,
+            "auto_canceled": auto_canceled,
         }
 
     def _atomic_claim_status(self, redemption_id: int, staff_org_user_id: int) -> bool:
@@ -237,13 +254,18 @@ class ConfirmService:
         self.db.flush()
         return result.rowcount > 0
 
-    def _deduct_stock(self, redemption: RewardRedemption):
+    def _deduct_stock(self, redemption: RewardRedemption) -> dict | None:
         """Deduct stock for a single redemption item (status already set to completed).
 
         Concurrency: locks the catalog row with SELECT ... FOR UPDATE before reading
         the stock sum + inserting the -quantity ledger entry. This serialises
         concurrent redemptions on the same item and prevents the stock total from
         going negative through a TOCTOU race.
+
+        Returns None on success. If stock is insufficient (e.g. another submission
+        depleted it between submit and confirm), this method auto-cancels the
+        redemption and refunds points to the user, then returns a dict describing
+        the auto-cancel so the caller can report it to staff.
         """
         # Lock the catalog row to serialise stock operations for this item.
         # Released at transaction commit / rollback.
@@ -265,15 +287,36 @@ class ConfirmService:
         )
 
         if int(current_stock) < redemption.quantity:
+            # Auto-cancel + refund instead of raising (which would leave the user
+            # with deducted points and a 'completed' status that has no stock row).
             catalog = (
                 self.db.query(RewardCatalog)
                 .filter(RewardCatalog.id == redemption.catalog_id)
                 .first()
             )
             name = catalog.name if catalog else f"ID {redemption.catalog_id}"
-            raise BadRequestException(
-                f"Insufficient stock for '{name}' (available: {int(current_stock)}, needed: {redemption.quantity})"
+
+            redemption.status = "canceled"
+            redemption.updated_date = datetime.now(timezone.utc)
+            refund_txn = RewardPointTransaction(
+                organization_id=redemption.organization_id,
+                reward_user_id=redemption.reward_user_id,
+                points=abs(int(redemption.points_redeemed or 0)),
+                reward_campaign_id=redemption.reward_campaign_id,
+                claimed_date=datetime.now(timezone.utc),
+                reference_type="refund",
             )
+            self.db.add(refund_txn)
+            self.db.flush()
+            return {
+                "auto_canceled": True,
+                "reason": "insufficient_stock",
+                "catalog_name": name,
+                "available": int(current_stock),
+                "needed": redemption.quantity,
+                "refunded_points": int(redemption.points_redeemed or 0),
+                "redemption_id": redemption.id,
+            }
 
         stock_record = RewardStock(
             reward_catalog_id=redemption.catalog_id,
@@ -281,12 +324,14 @@ class ConfirmService:
             reward_campaign_id=redemption.reward_campaign_id,
             note="redemption_confirmed",
             reward_user_id=redemption.reward_user_id,
+            ledger_type="redeem",
         )
         self.db.add(stock_record)
         self.db.flush()
 
         redemption.stock_action_id = stock_record.id
         self.db.flush()
+        return None
 
     def _item_dict(self, r: RewardRedemption) -> dict:
         catalog = (

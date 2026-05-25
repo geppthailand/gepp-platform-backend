@@ -485,6 +485,10 @@ def handle_reward_routes(event: Dict[str, Any], data: Dict[str, Any], **params) 
             svc = StockService(db_session)
             return svc.transfer(data, organization_id=current_org_id, admin_user_id=current_user_id)
 
+        if path == "/api/rewards/inventory/record-purchase" and method == "POST":
+            svc = StockService(db_session)
+            return svc.record_purchase(data, organization_id=current_org_id, admin_user_id=current_user_id)
+
         if path == "/api/rewards/inventory/ledger" and method == "GET":
             svc = StockService(db_session)
             return svc.list_ledger(current_org_id, dict(query_params))

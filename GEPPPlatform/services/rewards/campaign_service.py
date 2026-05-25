@@ -539,7 +539,7 @@ class CampaignService:
         """Scoped transactions ledger for a single campaign — merges claims + redemptions."""
         from sqlalchemy import func
         from ...models.rewards.points import RewardPointTransaction
-        from ...models.rewards.redemptions import RewardRedemption, RewardUser, OrganizationRewardUser
+        from ...models.rewards.redemptions import RewardRedemption, RewardUser, OrganizationRewardUser, Droppoint
         from ...models.rewards.management import RewardActivityMaterial
         from ...models.rewards.catalog import RewardCatalog
 
@@ -565,12 +565,14 @@ class CampaignService:
                     RewardPointTransaction,
                     RewardUser,
                     RewardActivityMaterial,
+                    Droppoint,
                 )
                 .outerjoin(RewardUser, RewardUser.id == RewardPointTransaction.reward_user_id)
                 .outerjoin(
                     RewardActivityMaterial,
                     RewardActivityMaterial.id == RewardPointTransaction.reward_activity_materials_id,
                 )
+                .outerjoin(Droppoint, Droppoint.id == RewardPointTransaction.droppoint_id)
                 .filter(
                     RewardPointTransaction.reward_campaign_id == id,
                     RewardPointTransaction.reference_type == "claim",
@@ -582,7 +584,7 @@ class CampaignService:
             if date_to:
                 claim_rows = claim_rows.filter(RewardPointTransaction.claimed_date <= date_to)
 
-            for tx, user, am in claim_rows.all():
+            for tx, user, am, dp in claim_rows.all():
                 user_name = (user.display_name if user else None) or (user.line_display_name if user else None) or f"User #{tx.reward_user_id}"
                 if search and search.lower() not in user_name.lower():
                     continue
@@ -599,6 +601,8 @@ class CampaignService:
                     "unit": tx.unit,
                     "points": float(tx.points) if tx.points is not None else 0,
                     "status": "completed",
+                    "droppoint_id": dp.id if dp else None,
+                    "droppoint_name": dp.name if dp else None,
                 })
 
         # --- REDEMPTIONS ---
@@ -634,6 +638,8 @@ class CampaignService:
                     "unit": "ชิ้น",
                     "points": -float(r.points_redeemed or 0),
                     "status": r.status,
+                    "droppoint_id": None,
+                    "droppoint_name": None,
                 })
 
         # Sort desc by datetime, paginate

@@ -303,6 +303,31 @@ class RedeemService:
                 name = catalog.name if catalog else f"ID {catalog_id}"
                 raise BadRequestException(f"Insufficient stock for '{name}'")
 
+            # 2d. Check per-user-per-campaign catalog limit
+            catalog = (
+                self.db.query(RewardCatalog)
+                .filter(RewardCatalog.id == catalog_id)
+                .first()
+            )
+            if catalog and catalog.limit_per_user_per_campaign is not None:
+                already_redeemed = (
+                    self.db.query(func.coalesce(func.sum(RewardRedemption.quantity), 0))
+                    .filter(
+                        RewardRedemption.reward_user_id == reward_user_id,
+                        RewardRedemption.reward_campaign_id == campaign_id,
+                        RewardRedemption.catalog_id == catalog_id,
+                        RewardRedemption.status.in_(["inprogress", "completed"]),
+                        RewardRedemption.deleted_date.is_(None),
+                    )
+                    .scalar()
+                ) or 0
+                if int(already_redeemed) + int(quantity) > int(catalog.limit_per_user_per_campaign):
+                    raise BadRequestException(
+                        f"Per-user limit reached for '{catalog.name}' "
+                        f"(limit: {catalog.limit_per_user_per_campaign}, "
+                        f"already: {int(already_redeemed)})"
+                    )
+
             redemption_items.append({
                 "catalog_id": catalog_id,
                 "quantity": quantity,
@@ -564,12 +589,14 @@ class RedeemService:
             .all()
         )
 
-        # Lifetime totals — don't filter by campaign status, just by tx type
+        # Lifetime totals — sum only true earn tx (claim), not refunds (which are
+        # positive points but reference_type='redeem').
         lifetime_earned = (
             self.db.query(func.coalesce(func.sum(RewardPointTransaction.points), 0))
             .filter(
                 RewardPointTransaction.reward_user_id == reward_user_id,
                 RewardPointTransaction.points > 0,
+                RewardPointTransaction.reference_type == "claim",
                 RewardPointTransaction.deleted_date.is_(None),
             )
             .scalar()
@@ -908,31 +935,38 @@ class RedeemService:
         kg_recycled: float,
         unique_materials: int,
     ) -> list[dict]:
-        """Per-org achievements — scoped within one community."""
+        """Per-org achievements — scoped within one community.
+
+        [V3-BADGES] Simplified to 5 clear, monotonic milestones based on
+        claim-count + weight. Streak / rank / unique-materials badges were
+        removed because their data dependencies were brittle and the rules
+        confused users.
+        """
+        kg_int = int(kg_recycled)
         return [
             {
-                "id": "first_claim_org",
-                "label": "เริ่มต้น",
+                "id": "claim_1_org",
+                "label": "ส่งครั้งแรก",
                 "description": "ส่งขยะครั้งแรกในชุมชนนี้",
                 "icon": "🌱",
                 "earned": claims_count >= 1,
                 "progress": {"current": min(claims_count, 1), "target": 1},
             },
             {
-                "id": "streak_4w_org",
-                "label": "Streak 4 สัปดาห์",
-                "description": "สะสมต่อเนื่อง 4 สัปดาห์ในชุมชนนี้",
-                "icon": "🔥",
-                "earned": streak_current >= 4,
-                "progress": {"current": min(streak_current, 4), "target": 4},
+                "id": "claim_10_org",
+                "label": "ส่ง 10 ครั้ง",
+                "description": "สะสมการส่งครบ 10 ครั้งในชุมชนนี้",
+                "icon": "🌿",
+                "earned": claims_count >= 10,
+                "progress": {"current": min(claims_count, 10), "target": 10},
             },
             {
-                "id": "rank_tier_org",
-                "label": "เลื่อนขั้น",
-                "description": "เลื่อนขั้นเป็นต้นกล้าหรือสูงกว่า",
-                "icon": "⭐",
-                "earned": rank_level >= 2,
-                "progress": {"current": min(rank_level, 2), "target": 2},
+                "id": "claim_50_org",
+                "label": "ส่ง 50 ครั้ง",
+                "description": "สะสมการส่งครบ 50 ครั้งในชุมชนนี้",
+                "icon": "🌳",
+                "earned": claims_count >= 50,
+                "progress": {"current": min(claims_count, 50), "target": 50},
             },
             {
                 "id": "kg_100_org",
@@ -940,15 +974,15 @@ class RedeemService:
                 "description": "รีไซเคิลครบ 100 กก. ในชุมชนนี้",
                 "icon": "💯",
                 "earned": kg_recycled >= 100,
-                "progress": {"current": int(min(kg_recycled, 100)), "target": 100},
+                "progress": {"current": min(kg_int, 100), "target": 100},
             },
             {
-                "id": "5_materials_org",
-                "label": "5 วัสดุ",
-                "description": "รีไซเคิลวัสดุครบ 5 ชนิดในชุมชนนี้",
-                "icon": "🎨",
-                "earned": unique_materials >= 5,
-                "progress": {"current": min(unique_materials, 5), "target": 5},
+                "id": "kg_500_org",
+                "label": "500 กก.",
+                "description": "รีไซเคิลครบ 500 กก. ในชุมชนนี้",
+                "icon": "🏆",
+                "earned": kg_recycled >= 500,
+                "progress": {"current": min(kg_int, 500), "target": 500},
             },
         ]
 
