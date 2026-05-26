@@ -283,11 +283,15 @@ class ClaimService:
                 "point_transaction_id": txn.id,
             })
 
+        # Resolve droppoint's user_location once — used both as Transaction.origin_id
+        # and as user_location_id on the CRM events below. Falls back to None when
+        # the droppoint has no linked location (FK column is nullable).
+        origin_id = droppoint.user_location_id if droppoint and droppoint.user_location_id else None
+
         # 3. Create Transaction + TransactionRecords in main system
         #    (only if there are resolvable material links)
         transaction_id = None
         if pending_records:
-            origin_id = droppoint.user_location_id if droppoint and droppoint.user_location_id else None
             transaction = Transaction(
                 transaction_method="reward",
                 status=TransactionStatus.completed,
@@ -351,31 +355,35 @@ class ClaimService:
                 nested.rollback()  # rollback only the savepoint, not the whole transaction
 
         # ── CRM: emit reward_claimed + points_earned (+ campaign_joined on first claim) ──
+        # crm_events.user_location_id is FK → user_locations.id, so we must pass the
+        # droppoint's location (origin_id), NOT staff_org_user_id which belongs to a
+        # different table (organization_reward_users) — using the wrong id silently
+        # passes emit_event() but blows up on COMMIT with a FK violation.
         try:
             from GEPPPlatform.services.admin.crm.crm_service import emit_event
             _props = {
                 'campaign_id': campaign_id,
-                'transaction_id': transaction.id,
+                'transaction_id': transaction_id,
                 'total_points': float(total_points),
                 'total_weight_kg': float(total_weight),
             }
             emit_event(
                 self.db, event_type='reward_claimed', event_category='reward',
                 organization_id=campaign.organization_id,
-                user_location_id=staff_org_user_id,
+                user_location_id=origin_id,
                 properties=_props, event_source='server', commit=False,
             )
             emit_event(
                 self.db, event_type='points_earned', event_category='reward',
                 organization_id=campaign.organization_id,
-                user_location_id=staff_org_user_id,
+                user_location_id=origin_id,
                 properties=_props, event_source='server', commit=False,
             )
             if _is_new_member:
                 emit_event(
                     self.db, event_type='campaign_joined', event_category='reward',
                     organization_id=campaign.organization_id,
-                    user_location_id=staff_org_user_id,
+                    user_location_id=origin_id,
                     properties={'campaign_id': campaign_id}, event_source='server', commit=False,
                 )
         except Exception as _exc:
