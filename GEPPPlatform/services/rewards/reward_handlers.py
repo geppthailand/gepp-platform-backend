@@ -20,6 +20,7 @@ from .expense_category_service import ExpenseCategoryService
 from .campaign_expense_service import CampaignExpenseService
 from .stock_service import StockService
 from .member_service import MemberService
+from .leaderboard_service import LeaderboardService
 from .staff_service import StaffService
 from .droppoint_service import DroppointService
 from .overview_service import OverviewService
@@ -135,6 +136,16 @@ def handle_reward_routes(event: Dict[str, Any], data: Dict[str, Any], **params) 
                 date_from=query_params.get("date_from") or None,
                 date_to=query_params.get("date_to") or None,
                 campaign_id=_parse_campaign_id(query_params.get("campaign_id")),
+            )
+
+        if path == "/api/rewards/leaderboard" and method == "GET":
+            # Admin scope — org id comes from auth context
+            svc = LeaderboardService(db_session)
+            return svc.get_leaderboard(
+                organization_id=current_org_id,
+                period=query_params.get("period", "month"),
+                limit=int(query_params.get("limit", 50)),
+                viewer_user_id=None,
             )
 
         # --- Phase 2: Drop Point Breakdown (Material kg / Activity count) ---
@@ -691,6 +702,19 @@ def handle_reward_routes(event: Dict[str, Any], data: Dict[str, Any], **params) 
         if path == "/api/rewards/public/gamification/summary" and method == "GET":
             svc = RedeemService(db_session)
             return svc.get_gamification_summary(_resolve_user())
+
+        if path == "/api/rewards/public/leaderboard" and method == "GET":
+            # LIFF scope — viewer is the LINE user; org_id is required (per-org board)
+            org_id = query_params.get("organization_id") or query_params.get("org_id")
+            if not org_id:
+                raise BadRequestException("organization_id is required")
+            svc = LeaderboardService(db_session)
+            return svc.get_leaderboard(
+                organization_id=int(org_id),
+                period=query_params.get("period", "month"),
+                limit=int(query_params.get("limit", 10)),
+                viewer_user_id=_resolve_user(),
+            )
 
         if path == "/api/rewards/public/redeem/campaigns" and method == "GET":
             svc = RedeemService(db_session)
