@@ -30,6 +30,9 @@ def handle_auth_routes(path: str, data: dict, **commonParams):
     if method == "POST":
         if internal_path == "/register":
             return auth_handler.register(data, **commonParams)
+        elif internal_path == "/register/check-email":
+            email = (data or {}).get('email', '')
+            return auth_handler.check_email_exists(email)
         elif internal_path == "/login":
             return auth_handler.login(data, **commonParams)
         elif internal_path == "/liff":
