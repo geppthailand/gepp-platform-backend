@@ -31,6 +31,7 @@ class RewardStaffInvite(Base, BaseModel):
     hash = Column(String(64), unique=True, nullable=False)
     organization_id = Column(BigInteger, ForeignKey('organizations.id'), nullable=False)
     created_by_id = Column(BigInteger, nullable=False)  # admin user who created
+    invitee_name = Column(String(255), nullable=True)  # optional label set by admin at creation
     status = Column(String(20), nullable=False, default='pending')  # pending / used / expired
     used_by_id = Column(BigInteger, ForeignKey('reward_users.id'), nullable=True)
     used_date = Column(DateTime(timezone=True), nullable=True)

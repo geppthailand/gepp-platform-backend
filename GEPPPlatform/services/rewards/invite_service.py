@@ -28,10 +28,12 @@ class InviteService:
         organization_id: int,
         created_by_id: int,
         expiry_hours: int | None = None,
+        invitee_name: str | None = None,
     ) -> dict:
         """Create a one-time staff invite link (admin action).
 
         expiry_hours: one of {24, 168, 720, 0}. None → default 168 (7d). 0 → never expires.
+        invitee_name: optional label for who this invite is meant for.
         """
         hours = 168 if expiry_hours is None else int(expiry_hours)
         if hours not in self.ALLOWED_EXPIRY_HOURS:
@@ -41,10 +43,13 @@ class InviteService:
 
         expires_date = None if hours == 0 else datetime.now(timezone.utc) + timedelta(hours=hours)
 
+        cleaned_name = (invitee_name or "").strip() or None
+
         invite = RewardStaffInvite(
             hash=uuid.uuid4().hex,
             organization_id=organization_id,
             created_by_id=created_by_id,
+            invitee_name=cleaned_name,
             status="pending",
             expires_date=expires_date,
         )
@@ -55,6 +60,7 @@ class InviteService:
             "id": invite.id,
             "hash": invite.hash,
             "organization_id": invite.organization_id,
+            "invitee_name": invite.invitee_name,
             "status": invite.status,
             "expires_date": invite.expires_date.isoformat() if invite.expires_date else None,
             "created_date": invite.created_date.isoformat() if invite.created_date else None,
@@ -120,6 +126,7 @@ class InviteService:
             result.append({
                 "id": inv.id,
                 "hash": inv.hash,
+                "invitee_name": inv.invitee_name,
                 "status": status,
                 "expires_date": inv.expires_date.isoformat() if inv.expires_date else None,
                 "used_by_id": inv.used_by_id,

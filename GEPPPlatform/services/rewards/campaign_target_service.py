@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from ...models.rewards.management import (
@@ -79,22 +79,32 @@ class CampaignTargetService:
             return 0.0
 
         if am.type == "activity":
-            # Count claim rows
+            # Count claim rows. Exclude only rows clearly tagged as weight ('kg')
+            # — keep NULL / legacy material-name units so historical data still counts.
             return float(
                 self.db.query(func.count(RewardPointTransaction.id))
                 .filter(
                     *base_filters,
                     RewardPointTransaction.reward_activity_materials_id == target.activity_material_id,
+                    or_(
+                        RewardPointTransaction.unit.is_(None),
+                        RewardPointTransaction.unit != "kg",
+                    ),
                 )
                 .scalar() or 0
             )
 
-        # material type — sum kg
+        # material type — sum kg. Exclude only rows clearly tagged as 'times'
+        # (activity count) — historical rows with NULL / material-name unit are kept.
         return float(
             self.db.query(func.coalesce(func.sum(RewardPointTransaction.value), 0))
             .filter(
                 *base_filters,
                 RewardPointTransaction.reward_activity_materials_id == target.activity_material_id,
+                or_(
+                    RewardPointTransaction.unit.is_(None),
+                    RewardPointTransaction.unit != "times",
+                ),
             )
             .scalar() or 0
         )
