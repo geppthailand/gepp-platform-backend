@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional
 
 # SQLAlchemy imports
-from sqlalchemy import func, or_
+from sqlalchemy import func, or_, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
@@ -326,6 +326,11 @@ class AuthHandlers:
             use_purpose = data.get('usePurpose', '')
             
             session = self.db_session
+            session.execute(
+                text("SELECT pg_advisory_xact_lock(hashtext(:identity))"),
+                {"identity": f"user_email:{email}"},
+            )
+
             # Check if email already exists
             existing_user = (
                 session.query(UserLocation)
