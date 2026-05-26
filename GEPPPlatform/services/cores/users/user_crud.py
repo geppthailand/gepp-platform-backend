@@ -18,6 +18,11 @@ from ....models.users.user_related import (
 from ....models.cores.roles import SystemRole
 from ....models.subscriptions.subscription_models import OrganizationRole
 
+
+def _normalize_identity(value: Any) -> str:
+    return str(value or '').strip().lower()
+
+
 class UserCRUD:
     """
     Comprehensive CRUD operations for user management
@@ -37,6 +42,13 @@ class UserCRUD:
         """
         Create a new user with full setup
         """
+        if user_data.get('email'):
+            user_data['email'] = _normalize_identity(user_data.get('email'))
+        if user_data.get('username'):
+            user_data['username'] = _normalize_identity(user_data.get('username'))
+        if user_data.get('company_email'):
+            user_data['company_email'] = _normalize_identity(user_data.get('company_email'))
+
         # Prepare user data
         user = UserLocation(
             is_user=True,
@@ -271,9 +283,10 @@ class UserCRUD:
 
     def get_user_by_email(self, email: str) -> Optional[UserLocation]:
         """Get user by email (only active, non-deleted users)"""
+        email = _normalize_identity(email)
         return self.db.query(UserLocation).filter(
             and_(
-                UserLocation.email == email,
+                func.lower(UserLocation.email) == email,
                 UserLocation.is_user == True,
                 UserLocation.is_active == True,
                 UserLocation.deleted_date.is_(None)
@@ -336,6 +349,10 @@ class UserCRUD:
         user = self.get_user_by_id(user_id)
         if not user:
             return None
+
+        for identity_field in ('email', 'username', 'company_email'):
+            if updates.get(identity_field):
+                updates[identity_field] = _normalize_identity(updates.get(identity_field))
 
         # Track changes for logging
         changes = {}

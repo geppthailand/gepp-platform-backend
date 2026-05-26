@@ -18,6 +18,10 @@ from ....models.users.user_location_materials import UserLocationMaterial
 from ....models.cores.references import Material
 
 
+def _normalize_identity(value: Any) -> str:
+    return str(value or '').strip().lower()
+
+
 class UserService:
     """
     High-level user management service with business logic
@@ -41,6 +45,8 @@ class UserService:
         Create user with enhanced business logic
         """
         try:
+            self._normalize_user_identity_fields(user_data)
+
             # Validate user data
             validation_result = self._validate_user_data(user_data)
             if not validation_result['valid']:
@@ -522,6 +528,8 @@ class UserService:
         Update user with validation and business logic
         """
         try:
+            self._normalize_user_identity_fields(updates)
+
             # Validate updates
             validation_result = self._validate_user_updates(user_id, updates)
             if not validation_result['valid']:
@@ -653,6 +661,8 @@ class UserService:
         Send user invitation
         """
         try:
+            self._normalize_user_identity_fields(invitation_data)
+
             # Check if user already exists
             existing_user = self.crud.get_user_by_email(invitation_data['email'])
             if existing_user:
@@ -790,6 +800,12 @@ class UserService:
             raise e
 
     # ========== HELPER METHODS ==========
+
+    def _normalize_user_identity_fields(self, data: Dict[str, Any]) -> None:
+        """Canonicalize email-like identity fields before validation and writes."""
+        for identity_field in ('email', 'username', 'company_email'):
+            if data.get(identity_field):
+                data[identity_field] = _normalize_identity(data.get(identity_field))
 
     def _validate_user_data(self, user_data: Dict[str, Any]) -> Dict[str, Any]:
         """Validate user creation data"""
