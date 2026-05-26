@@ -4,7 +4,7 @@ Admin service for backoffice business logic
 
 import secrets
 import string
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional, List
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func, or_
@@ -131,6 +131,15 @@ class AdminService:
         if not org:
             raise NotFoundException(f'Organization {org_id} not found')
 
+        self._ensure_organization_subscription(org)
+        subscriptions = (
+            self.db_session.query(Subscription)
+            .options(joinedload(Subscription.plan))
+            .filter(Subscription.organization_id == org.id)
+            .order_by(Subscription.id.asc())
+            .all()
+        )
+
         info = org.organization_info
         return {
             'id': org.id,
@@ -158,7 +167,7 @@ class AdminService:
                     'status': sub.status,
                     'currentPeriodEndsAt': sub.current_period_ends_at,
                 }
-                for sub in (org.subscriptions or [])
+                for sub in subscriptions
             ],
             'currentSubscriptionId': org.subscription_id,
             'allowAiAudit': org.allow_ai_audit,
@@ -166,6 +175,122 @@ class AdminService:
             'isActive': org.is_active,
             'createdDate': org.created_date.isoformat() if org.created_date else None,
         }
+
+    def _get_default_subscription_plan(self) -> SubscriptionPlan:
+        """Return the active Free Plan for no-plan organizations."""
+        plan = (
+            self.db_session.query(SubscriptionPlan)
+            .filter(
+                SubscriptionPlan.name == 'free',
+                SubscriptionPlan.is_active == True,  # noqa: E712
+            )
+            .order_by(SubscriptionPlan.created_date.desc())
+            .first()
+        )
+        if plan:
+            if not plan.is_default:
+                self.db_session.query(SubscriptionPlan).filter(
+                    SubscriptionPlan.is_default == True,  # noqa: E712
+                    SubscriptionPlan.id != plan.id,
+                ).update({SubscriptionPlan.is_default: False}, synchronize_session='fetch')
+                plan.is_default = True
+                self.db_session.flush()
+            return plan
+
+        plan = (
+            self.db_session.query(SubscriptionPlan)
+            .filter(
+                SubscriptionPlan.is_default == True,  # noqa: E712
+                SubscriptionPlan.is_active == True,  # noqa: E712
+            )
+            .order_by(SubscriptionPlan.created_date.desc())
+            .first()
+        )
+        if plan:
+            return plan
+
+        self.db_session.query(SubscriptionPlan).filter(
+            SubscriptionPlan.is_default == True  # noqa: E712
+        ).update({SubscriptionPlan.is_default: False}, synchronize_session='fetch')
+
+        plan = SubscriptionPlan(
+            name='free',
+            display_name='Free Plan',
+            description='Basic features for getting started',
+            price_monthly=0,
+            price_yearly=0,
+            max_users=5,
+            max_transactions_monthly=100,
+            max_storage_gb=1,
+            max_api_calls_daily=1000,
+            features=[
+                'Basic waste tracking',
+                'Up to 5 users',
+                '100 transactions/month',
+                '1GB storage',
+                'Basic reporting',
+            ],
+            is_default=True,
+        )
+        self.db_session.add(plan)
+        self.db_session.flush()
+        return plan
+
+    def _ensure_organization_subscription(self, org: Organization) -> Optional[Subscription]:
+        """Bind organizations with no current subscription to the Free Plan."""
+        current_sub = None
+        if org.subscription_id:
+            current_sub = (
+                self.db_session.query(Subscription)
+                .filter(
+                    Subscription.id == org.subscription_id,
+                    Subscription.organization_id == org.id,
+                )
+                .first()
+            )
+            if current_sub:
+                return current_sub
+
+        existing_active_sub = (
+            self.db_session.query(Subscription)
+            .filter(
+                Subscription.organization_id == org.id,
+                Subscription.status == 'active',
+                Subscription.is_active == True,  # noqa: E712
+            )
+            .order_by(Subscription.id.desc())
+            .first()
+        )
+        if existing_active_sub:
+            org.subscription_id = existing_active_sub.id
+            self.db_session.flush()
+            return existing_active_sub
+
+        plan = self._get_default_subscription_plan()
+        now = datetime.now(timezone.utc)
+        users_count = (
+            self.db_session.query(func.count(UserLocation.id))
+            .filter(
+                UserLocation.organization_id == org.id,
+                UserLocation.is_user == True,  # noqa: E712
+                UserLocation.is_active == True,  # noqa: E712
+                UserLocation.deleted_date.is_(None),
+            )
+            .scalar()
+        )
+        sub = Subscription(
+            organization_id=org.id,
+            plan_id=plan.id,
+            status='active',
+            current_period_starts_at=now.isoformat(),
+            current_period_ends_at=(now + timedelta(days=30)).isoformat(),
+            users_count=users_count or 0,
+        )
+        self.db_session.add(sub)
+        self.db_session.flush()
+        org.subscription_id = sub.id
+        self.db_session.flush()
+        return sub
 
     def update_organization(self, org_id: int, data: dict) -> Dict[str, Any]:
         """Update org-level fields **and** nested OrganizationInfo in one
