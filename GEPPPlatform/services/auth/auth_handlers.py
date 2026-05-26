@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional
 
 # SQLAlchemy imports
+from sqlalchemy import func, or_, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
@@ -31,6 +32,12 @@ from ...exceptions import (
     BadRequestException,
     ValidationException
 )
+
+
+def _normalize_identity(value: Any) -> str:
+    """Normalize login identifiers for case-insensitive email/username matching."""
+    return str(value or '').strip().lower()
+
 
 def _emit_auth_event(db_session, event_type: str, user=None, organization_id=None, properties=None):
     """Fire-and-forget CRM event emission for auth events.  Never raises."""
@@ -307,7 +314,7 @@ class AuthHandlers:
         """Register a new user with organization and free subscription using SQLAlchemy"""
         try:
             # Extract registration data
-            email = data.get('email')
+            email = _normalize_identity(data.get('email'))
             password = data.get('password')
             first_name = data.get('firstName')
             last_name = data.get('lastName')
@@ -319,8 +326,22 @@ class AuthHandlers:
             use_purpose = data.get('usePurpose', '')
             
             session = self.db_session
+            session.execute(
+                text("SELECT pg_advisory_xact_lock(hashtext(:identity))"),
+                {"identity": f"user_email:{email}"},
+            )
+
             # Check if email already exists
-            existing_user = session.query(UserLocation).filter_by(email=email).first()
+            existing_user = (
+                session.query(UserLocation)
+                .filter(
+                    or_(
+                        func.lower(UserLocation.email) == email,
+                        func.lower(UserLocation.username) == email,
+                    )
+                )
+                .first()
+            )
             if existing_user:
                 raise ValidationException('Email already registered')
 
@@ -488,7 +509,7 @@ class AuthHandlers:
     def login(self, data: Dict[str, Any], **kwargs) -> Dict[str, Any]:
         """Login user with email and password using SQLAlchemy"""
         try:
-            email = data.get('email')
+            email = _normalize_identity(data.get('email'))
             password = data.get('password')
             
             session = self.db_session
@@ -496,10 +517,13 @@ class AuthHandlers:
             # Must filter is_user=True to avoid matching business_unit locations with same email
             user = session.query(UserLocation).options(
                 joinedload(UserLocation.organization_role)
-            ).filter_by(
-                email=email,
-                is_user=True,
-                is_active=True
+            ).filter(
+                or_(
+                    func.lower(UserLocation.email) == email,
+                    func.lower(UserLocation.username) == email,
+                ),
+                UserLocation.is_user == True,
+                UserLocation.is_active == True,
             ).first()
 
             if not user:
@@ -518,12 +542,13 @@ class AuthHandlers:
                 raise UnauthorizedException('Invalid email or password')
 
             # Generate JWT auth and refresh tokens
-            tokens = self.generate_jwt_tokens(user.id, user.organization_id, email)
+            user_email = _normalize_identity(user.email or email)
+            tokens = self.generate_jwt_tokens(user.id, user.organization_id, user_email)
 
             # Build user response with role information
             user_data = {
                 'id': user.id,
-                'email': email,
+                'email': user_email,
                 'displayName': user.display_name,
                 'organizationId': user.organization_id
             }
@@ -606,7 +631,7 @@ class AuthHandlers:
     def integration_login(self, data: Dict[str, Any], **kwargs) -> Dict[str, Any]:
         """Login for integration with long-lived token (7 days) using email and password. Uses user.secret as JWT secret."""
         try:
-            email = data.get('email')
+            email = _normalize_identity(data.get('email'))
             password = data.get('password')
 
             if not email or not password:
@@ -614,10 +639,13 @@ class AuthHandlers:
 
             session = self.db_session
             # Get user by email (is_user=True to avoid matching business_unit locations)
-            user = session.query(UserLocation).filter_by(
-                email=email,
-                is_user=True,
-                is_active=True
+            user = session.query(UserLocation).filter(
+                or_(
+                    func.lower(UserLocation.email) == email,
+                    func.lower(UserLocation.username) == email,
+                ),
+                UserLocation.is_user == True,
+                UserLocation.is_active == True,
             ).first()
 
             if not user:
@@ -639,7 +667,7 @@ class AuthHandlers:
             integration_payload = {
                 'user_id': user.id,
                 'organization_id': user.organization_id,
-                'email': email,
+                'email': _normalize_identity(user.email or email),
                 'type': 'integration',  # Tag as integration
                 'exp': now + timedelta(days=7),
                 'iat': now
@@ -651,7 +679,7 @@ class AuthHandlers:
             token_record = IntegrationToken(
                 user_id=user.id,
                 jwt=integration_token,
-                description=f"Integration token for {email}",
+                description=f"Integration token for {_normalize_identity(user.email or email)}",
                 valid=True
             )
             session.add(token_record)
@@ -664,7 +692,7 @@ class AuthHandlers:
                 'expires_in': 604800,  # 7 days in seconds
                 'user': {
                     'id': user.id,
-                    'email': email,
+                    'email': _normalize_identity(user.email or email),
                     'displayName': user.display_name,
                     'organizationId': user.organization_id
                 }
@@ -813,7 +841,7 @@ class AuthHandlers:
                 raise NotFoundException('User not found')
 
             # Generate new auth and refresh tokens
-            tokens = self.generate_jwt_tokens(user.id, user.organization_id, user.email)
+            tokens = self.generate_jwt_tokens(user.id, user.organization_id, _normalize_identity(user.email))
 
             return {
                 'success': True,
@@ -941,6 +969,7 @@ class AuthHandlers:
     def check_email_exists(self, email: str) -> Dict[str, Any]:
         """Check if an email already exists in user_locations table"""
         try:
+            email = _normalize_identity(email)
             if not email:
                 return {
                     'success': True,
@@ -964,8 +993,15 @@ class AuthHandlers:
             # Check if email already exists (only non-deleted, active users - not locations)
             existing_user = (
                 session.query(UserLocation)
-                .filter_by(email=email, is_user=True)
-                .filter(UserLocation.is_active == True, UserLocation.deleted_date.is_(None))
+                .filter(
+                    or_(
+                        func.lower(UserLocation.email) == email,
+                        func.lower(UserLocation.username) == email,
+                    ),
+                    UserLocation.is_user == True,
+                    UserLocation.is_active == True,
+                    UserLocation.deleted_date.is_(None),
+                )
                 .first()
             )
             
@@ -998,7 +1034,7 @@ class AuthHandlers:
             payload = jwt.decode(data["login_token"], self.jwt_secret, algorithms=['HS256'])
             if payload is None:
                 raise BadRequestException("Invalid login token")
-            email = payload.get('email')
+            email = _normalize_identity(payload.get('email'))
             password = payload.get('password')
             expired_date_value = payload.get("expired_date")
             expired_date_value = datetime.fromisoformat(expired_date_value.replace("Z", "+00:00"))
@@ -1009,10 +1045,13 @@ class AuthHandlers:
 
             session = self.db_session
             # Get user by email (is_user=True to avoid matching business_unit locations)
-            user = session.query(UserLocation).filter_by(
-                email=email,
-                is_user=True,
-                is_active=True
+            user = session.query(UserLocation).filter(
+                or_(
+                    func.lower(UserLocation.email) == email,
+                    func.lower(UserLocation.username) == email,
+                ),
+                UserLocation.is_user == True,
+                UserLocation.is_active == True,
             ).first()
 
             if not user:
@@ -1023,7 +1062,8 @@ class AuthHandlers:
                 raise UnauthorizedException('Invalid email or password')
 
             # Generate JWT auth and refresh tokens
-            tokens = self.generate_jwt_tokens(user.id, user.organization_id, email)
+            user_email = _normalize_identity(user.email or email)
+            tokens = self.generate_jwt_tokens(user.id, user.organization_id, user_email)
 
             # ── CRM: emit user_login (IoT QR path) ──
             _emit_auth_event(session, 'user_login', user=user,
@@ -1037,7 +1077,7 @@ class AuthHandlers:
                 'expires_in': 86400,  # 1 day in seconds
                 'user': {
                     'id': user.id,
-                    'email': email,
+                    'email': user_email,
                     'displayName': user.display_name,
                     'organizationId': user.organization_id
                 }
@@ -1106,7 +1146,7 @@ class AuthHandlers:
     def forgot_password(self, data: Dict[str, Any], **kwargs) -> Dict[str, Any]:
         """Handle forgot password request - generates reset token"""
         try:
-            email = data.get('email', '').strip().lower()
+            email = _normalize_identity(data.get('email'))
 
             if not email:
                 raise ValidationException('Email is required')
@@ -1117,10 +1157,13 @@ class AuthHandlers:
 
             session = self.db_session
             # Find user by email
-            user = session.query(UserLocation).filter_by(
-                email=email,
-                is_active=True,
-                is_user=True
+            user = session.query(UserLocation).filter(
+                or_(
+                    func.lower(UserLocation.email) == email,
+                    func.lower(UserLocation.username) == email,
+                ),
+                UserLocation.is_active == True,
+                UserLocation.is_user == True,
             ).first()
 
             # Always return success to prevent email enumeration attacks
