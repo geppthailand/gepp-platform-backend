@@ -2500,20 +2500,12 @@ class TraceabilityService:
                         400,
                         "INVALID_REQUEST",
                     )
-            if destination_id_val is not None:
-                source_location_ids = set()
-                for src, _w in transport_contribs:
-                    if src.destination_id is not None:
-                        source_location_ids.add(int(src.destination_id))
-                for g, _w in group_contribs:
-                    if g.origin_id is not None:
-                        source_location_ids.add(int(g.origin_id))
-                if destination_id_val in source_location_ids:
-                    raise APIException(
-                        "Consolidation point cannot be one of the selected source locations",
-                        400,
-                        "CONSOLIDATION_POINT_IS_SOURCE",
-                    )
+            # A consolidation point may intentionally be one of the selected
+            # source locations, e.g. consolidating floors into the same
+            # building. The consumed source groups/transports are removed from
+            # future pickable sources, and consolidated result transports are
+            # excluded from the consolidate picker, so this no longer creates
+            # the old re-consolidation loop.
 
             disposal_method_val = (req.get("disposal_method") or "").strip() or None
             # Consolidation produces an "arrived" transport with arrival_date=now.
