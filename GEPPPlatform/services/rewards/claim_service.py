@@ -62,8 +62,9 @@ class ClaimService:
             raise NotFoundException("Campaign not found, not active, or has ended")
 
         # [V3] Block claims for members whose org membership is deactivated.
-        # Without this guard, deactivating a user from the admin Members tab had no effect on
-        # their ability to earn points via staff scan.
+        # First-time claimers have no membership row yet — those are allowed and
+        # auto-registered below (step 4). Only block when an existing membership is
+        # explicitly deactivated by an admin.
         membership = (
             self.db.query(OrganizationRewardUser)
             .filter(
@@ -73,10 +74,9 @@ class ClaimService:
             )
             .first()
         )
-        if not membership:
-            raise BadRequestException("Member is not registered with this organization")
-        if not membership.is_active:
+        if membership is not None and not membership.is_active:
             raise BadRequestException("Member account is deactivated — contact admin to reactivate")
+        _is_new_member = membership is None
 
         # Verify droppoint is linked to campaign
         dp_link = (
@@ -136,6 +136,9 @@ class ClaimService:
 
         # Collect TransactionRecord data first, create Transaction after
         pending_records = []
+        # Tracks cumulative points awarded within THIS claim submission so the
+        # per-transaction limit caps the whole submission, not each item individually.
+        submission_total = Decimal("0")
 
         for item in items:
             activity_material_id = item.get("activity_material_id")
@@ -203,9 +206,12 @@ class ClaimService:
             else:  # floor (default)
                 points = Decimal(str(math.floor(points)))
 
-            # 2e. Per-transaction limit
+            # 2e. Per-transaction (per claim submission) limit — cumulative across items
             if campaign.points_per_transaction_limit is not None:
-                points = min(points, Decimal(str(campaign.points_per_transaction_limit)))
+                remaining_tx = Decimal(str(campaign.points_per_transaction_limit)) - submission_total
+                points = min(points, max(Decimal("0"), remaining_tx))
+                if points <= 0:
+                    raise BadRequestException("Per-transaction point limit reached for this campaign")
 
             # 2f. Per-day limit
             if campaign.points_per_day_limit is not None:
@@ -214,6 +220,8 @@ class ClaimService:
                 if points <= 0:
                     raise BadRequestException("Daily point limit reached for this campaign")
                 today_total += points  # track accumulation across items in this request
+
+            submission_total += points
 
             # Get activity material for unit snapshot and material_id
             activity_mat = (
@@ -243,6 +251,12 @@ class ClaimService:
                 })
 
             # 2e. Create reward point transaction (always — this is the core reward logic)
+            # `unit` is the measurement unit ('kg' / 'times'), NOT the material name —
+            # rank + gamification logic key off this string via _is_weight_unit().
+            if activity_mat:
+                txn_unit = "kg" if activity_mat.type == "material" else "times"
+            else:
+                txn_unit = None
             txn = RewardPointTransaction(
                 organization_id=campaign.organization_id,
                 reward_user_id=reward_user_id,
@@ -250,7 +264,7 @@ class ClaimService:
                 reward_activity_materials_id=activity_material_id,
                 reward_campaign_id=campaign_id,
                 value=value,
-                unit=activity_mat.name if activity_mat else None,
+                unit=txn_unit,
                 claimed_date=now,
                 staff_id=staff_org_user_id,
                 droppoint_id=droppoint_id,

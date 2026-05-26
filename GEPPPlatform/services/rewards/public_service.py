@@ -194,14 +194,18 @@ class PublicRewardService:
         return profile
 
     def get_memberships(self, reward_user_id: int) -> list[dict]:
-        """Get all organization memberships for a user (from organization_reward_users)."""
+        """Get all organization memberships for a user (active AND deactivated).
+
+        Returns deactivated rows too so the LIFF can render them grayed out
+        instead of silently hiding. Caller filters by `is_active` when needed
+        (e.g. staff-role detection should require is_active=True).
+        """
         from ...models.subscriptions.organizations import Organization
 
         rows = (
             self.db.query(OrganizationRewardUser)
             .filter(
                 OrganizationRewardUser.reward_user_id == reward_user_id,
-                OrganizationRewardUser.is_active == True,
                 OrganizationRewardUser.deleted_date.is_(None),
             )
             .all()

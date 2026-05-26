@@ -11,7 +11,7 @@ from sqlalchemy import func, and_, or_, case
 from sqlalchemy.orm import Session
 
 from ...models.rewards.catalog import RewardCatalog, RewardCatalogCategory, RewardStock
-from ...models.rewards.management import RewardCampaign
+from ...models.rewards.management import RewardCampaign, RewardCampaignCatalog
 from ...exceptions import NotFoundException, BadRequestException
 
 
@@ -345,6 +345,31 @@ class StockService:
                 f"Insufficient stock in {src_label}: {source_stock} available, {quantity} requested"
             )
 
+        # [V3-FIX] Auto-attach catalog to destination campaign if it's not already a
+        # member. Without this row in reward_campaign_catalog, the transferred stock
+        # would exist in the ledger but never surface in the campaign's "ของรางวัล"
+        # list (since list() filters on RewardCampaignCatalog membership).
+        # Default points_cost=1 — admin can adjust via the campaign catalog modal.
+        if to_campaign is not None:
+            existing_membership = (
+                self.db.query(RewardCampaignCatalog)
+                .filter(
+                    RewardCampaignCatalog.campaign_id == to_campaign,
+                    RewardCampaignCatalog.catalog_id == catalog_id,
+                    RewardCampaignCatalog.deleted_date.is_(None),
+                )
+                .first()
+            )
+            if not existing_membership:
+                self.db.add(
+                    RewardCampaignCatalog(
+                        campaign_id=to_campaign,
+                        catalog_id=catalog_id,
+                        points_cost=1,
+                        status="active",
+                    )
+                )
+
         group_id = uuid.uuid4()
         out_row = RewardStock(
             reward_catalog_id=catalog_id,
@@ -376,6 +401,162 @@ class StockService:
             "transfer_group_id": str(group_id),
         }
 
+    def record_purchase(
+        self,
+        data: dict,
+        organization_id: int,
+        admin_user_id: int | None = None,
+    ) -> dict:
+        """Record a single bill containing multiple catalog items, all deposited into
+        the same campaign. Atomic — all rows succeed or none do.
+
+        Shape:
+          {
+            "reward_campaign_id": int,
+            "vendor": str | None,
+            "bill_date": ISO str | None,   # used as RewardStock.created_date if provided
+            "receipt_file_id": int | None,
+            "note": str | None,
+            "items": [
+              {"reward_catalog_id": int, "quantity": int, "total_price": float},
+              ...
+            ]
+          }
+
+        Per item: unit_price = total_price / quantity (computed here, never trusted from client).
+        Auto-creates RewardCampaignCatalog membership for catalog items not yet in the campaign
+        — same pattern as transfer(), so the bill items immediately surface in the campaign.
+        """
+        from datetime import datetime as _datetime
+
+        campaign_id = data.get("reward_campaign_id")
+        items = data.get("items") or []
+        if campaign_id is None:
+            raise BadRequestException("reward_campaign_id is required")
+        if not items:
+            raise BadRequestException("items list cannot be empty")
+
+        # Validate campaign ownership
+        campaign = (
+            self.db.query(RewardCampaign)
+            .filter(
+                RewardCampaign.id == campaign_id,
+                RewardCampaign.organization_id == organization_id,
+                RewardCampaign.deleted_date.is_(None),
+            )
+            .first()
+        )
+        if not campaign:
+            raise NotFoundException("Campaign not found in your organization")
+
+        # Parse bill_date (optional override; default = now)
+        bill_date = None
+        raw_date = data.get("bill_date")
+        if raw_date:
+            try:
+                bill_date = _datetime.fromisoformat(str(raw_date).replace("Z", "+00:00"))
+            except Exception:
+                raise BadRequestException(f"Invalid bill_date: {raw_date}")
+
+        vendor = data.get("vendor")
+        receipt_file_id = data.get("receipt_file_id")
+        shared_note = data.get("note")
+
+        # Validate every item up-front so we don't half-insert before discovering a bad row.
+        normalized = []
+        for it in items:
+            catalog_id = it.get("reward_catalog_id")
+            qty = it.get("quantity")
+            total_price = it.get("total_price")
+            if catalog_id is None or qty is None or total_price is None:
+                raise BadRequestException(
+                    "Each item requires reward_catalog_id, quantity, total_price"
+                )
+            qty = int(qty)
+            total_price = float(total_price)
+            if qty <= 0:
+                raise BadRequestException("quantity must be positive")
+            if total_price < 0:
+                raise BadRequestException("total_price cannot be negative")
+            normalized.append({
+                "catalog_id": int(catalog_id),
+                "quantity": qty,
+                "total_price": total_price,
+                "unit_price": total_price / qty if qty > 0 else 0.0,
+            })
+
+        # Verify every catalog belongs to this org (single query)
+        catalog_ids = [n["catalog_id"] for n in normalized]
+        owned = {
+            c.id
+            for c in self.db.query(RewardCatalog.id).filter(
+                RewardCatalog.id.in_(catalog_ids),
+                RewardCatalog.organization_id == organization_id,
+                RewardCatalog.deleted_date.is_(None),
+            ).all()
+        }
+        missing = [cid for cid in catalog_ids if cid not in owned]
+        if missing:
+            raise NotFoundException(f"Catalog item(s) not in your org: {missing}")
+
+        # Look up existing memberships in one shot
+        existing_member_ids = {
+            cc.catalog_id
+            for cc in self.db.query(RewardCampaignCatalog.catalog_id).filter(
+                RewardCampaignCatalog.campaign_id == campaign_id,
+                RewardCampaignCatalog.catalog_id.in_(catalog_ids),
+                RewardCampaignCatalog.deleted_date.is_(None),
+            ).all()
+        }
+
+        created_rows: list[dict] = []
+        for n in normalized:
+            # Auto-create campaign membership if catalog isn't yet a member of this campaign.
+            # Mirrors transfer() — keeps the new bill's items visible on the campaign page.
+            if n["catalog_id"] not in existing_member_ids:
+                self.db.add(
+                    RewardCampaignCatalog(
+                        campaign_id=campaign_id,
+                        catalog_id=n["catalog_id"],
+                        points_cost=1,
+                        status="active",
+                    )
+                )
+                existing_member_ids.add(n["catalog_id"])
+
+            row_kwargs = dict(
+                reward_catalog_id=n["catalog_id"],
+                values=n["quantity"],
+                reward_campaign_id=campaign_id,
+                ledger_type="deposit",
+                note=shared_note,
+                vendor=vendor,
+                unit_price=round(n["unit_price"], 2),
+                total_price=round(n["total_price"], 2),
+                receipt_file_id=receipt_file_id,
+                admin_user_id=admin_user_id,
+            )
+            if bill_date is not None:
+                row_kwargs["created_date"] = bill_date
+            row = RewardStock(**row_kwargs)
+            self.db.add(row)
+            self.db.flush()
+            created_rows.append({
+                "stock_id": row.id,
+                "catalog_id": n["catalog_id"],
+                "quantity": n["quantity"],
+                "unit_price": round(n["unit_price"], 2),
+                "total_price": round(n["total_price"], 2),
+            })
+
+        return {
+            "reward_campaign_id": campaign_id,
+            "vendor": vendor,
+            "bill_date": bill_date.isoformat() if bill_date else None,
+            "items": created_rows,
+            "total_amount": round(sum(r["total_price"] for r in created_rows), 2),
+        }
+
     # Legacy method — kept for backward compat with existing callers
     def deposit_or_withdraw(self, data: dict, organization_id: int = None) -> dict:
         """Legacy: positive=deposit, negative=withdraw. Prefer deposit() / transfer()."""
@@ -389,7 +570,9 @@ class StockService:
         )
         if organization_id is not None:
             q = q.filter(RewardCatalog.organization_id == organization_id)
-        catalog = q.first()
+        # Lock catalog row to serialise stock writes for this item across concurrent
+        # admin actions + redemption confirmations (prevents negative stock TOCTOU).
+        catalog = q.with_for_update().first()
         if not catalog:
             raise NotFoundException("Catalog item not found or not in your organization")
 

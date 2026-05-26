@@ -122,6 +122,10 @@ class HistoryService:
             {
                 "id": r.id,
                 "hash": r.hash,
+                # [V3-FIX] Expose the shared cart hash so the LIFF can encode it in
+                # the QR. Without this, the FE falls back to per-item r.hash and
+                # the staff lookup only finds 1 item out of a multi-item cart.
+                "redemption_group_hash": r.redemption_group_hash,
                 "catalog_id": r.catalog_id,
                 "catalog_name": catalog_name,
                 "campaign_id": r.reward_campaign_id,

@@ -16,7 +16,10 @@ class RewardSetup(Base, BaseModel):
     organization_id = Column(BigInteger, ForeignKey('organizations.id'), nullable=False)
     program_name = Column(String(255), nullable=True)
     program_name_local = Column(String(255), nullable=True)
-    points_rounding_method = Column(String(20), default='round')  # floor / ceil / round
+    # FE preview (ClaimItemsList.tsx) hard-codes Math.floor — keep default aligned to
+    # avoid FE-shown points differing from BE-saved points. Admins can opt into
+    # 'ceil' or 'round' explicitly via SettingsTab (accepting the preview drift).
+    points_rounding_method = Column(String(20), default='floor')  # floor / ceil / round
     timezone = Column(String(100), default='Asia/Bangkok')
     cost_per_point = Column(DECIMAL(10, 4), default=0.25)
     qr_code_size = Column(Integer, default=200)
