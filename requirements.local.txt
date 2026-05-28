@@ -9,6 +9,8 @@ Pillow
 langchain-core
 openai
 pyyaml
+pymysql
+requests
 
 # ── Lambda Layer: layer-installation.txt ──────────────
 google-cloud-firestore
