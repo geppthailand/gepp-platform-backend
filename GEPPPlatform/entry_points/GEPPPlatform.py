@@ -138,7 +138,7 @@ def main(event, context):
                 "statusCode": 200,
                 "headers": {
                     "Access-Control-Allow-Origin": "*",
-                    "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+                    "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
                     "Access-Control-Allow-Headers": "Content-Type, Authorization",
                     "Access-Control-Expose-Headers": _EXPOSED_HEADER_NAMES,
                     "Content-Type": "application/json",
@@ -164,7 +164,7 @@ def main(event, context):
                     "statusCode": 400,
                     "headers": {
                         "Access-Control-Allow-Origin": "*",
-                        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+                        "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
                         "Access-Control-Allow-Headers": "Content-Type, Authorization",
                         "Access-Control-Expose-Headers": _EXPOSED_HEADER_NAMES,
                         "Content-Type": "application/json",
@@ -182,7 +182,7 @@ def main(event, context):
         # readable by the browser's fetch/XHR.
         headers = {
             'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+            'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
             'Access-Control-Allow-Headers': 'Content-Type, Authorization',
             'Access-Control-Expose-Headers': _EXPOSED_HEADER_NAMES,
             'Content-Type': 'application/json',
@@ -223,6 +223,19 @@ def main(event, context):
                 )
                 hw_result = handle_iot_hardware_routes(event, data=body, **commonParams)
                 results = {"success": True, "data": hw_result}
+
+            elif "/api/epr/ai_audit" in path:
+                # PUBLIC: EPR AI audit ingestion + lookup endpoints.
+                # Routed here (before the auth gate) so external integrations
+                # can POST transactions without a JWT. Ported from
+                # gepp-v2-backend (GEPPV2.services.ai_audit).
+                from GEPPPlatform.services.cores.epr_ai_audit.api.handlers import handle_epr_ai_audit_routes
+
+                epr_ai_audit_result = handle_epr_ai_audit_routes(event, data=body, **commonParams)
+                results = {
+                    "success": True,
+                    "data": epr_ai_audit_result
+                }
 
             elif "/documents/api-docs" in raw_path or "/docs/bma/" in raw_path:
                 # Handle documentation routes (no authorization required)
@@ -1266,7 +1279,7 @@ def main(event, context):
 
                     else:
                         # Handle other future modules here
-                        available_routes = ["/api/auth/*", "/api/users/*", "/api/organizations/*", "/api/materials/*", "/api/locations/*", "/api/reports/*", "/api/transactions/*", "/api/transaction_audit/*", "/api/traceability/*", "/api/audit/*", "/api/esg/*", "/api/debug/*", "/api/integration/*", "/api/userapi/{api_path}/{service_path}/*", "/health"]
+                        available_routes = ["/api/auth/*", "/api/users/*", "/api/organizations/*", "/api/materials/*", "/api/locations/*", "/api/reports/*", "/api/transactions/*", "/api/transaction_audit/*", "/api/traceability/*", "/api/audit/*", "/api/audit-settings/*", "/api/epr/ai_audit/*", "/api/esg/*", "/api/debug/*", "/api/integration/*", "/api/userapi/{api_path}/{service_path}/*", "/health"]
                         return {
                             "statusCode": 404,
                             "headers": headers,
@@ -1327,7 +1340,7 @@ def main(event, context):
             "statusCode": 401,
             "headers": {
                 "Access-Control-Allow-Origin": "*",
-                "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+                "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
                 "Access-Control-Allow-Headers": "Content-Type, Authorization",
                 "Access-Control-Expose-Headers": _EXPOSED_HEADER_NAMES,
                 "Content-Type": "application/json",
@@ -1344,7 +1357,7 @@ def main(event, context):
             "statusCode": api_error.status_code,
             "headers": {
                 "Access-Control-Allow-Origin": "*",
-                "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+                "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
                 "Access-Control-Allow-Headers": "Content-Type, Authorization",
                 "Access-Control-Expose-Headers": _EXPOSED_HEADER_NAMES,
                 "Content-Type": "application/json",
@@ -1364,7 +1377,7 @@ def main(event, context):
             "statusCode": 500,
             "headers": {
                 "Access-Control-Allow-Origin": "*",
-                "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+                "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
                 "Access-Control-Allow-Headers": "Content-Type, Authorization",
                 "Access-Control-Expose-Headers": _EXPOSED_HEADER_NAMES,
                 "Content-Type": "application/json",
