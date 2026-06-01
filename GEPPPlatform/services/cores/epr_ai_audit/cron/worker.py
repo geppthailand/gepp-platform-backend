@@ -1094,12 +1094,13 @@ def _now_iso() -> str:
 
 
 def _project_has_ai_audit(legacy_conn, project_id: int) -> bool:
-    """Look up `epr_project.ai_audit` in the legacy MySQL DB. Returns True
-    only when the column is explicitly truthy. Missing project / NULL flag
-    default to False (safer — opt-in)."""
+    """Look up `epr_project_ai_audit_setting.enabled` in the legacy MySQL DB.
+    Returns True only when the flag is explicitly truthy. Missing setting row /
+    NULL flag default to False (safer — opt-in)."""
     with legacy_conn.cursor() as cur:
         cur.execute(
-            "SELECT ai_audit FROM epr_project WHERE id = %s",
+            "SELECT enabled FROM epr_project_ai_audit_setting "
+            "WHERE epr_project_id = %s",
             (project_id,),
         )
         row = cur.fetchone()
@@ -1171,8 +1172,9 @@ def process_transaction(conn, tx_id: int) -> Optional[dict]:
         project_id = row[0]
 
     # Step 0/1: project gate + legacy import. One legacy connection serves both.
-    #   0. Check `epr_project.ai_audit` in legacy DB — if disabled, mark the
-    #      tx + records as 'skipped' and return early. No LLM work runs.
+    #   0. Check `epr_project_ai_audit_setting.enabled` in legacy DB — if
+    #      disabled, mark the tx + records as 'skipped' and return early. No
+    #      LLM work runs.
     #   1. Drive one chunk of legacy import for the project (may return
     #      'in_progress' if more chunks remain).
     if project_id is not None:
