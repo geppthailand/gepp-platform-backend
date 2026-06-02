@@ -30,8 +30,6 @@ Tuning knobs (env vars, all optional):
   CRON_STAGE                        which queue stage to process (default 'embedding')
   JOB_REAP_AFTER_SECONDS            recover jobs stuck in 'processing' for this
                                     long (default 1200 = 20 min, min 60)
-  LEGACY_IMPORT_MAX_PER_PROJECT     cap on legacy transactions imported per
-                                    project (default 5, 0 = no cap)
   AI_AUDIT_API_BASE_URL             base URL of the deployed API (the EPR AI
                                     audit Lambda) used by the integrity test
                                     to POST /api/epr/ai_audit/embed-transaction.

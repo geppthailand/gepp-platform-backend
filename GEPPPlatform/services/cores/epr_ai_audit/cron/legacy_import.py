@@ -1,26 +1,40 @@
 """
 Per-project legacy import from the MySQL Gepp_new DB into our Postgres.
-Picks a RANDOM sample of legacy transactions (capped by
-LEGACY_IMPORT_MAX_PER_PROJECT) so each project has a representative dedup
-comparison set without re-importing the entire history.
+Builds each project's dedup **comparison corpus** by sampling legacy
+transactions according to the project's `epr_project_ai_audit_setting` row
+(legacy MySQL). Imported rows are comparison-only — they are NOT themselves
+audited (no dedup job is enqueued for them).
 
 Public entry point: `ensure_imported(legacy_conn, conn, project_id)`.
-Returns ('complete', count) once the project's import is fully done
-(cap hit OR legacy source exhausted), or ('in_progress', count) when more
-chunks remain. The caller (worker) decides what to do with each status.
+Returns ('complete', count) once nothing more needs importing this tick
+(sample target reached, legacy source exhausted, or no sampling configured),
+or ('in_progress', count) when more chunks remain. The caller (worker)
+decides what to do with each status.
 
-Sampling: `_fetch_legacy_chunk` does `ORDER BY RAND() LIMIT n` against the
-legacy `transactions` table, excluding any ids already in our DB (looked up
-via `raw_data->>'_legacy_id'` on `epr_transactions_embeded`). So:
-  - Re-running the import never re-picks an already-imported row.
-  - The same project may end up with a different random sample if you reset
-    its `epr_project_import_state` row and re-run.
+Sampling modes (read fresh from the setting on EVERY call — see
+`_get_sampling_setting`):
+  - `interval` — import ALL legacy txs whose `created_date` falls in
+    [interval_start, interval_end] that aren't already imported. `sample_amount`
+    is ignored. Missing either bound → import nothing.
+  - `latest`   — top up to `sample_amount` rows with the newest-by-created_date
+    legacy txs not already imported. If we already have ≥ sample_amount, no-op.
+  - `random`   — same as latest but `ORDER BY RAND()`.
+  - no row / unrecognized type / missing required params → import nothing.
+
+The selection always excludes already-imported ids and only ever ADDS rows
+(never removes), so a changed setting self-heals on the next tick: switching
+type or params simply tops up the missing rows without duplicating existing
+ones. Because the setting is re-read every call, there is no stored
+"applied setting" — the live legacy data + current imported set are the only
+inputs.
 
 Resumability: each legacy transaction's import (parent row + image rows
 + inline LLM extraction) is committed before the next is picked. If the
 cron Lambda crashes mid-import, the next tick re-queries for un-imported
 rows and continues. `last_imported_legacy_id` is kept for observability
-only — it's no longer used to drive selection.
+only — it's no longer used to drive selection. `epr_project_import_state`
+is used for partial-import cleanup, counts, and observability only — its
+`status` no longer gates whether a project is re-checked.
 
 Scope:
   - parent-level only (transactions + transaction_images)
@@ -33,7 +47,6 @@ rather than is_active so legacy rows still surface as dedup candidates.
 """
 
 import logging
-import os
 from typing import Optional, Tuple
 
 from psycopg2.extras import Json
@@ -44,45 +57,38 @@ logger = logging.getLogger(__name__)
 
 CHUNK_SIZE = 10  # legacy transactions per ensure_imported call
 
-# Default cap on the number of legacy transactions imported per project.
-# Overridable via the LEGACY_IMPORT_MAX_PER_PROJECT env var. Set to 0 to
-# disable the cap and import the full history. The cap is enforced against
-# `epr_project_import_state.imported_count`, so increasing the env var on a
-# running project simply unlocks more chunks on subsequent ticks.
-MAX_PER_PROJECT_DEFAULT = 5
+# Recognized sampling strategies in `epr_project_ai_audit_setting.type`.
+SAMPLE_TYPE_INTERVAL = "interval"
+SAMPLE_TYPE_LATEST = "latest"
+SAMPLE_TYPE_RANDOM = "random"
+_VALID_SAMPLE_TYPES = (SAMPLE_TYPE_INTERVAL, SAMPLE_TYPE_LATEST, SAMPLE_TYPE_RANDOM)
 
 
-def _max_per_project() -> int:
-    """Read the per-project import cap from the LEGACY_IMPORT_MAX_PER_PROJECT
-    env var, falling back to MAX_PER_PROJECT_DEFAULT. Returns 0 to mean
-    'no cap' (import the full legacy history)."""
-    raw = os.environ.get("LEGACY_IMPORT_MAX_PER_PROJECT")
-    if raw is None or raw == "":
-        return MAX_PER_PROJECT_DEFAULT
-    try:
-        v = int(raw)
-        return max(0, v)
-    except ValueError:
-        logger.warning(
-            "LEGACY_IMPORT_MAX_PER_PROJECT=%r is not an integer, using default %d",
-            raw, MAX_PER_PROJECT_DEFAULT,
-        )
-        return MAX_PER_PROJECT_DEFAULT
+def _get_sampling_setting(legacy_conn, project_id: int) -> Optional[dict]:
+    """Read the project's AI-audit sampling config from legacy MySQL.
 
-
-def _get_state(conn, project_id):
-    """Return (status, last_imported_legacy_id, imported_count) for the
-    project, or None if no state row exists yet. Uses FOR UPDATE so
-    concurrent callers serialize."""
-    with conn.cursor() as cur:
+    Returns {type, sample_amount, interval_start, interval_end} with `type`
+    lowercased/stripped (None if blank), or None when there is no setting row
+    for the project. Callers validate `type` against `_VALID_SAMPLE_TYPES` and
+    check that the params each mode needs are present.
+    """
+    with legacy_conn.cursor() as cur:
         cur.execute(
-            "SELECT status, last_imported_legacy_id, imported_count "
-            "FROM epr_project_import_state "
-            "WHERE epr_project_id = %s "
-            "FOR UPDATE",
+            "SELECT type, sample_amount, interval_start, interval_end "
+            "FROM epr_project_ai_audit_setting "
+            "WHERE epr_project_id = %s",
             (project_id,),
         )
-        return cur.fetchone()
+        row = cur.fetchone()
+    if row is None:
+        return None
+    s_type, sample_amount, interval_start, interval_end = row
+    return {
+        "type": (str(s_type).strip().lower() or None) if s_type is not None else None,
+        "sample_amount": sample_amount,
+        "interval_start": interval_start,
+        "interval_end": interval_end,
+    }
 
 
 def _init_state(conn, project_id):
@@ -136,8 +142,8 @@ def _cleanup_partial_imports(conn, project_id: int, stale_after_seconds: int = P
 def _resync_imported_count(conn, project_id: int) -> None:
     """Recompute `imported_count` in state from the actual number of
     legacy-tagged rows in our DB. Called after `_cleanup_partial_imports`
-    so the cap check uses the real number, not a stale one inflated by
-    rows we just deleted."""
+    so the sample-size check uses the real number, not a stale one inflated
+    by rows we just deleted."""
     with conn.cursor() as cur:
         cur.execute(
             "UPDATE epr_project_import_state s "
@@ -154,8 +160,9 @@ def _resync_imported_count(conn, project_id: int) -> None:
 
 def _already_imported_legacy_ids(conn, project_id: int) -> set:
     """Return the set of legacy_ids we've already imported into our DB for
-    this project, read from `raw_data->>'_legacy_id'`. Used to filter
-    random samples so we don't re-pick the same rows."""
+    this project, read from `raw_data->>'_legacy_id'`. Used both as the
+    exclude-set (so no mode re-picks the same row) and as the current sample
+    size for the latest/random count target."""
     with conn.cursor() as cur:
         cur.execute(
             "SELECT (raw_data->>'_legacy_id')::bigint "
@@ -167,59 +174,95 @@ def _already_imported_legacy_ids(conn, project_id: int) -> set:
         return {r[0] for r in cur.fetchall()}
 
 
-def _fetch_legacy_chunk(legacy_conn, project_id: int, exclude_ids: set, limit: int):
-    """SELECT a RANDOM chunk of legacy transactions for this project,
+# Columns selected for every legacy-transaction chunk, in the order
+# `_row_to_raw` unpacks them. Kept as one constant so the three sampling
+# selectors stay in lock-step.
+_LEGACY_TX_COLUMNS = (
+    "id, invoice_no, note, total_quantity, transaction_date, "
+    "status, epr_project_id, is_active, "
+    "created_date, updated_date, deleted_date"
+)
+
+
+def _row_to_raw(r):
+    """Map one legacy `transactions` row (in `_LEGACY_TX_COLUMNS` order) to
+    (legacy_tx_id, raw_dict) shaped like our API payload's transaction."""
+    legacy_id, invoice_no, note, total_quantity, transaction_date, \
+        status, epr_project_id, is_active, \
+        created_date, updated_date, deleted_date = r
+    raw = {
+        "_legacy_id": legacy_id,
+        "_source": "legacy_import",
+        "invoiceNo": invoice_no,
+        "note": note,
+        "totalQuantity": float(total_quantity) if total_quantity is not None else None,
+        "transactionDate": transaction_date.isoformat() if transaction_date else None,
+        "status": status,
+        "eprProjectId": epr_project_id,
+        "isActive": bool(is_active),
+        "createdDate": created_date.isoformat() if created_date else None,
+        "updatedDate": updated_date.isoformat() if updated_date else None,
+        "deletedDate": deleted_date.isoformat() if deleted_date else None,
+    }
+    return legacy_id, raw
+
+
+def _fetch_chunk(legacy_conn, project_id, exclude_ids, limit,
+                 *, extra_where="", extra_params=(), order_by="RAND()"):
+    """SELECT a chunk of non-deleted legacy transactions for this project,
     excluding any ids in `exclude_ids` (already imported into our DB).
 
-    Uses `ORDER BY RAND() LIMIT n`. MySQL has to score every candidate row,
-    so this is O(N) per query — fine for projects with up to ~100k legacy
-    txs. Run on much larger tables, swap to a seeded-pick strategy.
-
-    Returns list of (legacy_tx_id, raw_dict).
+    `order_by` / `extra_where` are supplied only from this module's own
+    constants (never user input), so the f-string interpolation is safe.
+    `ORDER BY RAND()` makes MySQL score every candidate row — O(N) per query,
+    fine up to ~100k legacy txs per project. Returns list of (legacy_tx_id, raw).
     """
     sql = (
-        "SELECT id, invoice_no, note, total_quantity, transaction_date, "
-        "       status, epr_project_id, is_active, "
-        "       created_date, updated_date, deleted_date "
+        f"SELECT {_LEGACY_TX_COLUMNS} "
         "FROM transactions "
         "WHERE epr_project_id = %s "
         "AND deleted_date IS NULL "
     )
     params: list = [project_id]
+    if extra_where:
+        sql += extra_where + " "
+        params.extend(extra_params)
     if exclude_ids:
-        # IN-list of already-imported ids. psycopg2/mysql.connector
-        # accept a tuple for IN; build it inline so empty set is a no-op.
+        # IN-list of already-imported ids. mysql.connector accepts a tuple
+        # for IN; build it inline so the empty set is a no-op.
         placeholders = ",".join(["%s"] * len(exclude_ids))
         sql += f"AND id NOT IN ({placeholders}) "
         params.extend(sorted(exclude_ids))
-    sql += "ORDER BY RAND() LIMIT %s"
+    sql += f"ORDER BY {order_by} LIMIT %s"
     params.append(limit)
 
     with legacy_conn.cursor() as cur:
         cur.execute(sql, tuple(params))
         rows = cur.fetchall()
+    return [_row_to_raw(r) for r in rows]
 
-    out = []
-    for r in rows:
-        legacy_id, invoice_no, note, total_quantity, transaction_date, \
-            status, epr_project_id, is_active, \
-            created_date, updated_date, deleted_date = r
-        raw = {
-            "_legacy_id": legacy_id,
-            "_source": "legacy_import",
-            "invoiceNo": invoice_no,
-            "note": note,
-            "totalQuantity": float(total_quantity) if total_quantity is not None else None,
-            "transactionDate": transaction_date.isoformat() if transaction_date else None,
-            "status": status,
-            "eprProjectId": epr_project_id,
-            "isActive": bool(is_active),
-            "createdDate": created_date.isoformat() if created_date else None,
-            "updatedDate": updated_date.isoformat() if updated_date else None,
-            "deletedDate": deleted_date.isoformat() if deleted_date else None,
-        }
-        out.append((legacy_id, raw))
-    return out
+
+def _fetch_random_chunk(legacy_conn, project_id: int, exclude_ids: set, limit: int):
+    """`random` mode — a random chunk not already imported."""
+    return _fetch_chunk(legacy_conn, project_id, exclude_ids, limit, order_by="RAND()")
+
+
+def _fetch_latest_chunk(legacy_conn, project_id: int, exclude_ids: set, limit: int):
+    """`latest` mode — newest-by-created_date chunk not already imported."""
+    return _fetch_chunk(legacy_conn, project_id, exclude_ids, limit,
+                        order_by="created_date DESC")
+
+
+def _fetch_interval_chunk(legacy_conn, project_id: int, exclude_ids: set,
+                          start, end, limit: int):
+    """`interval` mode — chunk within [start, end] by created_date, oldest
+    first, not already imported."""
+    return _fetch_chunk(
+        legacy_conn, project_id, exclude_ids, limit,
+        extra_where="AND created_date >= %s AND created_date <= %s",
+        extra_params=(start, end),
+        order_by="created_date ASC",
+    )
 
 
 def _fetch_legacy_images(legacy_conn, legacy_tx_id: int):
@@ -353,34 +396,33 @@ def ensure_imported(
     conn,
     project_id: int,
     chunk_size: int = CHUNK_SIZE,
-    max_per_project: Optional[int] = None,
 ) -> Tuple[str, int]:
     """Drive one chunk of legacy import for `project_id`. Idempotent + resumable.
 
-    `max_per_project` caps how many legacy transactions we ever import for
-    this project. None = read from LEGACY_IMPORT_MAX_PER_PROJECT env var
-    (default MAX_PER_PROJECT_DEFAULT). 0 = no cap (import the full history).
-    The check runs against `imported_count` in state, so raising the cap on
-    a project that previously hit it simply unlocks more chunks next tick.
+    The sampling strategy is read fresh from `epr_project_ai_audit_setting`
+    (legacy MySQL) on every call — see the module docstring for the three
+    modes. Selection always excludes already-imported ids and only ever adds
+    rows, so a changed setting self-heals by topping up; nothing is removed and
+    nothing is duplicated. There is no permanent "complete" short-circuit — a
+    project is re-evaluated against the live legacy data each tick.
 
-    Returns ('complete', count) when the project's import is done — either
-    because we ran out of legacy rows OR because we hit the cap. Returns
+    Returns ('complete', count) when nothing more needs importing this tick
+    (target reached, source exhausted, or no/invalid sampling config), or
     ('in_progress', count) when more chunks remain on subsequent cron ticks.
 
-    Per-tx checkpoint commits make this safe under crashes: re-running picks
-    up from `last_imported_legacy_id` without re-importing anything.
+    Per-tx checkpoint commits make this safe under crashes: re-running excludes
+    anything already imported without re-importing it.
     """
     _init_state(conn, project_id)
 
     # Sweep partially-imported legacy txs (Lambda died mid-extraction last
-    # time around). Deleting them frees their `_legacy_id` so the random
-    # sampler can re-pick the same tx and start fresh. Stale threshold
-    # protects a currently-running parallel worker.
+    # time around). Deleting them frees their `_legacy_id` so the sampler can
+    # re-pick the same tx and start fresh. Stale threshold protects a
+    # currently-running parallel worker.
     cleaned = _cleanup_partial_imports(conn, project_id)
     if cleaned:
-        # The state row's imported_count is now stale (we just deleted N
-        # rows it was counting). Sync it back to the actual count so the
-        # cap check below isn't fooled by ghost imports.
+        # The state row's imported_count is now stale (we just deleted N rows
+        # it was counting). Sync it back to the actual count.
         _resync_imported_count(conn, project_id)
         logger.info(
             "legacy import for project_id=%s: cleaned %d partial(s), resynced count",
@@ -388,37 +430,55 @@ def ensure_imported(
         )
     conn.commit()
 
-    state = _get_state(conn, project_id)
-    if state is None:
-        # Should not happen after _init_state, but defensive
-        return ("in_progress", 0)
-    status, last_id, imported_count = state
-    if status == "complete":
+    # Sampling config drives selection. No row / unrecognized type → import
+    # nothing (there is no env-var random fallback anymore).
+    setting = _get_sampling_setting(legacy_conn, project_id)
+    if setting is None or setting["type"] not in _VALID_SAMPLE_TYPES:
+        logger.info(
+            "legacy import for project_id=%s: no valid sampling config (%s), skipping",
+            project_id, (setting or {}).get("type"),
+        )
         return ("complete", 0)
+    s_type = setting["type"]
 
-    cap = _max_per_project() if max_per_project is None else max(0, int(max_per_project))
-    if cap > 0:
-        remaining = cap - (imported_count or 0)
-        if remaining <= 0:
-            # Already at/over the cap — mark complete so future ticks skip
-            # this project entirely.
-            _mark_complete(conn, project_id)
+    # `already` doubles as both the exclude-set and the current sample size.
+    already = _already_imported_legacy_ids(conn, project_id)
+    have = len(already)
+
+    if s_type == SAMPLE_TYPE_INTERVAL:
+        start, end = setting["interval_start"], setting["interval_end"]
+        if start is None or end is None:
             logger.info(
-                "legacy import for project_id=%s already at cap (%d/%d), marking complete",
-                project_id, imported_count, cap,
+                "legacy import for project_id=%s: interval type but bounds missing "
+                "(start=%s end=%s), skipping",
+                project_id, start, end,
             )
             return ("complete", 0)
-        effective_chunk = min(chunk_size, remaining)
+        effective_chunk = chunk_size  # no count target — import the whole window
+        chunk = _fetch_interval_chunk(
+            legacy_conn, project_id, already, start, end, effective_chunk,
+        )
     else:
-        effective_chunk = chunk_size
+        amount = setting["sample_amount"]
+        if amount is None or amount <= 0:
+            logger.info(
+                "legacy import for project_id=%s: %s type but sample_amount missing/<=0 (%s), skipping",
+                project_id, s_type, amount,
+            )
+            return ("complete", 0)
+        needed = amount - have
+        if needed <= 0:
+            # Already at/over target — nothing to do (covers interval→latest/
+            # random where `have` is already large).
+            return ("complete", 0)
+        effective_chunk = min(chunk_size, needed)
+        if s_type == SAMPLE_TYPE_LATEST:
+            chunk = _fetch_latest_chunk(legacy_conn, project_id, already, effective_chunk)
+        else:  # SAMPLE_TYPE_RANDOM
+            chunk = _fetch_random_chunk(legacy_conn, project_id, already, effective_chunk)
 
-    # Random sampling — pick `effective_chunk` legacy txs NOT yet in our DB.
-    # No monotonic checkpoint; resumability is "anything already imported is
-    # excluded from the next random pick."
-    already_imported = _already_imported_legacy_ids(conn, project_id)
-    chunk = _fetch_legacy_chunk(legacy_conn, project_id, already_imported, effective_chunk)
     if not chunk:
-        # Nothing left in legacy that we haven't imported — done.
+        # Nothing left in legacy matching the strategy that we haven't imported.
         _mark_complete(conn, project_id)
         return ("complete", 0)
 
@@ -440,17 +500,12 @@ def ensure_imported(
             )
             raise
 
-    # Done if (a) we hit the cap, or (b) the legacy source has no more
-    # un-imported rows (chunk smaller than requested = exhausted).
-    new_count = (imported_count or 0) + imported
-    if cap > 0 and new_count >= cap:
-        _mark_complete(conn, project_id)
-        logger.info(
-            "legacy import for project_id=%s reached cap (%d/%d), marking complete",
-            project_id, new_count, cap,
-        )
-        return ("complete", imported)
+    # A short chunk means the source is exhausted for this strategy → done.
+    # For latest/random, also done once we've reached the target amount.
     if len(chunk) < effective_chunk:
+        _mark_complete(conn, project_id)
+        return ("complete", imported)
+    if s_type != SAMPLE_TYPE_INTERVAL and (have + imported) >= setting["sample_amount"]:
         _mark_complete(conn, project_id)
         return ("complete", imported)
     return ("in_progress", imported)
