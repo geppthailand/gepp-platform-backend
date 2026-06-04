@@ -15,6 +15,7 @@ import logging
 from typing import Any, Dict, Optional
 
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 
 from ....exceptions import BadRequestException, NotFoundException
 from . import lead_service
@@ -54,14 +55,14 @@ def list_crm_leads(db: Session, query_params: dict, current_user: Optional[dict]
 
 
 def get_crm_lead(db: Session, resource_id: int, current_user: Optional[dict] = None) -> Dict[str, Any]:
-    org_id = _org_from_user(current_user)
-    if org_id is None:
-        raise BadRequestException("organizationId is required")
+    org_id = _org_from_user(current_user) or _org_from_lead(db, resource_id, current_user)
     return lead_service.get_lead(db, resource_id, org_id)
 
 
 def create_crm_lead(db: Session, data: dict, current_user: Optional[dict] = None) -> Dict[str, Any]:
-    org_id = _require_org_id(data, user=current_user)
+    org_id = _create_org_id(data, current_user)
+    if org_id is None and data.get('organizationName') and not data.get('company'):
+        data = {**data, 'company': data.get('organizationName')}
     return lead_service.create_lead(
         db,
         org_id=org_id,
@@ -75,14 +76,12 @@ def create_crm_lead(db: Session, data: dict, current_user: Optional[dict] = None
 def update_crm_lead(
     db: Session, resource_id: int, data: dict, current_user: Optional[dict] = None
 ) -> Dict[str, Any]:
-    org_id = _require_org_id(data, user=current_user)
+    org_id = _optional_org_id(data, user=current_user) or _org_from_lead(db, resource_id, current_user)
     return lead_service.update_lead(db, resource_id, org_id, data)
 
 
 def delete_crm_lead(db: Session, resource_id: int, current_user: Optional[dict] = None) -> Dict[str, Any]:
-    org_id = _org_from_user(current_user)
-    if org_id is None:
-        raise BadRequestException("organizationId is required")
+    org_id = _org_from_user(current_user) or _org_from_lead(db, resource_id, current_user)
     return lead_service.delete_lead(db, resource_id, org_id)
 
 
@@ -121,7 +120,7 @@ def dispatch_lead_subroute(
     if not resource_id:
         raise _NF(f"crm-leads sub-route not found: {method} /{sub_path}")
     if not org_id:
-        raise BadRequestException("organizationId is required")
+        org_id = _org_from_lead(db, int(resource_id), current_user)
 
     lead_id = int(resource_id)
     by_user = _int_or_none((current_user or {}).get('user_id') or (current_user or {}).get('id'))
@@ -213,12 +212,33 @@ def _resolve_list_org_id(source: dict, user: Optional[dict] = None) -> Optional[
 
 def _require_org_id(source: dict, user: Optional[dict] = None) -> int:
     """Extract and return org_id from body/query, falling back to current_user."""
-    raw = (source.get('organizationId') or source.get('organization_id')
-           or (user or {}).get('organization_id'))
+    raw = _raw_org_id(source, user)
     try:
         return int(raw)
     except (TypeError, ValueError):
         raise BadRequestException("organizationId is required")
+
+
+def _create_org_id(source: dict, user: Optional[dict] = None) -> Optional[int]:
+    org_id = _optional_org_id(source, user)
+    if org_id is not None:
+        return org_id
+    if _is_super_admin(user):
+        return None
+    raise BadRequestException("organizationId is required")
+
+
+def _optional_org_id(source: dict, user: Optional[dict] = None) -> Optional[int]:
+    raw = _raw_org_id(source, user)
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _raw_org_id(source: dict, user: Optional[dict] = None):
+    return ((source or {}).get('organizationId') or (source or {}).get('organization_id')
+            or (user or {}).get('organization_id'))
 
 
 def _org_from_user(current_user: Optional[dict]) -> Optional[int]:
@@ -229,6 +249,18 @@ def _org_from_user(current_user: Optional[dict]) -> Optional[int]:
         return int(raw)
     except (TypeError, ValueError):
         return None
+
+
+def _org_from_lead(db: Session, lead_id: int, current_user: Optional[dict]) -> Optional[int]:
+    if not _is_super_admin(current_user):
+        raise BadRequestException("organizationId is required")
+    row = db.execute(
+        text("SELECT organization_id FROM crm_leads WHERE id = :id AND deleted_date IS NULL"),
+        {'id': lead_id},
+    ).fetchone()
+    if not row:
+        raise NotFoundException(f"Lead {lead_id} not found")
+    return int(row[0]) if row[0] is not None else None
 
 
 def _int_or_none(value) -> Optional[int]:

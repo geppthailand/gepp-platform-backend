@@ -15,6 +15,7 @@ Sub-routes dispatched by crm/__init__.py handle_crm_admin_subroute:
 import logging
 from typing import Any, Dict, Optional
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ....exceptions import BadRequestException, NotFoundException
@@ -52,9 +53,7 @@ def list_crm_conversations(
 def get_crm_conversation(
     db: Session, resource_id: int, current_user: Optional[dict] = None,
 ) -> Dict[str, Any]:
-    org_id = _org_from_user(current_user)
-    if org_id is None:
-        raise BadRequestException("organizationId is required")
+    org_id = _org_from_user(current_user) or _org_from_conversation(db, int(resource_id), current_user)
     return inbox_service.get_conversation(db, int(resource_id), org_id)
 
 
@@ -62,9 +61,7 @@ def delete_crm_conversation(
     db: Session, resource_id: int, current_user: Optional[dict] = None,
 ) -> Dict[str, Any]:
     """Soft-close (no hard delete — conversations are append-only audit trail)."""
-    org_id = _org_from_user(current_user)
-    if org_id is None:
-        raise BadRequestException("organizationId is required")
+    org_id = _org_from_user(current_user) or _org_from_conversation(db, int(resource_id), current_user)
     return inbox_service.set_status(db, int(resource_id), org_id, 'closed')
 
 
@@ -89,7 +86,7 @@ def dispatch_inbox_subroute(
     if not resource_id:
         raise NotFoundException(f"crm-conversations sub-route not found: {method} /{sub_path}")
     if not org_id:
-        raise BadRequestException("organizationId is required")
+        org_id = _org_from_conversation(db, int(resource_id), current_user)
 
     conv_id = int(resource_id)
 
@@ -168,3 +165,19 @@ def _int_or_none(value) -> Optional[int]:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _org_from_conversation(db: Session, conversation_id: int, current_user: Optional[dict]) -> int:
+    if not _is_super_admin(current_user):
+        raise BadRequestException("organizationId is required")
+    row = db.execute(
+        text("""
+            SELECT organization_id
+            FROM crm_conversations
+            WHERE id = :id
+        """),
+        {'id': conversation_id},
+    ).fetchone()
+    if not row:
+        raise NotFoundException(f"Conversation {conversation_id} not found")
+    return int(row[0])

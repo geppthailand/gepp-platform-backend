@@ -174,6 +174,8 @@ class AdminHandlers:
             'crm-templates': lambda rid: crm.get_crm_template(self.db_session, rid),
             'crm-campaigns': lambda rid: crm.get_crm_campaign(self.db_session, rid),
             'crm-email-lists': lambda rid: crm.get_crm_email_list(self.db_session, rid, current_user=self.current_user),
+            'crm-user-profiles': lambda rid: crm.get_crm_user_profile(self.db_session, rid),
+            'crm-org-profiles': lambda rid: crm.get_crm_org_profile(self.db_session, rid),
             'crm-leads': lambda rid: crm_leads.get_crm_lead(self.db_session, rid, current_user=self.current_user),
             'crm-drip-sequences': lambda rid: crm_drip.get_crm_drip_sequence(self.db_session, rid, current_user=self.current_user),
             'crm-conversations': lambda rid: crm_inbox.get_crm_conversation(self.db_session, rid, current_user=self.current_user),

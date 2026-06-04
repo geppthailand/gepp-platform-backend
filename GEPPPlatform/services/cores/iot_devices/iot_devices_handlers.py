@@ -1281,9 +1281,15 @@ def handle_iot_devices_routes(event: Dict[str, Any], data: Dict[str, Any], **com
             user_service = UserService(db_session)
             return handle_get_locations_by_membership(user_service, query_params, current_user, db_session)
         if path == '/api/iot-devices/records':
-            data = data.get('data')
-            if not data:
+            request_body = data or {}
+            data = request_body.get('data')
+            if not data or not isinstance(data, dict):
                 raise ValidationException('Data is required')
+            if not current_user or not current_user.get('user_id'):
+                raise UnauthorizedException('Valid user_token is required for record submission')
+            if not current_user.get('organization_id'):
+                raise UnauthorizedException('User organization is required for record submission')
+
             transaction_service = TransactionService(db_session)
             current_user_id = current_user.get('user_id')
             current_user_organization_id = current_user.get('organization_id')
@@ -1433,6 +1439,8 @@ def handle_iot_devices_routes(event: Dict[str, Any], data: Dict[str, Any], **com
         raise APIException(str(e), status_code=401, error_code="UNAUTHORIZED")
     except NotFoundException as e:
         raise APIException(str(e), status_code=404, error_code="NOT_FOUND")
+    except APIException:
+        raise
     except Exception as e:
         raise APIException(
             f"Internal server error: {str(e)}",

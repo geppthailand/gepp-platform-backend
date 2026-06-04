@@ -15,6 +15,7 @@ Routes dispatched by crm/__init__.py handle_crm_admin_subroute:
 import logging
 from typing import Any, Dict, Optional
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ....exceptions import BadRequestException, NotFoundException
@@ -55,9 +56,7 @@ def get_crm_drip_sequence(
     resource_id: int,
     current_user: Optional[dict] = None,
 ) -> Dict[str, Any]:
-    org_id = _org_from_user(current_user)
-    if org_id is None:
-        raise BadRequestException("organizationId is required")
+    org_id = _org_from_user(current_user) or _org_from_sequence(db, resource_id, current_user)
     return drip_service.get_sequence(db, resource_id, org_id)
 
 
@@ -66,9 +65,7 @@ def create_crm_drip_sequence(
     data: dict,
     current_user: Optional[dict] = None,
 ) -> Dict[str, Any]:
-    org_id = _org_from_user(current_user)
-    if org_id is None:
-        raise BadRequestException("organizationId is required")
+    org_id = _require_org_id(data, current_user)
     created_by = (current_user or {}).get("user_location_id")
     return drip_service.create_sequence(db, org_id, data, created_by=created_by)
 
@@ -79,9 +76,7 @@ def update_crm_drip_sequence(
     data: dict,
     current_user: Optional[dict] = None,
 ) -> Dict[str, Any]:
-    org_id = _org_from_user(current_user)
-    if org_id is None:
-        raise BadRequestException("organizationId is required")
+    org_id = _optional_org_id(data, current_user) or _org_from_sequence(db, resource_id, current_user)
     return drip_service.update_sequence(db, resource_id, org_id, data)
 
 
@@ -90,9 +85,7 @@ def delete_crm_drip_sequence(
     resource_id: int,
     current_user: Optional[dict] = None,
 ) -> Dict[str, Any]:
-    org_id = _org_from_user(current_user)
-    if org_id is None:
-        raise BadRequestException("organizationId is required")
+    org_id = _org_from_user(current_user) or _org_from_sequence(db, resource_id, current_user)
     return drip_service.delete_sequence(db, resource_id, org_id)
 
 
@@ -111,7 +104,9 @@ def dispatch_drip_subroute(
     Dispatch sub-routes for crm-drip-sequences.
     sub_path is the trailing part after the resource_id.
     """
-    org_id = _org_from_user(current_user)
+    org_id = _optional_org_id(data, current_user)
+    if org_id is None and resource_id:
+        org_id = _org_from_sequence(db, int(resource_id), current_user)
     if org_id is None:
         raise BadRequestException("organizationId is required")
 
@@ -167,15 +162,24 @@ def _org_from_user(current_user: Optional[dict]) -> Optional[int]:
     return int(v) if v else None
 
 
-def _require_org_id(query_params: dict, current_user: Optional[dict] = None) -> int:
-    v = (query_params or {}).get("organizationId") or (query_params or {}).get("organization_id")
-    if v:
+def _require_org_id(source: dict, current_user: Optional[dict] = None) -> int:
+    v = _raw_org_id(source, current_user)
+    if v is not None:
         return int(v)
-    if current_user:
-        v2 = _org_from_user(current_user)
-        if v2:
-            return v2
     raise BadRequestException("organizationId is required")
+
+
+def _optional_org_id(source: dict, current_user: Optional[dict] = None) -> Optional[int]:
+    v = _raw_org_id(source, current_user)
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _raw_org_id(source: dict, current_user: Optional[dict] = None):
+    return ((source or {}).get("organizationId") or (source or {}).get("organization_id")
+            or (current_user or {}).get("organization_id") or (current_user or {}).get("organizationId"))
 
 
 def _is_super_admin(user: Optional[dict]) -> bool:
@@ -204,3 +208,19 @@ def _resolve_list_org_id(query_params: dict, current_user: Optional[dict] = None
     if v:
         return v
     raise BadRequestException("organizationId is required")
+
+
+def _org_from_sequence(db: Session, sequence_id: int, current_user: Optional[dict]) -> int:
+    if not _is_super_admin(current_user):
+        raise BadRequestException("organizationId is required")
+    row = db.execute(
+        text("""
+            SELECT organization_id
+            FROM crm_drip_sequences
+            WHERE id = :id AND deleted_date IS NULL
+        """),
+        {"id": sequence_id},
+    ).fetchone()
+    if not row:
+        raise NotFoundException(f"Drip sequence {sequence_id} not found")
+    return int(row[0])
