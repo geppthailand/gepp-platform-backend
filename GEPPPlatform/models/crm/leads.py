@@ -16,7 +16,7 @@ class CrmLead(Base, BaseModel):
     """
     __tablename__ = 'crm_leads'
 
-    organization_id   = Column(BigInteger, ForeignKey('organizations.id'), nullable=False)
+    organization_id   = Column(BigInteger, ForeignKey('organizations.id'), nullable=True)
     email             = Column(String(255), nullable=False)   # always lowercased
     first_name        = Column(String(128))
     last_name         = Column(String(128))

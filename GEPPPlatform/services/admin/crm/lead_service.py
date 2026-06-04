@@ -70,7 +70,28 @@ def _serialize_lead(row) -> Dict[str, Any]:
     for k, v in d.items():
         if isinstance(v, datetime):
             d[k] = v.isoformat()
+    d.update({
+        'organizationId': d.get('organization_id'),
+        'firstName': d.get('first_name'),
+        'lastName': d.get('last_name'),
+        'jobTitle': d.get('job_title'),
+        'sourceMetadata': d.get('source_metadata'),
+        'statusChangedAt': d.get('status_changed_at'),
+        'leadScore': d.get('lead_score'),
+        'ownerUserId': d.get('owner_user_id'),
+        'convertedUserId': d.get('converted_user_id'),
+        'convertedAt': d.get('converted_at'),
+        'lastActivityAt': d.get('last_activity_at'),
+        'createdDate': d.get('created_date'),
+        'updatedDate': d.get('updated_date'),
+    })
     return d
+
+
+def _pick(data: Dict[str, Any], snake_key: str, camel_key: str):
+    if snake_key in data:
+        return data.get(snake_key)
+    return data.get(camel_key)
 
 
 # ─── List / Get ──────────────────────────────────────────────────────────────
@@ -185,19 +206,21 @@ def list_leads(
     }
 
 
-def get_lead(db: Session, lead_id: int, org_id: int) -> Dict[str, Any]:
+def get_lead(db: Session, lead_id: int, org_id: Optional[int]) -> Dict[str, Any]:
     """Fetch one lead by id + org_id, or raise NotFoundException."""
+    org_sql = _org_match_sql(org_id)
+    params = _with_org_param({'id': lead_id}, org_id)
     row = db.execute(
-        text("""
+        text(f"""
             SELECT id, organization_id, email, first_name, last_name, company,
                    job_title, phone, country, language, source, source_metadata,
                    status, status_changed_at, lead_score, owner_user_id,
                    tags, notes, converted_user_id, converted_at,
                    last_activity_at, created_date, updated_date
             FROM crm_leads
-            WHERE id = :id AND organization_id = :org_id AND deleted_date IS NULL
+            WHERE id = :id AND {org_sql} AND deleted_date IS NULL
         """),
-        {'id': lead_id, 'org_id': org_id},
+        params,
     ).fetchone()
     if not row:
         raise NotFoundException(f"Lead {lead_id} not found")
@@ -208,7 +231,7 @@ def get_lead(db: Session, lead_id: int, org_id: int) -> Dict[str, Any]:
 
 def create_lead(
     db: Session,
-    org_id: int,
+    org_id: Optional[int],
     data: Dict[str, Any],
     source: str = 'manual',
     source_metadata: Optional[Dict[str, Any]] = None,
@@ -230,9 +253,11 @@ def create_lead(
         source = 'manual'
 
     # Idempotency check — include soft-deleted rows (don't re-create over deleted data).
+    org_sql = _org_match_sql(org_id)
+    existing_params = _with_org_param({'email': email}, org_id)
     existing = db.execute(
-        text("SELECT id FROM crm_leads WHERE organization_id = :org_id AND email = :email LIMIT 1"),
-        {'org_id': org_id, 'email': email},
+        text(f"SELECT id FROM crm_leads WHERE {org_sql} AND email = :email LIMIT 1"),
+        existing_params,
     ).fetchone()
     if existing:
         return get_lead(db, existing[0], org_id) if not _is_soft_deleted(db, existing[0]) \
@@ -257,10 +282,10 @@ def create_lead(
         {
             'org_id':           org_id,
             'email':            email,
-            'first_name':       data.get('first_name') or None,
-            'last_name':        data.get('last_name') or None,
+            'first_name':       _pick(data, 'first_name', 'firstName') or None,
+            'last_name':        _pick(data, 'last_name', 'lastName') or None,
             'company':          data.get('company') or None,
-            'job_title':        data.get('job_title') or None,
+            'job_title':        _pick(data, 'job_title', 'jobTitle') or None,
             'phone':            data.get('phone') or None,
             'country':          data.get('country') or None,
             'language':         data.get('language') or None,
@@ -287,7 +312,8 @@ def create_lead(
     # Auto-enroll in any active drip sequences triggered on lead_created.
     try:
         from . import drip_service as _drip
-        _drip._auto_enroll_on_event(db, event='lead_created', lead=created_lead, org_id=org_id)
+        if org_id is not None:
+            _drip._auto_enroll_on_event(db, event='lead_created', lead=created_lead, org_id=org_id)
     except Exception as exc:
         logger.warning("lead_service.create_lead: auto-enroll non-fatal: %s", exc)
 
@@ -297,35 +323,46 @@ def create_lead(
 def update_lead(
     db: Session,
     lead_id: int,
-    org_id: int,
+    org_id: Optional[int],
     data: Dict[str, Any],
 ) -> Dict[str, Any]:
     """Update mutable lead fields (does NOT touch status — use change_status for that)."""
     # Verify it exists first.
     get_lead(db, lead_id, org_id)
 
-    updatable = ['first_name', 'last_name', 'company', 'job_title', 'phone',
-                 'country', 'language', 'tags', 'notes']
+    updatable = {
+        'first_name': 'firstName',
+        'last_name': 'lastName',
+        'company': 'company',
+        'job_title': 'jobTitle',
+        'phone': 'phone',
+        'country': 'country',
+        'language': 'language',
+        'tags': 'tags',
+        'notes': 'notes',
+    }
     set_clauses: List[str] = ["updated_date = :now"]
-    params: Dict[str, Any] = {'id': lead_id, 'org_id': org_id, 'now': _now()}
+    params: Dict[str, Any] = _with_org_param({'id': lead_id, 'now': _now()}, org_id)
 
-    for field in updatable:
-        if field in data:
+    for field, camel_field in updatable.items():
+        if field in data or camel_field in data:
+            value = _pick(data, field, camel_field)
             if field == 'tags':
                 set_clauses.append(f"{field} = :{field}::jsonb")
-                params[field] = _to_json(data[field])
+                params[field] = _to_json(value)
             else:
                 set_clauses.append(f"{field} = :{field}")
-                params[field] = data[field] or None
+                params[field] = value or None
 
     if len(set_clauses) == 1:
         return get_lead(db, lead_id, org_id)  # nothing to update
 
+    org_sql = _org_match_sql(org_id)
     db.execute(
         text(f"""
             UPDATE crm_leads
                SET {', '.join(set_clauses)}
-             WHERE id = :id AND organization_id = :org_id AND deleted_date IS NULL
+             WHERE id = :id AND {org_sql} AND deleted_date IS NULL
         """),
         params,
     )
@@ -333,16 +370,17 @@ def update_lead(
     return get_lead(db, lead_id, org_id)
 
 
-def delete_lead(db: Session, lead_id: int, org_id: int) -> Dict[str, Any]:
+def delete_lead(db: Session, lead_id: int, org_id: Optional[int]) -> Dict[str, Any]:
     """Soft-delete by setting deleted_date."""
     get_lead(db, lead_id, org_id)
+    org_sql = _org_match_sql(org_id)
     db.execute(
-        text("""
+        text(f"""
             UPDATE crm_leads
                SET deleted_date = :now, updated_date = :now
-             WHERE id = :id AND organization_id = :org_id AND deleted_date IS NULL
+             WHERE id = :id AND {org_sql} AND deleted_date IS NULL
         """),
-        {'id': lead_id, 'org_id': org_id, 'now': _now()},
+        _with_org_param({'id': lead_id, 'now': _now()}, org_id),
     )
     db.commit()
     return {"deleted": True, "id": lead_id}
@@ -353,7 +391,7 @@ def delete_lead(db: Session, lead_id: int, org_id: int) -> Dict[str, Any]:
 def change_status(
     db: Session,
     lead_id: int,
-    org_id: int,
+    org_id: Optional[int],
     new_status: str,
     by_user_id: Optional[int] = None,
 ) -> Dict[str, Any]:
@@ -370,14 +408,15 @@ def change_status(
         return lead
 
     now = _now()
+    org_sql = _org_match_sql(org_id)
     db.execute(
-        text("""
+        text(f"""
             UPDATE crm_leads
                SET status = :status, status_changed_at = :now,
                    last_activity_at = :now, updated_date = :now
-             WHERE id = :id AND organization_id = :org_id AND deleted_date IS NULL
+             WHERE id = :id AND {org_sql} AND deleted_date IS NULL
         """),
-        {'id': lead_id, 'org_id': org_id, 'status': new_status, 'now': now},
+        _with_org_param({'id': lead_id, 'status': new_status, 'now': now}, org_id),
     )
 
     add_activity(
@@ -408,9 +447,10 @@ def change_status(
     # Auto-enroll in any active drip sequences triggered on lead_status_changed.
     try:
         from . import drip_service as _drip
-        _drip._auto_enroll_on_event(
-            db, event='lead_status_changed', lead=updated_lead, org_id=org_id
-        )
+        if org_id is not None:
+            _drip._auto_enroll_on_event(
+                db, event='lead_status_changed', lead=updated_lead, org_id=org_id
+            )
     except Exception as exc:
         logger.warning("lead_service.change_status: auto-enroll non-fatal: %s", exc)
 
@@ -420,7 +460,7 @@ def change_status(
 def assign_owner(
     db: Session,
     lead_id: int,
-    org_id: int,
+    org_id: Optional[int],
     owner_user_id: int,
     by_user_id: Optional[int] = None,
 ) -> Dict[str, Any]:
@@ -428,14 +468,15 @@ def assign_owner(
     lead = get_lead(db, lead_id, org_id)
     old_owner = lead.get('owner_user_id')
     now = _now()
+    org_sql = _org_match_sql(org_id)
 
     db.execute(
-        text("""
+        text(f"""
             UPDATE crm_leads
                SET owner_user_id = :owner, last_activity_at = :now, updated_date = :now
-             WHERE id = :id AND organization_id = :org_id AND deleted_date IS NULL
+             WHERE id = :id AND {org_sql} AND deleted_date IS NULL
         """),
-        {'id': lead_id, 'org_id': org_id, 'owner': owner_user_id, 'now': now},
+        _with_org_param({'id': lead_id, 'owner': owner_user_id, 'now': now}, org_id),
     )
     add_activity(
         db, lead_id,
@@ -451,7 +492,7 @@ def assign_owner(
 def convert_lead(
     db: Session,
     lead_id: int,
-    org_id: int,
+    org_id: Optional[int],
     user_location_id: int,
 ) -> Dict[str, Any]:
     """
@@ -468,15 +509,16 @@ def convert_lead(
     if lead.get('converted_user_id') == user_location_id:
         return lead
 
+    org_sql = _org_match_sql(org_id)
     db.execute(
-        text("""
+        text(f"""
             UPDATE crm_leads
                SET converted_user_id = :uid, converted_at = :now,
                    status = 'customer', status_changed_at = :now,
                    last_activity_at = :now, updated_date = :now
-             WHERE id = :id AND organization_id = :org_id AND deleted_date IS NULL
+             WHERE id = :id AND {org_sql} AND deleted_date IS NULL
         """),
-        {'id': lead_id, 'org_id': org_id, 'uid': user_location_id, 'now': now},
+        _with_org_param({'id': lead_id, 'uid': user_location_id, 'now': now}, org_id),
     )
 
     # Back-fill user_locations.from_lead_id (IF NOT ALREADY SET — don't overwrite
@@ -812,6 +854,16 @@ def _to_json(value) -> Optional[str]:
         return json.dumps(value)
     except (TypeError, ValueError):
         return None
+
+
+def _org_match_sql(org_id: Optional[int]) -> str:
+    return "organization_id IS NULL" if org_id is None else "organization_id = :org_id"
+
+
+def _with_org_param(params: Dict[str, Any], org_id: Optional[int]) -> Dict[str, Any]:
+    if org_id is not None:
+        params["org_id"] = org_id
+    return params
 
 
 def _is_soft_deleted(db: Session, lead_id: int) -> bool:

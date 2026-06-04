@@ -104,7 +104,12 @@ def _dispatch_analytics(
 
     # GET /crm-analytics/overview
     if parts == ['overview']:
-        return crm_service.get_analytics_overview(db_session)
+        return crm_service.get_analytics_overview(
+            db_session,
+            date_from=query_params.get('from'),
+            date_to=query_params.get('to'),
+            organization_id=_int_param(query_params, 'orgId'),
+        )
 
     # GET /crm-analytics/timeseries
     if parts == ['timeseries']:
@@ -115,6 +120,17 @@ def _dispatch_analytics(
             granularity=query_params.get('granularity', 'day'),
             date_from=query_params.get('from'),
             date_to=query_params.get('to'),
+        )
+
+    # GET /crm-analytics/org-comparison
+    if parts == ['org-comparison']:
+        return crm_service.get_analytics_org_comparison(
+            db_session,
+            organization_id=_int_param(query_params, 'orgId'),
+            event_type=query_params.get('eventType'),
+            date_from=query_params.get('from'),
+            date_to=query_params.get('to'),
+            limit=_int_param(query_params, 'limit') or 8,
         )
 
     # GET /crm-analytics/funnel?orgId=X&steps=login,transaction_created,reward_claimed

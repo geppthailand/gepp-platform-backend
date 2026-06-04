@@ -9,7 +9,7 @@ Sprint-1 devs fill in bodies; this file establishes the contract and empty respo
 import logging
 from typing import Any, Dict, Optional
 
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from sqlalchemy.orm import Session
 
 from ....exceptions import NotFoundException, BadRequestException
@@ -595,27 +595,44 @@ def list_crm_campaigns(db_session: Session, query_params: dict) -> Dict[str, Any
     status_filter = (query_params.get('status') or '').strip()
     name_filter = (query_params.get('name') or '').strip()
     template_id_filter = query_params.get('templateId') or query_params.get('template_id')
+    org_filter = query_params.get('organizationId') or query_params.get('orgId') or query_params.get('organization_id')
+    date_from = query_params.get('from') or query_params.get('dateFrom')
+    date_to = query_params.get('to') or query_params.get('dateTo')
     where = ["c.deleted_date IS NULL"]
     params: Dict[str, Any] = {}
     if name_filter:
         where.append("c.name ILIKE :name_q")
         params['name_q'] = f"%{name_filter}%"
     if status_filter:
-        where.append("c.status = :status")
-        params['status'] = status_filter
+        statuses = [s.strip() for s in status_filter.split(',') if s.strip()]
+        if len(statuses) == 1:
+            where.append("c.status = :status")
+            params['status'] = statuses[0]
+        elif statuses:
+            where.append("c.status IN :statuses")
+            params['statuses'] = statuses
     if template_id_filter:
         try:
             params['template_id'] = int(template_id_filter)
             where.append("c.template_id = :template_id")
         except (TypeError, ValueError):
             pass
+    if org_filter:
+        try:
+            params['org_id'] = int(org_filter)
+            where.append("c.organization_id = :org_id")
+        except (TypeError, ValueError):
+            pass
+    if date_from:
+        where.append("COALESCE(c.started_at, c.scheduled_at, c.created_date) >= :date_from")
+        params['date_from'] = date_from
+    if date_to:
+        where.append("COALESCE(c.started_at, c.scheduled_at, c.created_date) < (:date_to::date + INTERVAL '1 day')")
+        params['date_to'] = date_to
     where_sql = " AND ".join(where)
     offset = (page - 1) * page_size
-    total = int(db_session.execute(
-        text(f"SELECT COUNT(*) FROM crm_campaigns c WHERE {where_sql}"), params
-    ).scalar() or 0)
-    rows = db_session.execute(
-        text(f"""
+    count_sql = text(f"SELECT COUNT(*) FROM crm_campaigns c WHERE {where_sql}")
+    rows_sql = text(f"""
             SELECT c.id, c.name, c.campaign_type, c.status, c.segment_id,
                    c.template_id, t.name AS template_name,
                    c.scheduled_at, c.started_at, c.ended_at,
@@ -624,7 +641,13 @@ def list_crm_campaigns(db_session: Session, query_params: dict) -> Dict[str, Any
             LEFT JOIN crm_email_templates t ON t.id = c.template_id
             WHERE {where_sql}
             ORDER BY c.id DESC LIMIT :lim OFFSET :off
-        """),
+        """)
+    if 'statuses' in params:
+        count_sql = count_sql.bindparams(bindparam('statuses', expanding=True))
+        rows_sql = rows_sql.bindparams(bindparam('statuses', expanding=True))
+    total = int(db_session.execute(count_sql, params).scalar() or 0)
+    rows = db_session.execute(
+        rows_sql,
         {**params, 'lim': page_size, 'off': offset},
     ).fetchall()
     items = [
@@ -1082,6 +1105,79 @@ def list_crm_user_profiles(db_session: Session, query_params: dict) -> Dict[str,
     ]
     return {"items": items, "total": total, "page": page, "pageSize": page_size}
 
+def get_crm_user_profile(db_session: Session, resource_id: int) -> Dict[str, Any]:
+    """
+    Fetch one Marketing user profile by user_locations.id.
+
+    Keep this aligned with list_crm_user_profiles: crm_user_profiles is a
+    nightly cache, so the user should still resolve with default engagement
+    metrics before the refresher has produced a row.
+    """
+    row = db_session.execute(
+        text("""
+            SELECT
+                ul.id                                   AS user_location_id,
+                ul.first_name                            AS first_name,
+                ul.last_name                             AS last_name,
+                ul.email                                AS email,
+                ul.phone                                AS phone,
+                ul.organization_id                      AS organization_id,
+                o.name                                  AS organization_name,
+                COALESCE(p.engagement_score, 0)         AS engagement_score,
+                COALESCE(p.activity_tier, 'dormant')    AS activity_tier,
+                p.last_login_at                         AS last_login_at,
+                p.days_since_last_login                 AS days_since_last_login,
+                COALESCE(p.login_count_30d, 0)          AS login_count_30d,
+                COALESCE(p.transaction_count_30d, 0)    AS transaction_count_30d,
+                COALESCE(p.qr_count_30d, 0)             AS qr_count_30d,
+                COALESCE(p.reward_claim_count_30d, 0)   AS reward_claim_count_30d,
+                COALESCE(p.iot_readings_count_30d, 0)   AS iot_readings_count_30d,
+                COALESCE(p.gri_submission_count_30d, 0) AS gri_submission_count_30d,
+                COALESCE(p.traceability_count_30d, 0)   AS traceability_count_30d,
+                COALESCE(p.onboarded, FALSE)            AS onboarded,
+                p.first_login_at                        AS first_login_at,
+                p.last_profile_refresh_at               AS last_profile_refresh_at,
+                ul.created_date                         AS created_date
+            FROM user_locations ul
+            LEFT JOIN crm_user_profiles p ON p.user_location_id = ul.id
+            LEFT JOIN organizations o ON o.id = ul.organization_id AND o.deleted_date IS NULL
+            WHERE ul.id = :id
+              AND ul.is_user = TRUE
+              AND ul.is_active = TRUE
+              AND ul.platform = 'GEPP_BUSINESS_WEB'
+        """),
+        {'id': resource_id},
+    ).fetchone()
+    if not row:
+        raise NotFoundException(f"CRM user profile {resource_id} not found")
+
+    return {
+        'id': row.user_location_id,
+        'userLocationId': row.user_location_id,
+        'firstName': row.first_name,
+        'lastName': row.last_name,
+        'name': ' '.join(filter(None, [row.first_name, row.last_name])) or row.email,
+        'email': row.email,
+        'phone': row.phone,
+        'organizationId': row.organization_id,
+        'organizationName': row.organization_name,
+        'engagementScore': float(row.engagement_score or 0),
+        'activityTier': row.activity_tier,
+        'lastLoginAt': row.last_login_at,
+        'daysSinceLastLogin': row.days_since_last_login,
+        'loginCount30d': row.login_count_30d,
+        'transactionCount30d': row.transaction_count_30d,
+        'qrCount30d': row.qr_count_30d,
+        'rewardClaimCount30d': row.reward_claim_count_30d,
+        'iotReadingsCount30d': row.iot_readings_count_30d,
+        'griSubmissionCount30d': row.gri_submission_count_30d,
+        'traceabilityCount30d': row.traceability_count_30d,
+        'onboarded': row.onboarded,
+        'firstLoginAt': row.first_login_at,
+        'lastProfileRefreshAt': row.last_profile_refresh_at,
+        'createdDate': row.created_date,
+    }
+
 def list_crm_org_profiles(db_session: Session, query_params: dict) -> Dict[str, Any]:
     """
     List one row per organization, LEFT JOIN crm_org_profiles for engagement metrics.
@@ -1107,7 +1203,8 @@ def list_crm_org_profiles(db_session: Session, query_params: dict) -> Dict[str, 
     if name_filter:
         where_clauses.append(
             "(o.name ILIKE :name_q OR oi.company_name ILIKE :name_q "
-            "OR oi.company_name_en ILIKE :name_q OR oi.company_name_th ILIKE :name_q)"
+            "OR oi.company_name_en ILIKE :name_q OR oi.company_name_th ILIKE :name_q "
+            "OR ul.email ILIKE :name_q)"
         )
         params['name_q'] = f"%{name_filter}%"
     if tier_filter:
@@ -1119,7 +1216,7 @@ def list_crm_org_profiles(db_session: Session, query_params: dict) -> Dict[str, 
     count_sql = text(f"""
         SELECT COUNT(*)
         FROM organizations o
-        JOIN user_locations ul ON ul.id = o.owner_id AND ul.platform = 'GEPP_BUSINESS_WEB'
+        LEFT JOIN user_locations ul ON ul.id = o.owner_id
         LEFT JOIN organization_info oi ON oi.id = o.organization_info_id
         LEFT JOIN crm_org_profiles p ON p.organization_id = o.id
         WHERE {where_sql}
@@ -1155,7 +1252,7 @@ def list_crm_org_profiles(db_session: Session, query_params: dict) -> Dict[str, 
             p.last_activity_at,
             p.last_profile_refresh_at
         FROM organizations o
-        JOIN user_locations ul ON ul.id = o.owner_id AND ul.platform = 'GEPP_BUSINESS_WEB'
+        LEFT JOIN user_locations ul ON ul.id = o.owner_id
         LEFT JOIN organization_info oi ON oi.id = o.organization_info_id
         LEFT JOIN crm_org_profiles p ON p.organization_id = o.id
         LEFT JOIN LATERAL (
@@ -1204,6 +1301,79 @@ def list_crm_org_profiles(db_session: Session, query_params: dict) -> Dict[str, 
     ]
 
     return {"items": items, "total": total, "page": page, "pageSize": page_size}
+
+def get_crm_org_profile(db_session: Session, resource_id: int) -> Dict[str, Any]:
+    """
+    Fetch one Marketing organization profile by organizations.id.
+
+    Mirrors list_crm_org_profiles and left-joins the CRM rollup cache so a
+    real organization does not 404 just because crm_org_profiles is empty.
+    """
+    row = db_session.execute(
+        text("""
+            SELECT
+                o.id AS organization_id,
+                o.name AS organization_name,
+                COALESCE(oi.company_name, oi.company_name_en, oi.company_name_th, o.name) AS company_name,
+                ul.email AS owner_email,
+                COALESCE(active_sub.display_name, active_sub.plan_name) AS subscription_plan,
+                o.created_date,
+                COALESCE(p.active_user_count_30d, 0) AS active_user_count_30d,
+                COALESCE(p.total_user_count, 0) AS total_user_count,
+                COALESCE(p.active_user_ratio, 0) AS active_user_ratio,
+                COALESCE(p.transaction_count_30d, 0) AS transaction_count_30d,
+                COALESCE(p.traceability_count_30d, 0) AS traceability_count_30d,
+                COALESCE(p.gri_submission_count_30d, 0) AS gri_submission_count_30d,
+                COALESCE(active_sub.plan_id, p.subscription_plan_id) AS subscription_plan_id,
+                COALESCE(p.subscription_active, FALSE) AS subscription_active,
+                p.quota_used_pct,
+                COALESCE(p.activity_tier, 'dormant') AS activity_tier,
+                p.last_activity_at,
+                p.last_profile_refresh_at
+            FROM organizations o
+            LEFT JOIN user_locations ul ON ul.id = o.owner_id
+            LEFT JOIN organization_info oi ON oi.id = o.organization_info_id
+            LEFT JOIN crm_org_profiles p ON p.organization_id = o.id
+            LEFT JOIN LATERAL (
+                SELECT sp.id AS plan_id, sp.name AS plan_name, sp.display_name
+                FROM subscriptions s
+                LEFT JOIN subscription_plans sp ON sp.id = s.plan_id
+                WHERE s.organization_id = o.id
+                  AND s.status = 'active'
+                  AND s.is_active = TRUE
+                ORDER BY s.created_date DESC
+                LIMIT 1
+            ) active_sub ON TRUE
+            WHERE o.id = :id
+              AND o.deleted_date IS NULL
+        """),
+        {'id': resource_id},
+    ).fetchone()
+    if not row:
+        raise NotFoundException(f"CRM organization profile {resource_id} not found")
+
+    return {
+        'id': row.organization_id,
+        'organizationId': row.organization_id,
+        'name': row.organization_name,
+        'organizationName': row.organization_name,
+        'companyName': row.company_name,
+        'ownerEmail': row.owner_email,
+        'subscriptionPlan': row.subscription_plan,
+        'createdDate': row.created_date,
+        'activeUserCount30d': row.active_user_count_30d,
+        'totalUserCount': row.total_user_count,
+        'activeUserRatio': float(row.active_user_ratio or 0),
+        'transactionCount30d': row.transaction_count_30d,
+        'traceabilityCount30d': row.traceability_count_30d,
+        'griSubmissionCount30d': row.gri_submission_count_30d,
+        'subscriptionPlanId': row.subscription_plan_id,
+        'subscriptionActive': row.subscription_active,
+        'quotaUsedPct': float(row.quota_used_pct) if row.quota_used_pct is not None else None,
+        'activityTier': row.activity_tier,
+        'lastActivityAt': row.last_activity_at,
+        'lastProfileRefreshAt': row.last_profile_refresh_at,
+    }
 
 
 # ───────────────────────────────────────────────────────────────

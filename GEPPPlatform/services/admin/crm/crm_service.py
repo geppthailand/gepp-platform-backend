@@ -16,12 +16,24 @@ from typing import Any, Dict, List, Optional
 from datetime import datetime, timezone, timedelta
 
 import boto3
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from sqlalchemy.orm import Session
 
 from ....models.crm import CrmEvent
 
 logger = logging.getLogger(__name__)
+
+MARKETING_EVENT_TYPES = [
+    "user_login",
+    "transaction_created",
+    "transaction_qr_input",
+    "reward_claimed",
+    "gri_data_submitted",
+    "traceability_created",
+    "email_sent",
+    "email_opened",
+    "email_clicked",
+]
 
 
 # ───────────────────────────────────────────────────────────────
@@ -175,7 +187,12 @@ def send_via_email_lambda(
 # Analytics (BE Dev 1 fills in)
 # ───────────────────────────────────────────────────────────────
 
-def get_analytics_overview(db_session: Session) -> Dict[str, Any]:
+def get_analytics_overview(
+    db_session: Session,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    organization_id: Optional[int] = None,
+) -> Dict[str, Any]:
     """
     Platform-wide KPIs for Marketing tab overview page.
 
@@ -184,8 +201,9 @@ def get_analytics_overview(db_session: Session) -> Dict[str, Any]:
       emailsSent7d, topOrgsByEngagement (top-5), atRiskOrgCount
     """
     now = datetime.now(timezone.utc)
-    window_30d = now - timedelta(days=30)
-    window_7d = now - timedelta(days=7)
+    range_from, range_to_exclusive, range_to_display = _parse_analytics_range(date_from, date_to, now)
+    org_filter_sql = " AND organization_id = :org_id" if organization_id is not None else ""
+    org_params = {"org_id": organization_id} if organization_id is not None else {}
 
     # --- totalOrganizations ---
     total_orgs_row = db_session.execute(
@@ -195,56 +213,84 @@ def get_analytics_overview(db_session: Session) -> Dict[str, Any]:
 
     # --- activeUsers30d (distinct users who logged in in last 30d) ---
     active_users_row = db_session.execute(
-        text("""
+        text(f"""
             SELECT COUNT(DISTINCT user_location_id)
             FROM crm_events
             WHERE event_type = 'user_login'
-              AND occurred_at >= :window_30d
+              AND occurred_at >= :range_from
+              AND occurred_at < :range_to
+              {org_filter_sql}
         """),
-        {"window_30d": window_30d},
+        {"range_from": range_from, "range_to": range_to_exclusive, **org_params},
     ).scalar()
     active_users_30d = int(active_users_row or 0)
 
     # --- campaignsRunning (status in ('active','running')) ---
     campaigns_running_row = db_session.execute(
-        text("""
+        text(f"""
             SELECT COUNT(*) FROM crm_campaigns
             WHERE status IN ('active', 'running')
               AND deleted_date IS NULL
+              {org_filter_sql}
         """),
+        org_params,
     ).scalar()
     campaigns_running = int(campaigns_running_row or 0)
 
     # --- emailsSent7d (email events with category='email' in last 7d) ---
     emails_sent_row = db_session.execute(
-        text("""
+        text(f"""
             SELECT COUNT(*) FROM crm_events
             WHERE event_category = 'email'
               AND event_type = 'email_sent'
-              AND occurred_at >= :window_7d
+              AND occurred_at >= :range_from
+              AND occurred_at < :range_to
+              {org_filter_sql}
         """),
-        {"window_7d": window_7d},
+        {"range_from": range_from, "range_to": range_to_exclusive, **org_params},
     ).scalar()
     emails_sent_7d = int(emails_sent_row or 0)
 
     # --- topOrgsByEngagement (top 5 from crm_org_profiles) ---
     top_orgs_rows = db_session.execute(
-        text("""
+        text(f"""
             SELECT
-                op.organization_id,
+                e.organization_id,
                 o.name,
-                -- org-level score: use avg engagement of active users in that org
-                COALESCE(AVG(up.engagement_score), 0) AS engagement_score,
-                op.activity_tier
-            FROM crm_org_profiles op
-            JOIN organizations o ON o.id = op.organization_id
-            LEFT JOIN crm_user_profiles up ON up.organization_id = op.organization_id
+                COUNT(*)::INT AS engagement_score,
+                COALESCE(op.activity_tier, 'active') AS activity_tier
+            FROM crm_events e
+            JOIN organizations o ON o.id = e.organization_id
+            LEFT JOIN crm_org_profiles op ON op.organization_id = e.organization_id
             WHERE o.deleted_date IS NULL
-            GROUP BY op.organization_id, o.name, op.activity_tier
+              AND e.organization_id IS NOT NULL
+              AND e.occurred_at >= :range_from
+              AND e.occurred_at < :range_to
+              {org_filter_sql.replace("organization_id", "e.organization_id")}
+            GROUP BY e.organization_id, o.name, op.activity_tier
             ORDER BY engagement_score DESC
             LIMIT 5
         """),
+        {"range_from": range_from, "range_to": range_to_exclusive, **org_params},
     ).fetchall()
+
+    if not top_orgs_rows:
+        top_orgs_rows = db_session.execute(
+            text("""
+                SELECT
+                    op.organization_id,
+                    o.name,
+                    COALESCE(AVG(up.engagement_score), 0) AS engagement_score,
+                    op.activity_tier
+                FROM crm_org_profiles op
+                JOIN organizations o ON o.id = op.organization_id
+                LEFT JOIN crm_user_profiles up ON up.organization_id = op.organization_id
+                WHERE o.deleted_date IS NULL
+                GROUP BY op.organization_id, o.name, op.activity_tier
+                ORDER BY engagement_score DESC
+                LIMIT 5
+            """),
+        ).fetchall()
 
     top_orgs = [
         {
@@ -270,8 +316,97 @@ def get_analytics_overview(db_session: Session) -> Dict[str, Any]:
         "activeUsers30d": active_users_30d,
         "campaignsRunning": campaigns_running,
         "emailsSent7d": emails_sent_7d,
+        "activeUsersInRange": active_users_30d,
+        "emailsSentInRange": emails_sent_7d,
         "topOrgsByEngagement": top_orgs,
         "atRiskOrgCount": at_risk_org_count,
+        "from": range_from.isoformat(),
+        "to": range_to_display.isoformat(),
+        "organizationId": organization_id,
+    }
+
+
+def get_analytics_org_comparison(
+    db_session: Session,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    organization_id: Optional[int] = None,
+    event_type: Optional[str] = None,
+    limit: int = 8,
+) -> Dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    range_from, range_to_exclusive, range_to_display = _parse_analytics_range(date_from, date_to, now)
+    event_types = _parse_event_types(event_type) or MARKETING_EVENT_TYPES
+    limit = max(1, min(20, int(limit or 8)))
+    org_filter_sql = " AND e.organization_id = :org_id" if organization_id is not None else ""
+    params: Dict[str, Any] = {
+        "range_from": range_from,
+        "range_to": range_to_exclusive,
+        "event_types": event_types,
+        "limit": limit,
+    }
+    if organization_id is not None:
+        params["org_id"] = organization_id
+
+    rows = db_session.execute(
+        text(f"""
+            WITH event_counts AS (
+                SELECT
+                    e.organization_id,
+                    o.name AS organization_name,
+                    e.event_type,
+                    COUNT(*)::INT AS event_count
+                FROM crm_events e
+                JOIN organizations o ON o.id = e.organization_id
+                WHERE e.organization_id IS NOT NULL
+                  AND o.deleted_date IS NULL
+                  AND e.occurred_at >= :range_from
+                  AND e.occurred_at < :range_to
+                  AND e.event_type IN :event_types
+                  {org_filter_sql}
+                GROUP BY e.organization_id, o.name, e.event_type
+            ),
+            ranked_orgs AS (
+                SELECT
+                    organization_id,
+                    organization_name,
+                    SUM(event_count)::INT AS total_activity
+                FROM event_counts
+                GROUP BY organization_id, organization_name
+                ORDER BY total_activity DESC, organization_name ASC
+                LIMIT :limit
+            )
+            SELECT
+                r.organization_id,
+                r.organization_name,
+                r.total_activity,
+                c.event_type,
+                c.event_count
+            FROM ranked_orgs r
+            JOIN event_counts c ON c.organization_id = r.organization_id
+            ORDER BY r.total_activity DESC, r.organization_name ASC, c.event_type ASC
+        """).bindparams(bindparam("event_types", expanding=True)),
+        params,
+    ).fetchall()
+
+    org_map: Dict[int, Dict[str, Any]] = {}
+    for row in rows:
+        org_id = int(row[0])
+        if org_id not in org_map:
+            org_map[org_id] = {
+                "organizationId": org_id,
+                "name": row[1] or f"Org {org_id}",
+                "totalActivity": int(row[2] or 0),
+                "events": {event: 0 for event in event_types},
+            }
+        org_map[org_id]["events"][row[3]] = int(row[4] or 0)
+
+    return {
+        "from": range_from.isoformat(),
+        "to": range_to_display.isoformat(),
+        "organizationId": organization_id,
+        "eventTypes": event_types,
+        "organizations": list(org_map.values()),
     }
 
 
@@ -468,7 +603,7 @@ def get_analytics_timeseries(
     Time-series chart data.
 
     granularity: 'hour' | 'day' | 'week' | 'month'
-    Returns list of {bucket, count} sorted ascending.
+    Returns named event series with zero-filled buckets across the selected range.
     """
     # Whitelist granularity to prevent injection via date_trunc arg
     _VALID_GRANULARITY = {'hour', 'day', 'week', 'month'}
@@ -476,24 +611,18 @@ def get_analytics_timeseries(
         granularity = 'day'
 
     now = datetime.now(timezone.utc)
-
-    # Parse / default date range
-    try:
-        dt_from = datetime.fromisoformat(date_from) if date_from else (now - timedelta(days=30))
-    except ValueError:
-        dt_from = now - timedelta(days=30)
-    try:
-        dt_to = datetime.fromisoformat(date_to) if date_to else now
-    except ValueError:
-        dt_to = now
+    dt_from, dt_to_exclusive, dt_to_display = _parse_analytics_range(date_from, date_to, now)
+    requested_event_types = _parse_event_types(event_type)
+    query_event_types = requested_event_types or MARKETING_EVENT_TYPES
 
     # Build parameterized WHERE clauses (no string interpolation for data)
     where_clauses = [
-        "occurred_at BETWEEN :date_from AND :date_to",
+        "occurred_at >= :date_from",
+        "occurred_at < :date_to",
     ]
     params: Dict[str, Any] = {
         "date_from": dt_from,
-        "date_to": dt_to,
+        "date_to": dt_to_exclusive,
         # granularity is whitelisted above — safe to embed as SQL identifier
     }
 
@@ -501,9 +630,8 @@ def get_analytics_timeseries(
         where_clauses.append("organization_id = :org_id")
         params["org_id"] = organization_id
 
-    if event_type:
-        where_clauses.append("event_type = :event_type")
-        params["event_type"] = event_type
+    where_clauses.append("event_type IN :event_types")
+    params["event_types"] = query_event_types
 
     where_sql = " AND ".join(where_clauses)
 
@@ -511,21 +639,41 @@ def get_analytics_timeseries(
     sql = text(f"""
         SELECT
             DATE_TRUNC('{granularity}', occurred_at AT TIME ZONE 'UTC') AS bucket,
+            event_type,
             COUNT(*)::INT                                                  AS cnt
         FROM crm_events
         WHERE {where_sql}
-        GROUP BY bucket
-        ORDER BY bucket ASC
-    """)
+        GROUP BY bucket, event_type
+        ORDER BY bucket ASC, event_type ASC
+    """).bindparams(bindparam("event_types", expanding=True))
 
     rows = db_session.execute(sql, params).fetchall()
 
+    buckets = _bucket_range(dt_from, dt_to_display, granularity)
+    bucket_keys = [_bucket_key(b, granularity) for b in buckets]
+    event_types = requested_event_types or MARKETING_EVENT_TYPES
+    counts: Dict[str, Dict[str, int]] = {et: {key: 0 for key in bucket_keys} for et in event_types}
+
+    for row in rows:
+        bucket = row[0]
+        row_event_type = row[1]
+        if not row_event_type:
+            continue
+        key = _bucket_key(bucket, granularity)
+        if row_event_type in counts and key in counts[row_event_type]:
+            counts[row_event_type][key] = int(row[2] or 0)
+
+    ordered_event_types = requested_event_types or MARKETING_EVENT_TYPES
     series = [
         {
-            "bucket": row[0].isoformat() if row[0] else None,
-            "count": int(row[1]),
+            "eventType": et,
+            "label": et.replace("_", " "),
+            "data": [
+                {"date": key, "count": counts.get(et, {}).get(key, 0)}
+                for key in bucket_keys
+            ],
         }
-        for row in rows
+        for et in ordered_event_types
     ]
 
     return {
@@ -533,9 +681,110 @@ def get_analytics_timeseries(
         "organizationId": organization_id,
         "eventType": event_type,
         "from": dt_from.isoformat(),
-        "to": dt_to.isoformat(),
+        "to": dt_to_display.isoformat(),
         "series": series,
     }
+
+
+def _parse_analytics_range(
+    date_from: Optional[str],
+    date_to: Optional[str],
+    now: Optional[datetime] = None,
+) -> tuple[datetime, datetime, datetime]:
+    current = now or datetime.now(timezone.utc)
+
+    def _parse_start(value: Optional[str], fallback: datetime) -> datetime:
+        if not value:
+            return fallback
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return fallback
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+
+    def _parse_end(value: Optional[str], fallback: datetime) -> tuple[datetime, datetime]:
+        if not value:
+            return fallback, fallback
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return fallback, fallback
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        is_date_only = len(value.strip()) == 10
+        exclusive = parsed + timedelta(days=1) if is_date_only else parsed
+        return exclusive, parsed
+
+    fallback_from = current - timedelta(days=30)
+    start = _parse_start(date_from, fallback_from)
+    end_exclusive, end_display = _parse_end(date_to, current)
+    if end_exclusive <= start:
+        end_exclusive = start + timedelta(days=1)
+        end_display = end_exclusive - timedelta(seconds=1)
+    return start, end_exclusive, end_display
+
+
+def _parse_event_types(event_type: Optional[str]) -> List[str]:
+    if not event_type:
+        return []
+    seen = set()
+    result: List[str] = []
+    for raw in str(event_type).split(","):
+        candidate = raw.strip()
+        if not candidate or candidate in seen:
+            continue
+        if candidate.replace("_", "").isalnum():
+            seen.add(candidate)
+            result.append(candidate)
+    return result
+
+
+def _bucket_range(start: datetime, end_display: datetime, granularity: str) -> List[datetime]:
+    if granularity == "month":
+        cur = datetime(start.year, start.month, 1, tzinfo=timezone.utc)
+    elif granularity == "week":
+        base = start.astimezone(timezone.utc)
+        cur = datetime(base.year, base.month, base.day, tzinfo=timezone.utc) - timedelta(days=base.weekday())
+    elif granularity == "hour":
+        base = start.astimezone(timezone.utc)
+        cur = datetime(base.year, base.month, base.day, base.hour, tzinfo=timezone.utc)
+    else:
+        base = start.astimezone(timezone.utc)
+        cur = datetime(base.year, base.month, base.day, tzinfo=timezone.utc)
+
+    end_key = _bucket_key(end_display, granularity)
+    buckets: List[datetime] = []
+    for _ in range(500):
+        buckets.append(cur)
+        if _bucket_key(cur, granularity) == end_key:
+            break
+        if granularity == "month":
+            year = cur.year + (1 if cur.month == 12 else 0)
+            month = 1 if cur.month == 12 else cur.month + 1
+            cur = datetime(year, month, 1, tzinfo=timezone.utc)
+        elif granularity == "week":
+            cur = cur + timedelta(weeks=1)
+        elif granularity == "hour":
+            cur = cur + timedelta(hours=1)
+        else:
+            cur = cur + timedelta(days=1)
+    return buckets
+
+
+def _bucket_key(value: datetime, granularity: str) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    value = value.astimezone(timezone.utc)
+    if granularity == "month":
+        return value.strftime("%Y-%m-01")
+    if granularity == "week":
+        week_start = value - timedelta(days=value.weekday())
+        return week_start.strftime("%Y-%m-%d")
+    if granularity == "hour":
+        return value.strftime("%Y-%m-%dT%H:00:00+00:00")
+    return value.strftime("%Y-%m-%d")
 
 
 def get_analytics_funnel(
