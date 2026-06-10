@@ -1032,7 +1032,7 @@ def _test_campaign(db_session, campaign_id, data, current_user):
             _t("""SELECT 1 FROM crm_email_lists
                   WHERE organization_id=:org_id
                     AND deleted_date IS NULL
-                    AND emails @> jsonb_build_array(jsonb_build_object('email', :email::text))
+                    AND emails @> jsonb_build_array(jsonb_build_object('email', CAST(:email AS text)))
                   LIMIT 1"""),
             {'org_id': org_id, 'email': recipient_email},
         ).fetchone()

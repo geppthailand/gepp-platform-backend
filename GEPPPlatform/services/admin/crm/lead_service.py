@@ -145,7 +145,7 @@ def list_leads(
 
     if filters.get('tag'):
         # JSONB array containment: tags @> '["some_tag"]'
-        where_clauses.append("tags @> jsonb_build_array(:tag::text)")
+        where_clauses.append("tags @> jsonb_build_array(CAST(:tag AS text))")
         params['tag'] = str(filters['tag'])
 
     if filters.get('min_score') is not None:
@@ -273,8 +273,8 @@ def create_lead(
                 last_activity_at, created_date, updated_date
             ) VALUES (
                 :org_id, :email, :first_name, :last_name, :company, :job_title,
-                :phone, :country, :language, :source, :source_metadata::jsonb, 'new',
-                0, :owner_user_id, :tags::jsonb, :notes,
+                :phone, :country, :language, :source, CAST(:source_metadata AS jsonb), 'new',
+                0, :owner_user_id, CAST(:tags AS jsonb), :notes,
                 :now, :now, :now
             )
             RETURNING id
@@ -559,7 +559,7 @@ def add_activity(
             INSERT INTO crm_lead_activities
                 (lead_id, activity_type, properties, performed_by, occurred_at)
             VALUES
-                (:lead_id, :activity_type, :properties::jsonb, :performed_by, :occurred_at)
+                (:lead_id, :activity_type, CAST(:properties AS jsonb), :performed_by, :occurred_at)
             RETURNING id
         """),
         {
@@ -812,7 +812,7 @@ def bulk_import_csv(
                     INSERT INTO crm_lead_activities
                         (lead_id, activity_type, properties, performed_by, occurred_at)
                     VALUES
-                        (:lead_id, 'csv_imported', :props::jsonb, :by, :now)
+                        (:lead_id, 'csv_imported', CAST(:props AS jsonb), :by, :now)
                 """),
                 {
                     'lead_id': new_id,

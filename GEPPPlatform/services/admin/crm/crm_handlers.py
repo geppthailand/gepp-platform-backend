@@ -271,6 +271,8 @@ def list_crm_templates(db_session: Session, query_params: dict) -> Dict[str, Any
     # Sprint 7 — gallery filters
     category_filter = (query_params.get('category') or '').strip()
     is_system_filter = (query_params.get('isSystem') or '').strip().lower()  # '' | 'true' | 'false'
+    # Migration 066 — filter by presence of system_key (business-v3 trigger templates).
+    has_system_key = (query_params.get('hasSystemKey') or '').strip().lower()  # '' | 'true' | 'false'
     org_filter_raw = query_params.get('organizationId')
 
     where = ["deleted_date IS NULL"]
@@ -292,6 +294,10 @@ def list_crm_templates(db_session: Session, query_params: dict) -> Dict[str, Any
         where.append("is_system = TRUE")
     elif is_system_filter in ('false', '0', 'no'):
         where.append("is_system = FALSE")
+    if has_system_key in ('true', '1', 'yes'):
+        where.append("system_key IS NOT NULL")
+    elif has_system_key in ('false', '0', 'no'):
+        where.append("system_key IS NULL")
     if org_filter_raw:
         try:
             params['org_id'] = int(org_filter_raw)
@@ -312,7 +318,7 @@ def list_crm_templates(db_session: Session, query_params: dict) -> Dict[str, Any
                    COALESCE(is_current, TRUE) AS is_current,
                    parent_template_id,
                    category, icon, COALESCE(is_system, FALSE) AS is_system,
-                   suggested_subject
+                   suggested_subject, system_key
             FROM crm_email_templates
             WHERE {where_sql}
             ORDER BY id DESC LIMIT :lim OFFSET :off
@@ -332,6 +338,7 @@ def list_crm_templates(db_session: Session, query_params: dict) -> Dict[str, Any
             'icon': r[12],
             'isSystem': r[13],
             'suggestedSubject': r[14],
+            'systemKey': r[15],
         }
         for r in rows
     ]
@@ -406,7 +413,8 @@ def get_crm_template(db_session: Session, resource_id: int) -> Dict[str, Any]:
                    organization_id, created_date, updated_date,
                    COALESCE(is_current, TRUE) AS is_current,
                    parent_template_id,
-                   ai_model, ai_token_usage
+                   ai_model, ai_token_usage,
+                   COALESCE(is_system, FALSE) AS is_system, system_key, category, icon
             FROM crm_email_templates
             WHERE id = :id AND deleted_date IS NULL
         """),
@@ -425,6 +433,10 @@ def get_crm_template(db_session: Session, resource_id: int) -> Dict[str, Any]:
         'parentTemplateId': row[14],
         'aiModel': row[15],
         'aiTokenUsage': row[16],
+        'isSystem': row[17],
+        'systemKey': row[18],
+        'category': row[19],
+        'icon': row[20],
     }
 
 
@@ -503,7 +515,8 @@ def update_crm_template(db_session: Session, resource_id: int, data: dict) -> Di
         text("""
             SELECT id, name, subject, preview_text, body_html, body_plain,
                    variables, generated_by, ai_prompt, ai_model, ai_token_usage,
-                   version, organization_id, block_tree
+                   version, organization_id, block_tree,
+                   COALESCE(is_system, FALSE), system_key, category, icon
             FROM crm_email_templates
             WHERE id = :id AND deleted_date IS NULL
         """),
@@ -514,7 +527,8 @@ def update_crm_template(db_session: Session, resource_id: int, data: dict) -> Di
 
     (old_id, old_name, old_subject, old_preview, old_html, old_plain,
      old_vars, old_gen_by, old_prompt, old_model, old_token_usage,
-     old_version, old_org_id, old_block_tree) = old_row
+     old_version, old_org_id, old_block_tree,
+     old_is_system, old_system_key, old_category, old_icon) = old_row
 
     # No real changes? Return current row unchanged (early exit keeps versions clean).
     has_changes = any(k in data for k in (
@@ -561,6 +575,13 @@ def update_crm_template(db_session: Session, resource_id: int, data: dict) -> Di
         parent_template_id=resource_id,
         is_current=True,
         block_tree=new_block_tree,
+        # Carry system-template identity to the new version — otherwise editing a
+        # business-v3 system template would orphan its system_key (sender lookups
+        # by system_key + is_current would then find nothing). Migration 066.
+        is_system=old_is_system,
+        system_key=old_system_key,
+        category=data.get('category', old_category),
+        icon=data.get('icon', old_icon),
     )
     db_session.add(new_tpl)
     db_session.flush()
@@ -627,7 +648,7 @@ def list_crm_campaigns(db_session: Session, query_params: dict) -> Dict[str, Any
         where.append("COALESCE(c.started_at, c.scheduled_at, c.created_date) >= :date_from")
         params['date_from'] = date_from
     if date_to:
-        where.append("COALESCE(c.started_at, c.scheduled_at, c.created_date) < (:date_to::date + INTERVAL '1 day')")
+        where.append("COALESCE(c.started_at, c.scheduled_at, c.created_date) < (CAST(:date_to AS date) + INTERVAL '1 day')")
         params['date_to'] = date_to
     where_sql = " AND ".join(where)
     offset = (page - 1) * page_size

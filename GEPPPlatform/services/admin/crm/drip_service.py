@@ -171,7 +171,7 @@ def create_sequence(
                 (organization_id, name, description, trigger_event, trigger_config,
                  status, created_by, created_date, updated_date)
             VALUES
-                (:org_id, :name, :desc, :trigger_event, :trigger_config::jsonb,
+                (:org_id, :name, :desc, :trigger_event, CAST(:trigger_config AS jsonb),
                  'draft', :created_by, :now, :now)
             RETURNING id
         """),
@@ -210,7 +210,7 @@ def update_sequence(
             SET name           = COALESCE(:name, name),
                 description    = COALESCE(:desc, description),
                 trigger_event  = COALESCE(:trigger_event, trigger_event),
-                trigger_config = COALESCE(:trigger_config::jsonb, trigger_config),
+                trigger_config = COALESCE(CAST(:trigger_config AS jsonb), trigger_config),
                 updated_date   = :now
             WHERE id = :id AND organization_id = :org_id AND deleted_date IS NULL
         """),
@@ -306,7 +306,7 @@ def _replace_steps(db: Session, sequence_id: int, steps: List[Dict[str, Any]]) -
                 INSERT INTO crm_drip_steps
                     (sequence_id, step_index, template_id, delay_days, delay_hours, skip_filter)
                 VALUES
-                    (:seq_id, :idx, :template_id, :delay_days, :delay_hours, :skip_filter::jsonb)
+                    (:seq_id, :idx, :template_id, :delay_days, :delay_hours, CAST(:skip_filter AS jsonb))
             """),
             {
                 "seq_id":      sequence_id,
