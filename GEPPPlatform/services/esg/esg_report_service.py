@@ -61,7 +61,8 @@ class EsgReportService:
             return None
 
     def get_report(self, organization_id: int, year: int = None,
-                   view: str = 'executive', user_id: int = None) -> Dict[str, Any]:
+                   view: str = 'executive', user_id: int = None,
+                   lang: str = 'en') -> Dict[str, Any]:
         """
         Consolidated report endpoint. Returns all data needed for
         Dashboard, Report, and Share pages in a single call.
@@ -173,18 +174,18 @@ class EsgReportService:
             report['scope3_detail'] = self._get_scope3_detail(base_year_q)
             report['framework_alignment'] = self._get_framework_alignment(organization_id)
             report['recommendations'] = self._get_recommendations(
-                summary, completeness, target_progress, yoy, top_emitters
+                summary, completeness, target_progress, yoy, top_emitters, lang
             )
         else:
             # Executive gets top 3 recommendations and simplified framework
             all_recs = self._get_recommendations(
-                summary, completeness, target_progress, yoy, top_emitters
+                summary, completeness, target_progress, yoy, top_emitters, lang
             )
             report['recommendations'] = all_recs[:3]
             report['framework_alignment'] = self._get_framework_alignment(organization_id)
 
         # ── Generate smart insights from all computed data ──
-        report['insights'] = generate_insights(report)
+        report['insights'] = generate_insights(report, lang)
 
         return {'success': True, 'report': report}
 
@@ -574,21 +575,34 @@ class EsgReportService:
         }
 
     def _get_recommendations(self, summary: Dict, completeness: Dict,
-                             target: Dict, yoy: Dict, top_emitters: List) -> List[Dict]:
-        """Generate data-driven recommendations from analysis of current state."""
+                             target: Dict, yoy: Dict, top_emitters: List,
+                             lang: str = 'en') -> List[Dict]:
+        """Generate data-driven recommendations from analysis of current state.
+
+        `lang` ('en' | 'th') localizes the text via the _L(en, th) helper;
+        numbers, codes, and DB-sourced names stay verbatim.
+        """
         recs = []
         rec_id = 1
+        is_th = (lang == 'th')
+
+        def _L(en: str, th: str) -> str:
+            return th if is_th else en
 
         # 1. Data completeness
         if completeness['overall_score'] < 50:
             recs.append({
                 'id': rec_id, 'priority': 'high',
-                'title': 'Improve data collection coverage',
-                'description': f"Current data completeness is {completeness['overall_score']}%. "
-                               f"Only {completeness['filled_datapoints']}/{completeness['total_datapoints']} datapoints have data. "
-                               f"Focus on filling gaps in the lowest-scoring pillars.",
-                'estimated_savings': 'Better data = better decisions',
-                'impact': 'Enables accurate reporting and target setting',
+                'title': _L('Improve data collection coverage', 'เพิ่มความครอบคลุมของการเก็บข้อมูล'),
+                'description': _L(
+                    f"Current data completeness is {completeness['overall_score']}%. "
+                    f"Only {completeness['filled_datapoints']}/{completeness['total_datapoints']} datapoints have data. "
+                    f"Focus on filling gaps in the lowest-scoring pillars.",
+                    f"ความครบถ้วนข้อมูลปัจจุบันอยู่ที่ {completeness['overall_score']}% "
+                    f"มีข้อมูลเพียง {completeness['filled_datapoints']}/{completeness['total_datapoints']} จุดข้อมูล "
+                    f"เน้นกรอกข้อมูลในเสาหลักที่คะแนนต่ำสุดก่อน"),
+                'estimated_savings': _L('Better data = better decisions', 'ข้อมูลดี = ตัดสินใจดี'),
+                'impact': _L('Enables accurate reporting and target setting', 'ช่วยให้รายงานและตั้งเป้าได้แม่นยำ'),
                 'scope_affected': 'All',
             })
             rec_id += 1
@@ -597,12 +611,15 @@ class EsgReportService:
         if not target.get('has_target'):
             recs.append({
                 'id': rec_id, 'priority': 'high',
-                'title': 'Set science-based reduction targets',
-                'description': 'No emission reduction target is configured. '
-                               'Set a base year and reduction target aligned with SBTi (1.5C pathway) '
-                               'to demonstrate climate commitment.',
-                'estimated_savings': 'Required for SBTi validation and CDP A-list',
-                'impact': 'Enables progress tracking and stakeholder confidence',
+                'title': _L('Set science-based reduction targets', 'ตั้งเป้าลดการปล่อยเชิงวิทยาศาสตร์'),
+                'description': _L(
+                    'No emission reduction target is configured. '
+                    'Set a base year and reduction target aligned with SBTi (1.5C pathway) '
+                    'to demonstrate climate commitment.',
+                    'ยังไม่ได้ตั้งเป้าลดการปล่อย ตั้งปีฐานและเป้าหมายให้สอดคล้องกับ SBTi (เส้นทาง 1.5°C) '
+                    'เพื่อแสดงความมุ่งมั่นด้านสภาพภูมิอากาศ'),
+                'estimated_savings': _L('Required for SBTi validation and CDP A-list', 'จำเป็นต่อการรับรอง SBTi และ CDP A-list'),
+                'impact': _L('Enables progress tracking and stakeholder confidence', 'ช่วยติดตามความคืบหน้าและสร้างความเชื่อมั่น'),
                 'scope_affected': 'All',
             })
             rec_id += 1
@@ -612,12 +629,16 @@ class EsgReportService:
         if s3 and s3.get('percentage', 0) > 50:
             recs.append({
                 'id': rec_id, 'priority': 'high',
-                'title': 'Engage suppliers for primary emission data',
-                'description': f"Scope 3 accounts for {s3['percentage']}% of total emissions. "
-                               f"Transition from spend-based to supplier-specific emission factors "
-                               f"for more accurate reporting and reduction opportunities.",
-                'estimated_savings': '10-30% more accurate Scope 3 data',
-                'impact': 'Better supplier relationships and data quality',
+                'title': _L('Engage suppliers for primary emission data', 'ขอข้อมูลการปล่อยโดยตรงจากซัพพลายเออร์'),
+                'description': _L(
+                    f"Scope 3 accounts for {s3['percentage']}% of total emissions. "
+                    f"Transition from spend-based to supplier-specific emission factors "
+                    f"for more accurate reporting and reduction opportunities.",
+                    f"Scope 3 คิดเป็น {s3['percentage']}% ของการปล่อยทั้งหมด "
+                    f"เปลี่ยนจาก spend-based ไปใช้ค่าการปล่อยเฉพาะของซัพพลายเออร์ "
+                    f"เพื่อรายงานที่แม่นยำขึ้นและเห็นโอกาสลดการปล่อย"),
+                'estimated_savings': _L('10-30% more accurate Scope 3 data', 'ข้อมูล Scope 3 แม่นยำขึ้น 10-30%'),
+                'impact': _L('Better supplier relationships and data quality', 'ความสัมพันธ์กับซัพพลายเออร์และคุณภาพข้อมูลดีขึ้น'),
                 'scope_affected': 'Scope 3',
             })
             rec_id += 1
@@ -627,11 +648,14 @@ class EsgReportService:
         if s2 and s2['tco2e'] > 0:
             recs.append({
                 'id': rec_id, 'priority': 'medium',
-                'title': 'Switch to renewable energy sources',
-                'description': f"Scope 2 emissions are {s2['tco2e']:.1f} tCO2e from purchased electricity. "
-                               f"Consider solar PPA, RECs, or green tariff to reduce market-based Scope 2 to near zero.",
-                'estimated_savings': f"Up to {s2['tco2e']:.1f} tCO2e reduction",
-                'impact': 'Direct emission reduction, RE100 eligibility',
+                'title': _L('Switch to renewable energy sources', 'เปลี่ยนไปใช้พลังงานหมุนเวียน'),
+                'description': _L(
+                    f"Scope 2 emissions are {s2['tco2e']:.1f} tCO2e from purchased electricity. "
+                    f"Consider solar PPA, RECs, or green tariff to reduce market-based Scope 2 to near zero.",
+                    f"การปล่อย Scope 2 อยู่ที่ {s2['tco2e']:.1f} tCO2e จากไฟฟ้าที่ซื้อ "
+                    f"ลองใช้ solar PPA, RECs หรือไฟเขียว เพื่อลด Scope 2 แบบ market-based ให้เกือบเป็นศูนย์"),
+                'estimated_savings': _L(f"Up to {s2['tco2e']:.1f} tCO2e reduction", f"ลดได้ถึง {s2['tco2e']:.1f} tCO2e"),
+                'impact': _L('Direct emission reduction, RE100 eligibility', 'ลดการปล่อยทางตรง และเข้าเกณฑ์ RE100'),
                 'scope_affected': 'Scope 2',
             })
             rec_id += 1
@@ -641,12 +665,16 @@ class EsgReportService:
             top = top_emitters[0]
             recs.append({
                 'id': rec_id, 'priority': 'medium',
-                'title': f"Prioritize reduction in {top['name']}",
-                'description': f"'{top['name']}' is the largest emission source at {top['tco2e']:.1f} tCO2e "
-                               f"({top['percentage']}% of total). "
-                               f"Focus reduction efforts here for maximum impact.",
-                'estimated_savings': f"Target 10% = {top['tco2e'] * 0.1:.1f} tCO2e",
-                'impact': 'Highest leverage reduction opportunity',
+                'title': _L(f"Prioritize reduction in {top['name']}", f"ให้ความสำคัญกับการลดใน {top['name']}"),
+                'description': _L(
+                    f"'{top['name']}' is the largest emission source at {top['tco2e']:.1f} tCO2e "
+                    f"({top['percentage']}% of total). "
+                    f"Focus reduction efforts here for maximum impact.",
+                    f"'{top['name']}' เป็นแหล่งปล่อยใหญ่สุดที่ {top['tco2e']:.1f} tCO2e "
+                    f"({top['percentage']}% ของทั้งหมด) "
+                    f"เน้นความพยายามลดการปล่อยตรงนี้เพื่อผลกระทบสูงสุด"),
+                'estimated_savings': _L(f"Target 10% = {top['tco2e'] * 0.1:.1f} tCO2e", f"เป้า 10% = {top['tco2e'] * 0.1:.1f} tCO2e"),
+                'impact': _L('Highest leverage reduction opportunity', 'โอกาสลดการปล่อยที่คุ้มค่าที่สุด'),
                 'scope_affected': top.get('scope', 'Unknown'),
             })
             rec_id += 1
@@ -655,12 +683,16 @@ class EsgReportService:
         if summary['pending_count'] > summary['verified_count']:
             recs.append({
                 'id': rec_id, 'priority': 'low',
-                'title': 'Verify pending data entries',
-                'description': f"{summary['pending_count']} entries are pending verification vs "
-                               f"{summary['verified_count']} verified. Verify data to improve quality "
-                               f"and meet assurance requirements.",
-                'estimated_savings': 'Audit readiness',
-                'impact': 'Higher data quality score for ratings',
+                'title': _L('Verify pending data entries', 'ยืนยันรายการข้อมูลที่รอตรวจ'),
+                'description': _L(
+                    f"{summary['pending_count']} entries are pending verification vs "
+                    f"{summary['verified_count']} verified. Verify data to improve quality "
+                    f"and meet assurance requirements.",
+                    f"มี {summary['pending_count']} รายการรอการยืนยัน เทียบกับ "
+                    f"{summary['verified_count']} รายการที่ยืนยันแล้ว ยืนยันข้อมูลเพื่อเพิ่มคุณภาพ "
+                    f"และให้พร้อมต่อการตรวจรับรอง"),
+                'estimated_savings': _L('Audit readiness', 'พร้อมต่อการตรวจสอบ'),
+                'impact': _L('Higher data quality score for ratings', 'คะแนนคุณภาพข้อมูลสูงขึ้นสำหรับเรตติ้ง'),
                 'scope_affected': 'All',
             })
             rec_id += 1
@@ -670,11 +702,14 @@ class EsgReportService:
             if p['score'] == 0 and p['total'] > 0:
                 recs.append({
                     'id': rec_id, 'priority': 'medium',
-                    'title': f"Start tracking {p['name']} data",
-                    'description': f"No data for {p['name']} pillar ({p['total']} datapoints available). "
-                                   f"ESG ratings require all three pillars (E, S, G) for comprehensive assessment.",
-                    'estimated_savings': f"Unlock {p['name']} reporting",
-                    'impact': f"Complete ESG profile for ratings and ONE Report",
+                    'title': _L(f"Start tracking {p['name']} data", f"เริ่มเก็บข้อมูล {p['name']}"),
+                    'description': _L(
+                        f"No data for {p['name']} pillar ({p['total']} datapoints available). "
+                        f"ESG ratings require all three pillars (E, S, G) for comprehensive assessment.",
+                        f"ยังไม่มีข้อมูลเสาหลัก {p['name']} (มี {p['total']} จุดข้อมูล) "
+                        f"เรตติ้ง ESG ต้องการครบทั้งสามเสาหลัก (E, S, G) เพื่อการประเมินที่ครบถ้วน"),
+                    'estimated_savings': _L(f"Unlock {p['name']} reporting", f"ปลดล็อกการรายงาน {p['name']}"),
+                    'impact': _L('Complete ESG profile for ratings and ONE Report', 'โปรไฟล์ ESG ครบถ้วนสำหรับเรตติ้งและ ONE Report'),
                     'scope_affected': p['pillar'],
                 })
                 rec_id += 1
