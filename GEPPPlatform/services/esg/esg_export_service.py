@@ -3,6 +3,7 @@ ESG Export Service — Generate Excel and PDF exports of collected data
 """
 
 import io
+import os
 import uuid
 from datetime import datetime
 
@@ -17,7 +18,10 @@ class EsgExportService:
 
     def __init__(self, session, s3_bucket: str = None):
         self.session = session
-        self.s3_bucket = s3_bucket or 'gepp-esg-exports'
+        # Read the same env var the (working) Scope 3 export uses, so both
+        # exports land in the real configured bucket. The bare 'gepp-esg-exports'
+        # default does not exist in this environment → NoSuchBucket on PutObject.
+        self.s3_bucket = s3_bucket or os.getenv('S3_BUCKET_NAME', 'gepp-esg-exports')
         self.s3_client = boto3.client('s3')
 
     def export_to_excel(self, organization_id: int) -> dict:

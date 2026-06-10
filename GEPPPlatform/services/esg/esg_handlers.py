@@ -56,11 +56,13 @@ def handle_esg_routes(event: Dict[str, Any], data: Dict[str, Any], **params) -> 
             report_svc = EsgReportService(db_session)
             year = int(query_params.get('year', 0)) or None
             view = query_params.get('view', 'executive')
+            lang = (query_params.get('lang') or 'en').lower()
             return report_svc.get_report(
                 current_user_org_id,
                 year=year,
                 view=view,
                 user_id=liff_user_id,
+                lang='th' if lang.startswith('th') else 'en',
             )
 
         elif path == '/api/esg/liff/summary' and method == 'GET':
