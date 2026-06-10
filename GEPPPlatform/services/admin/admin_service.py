@@ -1483,7 +1483,7 @@ class AdminService:
             self.db_session.execute(_t(
                 "INSERT INTO iot_debug_logs "
                 "(iot_device_id, captured_at, level, tag, message) "
-                "VALUES (:device_id, COALESCE(:ts::timestamptz, NOW()), :level, :tag, :msg)"
+                "VALUES (:device_id, COALESCE(CAST(:ts AS timestamptz), NOW()), :level, :tag, :msg)"
             ), {
                 'device_id': device_id,
                 'ts': ts,

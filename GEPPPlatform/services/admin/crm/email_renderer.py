@@ -42,6 +42,18 @@ _KNOWN_VARIABLES = {
     "unsubscribe_url":            "unsubscribe_url",
 }
 
+# Variables whose values are TRUSTED, server-generated HTML and must NOT be
+# HTML-escaped when substituted into body_html. These are only ever populated
+# by backend code (e.g. system notification senders building a <table> of
+# transaction materials) — never from user-editable template text — so raw
+# insertion cannot become an XSS vector via the template editor.
+#
+# An admin editing a template can *reference* {{materials_table}} but cannot
+# set its VALUE; the value is supplied via extra_vars by the sending code.
+_RAW_VARIABLES = frozenset({
+    "materials_table",
+})
+
 # Matches {{ varname }} with optional surrounding spaces.
 # Group 1 captures the raw variable name (stripped).
 _VAR_PATTERN = re.compile(r'\{\{\s*([^}]+?)\s*\}\}')
@@ -143,7 +155,10 @@ def _substitute(text: str, context: Dict[str, Any], html_escape: bool) -> str:
                 var_name,
             )
             value = ""
-        return escape(value) if html_escape else value
+        # Skip escaping for raw (trusted, server-generated HTML) variables.
+        if html_escape and var_name not in _RAW_VARIABLES:
+            return escape(value)
+        return value
 
     return _VAR_PATTERN.sub(replace, text)
 

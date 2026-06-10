@@ -80,6 +80,13 @@ def emit_event(
         return evt
     except Exception as e:
         logger.warning("crm_service.emit_event failed (non-fatal): %s", e)
+        # A failed flush/commit leaves the session in a PendingRollback state.
+        # Roll back so this truly is non-fatal — otherwise the caller's outer
+        # commit (e.g. get_session() teardown) blows up with PendingRollbackError.
+        try:
+            db_session.rollback()
+        except Exception:
+            pass
         return None
 
 

@@ -24,7 +24,17 @@ class CrmEmailTemplate(Base, BaseModel):
     parent_template_id = Column(BigInteger, ForeignKey('crm_email_templates.id'), nullable=True)
     is_current = Column(Boolean, nullable=False, default=True)
     created_by = Column(BigInteger, ForeignKey('user_locations.id'))
+    # Gallery / system metadata — added by migration 047
+    category = Column(String(32))          # lead-lifecycle | client-engagement | marketing | admin | transactional
+    icon = Column(String(32))
+    suggested_subject = Column(String(500))
+    is_system = Column(Boolean, nullable=False, default=False)
     # Block builder (Sprint 8) — added by migration 047
     # When set, body_html is derived from block_tree at render time.
     # NULL means the template uses body_html directly (legacy + AI-generated).
     block_tree = Column(JSON, nullable=True)
+    # System-template trigger key — added by migration 066.
+    # Links an is_system template to a business-v3 email trigger
+    # (TXN_CREATED, TXN_UPDATED, TXN_DELETED, RPT_TXN_SCHEDULED) so sender code
+    # can resolve "the template for this email". NULL for ordinary templates.
+    system_key = Column(String(64), nullable=True)
