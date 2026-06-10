@@ -606,6 +606,44 @@ class EsgService:
         except Exception:
             logger.exception('record_count_by_cat from esg_records failed — using entries fallback')
 
+        # Scope-3 records are linked to their category via
+        # `scope3_category_id` (1..15) — the SAME column the modal
+        # (`get_scope3_category_records`) filters on — and NOT necessarily
+        # via `category_id` (which can be NULL or point elsewhere for
+        # LINE-extracted rows). Count off scope3_category_id too so the
+        # card badge agrees with what the modal actually shows.
+        entry_count_by_s3: dict[int, int] = {}
+        record_groups_by_s3: dict[int, set[tuple]] = {}
+        try:
+            s3_rows = (
+                self.db.query(
+                    EsgRecord.id,
+                    EsgRecord.scope3_category_id,
+                    EsgRecord.evidence_image_url,
+                    EsgRecord.file_key,
+                    EsgRecord.datapoints,
+                )
+                .filter(
+                    EsgRecord.organization_id == organization_id,
+                    EsgRecord.is_active == True,
+                    EsgRecord.scope3_category_id.isnot(None),
+                )
+                .all()
+            )
+            for row_id, s3_id, ev_url, file_key, extra in s3_rows:
+                entry_count_by_s3[s3_id] = entry_count_by_s3.get(s3_id, 0) + 1
+                record_label = ''
+                if isinstance(extra, dict):
+                    record_label = (extra.get('record_label') or '').strip()
+                evidence = (ev_url or file_key or '').strip()
+                group_key = (record_label or f'entry-{row_id}', evidence)
+                record_groups_by_s3.setdefault(s3_id, set()).add(group_key)
+        except Exception:
+            logger.exception('scope3 record counts failed — falling back to category_id counts')
+        record_count_by_s3: dict[int, int] = {
+            s3_id: len(groups) for s3_id, groups in record_groups_by_s3.items()
+        }
+
         # 3. Build maps
         sub_by_cat = {}
         for s in subcategories:
@@ -686,8 +724,17 @@ class EsgService:
             # hierarchy (LLM mis-classified onto the wrong datapoint
             # but still tagged the right category_id). Falls back to
             # the walked count when the direct count isn't populated.
-            direct_entries = entry_count_by_cat.get(cat.id, cat_entries)
-            direct_records = record_count_by_cat.get(cat.id, 0)
+            # For Scope 3 categories prefer the scope3_category_id-keyed
+            # counts (matches the modal exactly). Fall back to the
+            # category_id counts for non-Scope-3 categories or when the
+            # category has no scope3-linked rows.
+            s3id = cat.scope3_category_id
+            if s3id and s3id in entry_count_by_s3:
+                direct_entries = entry_count_by_s3.get(s3id, 0)
+                direct_records = record_count_by_s3.get(s3id, 0)
+            else:
+                direct_entries = entry_count_by_cat.get(cat.id, cat_entries)
+                direct_records = record_count_by_cat.get(cat.id, 0)
             pillar_map[p]['categories'].append({
                 'id': cat.id,
                 'name': cat.name,
