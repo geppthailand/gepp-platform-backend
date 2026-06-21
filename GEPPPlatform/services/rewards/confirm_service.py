@@ -5,7 +5,7 @@ Supports both single-item hash (backward compat) and group hash (cart)
 
 from datetime import datetime, timezone
 
-from sqlalchemy import func, update, or_
+from sqlalchemy import func, update
 from sqlalchemy.orm import Session
 
 from ...models.rewards.redemptions import RewardRedemption, RewardUser, OrganizationRewardUser
@@ -49,7 +49,24 @@ class ConfirmService:
             )
             if not single:
                 raise NotFoundException("Redemption not found")
-            redemptions = [single]
+            # Defense-in-depth: if a per-item QR is scanned but the redemption
+            # belongs to a multi-item cart, expand to the whole group so staff
+            # see every item. confirm_redemption confirms the entire group, so the
+            # preview must match — otherwise stock is deducted for items staff
+            # never saw and the member is shorted.
+            if single.redemption_group_hash:
+                group = (
+                    self.db.query(RewardRedemption)
+                    .filter(
+                        RewardRedemption.redemption_group_hash == single.redemption_group_hash,
+                        RewardRedemption.organization_id == organization_id,
+                        RewardRedemption.deleted_date.is_(None),
+                    )
+                    .all()
+                )
+                redemptions = group or [single]
+            else:
+                redemptions = [single]
 
         # Get user info
         user_id = redemptions[0].reward_user_id
@@ -277,10 +294,10 @@ class ConfirmService:
             self.db.query(func.coalesce(func.sum(RewardStock.values), 0))
             .filter(
                 RewardStock.reward_catalog_id == redemption.catalog_id,
-                or_(
-                    RewardStock.reward_campaign_id == redemption.reward_campaign_id,
-                    RewardStock.reward_campaign_id.is_(None),
-                ),
+                # Campaign-specific allocation ONLY — matches the submit-time check and
+                # the admin stock view. Global pool is not auto-redeemable, so the
+                # campaign bucket can never be deducted below zero.
+                RewardStock.reward_campaign_id == redemption.reward_campaign_id,
                 RewardStock.deleted_date.is_(None),
             )
             .scalar()
