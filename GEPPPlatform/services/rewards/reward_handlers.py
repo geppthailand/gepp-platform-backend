@@ -762,6 +762,37 @@ def handle_reward_routes(event: Dict[str, Any], data: Dict[str, Any], **params) 
                 items=data.get("items", []),
             )
 
+        # --- Staff redeems ON BEHALF of a member (one-step: deduct points + stock) ---
+        if path == "/api/rewards/public/staff/redeem/campaigns" and method == "GET":
+            org_id = int(query_params.get("organization_id"))
+            _resolve_staff(org_id)  # auth: caller must be staff of this org
+            svc = RedeemService(db_session)
+            return svc.get_user_campaigns_for_redeem(
+                int(query_params.get("reward_user_id")), org_id
+            )
+
+        if path == "/api/rewards/public/staff/redeem/catalog" and method == "GET":
+            org_id = int(query_params.get("organization_id"))
+            _resolve_staff(org_id)  # auth: caller must be staff of this org
+            svc = RedeemService(db_session)
+            return svc.get_campaign_catalog_for_redeem(
+                int(query_params.get("campaign_id")),
+                int(query_params.get("reward_user_id")),
+            )
+
+        if path == "/api/rewards/public/staff/redeem" and method == "POST":
+            org_id = int(data.get("organization_id"))
+            # Resolve staff identity server-side — never trust client-provided staff_org_user_id
+            staff_org_user_id = _resolve_staff(org_id)
+            svc = RedeemService(db_session)
+            return svc.staff_redeem(
+                staff_org_user_id=staff_org_user_id,
+                reward_user_id=int(data.get("reward_user_id")),
+                organization_id=org_id,
+                campaign_id=int(data.get("campaign_id")),
+                items=data.get("items", []),
+            )
+
         if path == "/api/rewards/public/redemption-lookup" and method == "GET":
             org_id = int(query_params.get("organization_id"))
             _resolve_staff(org_id)  # auth: caller must be staff of this org

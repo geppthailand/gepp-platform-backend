@@ -55,7 +55,8 @@ def make_session():
         RewardUserMerge,
     )
     from GEPPPlatform.models.rewards.points import RewardPointTransaction
-    from GEPPPlatform.models.rewards.catalog import RewardStock
+    from GEPPPlatform.models.rewards.catalog import RewardStock, RewardCatalog
+    from GEPPPlatform.models.rewards.management import RewardCampaign, RewardCampaignCatalog
 
     tables = [
         RewardUser.__table__,
@@ -65,6 +66,10 @@ def make_session():
         RewardStock.__table__,
         RewardStaffInvite.__table__,
         RewardUserMerge.__table__,
+        # Catalog/campaign tables needed by the redeem flow (staff_redeem tests).
+        RewardCampaign.__table__,
+        RewardCampaignCatalog.__table__,
+        RewardCatalog.__table__,
     ]
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine, tables=tables)
