@@ -393,6 +393,42 @@ class RedeemService:
             "redemptions": redemptions,
         }
 
+    def staff_redeem(
+        self,
+        staff_org_user_id: int,
+        reward_user_id: int,
+        organization_id: int,
+        campaign_id: int,
+        items: list[dict],
+    ) -> dict:
+        """Staff redeems catalog items ON BEHALF of a member, completed in one step.
+
+        Orchestrates the two existing atomic primitives — submit (deduct points,
+        create inprogress redemption) then confirm (deduct stock, mark completed,
+        record staff_id). Both run in the SAME request, so the outer session commits
+        them together or rolls everything back: no partial state, no reimplemented
+        points/stock math.
+        """
+        submit = self.submit_redemption(reward_user_id, organization_id, campaign_id, items)
+        group_hash = submit["group_hash"]
+
+        # Local import avoids a circular import at module load.
+        from .confirm_service import ConfirmService
+        confirm = ConfirmService(self.db).confirm_redemption(
+            group_hash=group_hash,
+            staff_org_user_id=staff_org_user_id,
+            organization_id=organization_id,
+        )
+
+        return {
+            "success": bool(confirm.get("success", True)),
+            "group_hash": group_hash,
+            "confirmed_items": confirm.get("confirmed_items", []),
+            # Items whose stock raced out between submit and confirm are auto-canceled
+            # and their points refunded — surface so the UI can tell staff.
+            "auto_canceled": confirm.get("auto_canceled", []),
+        }
+
     def cancel_redemption(self, reward_user_id: int, redemption_id: int) -> dict:
         """Cancel an inprogress redemption and refund points."""
         redemption = (
