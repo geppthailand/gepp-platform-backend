@@ -2,7 +2,8 @@
 Redemption, user, droppoint, and staff invite models
 """
 
-from sqlalchemy import Column, String, Text, ForeignKey, BigInteger, Integer, DateTime
+from sqlalchemy import Column, String, Text, ForeignKey, BigInteger, Integer, Date, DateTime
+from sqlalchemy.dialects.postgresql import JSONB
 from ..base import Base, BaseModel
 
 
@@ -46,6 +47,11 @@ class RewardUser(Base, BaseModel):
     email = Column(String(255), nullable=True)
     phone_number = Column(String(50), nullable=True)
     address = Column(Text, nullable=True)
+    # Walk-in (non-LINE) members
+    date_of_birth = Column(Date, nullable=True)
+    created_via = Column(String(20), nullable=False, default='line')  # line / staff_walkin / self_register
+    created_by_staff_id = Column(BigInteger, nullable=True)  # FK organization_reward_users.id (walk-in registrar)
+    pdpa_consent_at = Column(DateTime(timezone=True), nullable=True)
     # LINE
     line_user_id = Column(String(255), unique=True, nullable=True)
     line_display_name = Column(String(255), nullable=True)
@@ -55,6 +61,23 @@ class RewardUser(Base, BaseModel):
     whatsapp_user_id = Column(String(255), unique=True, nullable=True)
     # WeChat
     wechat_user_id = Column(String(255), unique=True, nullable=True)
+
+
+class RewardUserMerge(Base, BaseModel):
+    """Audit log of reward_users account merges (walk-in -> LINE auto-merge and admin manual merges).
+
+    A merge re-points the victim's point transactions, redemptions, catalog ownership, and
+    org memberships to the survivor, then soft-deletes the victim. There is no auto-unmerge.
+    """
+    __tablename__ = 'reward_user_merges'
+
+    survivor_user_id = Column(BigInteger, ForeignKey('reward_users.id'), nullable=False)
+    victim_user_id = Column(BigInteger, ForeignKey('reward_users.id'), nullable=False)
+    organization_id = Column(BigInteger, nullable=True)  # context org for manual/admin merges
+    merge_type = Column(String(20), nullable=False)  # auto_phone / manual_admin
+    moved_counts = Column(JSONB, nullable=True)  # {"point_tx":n,"redemptions":n,"memberships":n,"catalog":n}
+    performed_by_user_id = Column(BigInteger, nullable=True)  # platform users.id (admin manual merge)
+    performed_by_staff_id = Column(BigInteger, nullable=True)  # organization_reward_users.id (if relevant)
 
 
 class OrganizationRewardUser(Base, BaseModel):

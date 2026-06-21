@@ -128,6 +128,14 @@ class MemberService:
             q = q.filter(OrganizationRewardUser.role == f["role"])
         if "is_active" in f and f["is_active"] is not None:
             q = q.filter(OrganizationRewardUser.is_active == bool(f["is_active"]))
+        # Credential channel filter (matches the 📱/☎️ column in the admin table).
+        cred = f.get("credential")
+        if cred == "line_only":
+            q = q.filter(RewardUser.line_user_id.isnot(None), RewardUser.phone_number.is_(None))
+        elif cred == "walkin_only":
+            q = q.filter(RewardUser.line_user_id.is_(None))
+        elif cred == "both":
+            q = q.filter(RewardUser.line_user_id.isnot(None), RewardUser.phone_number.isnot(None))
         if f.get("date_from"):
             q = q.filter(OrganizationRewardUser.created_date >= f["date_from"])
         if f.get("date_to"):
@@ -175,6 +183,10 @@ class MemberService:
                 "email": user.email,
                 "phone_number": user.phone_number,
                 "line_user_id": user.line_user_id,
+                "created_via": user.created_via,
+                "date_of_birth": user.date_of_birth.isoformat() if user.date_of_birth else None,
+                "pdpa_consent_at": user.pdpa_consent_at.isoformat() if user.pdpa_consent_at else None,
+                "created_by_staff_id": user.created_by_staff_id,
                 "role": org_user.role,
                 "is_active": org_user.is_active,
                 "created_date": org_user.created_date.isoformat() if org_user.created_date else None,
@@ -377,6 +389,10 @@ class MemberService:
             "line_user_id": user.line_user_id,
             "whatsapp_user_id": user.whatsapp_user_id,
             "wechat_user_id": user.wechat_user_id,
+            "created_via": user.created_via,
+            "date_of_birth": user.date_of_birth.isoformat() if user.date_of_birth else None,
+            "pdpa_consent_at": user.pdpa_consent_at.isoformat() if user.pdpa_consent_at else None,
+            "created_by_staff_id": user.created_by_staff_id,
             "role": org_user.role,
             "is_active": org_user.is_active,
             "created_date": org_user.created_date.isoformat() if org_user.created_date else None,
