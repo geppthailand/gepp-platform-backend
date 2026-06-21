@@ -123,6 +123,12 @@ class PublicRewardService:
             "line_picture_url": user.line_picture_url,
             "email": user.email,
             "phone_number": user.phone_number,
+            "date_of_birth": user.date_of_birth.isoformat() if user.date_of_birth else None,
+            "pdpa_consent_at": user.pdpa_consent_at.isoformat() if user.pdpa_consent_at else None,
+            # The LIFF shows a profile-completion step until the member has both a
+            # phone and PDPA consent (existing LINE-only members are auto-created
+            # without either, so they will be prompted on next open).
+            "needs_profile": not (user.phone_number and user.pdpa_consent_at),
             "created_date": user.created_date.isoformat() if user.created_date else None,
         }
 

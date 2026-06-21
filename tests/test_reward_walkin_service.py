@@ -136,6 +136,16 @@ def test_complete_profile_confirm_merges_walkin_into_line(session):
     assert victim.deleted_date is not None
 
 
+def test_register_user_sets_needs_profile_until_phone_and_consent(session):
+    svc = _svc(session)
+    out = svc.register_user({"line_user_id": "Unew", "display_name": "Som"})
+    assert out["needs_profile"] is True  # no phone / no consent yet
+
+    svc.complete_profile(out["id"], "Som", "0812345678", pdpa_consent=True)
+    again = svc.register_user({"line_user_id": "Unew"})  # idempotent re-register on next open
+    assert again["needs_profile"] is False
+
+
 def test_complete_profile_phone_bound_to_other_line_is_refused(session):
     svc = _svc(session)
     # Another LINE account already owns this phone.
