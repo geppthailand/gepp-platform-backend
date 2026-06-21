@@ -77,6 +77,13 @@ for _name in (
     "GEPPPlatform.models",
     "GEPPPlatform.models.crm",
     "GEPPPlatform.exceptions",
+    # Some suites (e.g. crm_features/test_public_lead_capture) stub sqlalchemy with
+    # MagicMocks in sys.modules at import time and never restore it. Snapshot the real
+    # modules so the per-test/per-module restore hooks below put them back — otherwise
+    # later suites that need a real DB session (e.g. the reward walk-in/merge tests)
+    # bind to the mock.
+    "sqlalchemy",
+    "sqlalchemy.orm",
 ) + _PRE_IMPORTS:
     if _name in sys.modules:
         _SNAPSHOT[_name] = sys.modules[_name]

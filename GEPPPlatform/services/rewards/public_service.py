@@ -2,7 +2,9 @@
 Public Service - LIFF/public user registration and profile
 """
 
-from sqlalchemy import func
+from datetime import date, datetime, timezone
+
+from sqlalchemy import func, case
 from sqlalchemy.orm import Session
 
 from ...models.rewards.redemptions import (
@@ -13,6 +15,7 @@ from ...models.rewards.redemptions import (
 from ...models.rewards.points import RewardPointTransaction
 from ...models.rewards.management import RewardCampaign, RewardCampaignDroppoint
 from ...exceptions import NotFoundException, BadRequestException, UnauthorizedException
+from ._phone import normalize_thai_phone, is_valid_thai_mobile, normalize_and_validate_thai_mobile
 
 
 class PublicRewardService:
@@ -122,6 +125,226 @@ class PublicRewardService:
             "phone_number": user.phone_number,
             "created_date": user.created_date.isoformat() if user.created_date else None,
         }
+
+    # ── Walk-in (phone-based) members ─────────────────────────────────────────
+
+    def resolve_user_by_phone(
+        self,
+        phone: str,
+        organization_id: int | None = None,
+        exclude_user_id: int | None = None,
+    ) -> dict | None:
+        """Find a live member by normalized phone. Returns a preview dict or None.
+
+        Phone values written by this system (walk-in register / profile completion)
+        are always stored normalized, so an exact match on the normalized form is
+        the reliable lookup key.
+        """
+        normalized = normalize_thai_phone(phone)
+        if not is_valid_thai_mobile(normalized):
+            return None
+        q = self.db.query(RewardUser).filter(
+            RewardUser.phone_number == normalized,
+            RewardUser.deleted_date.is_(None),
+        )
+        if exclude_user_id:
+            q = q.filter(RewardUser.id != exclude_user_id)
+        user = q.order_by(RewardUser.created_date.asc()).first()
+        if not user:
+            return None
+        return self._user_preview(user, organization_id)
+
+    def register_walkin(
+        self,
+        staff_org_user_id: int,
+        organization_id: int,
+        display_name: str,
+        phone: str,
+        date_of_birth: str | None = None,
+        pdpa_consent: bool = False,
+    ) -> dict:
+        """Staff registers a walk-in (non-LINE) member by phone.
+
+        Idempotent on phone: if a member already exists with this number we return
+        them (with ``existing=True``) and just ensure org membership — never a dup.
+        """
+        if not display_name or not display_name.strip():
+            raise BadRequestException("display_name is required")
+        if not pdpa_consent:
+            raise BadRequestException("PDPA consent is required")
+        normalized = normalize_and_validate_thai_mobile(phone)
+
+        existing = (
+            self.db.query(RewardUser)
+            .filter(RewardUser.phone_number == normalized, RewardUser.deleted_date.is_(None))
+            .order_by(RewardUser.created_date.asc())
+            .first()
+        )
+        if existing:
+            self._ensure_membership(existing.id, organization_id)
+            self.db.flush()
+            preview = self._user_preview(existing, organization_id)
+            preview["existing"] = True
+            return preview
+
+        user = RewardUser(
+            display_name=display_name.strip(),
+            phone_number=normalized,
+            date_of_birth=self._parse_dob(date_of_birth),
+            created_via="staff_walkin",
+            created_by_staff_id=staff_org_user_id,
+            pdpa_consent_at=datetime.now(timezone.utc),
+        )
+        self.db.add(user)
+        self.db.flush()
+        self._ensure_membership(user.id, organization_id)
+        self.db.flush()
+        preview = self._user_preview(user, organization_id)
+        preview["existing"] = False
+        return preview
+
+    def complete_profile(
+        self,
+        reward_user_id: int,
+        display_name: str,
+        phone: str,
+        date_of_birth: str | None = None,
+        pdpa_consent: bool = False,
+        confirm_merge: bool = False,
+    ) -> dict:
+        """LINE user fills in name + phone (+ DOB) after auto-create.
+
+        If the phone matches an existing walk-in account, returns ``needs_merge``
+        (with a preview) so the LIFF can confirm; on ``confirm_merge=True`` the
+        walk-in is merged into this LINE account. A phone already bound to a
+        DIFFERENT LINE account is refused (anti-hijack).
+        """
+        user = self._live_user(reward_user_id)
+        if not display_name or not display_name.strip():
+            raise BadRequestException("display_name is required")
+        if not pdpa_consent and not user.pdpa_consent_at:
+            raise BadRequestException("PDPA consent is required")
+        normalized = normalize_and_validate_thai_mobile(phone)
+
+        other = (
+            self.db.query(RewardUser)
+            .filter(
+                RewardUser.phone_number == normalized,
+                RewardUser.id != reward_user_id,
+                RewardUser.deleted_date.is_(None),
+            )
+            .order_by(RewardUser.created_date.asc())
+            .first()
+        )
+
+        merged = False
+        if other is not None:
+            if other.line_user_id is not None:
+                # Phone belongs to another LINE-linked account — refuse to take it over.
+                raise BadRequestException("เบอร์นี้ผูกกับบัญชี LINE อื่นแล้ว")
+            if not confirm_merge:
+                return {"needs_merge": True, "walkin_preview": self._user_preview(other, None)}
+            # Confirmed: set this LINE user's profile FIRST (form name wins, decision #4),
+            # then merge the walk-in into it.
+            self._apply_profile(user, display_name, normalized, date_of_birth, pdpa_consent)
+            from .merge_service import MergeService
+            MergeService(self.db).merge(
+                survivor_id=user.id, victim_id=other.id, merge_type="auto_phone",
+            )
+            merged = True
+        else:
+            self._apply_profile(user, display_name, normalized, date_of_birth, pdpa_consent)
+
+        self.db.flush()
+        fresh = self._live_user(reward_user_id)
+        result = self._user_preview(fresh, None)
+        result["merged"] = merged
+        result["needs_merge"] = False
+        return result
+
+    # ── walk-in helpers ───────────────────────────────────────────────────────
+
+    def _live_user(self, reward_user_id: int) -> RewardUser:
+        user = (
+            self.db.query(RewardUser)
+            .filter(RewardUser.id == reward_user_id, RewardUser.deleted_date.is_(None))
+            .first()
+        )
+        if not user:
+            raise NotFoundException("User not found")
+        return user
+
+    def _ensure_membership(self, reward_user_id: int, organization_id: int, role: str = "user"):
+        """Return the user's live membership in the org, creating one if absent.
+
+        Does NOT reactivate a membership an admin deactivated — claim logic surfaces
+        that to the user with a clear message instead.
+        """
+        m = (
+            self.db.query(OrganizationRewardUser)
+            .filter(
+                OrganizationRewardUser.reward_user_id == reward_user_id,
+                OrganizationRewardUser.organization_id == organization_id,
+                OrganizationRewardUser.deleted_date.is_(None),
+            )
+            .first()
+        )
+        if m:
+            return m
+        m = OrganizationRewardUser(
+            reward_user_id=reward_user_id, organization_id=organization_id, role=role
+        )
+        self.db.add(m)
+        self.db.flush()
+        return m
+
+    def _apply_profile(self, user: RewardUser, display_name: str, normalized_phone: str,
+                       date_of_birth: str | None, pdpa_consent: bool) -> None:
+        user.display_name = display_name.strip()
+        user.phone_number = normalized_phone
+        dob = self._parse_dob(date_of_birth)
+        if dob is not None:
+            user.date_of_birth = dob
+        if pdpa_consent and not user.pdpa_consent_at:
+            user.pdpa_consent_at = datetime.now(timezone.utc)
+
+    def _user_preview(self, user: RewardUser, organization_id: int | None) -> dict:
+        """Compact member card used by staff lookup + merge confirmation."""
+        pts_q = self.db.query(
+            func.coalesce(
+                func.sum(
+                    case((RewardPointTransaction.points > 0, RewardPointTransaction.points), else_=0)
+                ), 0
+            ).label("earned"),
+            func.coalesce(func.sum(RewardPointTransaction.points), 0).label("balance"),
+        ).filter(
+            RewardPointTransaction.reward_user_id == user.id,
+            RewardPointTransaction.deleted_date.is_(None),
+        )
+        if organization_id:
+            pts_q = pts_q.filter(RewardPointTransaction.organization_id == organization_id)
+        row = pts_q.one()
+        return {
+            "id": user.id,
+            "display_name": user.display_name or user.line_display_name,
+            "line_picture_url": user.line_picture_url,
+            "phone_number": user.phone_number,
+            "has_line": user.line_user_id is not None,
+            "created_via": user.created_via,
+            "lifetime_earned": float(row.earned or 0),
+            "current_balance": float(row.balance or 0),
+        }
+
+    @staticmethod
+    def _parse_dob(value) -> date | None:
+        if not value:
+            return None
+        if isinstance(value, date):
+            return value
+        try:
+            return datetime.strptime(str(value)[:10], "%Y-%m-%d").date()
+        except ValueError:
+            raise BadRequestException("Invalid date_of_birth (expected YYYY-MM-DD)")
 
     def get_profile(self, reward_user_id: int, organization_id: int = None) -> dict:
         """Get user profile, optionally with organization-specific point balances."""

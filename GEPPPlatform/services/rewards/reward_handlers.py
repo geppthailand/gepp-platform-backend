@@ -30,6 +30,7 @@ from .confirm_service import ConfirmService
 from .public_service import PublicRewardService
 from .history_service import HistoryService
 from .invite_service import InviteService
+from .merge_service import MergeService
 
 from ...exceptions import (
     APIException,
@@ -522,6 +523,7 @@ def handle_reward_routes(event: Dict[str, Any], data: Dict[str, Any], **params) 
                     else False if query_params.get("is_active") == "false"
                     else None
                 ),
+                "credential": query_params.get("credential"),  # line_only | walkin_only | both
                 "search": query_params.get("search"),
                 "date_from": query_params.get("date_from"),
                 "date_to": query_params.get("date_to"),
@@ -558,6 +560,18 @@ def handle_reward_routes(event: Dict[str, Any], data: Dict[str, Any], **params) 
                 [int(i) for i in (data.get("ids") or [])],
                 bool(data.get("is_active")),
                 current_org_id,
+            )
+
+        if path == "/api/rewards/members/merge" and method == "POST":
+            # Admin manually merges two reward_users (by reward_user_id). Survivor
+            # is the account that remains; victim's history is re-pointed onto it.
+            svc = MergeService(db_session)
+            return svc.merge(
+                survivor_id=int(data.get("survivor_reward_user_id")),
+                victim_id=int(data.get("victim_reward_user_id")),
+                merge_type="manual_admin",
+                performed_by_user_id=current_user_id,
+                organization_id=current_org_id,
             )
 
         if path == "/api/rewards/members/redemption/confirm" and method == "POST":
@@ -652,6 +666,19 @@ def handle_reward_routes(event: Dict[str, Any], data: Dict[str, Any], **params) 
         if path == "/api/rewards/public/register" and method == "POST":
             svc = PublicRewardService(db_session)
             return svc.register_user(data)
+
+        if path == "/api/rewards/public/complete-profile" and method == "POST":
+            # LINE user fills name + phone (+ DOB) after auto-create; may trigger
+            # an auto-merge with an existing walk-in account on matching phone.
+            svc = PublicRewardService(db_session)
+            return svc.complete_profile(
+                reward_user_id=_resolve_user(),
+                display_name=data.get("display_name"),
+                phone=data.get("phone_number") or data.get("phone"),
+                date_of_birth=data.get("date_of_birth"),
+                pdpa_consent=bool(data.get("pdpa_consent")),
+                confirm_merge=bool(data.get("confirm_merge")),
+            )
 
         if path == "/api/rewards/public/profile" and method == "GET":
             svc = PublicRewardService(db_session)
@@ -827,6 +854,28 @@ def handle_reward_routes(event: Dict[str, Any], data: Dict[str, Any], **params) 
             return svc.get_profile(
                 reward_user_id=int(query_params.get("reward_user_id")),
                 organization_id=org_id,
+            )
+
+        if path == "/api/rewards/public/staff/lookup-by-phone" and method == "GET":
+            org_id = int(query_params.get("organization_id"))
+            _resolve_staff(org_id)  # auth: caller must be staff of this org
+            svc = PublicRewardService(db_session)
+            preview = svc.resolve_user_by_phone(
+                query_params.get("phone"), organization_id=org_id
+            )
+            return {"found": preview is not None, "member": preview}
+
+        if path == "/api/rewards/public/staff/register-walkin" and method == "POST":
+            org_id = int(data.get("organization_id"))
+            staff_org_user_id = _resolve_staff(org_id)  # server-resolved, never trust client
+            svc = PublicRewardService(db_session)
+            return svc.register_walkin(
+                staff_org_user_id=staff_org_user_id,
+                organization_id=org_id,
+                display_name=data.get("display_name"),
+                phone=data.get("phone_number") or data.get("phone"),
+                date_of_birth=data.get("date_of_birth"),
+                pdpa_consent=bool(data.get("pdpa_consent")),
             )
 
         if path == "/api/rewards/public/staff/pickup-queue" and method == "GET":
