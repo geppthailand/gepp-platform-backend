@@ -281,15 +281,16 @@ class RedeemService:
             item_cost = Decimal(str(points_cost)) * quantity
             total_cost += item_cost
 
-            # 2c. Check stock (campaign-specific + global)
+            # 2c. Check stock — campaign-specific allocation ONLY. The Global pool
+            # (campaign_id=NULL) is a reserve that must be explicitly assigned into the
+            # campaign before it becomes redeemable. Counting global here let the campaign
+            # bucket be overdrawn into negative (deduction is recorded campaign-scoped)
+            # and made the user-facing number disagree with the admin campaign stock view.
             current_stock = (
                 self.db.query(func.coalesce(func.sum(RewardStock.values), 0))
                 .filter(
                     RewardStock.reward_catalog_id == catalog_id,
-                    or_(
-                        RewardStock.reward_campaign_id == campaign_id,
-                        RewardStock.reward_campaign_id.is_(None),
-                    ),
+                    RewardStock.reward_campaign_id == campaign_id,
                     RewardStock.deleted_date.is_(None),
                 )
                 .scalar()
@@ -1091,15 +1092,14 @@ class RedeemService:
             if not catalog:
                 continue
 
-            # Stock = campaign-specific + global (campaign_id=NULL)
+            # Stock = campaign-specific allocation ONLY — must match the submit/confirm
+            # checks and the admin campaign stock view. Global pool is not redeemable
+            # until assigned into the campaign.
             stock_remaining = (
                 self.db.query(func.coalesce(func.sum(RewardStock.values), 0))
                 .filter(
                     RewardStock.reward_catalog_id == link.catalog_id,
-                    or_(
-                        RewardStock.reward_campaign_id == campaign_id,
-                        RewardStock.reward_campaign_id.is_(None),
-                    ),
+                    RewardStock.reward_campaign_id == campaign_id,
                     RewardStock.deleted_date.is_(None),
                 )
                 .scalar()
@@ -1112,9 +1112,44 @@ class RedeemService:
                 "description": catalog.description,
                 "thumbnail_id": catalog.thumbnail_id,
                 "points_cost": link.points_cost,
-                "stock_remaining": int(stock_remaining),
+                # Clamp at 0 for the user — a campaign bucket left negative by historical
+                # over-allocation should read as "out of stock", never a negative count.
+                # (The admin campaign view keeps the true value so the deficit stays visible.)
+                "stock_remaining": max(0, int(stock_remaining)),
                 "unit": catalog.unit,
             })
+
+        # Resolve thumbnail file ids → viewable URLs (presigned for S3 files, direct
+        # for external) so the public LIFF can render real product images. Done
+        # server-side because the LIFF is unauthenticated and cannot call the
+        # protected presigned-URL endpoint. Best-effort: any failure just leaves
+        # img=None and the card falls back to the 🎁 placeholder.
+        thumb_ids = list({c["thumbnail_id"] for c in catalog_items if c.get("thumbnail_id")})
+        url_by_file_id = {}
+        if thumb_ids:
+            try:
+                from ..cores.transactions.presigned_url_service import (
+                    TransactionPresignedUrlService,
+                )
+                presigned = (
+                    TransactionPresignedUrlService()
+                    .get_transaction_file_view_presigned_urls_by_ids(
+                        file_ids=thumb_ids,
+                        db=self.db,
+                        organization_id=campaign.organization_id,
+                        user_id=reward_user_id,
+                    )
+                )
+                for fid, info in (presigned.get("presigned_urls") or {}).items():
+                    url = info.get("view_url") if isinstance(info, dict) else None
+                    if url:
+                        url_by_file_id[int(fid)] = url
+            except Exception:
+                url_by_file_id = {}
+
+        for c in catalog_items:
+            tid = c.get("thumbnail_id")
+            c["img"] = url_by_file_id.get(int(tid)) if tid else None
 
         return {
             "available_points": float(available_points),

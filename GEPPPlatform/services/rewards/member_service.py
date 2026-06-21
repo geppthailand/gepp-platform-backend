@@ -591,7 +591,7 @@ class MemberService:
         and sets staff_id=NULL (admin isn't a staff reward user).
         Stock deduction + atomic status change mirror ConfirmService._confirm_single.
         """
-        from sqlalchemy import update, or_ as sql_or
+        from sqlalchemy import update
 
         redemption = (
             self.db.query(RewardRedemption)
@@ -643,10 +643,9 @@ class MemberService:
             self.db.query(func.coalesce(func.sum(RewardStock.values), 0))
             .filter(
                 RewardStock.reward_catalog_id == redemption.catalog_id,
-                sql_or(
-                    RewardStock.reward_campaign_id == redemption.reward_campaign_id,
-                    RewardStock.reward_campaign_id.is_(None),
-                ),
+                # Campaign-specific allocation ONLY — matches ConfirmService + the submit
+                # check. Global pool is not auto-redeemable.
+                RewardStock.reward_campaign_id == redemption.reward_campaign_id,
                 RewardStock.deleted_date.is_(None),
             )
             .scalar()
