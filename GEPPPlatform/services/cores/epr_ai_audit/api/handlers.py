@@ -32,6 +32,14 @@ def handle_epr_ai_audit_routes(event: Dict[str, Any], data: Dict[str, Any], **pa
     service = EprAiAuditService(db_session)
     query_params = params.get("query_params") or {}
 
+    if path.endswith("/epr/ai_audit/ocr") and method == "POST":
+        from .ocr import read_transaction
+        files = data.get("files") or []
+        fields = data.get("fields") or []
+        if not files:
+            raise APIException("No files provided")
+        return {"success": True, "data": read_transaction(files, fields)}
+
     if path.endswith("/epr/ai_audit/embed-transaction") and method == "POST":
         return {"success": True, "data": service.embed_transaction(data)}
 
