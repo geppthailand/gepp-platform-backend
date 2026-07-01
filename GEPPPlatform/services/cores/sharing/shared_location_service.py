@@ -140,6 +140,15 @@ class SharedLocationService:
         ).order_by(SharedUserLocation.created_date.desc()).all()
         return [self._serialize(s) for s in shares]
 
+    def list_source_location_ids(self, source_organization_id: int) -> List[int]:
+        """Distinct source_user_location_ids in this org that have ≥1 share (valid or not,
+        not deleted) — drives the "shared out" indicator on org-chart nodes."""
+        rows = self.db.query(SharedUserLocation.source_user_location_id).filter(
+            SharedUserLocation.source_organization_id == source_organization_id,
+            SharedUserLocation.deleted_date.is_(None),
+        ).distinct().all()
+        return [r[0] for r in rows if r[0] is not None]
+
     def get_share(self, share_id: int, source_organization_id: int,
                   actor_user_id: int) -> Dict[str, Any]:
         self._require_owner(source_organization_id, actor_user_id)

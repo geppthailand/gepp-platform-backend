@@ -77,6 +77,10 @@ def shared_location_routes(event: Dict[str, Any], context: Any, **params) -> Any
     if segments[0] == 'incoming' and method == 'GET':
         return service.list_incoming(organization_id, user_id)
 
+    # ── /source-ids (locations that have outgoing shares) ──────────────────────
+    if segments[0] == 'source-ids' and method == 'GET':
+        return service.list_source_location_ids(organization_id)
+
     # ── item routes: /{id} and /{id}/reject ───────────────────────────────────
     share_id = _int_or_none(segments[0])
     if share_id is None:
