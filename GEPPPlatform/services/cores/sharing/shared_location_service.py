@@ -382,6 +382,26 @@ class SharedLocationService:
         self.db.refresh(share)
         return self._serialize(share)
 
+    def unplace_share(self, share_id: int, target_organization_id: int,
+                      actor_user_id: int) -> Dict[str, Any]:
+        """Remove a shared node from the target org's chart WITHOUT rejecting the share.
+
+        Non-destructive: clears placement only (is_valid/is_rejected untouched), so the share
+        returns to the tray as an unplaced item that can be dragged back in later.
+        """
+        self._require_owner(target_organization_id, actor_user_id)
+        share = self.db.query(SharedUserLocation).filter(
+            SharedUserLocation.id == share_id,
+            SharedUserLocation.target_organization_id == target_organization_id,
+            SharedUserLocation.deleted_date.is_(None),
+        ).first()
+        if not share:
+            raise NotFoundException('Share not found')
+        share.placed_parent_node_id = None
+        self.db.commit()
+        self.db.refresh(share)
+        return self._serialize(share)
+
     # ── reject (target owner) ─────────────────────────────────────────────────
     def reject_share(self, share_id: int, target_organization_id: int,
                     actor_user_id: int) -> Dict[str, Any]:

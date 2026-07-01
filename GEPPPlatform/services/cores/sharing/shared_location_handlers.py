@@ -95,6 +95,11 @@ def shared_location_routes(event: Dict[str, Any], context: Any, **params) -> Any
             return service.place_share(share_id, organization_id, user_id, parent_node_id)
         raise NotFoundException('Shared-location endpoint not found')
 
+    if len(segments) >= 2 and segments[1] == 'unplace':
+        if method == 'POST':
+            return service.unplace_share(share_id, organization_id, user_id)
+        raise NotFoundException('Shared-location endpoint not found')
+
     if method == 'GET':
         return service.get_share(share_id, organization_id, user_id)
     if method in ('PATCH', 'PUT'):
