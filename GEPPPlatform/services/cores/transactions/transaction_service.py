@@ -1721,15 +1721,33 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
         if not shares:
             return [], {}
 
-        branches = []
-        share_meta_by_origin = {}
+        # Resolve each in-scope share to its source subtree ids.
+        resolved = []  # (share, src_ids)
         for share in shares:
             if own_selected_ids is not None and share.placed_parent_node_id not in own_selected_ids:
                 continue
             src_ids = self._collect_source_subtree_ids(
                 share.source_organization_id, share.source_user_location_id)
-            if not src_ids:
+            if src_ids:
+                resolved.append((share, src_ids))
+        if not resolved:
+            return [], {}
+
+        # DEDUP: a transaction must never be pulled in twice, even when A shares both a parent
+        # location AND a child under it (their subtrees overlap). Attribute each source origin to
+        # exactly ONE share — the deepest / most-specific one (smallest subtree claims first) — so the
+        # OR branches are DISJOINT and no aggregation double-counts. A share fully covered by deeper
+        # shares contributes nothing (its transactions belong to the more-specific shared node).
+        resolved.sort(key=lambda r: len(r[1]))
+
+        branches = []
+        share_meta_by_origin = {}
+        claimed = set()
+        for share, src_ids in resolved:
+            unique = [oid for oid in src_ids if oid not in claimed]
+            if not unique:
                 continue
+            claimed.update(unique)
             # Roll-up label: the shared location's own name (children collapse under it).
             loc = self.db.query(UserLocation).filter(
                 UserLocation.id == share.source_user_location_id).first()
@@ -1743,12 +1761,12 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
 
             branches.append({
                 'source_org_id': share.source_organization_id,
-                'src_ids': list(src_ids),
+                'src_ids': unique,
                 'start_date': share.start_date,
                 'end_date': share.end_date,
                 'share_id': share.id,
             })
-            for oid in src_ids:
+            for oid in unique:
                 share_meta_by_origin[oid] = {
                     'share_id': share.id,
                     'label': label,
