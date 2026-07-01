@@ -1447,6 +1447,56 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
             send_email_fn=self._send_txn_rejected_emails,
         )
 
+    def is_transaction_shared_to_org(self, transaction: Dict[str, Any], target_org_id: int) -> bool:
+        """True if a cross-org transaction is visible to target_org_id via an effective placed share
+        (within the share's date window). Used to allow READ-ONLY detail viewing of shared rows."""
+        try:
+            origin_id = transaction.get('origin_id')
+            src_org = transaction.get('organization_id')
+            if origin_id is None or src_org is None or src_org == target_org_id:
+                return False
+
+            def _aware(dt):
+                return dt.replace(tzinfo=timezone.utc) if dt is not None and dt.tzinfo is None else dt
+
+            tdt = None
+            raw = transaction.get('transaction_date')
+            if raw:
+                try:
+                    s = str(raw)
+                    if s.endswith('Z'):
+                        s = s[:-1] + '+00:00'
+                    tdt = _aware(datetime.fromisoformat(s))
+                except (ValueError, TypeError):
+                    tdt = None
+
+            now = datetime.now(timezone.utc)
+            shares = self.db.query(SharedUserLocation).filter(
+                SharedUserLocation.target_organization_id == target_org_id,
+                SharedUserLocation.source_organization_id == src_org,
+                SharedUserLocation.deleted_date.is_(None),
+                SharedUserLocation.is_active == True,
+                SharedUserLocation.is_valid == True,
+                SharedUserLocation.is_rejected == False,
+                SharedUserLocation.placed_parent_node_id.isnot(None),
+                or_(SharedUserLocation.expired_date.is_(None),
+                    SharedUserLocation.expired_date > now),
+            ).all()
+            for share in shares:
+                src_ids = self._collect_source_subtree_ids(
+                    share.source_organization_id, share.source_user_location_id)
+                if origin_id not in src_ids:
+                    continue
+                if tdt is not None:
+                    if share.start_date and tdt < _aware(share.start_date):
+                        continue
+                    if share.end_date and tdt > _aware(share.end_date):
+                        continue
+                return True
+            return False
+        except Exception:
+            return False
+
     def get_transaction(self, transaction_id: int, include_records: bool = False) -> Dict[str, Any]:
         """
         Retrieve a transaction by ID
