@@ -1724,7 +1724,11 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
         # Resolve each in-scope share to its source subtree ids.
         resolved = []  # (share, src_ids)
         for share in shares:
-            if own_selected_ids is not None and share.placed_parent_node_id not in own_selected_ids:
+            # In scope when: no location filter; the placement parent (or an ancestor) is selected;
+            # or the shared node itself was selected (its virtual id).
+            if own_selected_ids is not None \
+               and share.placed_parent_node_id not in own_selected_ids \
+               and shared_node_id_for(share.id) not in own_selected_ids:
                 continue
             src_ids = self._collect_source_subtree_ids(
                 share.source_organization_id, share.source_user_location_id)
