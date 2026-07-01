@@ -587,6 +587,15 @@ class ReportsService:
         _find_and_expand(root_nodes)
         return list(expanded)
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # SHARED-LOCATION SEAM (cross-org data sharing) — NOT WIRED YET.
+    # Placed cross-org shares live in shared_user_locations (target_organization_id ==
+    # this org, placed_parent_node_id IS NOT NULL); they are NOT rows in user_locations
+    # and NOT nodes in root_nodes. Reports therefore EXCLUDE shared data today.
+    # To wire reports later: mirror transaction_service._resolve_shared_branches to pull
+    # each placed share's source subtree bounded by [start_date, end_date], and emit it as
+    # a SINGLE summary node under placed_parent_node_id — NO descendant breakdown below it.
+    # ─────────────────────────────────────────────────────────────────────────
     def _apply_location_filters(self, query, filters: Dict[str, Any], organization_id: int):
         """
         Apply new location_ids/filter_tag_ids/filter_tenant_ids filters to a query.
