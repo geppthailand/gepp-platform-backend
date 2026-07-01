@@ -980,6 +980,28 @@ class ReportsService:
                             needed_ids.add(parent_map[current])
                             current = parent_map[current]
 
+                # Cross-org shared nodes appear as filterable entries at their placement level. Pull
+                # in each placed share and ensure its placement-parent chain is present in the tree.
+                from ..transactions.transaction_service import TransactionService, shared_node_id_for
+                shared_branches_for_filter, _sb_meta = TransactionService(self.db)._resolve_shared_branches(
+                    organization_id, None)
+                shared_filter_nodes = []  # {vid, label, parent_id, source_org_name}
+                for b in shared_branches_for_filter:
+                    pid = b.get('placed_parent_node_id')
+                    if pid is None or pid not in level_map:
+                        continue
+                    shared_filter_nodes.append({
+                        'vid': shared_node_id_for(b['share_id']),
+                        'label': b.get('label') or 'Shared',
+                        'parent_id': pid,
+                        'source_org_name': b.get('source_org_name'),
+                    })
+                    needed_ids.add(pid)
+                    current = pid
+                    while current in parent_map:
+                        needed_ids.add(parent_map[current])
+                        current = parent_map[current]
+
                 # Group by level (0=branch, 1=building, 2=floor, 3=room)
                 level_groups: Dict[int, list] = {0: [], 1: [], 2: [], 3: []}
                 for loc_id in needed_ids:
@@ -1005,6 +1027,34 @@ class ReportsService:
                 location_filter['buildings'] = level_groups[1]
                 location_filter['floors'] = level_groups[2]
                 location_filter['rooms'] = level_groups[3]
+
+                # Inject shared nodes as filterable entries under their placement parent, flagged
+                # is_shared so the UI marks them with a shared icon.
+                if shared_filter_nodes:
+                    level_key = {0: 'branches', 1: 'buildings', 2: 'floors', 3: 'rooms'}
+                    entry_by_id = {}
+                    for lk in ('branches', 'buildings', 'floors', 'rooms'):
+                        for e in location_filter[lk]:
+                            entry_by_id[e['id']] = e
+                    for sn in shared_filter_nodes:
+                        pid = sn['parent_id']
+                        node_level = min((level_map.get(pid, 0)) + 1, 3)
+                        parent_path = _get_ancestor_path(pid)
+                        parent_name = location_names.get(pid, f"Location {pid}")
+                        location_filter[level_key[node_level]].append({
+                            'id': sn['vid'],
+                            'name': sn['label'],
+                            'parent_id': pid,
+                            'children_ids': [],
+                            'path': ', '.join(parent_path + [parent_name]) if (parent_path or parent_name) else '',
+                            'is_shared': True,
+                            'source_org_name': sn['source_org_name'],
+                        })
+                        pe = entry_by_id.get(pid)
+                        if pe is not None and sn['vid'] not in pe['children_ids']:
+                            pe['children_ids'].append(sn['vid'])
+                    for lk in ('branches', 'buildings', 'floors', 'rooms'):
+                        location_filter[lk].sort(key=lambda x: x['name'])
             else:
                 # No tree structure - put all origins as branches
                 for loc in origin_locations:
