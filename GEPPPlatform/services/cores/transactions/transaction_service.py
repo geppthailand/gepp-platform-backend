@@ -1765,6 +1765,10 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                 'start_date': share.start_date,
                 'end_date': share.end_date,
                 'share_id': share.id,
+                'label': label,
+                'source_org_name': src_org_name,
+                'placed_parent_node_id': share.placed_parent_node_id,
+                'source_user_location_id': share.source_user_location_id,
             })
             for oid in unique:
                 share_meta_by_origin[oid] = {
