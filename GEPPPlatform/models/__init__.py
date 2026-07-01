@@ -50,6 +50,9 @@ from .custom import CustomApi, OrganizationCustomApi
 # Import ESG models
 from .esg import *
 
+# Import shared user location model (cross-org location data sharing)
+from .shared_user_location import SharedUserLocation
+
 # Add input_channels relationship to UserLocation
 from sqlalchemy.orm import relationship
 from .users.user_location import UserLocation
@@ -135,6 +138,9 @@ __all__ = [
     
     # Custom API models
     'CustomApi', 'OrganizationCustomApi',
+
+    # Shared user location (cross-org location data sharing)
+    'SharedUserLocation',
 
     # ESG models
     'EsgOrganizationSettings', 'EsgEmissionFactor',
