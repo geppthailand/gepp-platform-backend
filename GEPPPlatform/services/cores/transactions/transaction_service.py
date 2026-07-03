@@ -1779,6 +1779,7 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                     'share_id': share.id,
                     'label': label,
                     'source_org_name': src_org_name,
+                    'placed_parent_node_id': share.placed_parent_node_id,
                 }
         return branches, share_meta_by_origin
 
@@ -2109,6 +2110,51 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                               .all()
             logger.info(f"Retrieved {len(transactions)} transactions")
 
+            # Ancestor breadcrumb per origin (e.g. ["Bangkok Branch", "UOB Phetkasem"]), built ONCE
+            # from the org tree and bundled INTO each row below — so the location column shows the
+            # full path in the SAME payload as the name, instead of waiting on the separate
+            # filter-options request. Same source/order as the create-transaction location picker.
+            loc_parent_map: Dict[int, int] = {}
+            loc_names: Dict[int, str] = {}
+            try:
+                _rn = self._active_root_nodes(organization_id)
+                if _rn:
+                    def _walk_paths(nodes, parent=None):
+                        for node in nodes if isinstance(nodes, list) else []:
+                            nid = node.get('nodeId')
+                            if nid is None:
+                                continue
+                            nid = int(nid) if isinstance(nid, str) else nid
+                            if parent is not None:
+                                loc_parent_map[nid] = parent
+                            kids = node.get('children') or []
+                            if kids:
+                                _walk_paths(kids, nid)
+                    _walk_paths(_rn)
+                    for row in self.db.query(
+                        UserLocation.id, UserLocation.display_name,
+                        UserLocation.name_th, UserLocation.name_en,
+                    ).filter(
+                        UserLocation.organization_id == organization_id,
+                        UserLocation.is_active == True,
+                        UserLocation.deleted_date.is_(None),
+                    ).all():
+                        loc_names[row.id] = (row.display_name or row.name_th
+                                             or row.name_en or f"Location {row.id}")
+            except Exception as e:  # noqa: BLE001 — path is decorative; never fail the list
+                logger.warning("Failed to build location path map: %s", str(e))
+
+            def _ancestor_names(loc_id):
+                """Ancestor names root→parent (excludes the location itself)."""
+                out, seen = [], set()
+                cur = loc_parent_map.get(loc_id)
+                while cur is not None and cur not in seen:
+                    seen.add(cur)
+                    out.append(loc_names.get(cur, f"Location {cur}"))
+                    cur = loc_parent_map.get(cur)
+                out.reverse()
+                return out
+
             # Convert to dict format
             logger.info("Converting transactions to dict format...")
             transactions_list = []
@@ -2129,8 +2175,18 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                             'name_th': meta['label'],
                             'display_name': meta['label'],
                         }
+                        # Path = the placement location's breadcrumb in THIS org's chart.
+                        _pid = meta.get('placed_parent_node_id')
+                        transaction_dict['origin_path'] = (
+                            _ancestor_names(_pid) + [loc_names.get(_pid, f"Location {_pid}")]
+                            if _pid is not None else []
+                        )
                     else:
                         transaction_dict['is_shared'] = False
+                        transaction_dict['origin_path'] = (
+                            _ancestor_names(transaction.origin_id)
+                            if transaction.origin_id is not None else []
+                        )
 
                     if include_records:
                         logger.info(f"Including records for transaction {transaction.id}")
