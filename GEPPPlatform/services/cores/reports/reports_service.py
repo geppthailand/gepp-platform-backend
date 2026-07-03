@@ -33,6 +33,76 @@ class ReportsService:
 
     # ========== TRANSACTION RECORDS REPORTS ==========
 
+    def _fetch_shared_report_records(self, organization_id, filters, report_type):
+        """Fetch TransactionRecords shared TO this org for reports.
+
+        Returns (records, shared_map, node_meta):
+          - records: source-org ORM TransactionRecords in scope (disjoint per share → no double count)
+          - shared_map: {record.id: {origin_id(virtual), label, source_org_name, placed_parent_node_id}}
+          - node_meta:  {virtual_origin_id: {label, source_org_name, placed_parent_node_id}} for the
+                        origin/location breakdown so a shared location shows at its placed position.
+
+        Each shared location acts as a normal node at the placement level in THIS org. Attribution is
+        disjoint (deepest share wins) so a transaction is never counted twice.
+        """
+        from ..transactions.transaction_service import TransactionService, shared_node_id_for
+        filters = filters or {}
+        own_selected = None
+        if filters.get('location_ids'):
+            own_selected = set(self._resolve_descendant_ids(organization_id, filters['location_ids']))
+        txnsvc = TransactionService(self.db)
+        branches, _meta = txnsvc._resolve_shared_branches(organization_id, own_selected)
+        if not branches:
+            return [], {}, {}
+
+        report_from = filters.get('date_from')
+        report_to = filters.get('date_to')
+        material_ids = filters.get('material_ids') or []
+
+        records = []
+        shared_map = {}
+        node_meta = {}
+        for b in branches:
+            vid = shared_node_id_for(b['share_id'])
+            node_meta[vid] = {
+                'label': b.get('label'),
+                'source_org_name': b.get('source_org_name'),
+                'placed_parent_node_id': b.get('placed_parent_node_id'),
+            }
+            q = self.db.query(TransactionRecord).join(
+                Transaction, TransactionRecord.created_transaction_id == Transaction.id
+            ).filter(
+                Transaction.organization_id == b['source_org_id'],
+                Transaction.origin_id.in_(b['src_ids']),
+                Transaction.deleted_date.is_(None),
+                TransactionRecord.deleted_date.is_(None),
+                or_(TransactionRecord.status != 'rejected', TransactionRecord.status.is_(None)),
+            )
+            # Share data window (on parent transaction date) — never share beyond the agreed window.
+            if b.get('start_date'):
+                q = q.filter(Transaction.transaction_date >= b['start_date'])
+            if b.get('end_date'):
+                q = q.filter(Transaction.transaction_date <= b['end_date'])
+            # Report date range (on record date, matching the base query).
+            if report_from:
+                q = q.filter(TransactionRecord.transaction_date >= report_from)
+            if report_to:
+                q = q.filter(TransactionRecord.transaction_date <= report_to)
+            if material_ids:
+                try:
+                    q = q.filter(TransactionRecord.material_id.in_([int(m) for m in material_ids]))
+                except (TypeError, ValueError):
+                    pass
+            for rec in q.all():
+                records.append(rec)
+                shared_map[rec.id] = {
+                    'origin_id': vid,
+                    'label': b.get('label'),
+                    'source_org_name': b.get('source_org_name'),
+                    'placed_parent_node_id': b.get('placed_parent_node_id'),
+                }
+        return records, shared_map, node_meta
+
     def get_transaction_records_by_organization(
         self,
         organization_id: int,
@@ -165,6 +235,13 @@ class ReportsService:
             # Execute query
             transaction_records = query.all()
 
+            # Merge cross-org shared records (read-only). Branches are disjoint (deepest share wins),
+            # so a transaction is never pulled in twice and totals are not double-counted.
+            shared_records, shared_map, _shared_node_meta = self._fetch_shared_report_records(
+                organization_id, filters, report_type)
+            if shared_records:
+                transaction_records = list(transaction_records) + shared_records
+
             # Preload transaction fields (origin_id, location_tag_id, tenant_id) for logging
             transaction_ids = {record.created_transaction_id for record in transaction_records}
             txn_meta_map: Dict[int, Dict[str, Any]] = {}
@@ -295,7 +372,19 @@ class ReportsService:
                     record_dict['is_rejected'] = (tx_status == TransactionStatus.rejected)
                 except Exception:
                     record_dict['is_rejected'] = False
-                
+
+                # Cross-org shared record: attribute to its placed shared node (virtual origin) so it
+                # acts as a normal node at the placement level in this org's reports.
+                sm = shared_map.get(record.id)
+                if sm:
+                    record_dict['origin_id'] = sm['origin_id']
+                    record_dict['location_tag_id'] = None
+                    record_dict['tenant_id'] = None
+                    record_dict['is_shared'] = True
+                    record_dict['shared_from_org'] = sm['source_org_name']
+                    record_dict['shared_label'] = sm['label']
+                    record_dict['placed_parent_node_id'] = sm['placed_parent_node_id']
+
                 records_data.append(record_dict)
 
             # Summary log for weight/tag/tenant debugging
@@ -347,6 +436,80 @@ class ReportsService:
         except Exception as e:
             logger.error(f"Unexpected error in get_transaction_records_by_organization: {str(e)}")
             raise
+
+    def _fetch_shared_overview_rows(self, organization_id, filters, report_type):
+        """Shared (cross-org) rows for get_overview_data, as the SAME 20-column tuples but with
+        origin_id replaced by the virtual shared-node id (so a shared location acts as a node at its
+        placement level). Branches are disjoint (deepest share wins) → never double-counted.
+        Returns (rows, node_meta)."""
+        from ..transactions.transaction_service import TransactionService, shared_node_id_for
+        from sqlalchemy import literal
+        filters = filters or {}
+        own_selected = None
+        if filters.get('location_ids'):
+            own_selected = set(self._resolve_descendant_ids(organization_id, filters['location_ids']))
+        branches, _m = TransactionService(self.db)._resolve_shared_branches(organization_id, own_selected)
+        if not branches:
+            return [], {}
+        report_from = filters.get('date_from')
+        report_to = filters.get('date_to')
+        material_ids = filters.get('material_ids') or []
+        rows = []
+        node_meta = {}
+        for b in branches:
+            vid = shared_node_id_for(b['share_id'])
+            node_meta[vid] = {
+                'label': b.get('label'),
+                'source_org_name': b.get('source_org_name'),
+                'placed_parent_node_id': b.get('placed_parent_node_id'),
+            }
+            q = self.db.query(
+                TransactionRecord.origin_quantity,          # 0
+                TransactionRecord.transaction_date,         # 1
+                TransactionRecord.created_transaction_id,   # 2
+                literal(vid).label('origin_id'),            # 3 — virtual shared-node origin
+                Transaction.status,                         # 4
+                Material.unit_weight,                       # 5
+                Material.calc_ghg,                          # 6
+                Material.category_id,                       # 7
+                Material.main_material_id,                  # 8
+                Material.tags.label('material_tags'),       # 9
+                TransactionRecord.origin_weight_kg,         # 10
+                TransactionRecord.category_id.label('record_category_id'),          # 11
+                TransactionRecord.main_material_id.label('record_main_material_id'),# 12
+                TransactionRecord.material_id,              # 13
+                Material.name_en.label('material_name_en'), # 14
+                Material.name_th.label('material_name_th'), # 15
+                TransactionRecord.disposal_method,          # 16
+                TransactionRecord.status.label('record_status'),  # 17
+                TransactionRecord.traceability_group_id,        # 18
+                TransactionRecord.id.label('record_id'),        # 19
+            ).join(
+                Transaction, TransactionRecord.created_transaction_id == Transaction.id
+            ).outerjoin(
+                Material, TransactionRecord.material_id == Material.id
+            ).filter(
+                Transaction.organization_id == b['source_org_id'],
+                Transaction.origin_id.in_(b['src_ids']),
+                Transaction.deleted_date.is_(None),
+                TransactionRecord.deleted_date.is_(None),
+                or_(TransactionRecord.status != 'rejected', TransactionRecord.status.is_(None)),
+            )
+            if b.get('start_date'):
+                q = q.filter(Transaction.transaction_date >= b['start_date'])
+            if b.get('end_date'):
+                q = q.filter(Transaction.transaction_date <= b['end_date'])
+            if report_from:
+                q = q.filter(TransactionRecord.transaction_date >= report_from)
+            if report_to:
+                q = q.filter(TransactionRecord.transaction_date <= report_to)
+            if material_ids:
+                try:
+                    q = q.filter(TransactionRecord.material_id.in_([int(m) for m in material_ids]))
+                except (TypeError, ValueError):
+                    pass
+            rows.extend(q.all())
+        return rows, node_meta
 
     def get_overview_data(
         self,
@@ -459,6 +622,14 @@ class ReportsService:
             query = self._apply_member_filter_to_transaction_query(query, current_user_id, organization_id)
 
             rows = query.all()
+
+            # Merge cross-org shared rows (read-only). Every report tab funnels through this method,
+            # so shared data flows into overview / performance / comparison / materials / waste alike.
+            # Branches are disjoint (deepest share wins) → no transaction is double-counted.
+            shared_rows, _shared_node_meta = self._fetch_shared_overview_rows(
+                organization_id, filters, report_type)
+            if shared_rows:
+                rows = list(rows) + shared_rows
 
             return {
                 'success': True,
@@ -587,6 +758,16 @@ class ReportsService:
         _find_and_expand(root_nodes)
         return list(expanded)
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # SHARED-LOCATION handling (cross-org data sharing) — WIRED.
+    # Placed cross-org shares (shared_user_locations: target_organization_id == this org,
+    # placed_parent_node_id IS NOT NULL) are merged into reports via
+    # `_fetch_shared_overview_rows` (all tabs funnel through `get_overview_data`) and
+    # `_fetch_shared_report_records`. Each shared source subtree is bounded by the share's
+    # [start_date, end_date], attributed to a virtual shared-node origin (so it acts as a node
+    # at its placement level), and branches are DISJOINT (deepest share wins) so nothing is
+    # double-counted. `_apply_location_filters` below still operates on this org's own tree only.
+    # ─────────────────────────────────────────────────────────────────────────
     def _apply_location_filters(self, query, filters: Dict[str, Any], organization_id: int):
         """
         Apply new location_ids/filter_tag_ids/filter_tenant_ids filters to a query.
@@ -799,6 +980,28 @@ class ReportsService:
                             needed_ids.add(parent_map[current])
                             current = parent_map[current]
 
+                # Cross-org shared nodes appear as filterable entries at their placement level. Pull
+                # in each placed share and ensure its placement-parent chain is present in the tree.
+                from ..transactions.transaction_service import TransactionService, shared_node_id_for
+                shared_branches_for_filter, _sb_meta = TransactionService(self.db)._resolve_shared_branches(
+                    organization_id, None)
+                shared_filter_nodes = []  # {vid, label, parent_id, source_org_name}
+                for b in shared_branches_for_filter:
+                    pid = b.get('placed_parent_node_id')
+                    if pid is None or pid not in level_map:
+                        continue
+                    shared_filter_nodes.append({
+                        'vid': shared_node_id_for(b['share_id']),
+                        'label': b.get('label') or 'Shared',
+                        'parent_id': pid,
+                        'source_org_name': b.get('source_org_name'),
+                    })
+                    needed_ids.add(pid)
+                    current = pid
+                    while current in parent_map:
+                        needed_ids.add(parent_map[current])
+                        current = parent_map[current]
+
                 # Group by level (0=branch, 1=building, 2=floor, 3=room)
                 level_groups: Dict[int, list] = {0: [], 1: [], 2: [], 3: []}
                 for loc_id in needed_ids:
@@ -824,6 +1027,34 @@ class ReportsService:
                 location_filter['buildings'] = level_groups[1]
                 location_filter['floors'] = level_groups[2]
                 location_filter['rooms'] = level_groups[3]
+
+                # Inject shared nodes as filterable entries under their placement parent, flagged
+                # is_shared so the UI marks them with a shared icon.
+                if shared_filter_nodes:
+                    level_key = {0: 'branches', 1: 'buildings', 2: 'floors', 3: 'rooms'}
+                    entry_by_id = {}
+                    for lk in ('branches', 'buildings', 'floors', 'rooms'):
+                        for e in location_filter[lk]:
+                            entry_by_id[e['id']] = e
+                    for sn in shared_filter_nodes:
+                        pid = sn['parent_id']
+                        node_level = min((level_map.get(pid, 0)) + 1, 3)
+                        parent_path = _get_ancestor_path(pid)
+                        parent_name = location_names.get(pid, f"Location {pid}")
+                        location_filter[level_key[node_level]].append({
+                            'id': sn['vid'],
+                            'name': sn['label'],
+                            'parent_id': pid,
+                            'children_ids': [],
+                            'path': ', '.join(parent_path + [parent_name]) if (parent_path or parent_name) else '',
+                            'is_shared': True,
+                            'source_org_name': sn['source_org_name'],
+                        })
+                        pe = entry_by_id.get(pid)
+                        if pe is not None and sn['vid'] not in pe['children_ids']:
+                            pe['children_ids'].append(sn['vid'])
+                    for lk in ('branches', 'buildings', 'floors', 'rooms'):
+                        location_filter[lk].sort(key=lambda x: x['name'])
             else:
                 # No tree structure - put all origins as branches
                 for loc in origin_locations:

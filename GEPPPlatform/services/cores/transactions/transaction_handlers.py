@@ -265,14 +265,21 @@ def handle_get_transaction(
             else:
                 raise APIException(result['message'])
 
-        # Check if user has access to this transaction
+        # Check if user has access to this transaction. A transaction from another org is viewable
+        # READ-ONLY when it is shared to this org via an effective placed share.
         transaction = result['transaction']
+        is_shared_view = False
         if transaction['organization_id'] != current_user_organization_id:
-            raise UnauthorizedException('Access denied: Transaction belongs to different organization')
+            if transaction_service.is_transaction_shared_to_org(transaction, current_user_organization_id):
+                is_shared_view = True
+                transaction['is_shared'] = True
+                transaction['read_only'] = True
+            else:
+                raise UnauthorizedException('Access denied: Transaction belongs to different organization')
 
-        # Enrich origin_location with hierarchy path using UserService._build_location_paths
+        # Enrich origin_location with hierarchy path (own-org only; shared rows keep source data).
         origin_id = transaction.get('origin_id')
-        if origin_id:
+        if origin_id and not is_shared_view:
             # Build location_data structure expected by _build_location_paths
             location_data_for_paths = [{'id': origin_id}]
             location_paths = user_service._build_location_paths(

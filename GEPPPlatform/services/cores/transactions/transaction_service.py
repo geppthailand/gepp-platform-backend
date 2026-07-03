@@ -6,7 +6,7 @@ Handles CRUD operations, validation, and transaction record linking
 from typing import List, Optional, Dict, Any, Tuple
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy import cast, String, exists, and_, func, or_
+from sqlalchemy import cast, String, exists, and_, func, or_, true
 from sqlalchemy.dialects.postgresql import JSONB
 import json
 import logging
@@ -33,8 +33,21 @@ from ....models.users.user_location import UserLocation
 from ....models.users.user_related import UserLocationTag, UserTenant
 from ....models.subscriptions.organizations import Organization, OrganizationSetup
 from ....models.subscriptions.subscription_models import OrganizationRole
+from ....models.shared_user_location import SharedUserLocation
 
 logger = logging.getLogger(__name__)
+
+# Shared locations are NOT persisted as nodes in root_nodes and are NOT user_locations rows.
+# Placement lives on shared_user_locations.placed_parent_node_id. The FRONTEND renders each
+# placed share as an in-memory overlay node whose id is a large NEGATIVE sentinel (kept here
+# for cross-tier parity): unique, never colliding with real positive ids, and harmless to any
+# `int(nodeId)` walker. The tree-save pipeline skips these overlay nodes, so they never reach
+# the backend. Shared data is surfaced by resolving the share record's source subtree instead.
+SHARED_NODE_ID_OFFSET = 2_000_000_000
+
+
+def shared_node_id_for(share_id: int) -> int:
+    return -(SHARED_NODE_ID_OFFSET + int(share_id))
 
 # Two decimal places for all weight, quantity, and amount values
 TWO_PLACES = Decimal('0.01')
@@ -1434,6 +1447,56 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
             send_email_fn=self._send_txn_rejected_emails,
         )
 
+    def is_transaction_shared_to_org(self, transaction: Dict[str, Any], target_org_id: int) -> bool:
+        """True if a cross-org transaction is visible to target_org_id via an effective placed share
+        (within the share's date window). Used to allow READ-ONLY detail viewing of shared rows."""
+        try:
+            origin_id = transaction.get('origin_id')
+            src_org = transaction.get('organization_id')
+            if origin_id is None or src_org is None or src_org == target_org_id:
+                return False
+
+            def _aware(dt):
+                return dt.replace(tzinfo=timezone.utc) if dt is not None and dt.tzinfo is None else dt
+
+            tdt = None
+            raw = transaction.get('transaction_date')
+            if raw:
+                try:
+                    s = str(raw)
+                    if s.endswith('Z'):
+                        s = s[:-1] + '+00:00'
+                    tdt = _aware(datetime.fromisoformat(s))
+                except (ValueError, TypeError):
+                    tdt = None
+
+            now = datetime.now(timezone.utc)
+            shares = self.db.query(SharedUserLocation).filter(
+                SharedUserLocation.target_organization_id == target_org_id,
+                SharedUserLocation.source_organization_id == src_org,
+                SharedUserLocation.deleted_date.is_(None),
+                SharedUserLocation.is_active == True,
+                SharedUserLocation.is_valid == True,
+                SharedUserLocation.is_rejected == False,
+                SharedUserLocation.placed_parent_node_id.isnot(None),
+                or_(SharedUserLocation.expired_date.is_(None),
+                    SharedUserLocation.expired_date > now),
+            ).all()
+            for share in shares:
+                src_ids = self._collect_source_subtree_ids(
+                    share.source_organization_id, share.source_user_location_id)
+                if origin_id not in src_ids:
+                    continue
+                if tdt is not None:
+                    if share.start_date and tdt < _aware(share.start_date):
+                        continue
+                    if share.end_date and tdt > _aware(share.end_date):
+                        continue
+                return True
+            return False
+        except Exception:
+            return False
+
     def get_transaction(self, transaction_id: int, include_records: bool = False) -> Dict[str, Any]:
         """
         Retrieve a transaction by ID
@@ -1581,6 +1644,145 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
         _find_and_expand(root_nodes)
         return list(expanded)
 
+    # ── Shared-location (cross-org) data injection ────────────────────────────
+    def _active_root_nodes(self, organization_id: int):
+        """Return an organization's active (or latest) org-setup root_nodes list."""
+        setup = self.db.query(OrganizationSetup).filter(
+            OrganizationSetup.organization_id == organization_id,
+            OrganizationSetup.is_active == True
+        ).first()
+        if not setup:
+            setup = self.db.query(OrganizationSetup).filter(
+                OrganizationSetup.organization_id == organization_id
+            ).order_by(OrganizationSetup.created_date.desc()).first()
+        if not setup or not setup.root_nodes:
+            return []
+        return setup.root_nodes if isinstance(setup.root_nodes, list) else []
+
+    def _collect_source_subtree_ids(self, source_org_id: int, source_location_id: int) -> set:
+        """Real (positive) location ids for source_location_id + its descendants, from the
+        SOURCE org's tree. Excludes any nested shared/virtual nodes (defensive vs. re-share)."""
+        root_nodes = self._active_root_nodes(source_org_id)
+
+        def _to_int(nid):
+            try:
+                return int(nid) if isinstance(nid, str) else nid
+            except (TypeError, ValueError):
+                return None
+
+        def _collect_all(nodes):
+            ids = set()
+            for n in nodes if isinstance(nodes, list) else []:
+                if n.get('is_shared'):
+                    continue  # never follow another share (calc-time cycle guard)
+                nid = _to_int(n.get('nodeId'))
+                if isinstance(nid, int) and nid > 0:
+                    ids.add(nid)
+                ids |= _collect_all(n.get('children') or [])
+            return ids
+
+        def _find(nodes):
+            for n in nodes if isinstance(nodes, list) else []:
+                nid = _to_int(n.get('nodeId'))
+                if nid == source_location_id and not n.get('is_shared'):
+                    return {source_location_id} | _collect_all(n.get('children') or [])
+                found = _find(n.get('children') or [])
+                if found:
+                    return found
+            return None
+
+        return _find(root_nodes) or {source_location_id}
+
+    def _resolve_shared_branches(self, organization_id: int, own_selected_ids: Optional[set]):
+        """Resolve placed cross-org shares granted to this org into per-share query specs.
+
+        Placement lives on the share record (placed_parent_node_id), NOT in root_nodes, so this
+        never depends on virtual nodes surviving the tree-save pipeline.
+
+        Returns (branches, share_meta_by_origin):
+          branches: [{source_org_id, src_ids:[int], start_date, end_date, share_id}]
+          share_meta_by_origin: {origin_id: {share_id, label, source_org_name}} for roll-up display.
+
+        own_selected_ids is None when there is no location filter (ALL placed shares in scope);
+        when a location filter is applied it is the expanded selected id set, and a share is in
+        scope only if its placed_parent_node_id is within it.
+        """
+        now = datetime.now(timezone.utc)
+        shares = self.db.query(SharedUserLocation).filter(
+            SharedUserLocation.target_organization_id == organization_id,
+            SharedUserLocation.deleted_date.is_(None),
+            SharedUserLocation.is_active == True,
+            SharedUserLocation.is_valid == True,
+            SharedUserLocation.is_rejected == False,
+            SharedUserLocation.placed_parent_node_id.isnot(None),
+            or_(SharedUserLocation.expired_date.is_(None),
+                SharedUserLocation.expired_date > now),
+        ).all()
+        if not shares:
+            return [], {}
+
+        # Resolve each in-scope share to its source subtree ids.
+        resolved = []  # (share, src_ids)
+        for share in shares:
+            # In scope when: no location filter; the placement parent (or an ancestor) is selected;
+            # or the shared node itself was selected (its virtual id).
+            if own_selected_ids is not None \
+               and share.placed_parent_node_id not in own_selected_ids \
+               and shared_node_id_for(share.id) not in own_selected_ids:
+                continue
+            src_ids = self._collect_source_subtree_ids(
+                share.source_organization_id, share.source_user_location_id)
+            if src_ids:
+                resolved.append((share, src_ids))
+        if not resolved:
+            return [], {}
+
+        # DEDUP: a transaction must never be pulled in twice, even when A shares both a parent
+        # location AND a child under it (their subtrees overlap). Attribute each source origin to
+        # exactly ONE share — the deepest / most-specific one (smallest subtree claims first) — so the
+        # OR branches are DISJOINT and no aggregation double-counts. A share fully covered by deeper
+        # shares contributes nothing (its transactions belong to the more-specific shared node).
+        resolved.sort(key=lambda r: len(r[1]))
+
+        branches = []
+        share_meta_by_origin = {}
+        claimed = set()
+        for share, src_ids in resolved:
+            unique = [oid for oid in src_ids if oid not in claimed]
+            if not unique:
+                continue
+            claimed.update(unique)
+            # Roll-up label: the shared location's own name (children collapse under it).
+            loc = self.db.query(UserLocation).filter(
+                UserLocation.id == share.source_user_location_id).first()
+            label = None
+            if loc:
+                label = loc.display_name or loc.name_th or loc.name_en
+            label = label or share.name or 'Shared location'
+            src_org = self.db.query(Organization).filter(
+                Organization.id == share.source_organization_id).first()
+            src_org_name = src_org.name if src_org else None
+
+            branches.append({
+                'source_org_id': share.source_organization_id,
+                'src_ids': unique,
+                'start_date': share.start_date,
+                'end_date': share.end_date,
+                'share_id': share.id,
+                'label': label,
+                'source_org_name': src_org_name,
+                'placed_parent_node_id': share.placed_parent_node_id,
+                'source_user_location_id': share.source_user_location_id,
+            })
+            for oid in unique:
+                share_meta_by_origin[oid] = {
+                    'share_id': share.id,
+                    'label': label,
+                    'source_org_name': src_org_name,
+                    'placed_parent_node_id': share.placed_parent_node_id,
+                }
+        return branches, share_meta_by_origin
+
     def _should_filter_transactions_by_origin_member(self, current_user_id) -> bool:
         """
         Return True if we should filter transactions by origin members (only show where user is in origin.members).
@@ -1669,15 +1871,19 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                 joinedload(Transaction.created_by)
             ).filter(Transaction.deleted_date.is_(None))
 
-            # Apply filters
-            if organization_id:
-                query = query.filter(Transaction.organization_id == organization_id)
+            # Global filters (apply to own AND shared rows alike)
             if status:
                 query = query.filter(Transaction.status == status)
             if origin_id:
                 query = query.filter(Transaction.origin_id == origin_id)
 
-            # Use 3-tier location access: owners see all, members see assigned locations only
+            # ── Visibility clause: own org (+ 3-tier access + multi-select location filter),
+            #    OR'd with any cross-org shared-location branches present in this org's tree.
+            own_conditions = []
+            if organization_id:
+                own_conditions.append(Transaction.organization_id == organization_id)
+
+            # 3-tier location access: owners see all, members see assigned locations only
             if current_user_id is not None and organization_id:
                 from ..users.user_service import UserService
                 user_service = UserService(self.db)
@@ -1686,10 +1892,12 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                 if not tiers['is_owner']:
                     assigned_ids = tiers['assigned_ids']
                     if not assigned_ids:
-                        query = query.filter(Transaction.origin_id.is_(None))
+                        own_conditions.append(Transaction.origin_id.is_(None))
                     else:
-                        query = query.filter(Transaction.origin_id.in_(list(assigned_ids)))
+                        own_conditions.append(Transaction.origin_id.in_(list(assigned_ids)))
+
             # New multi-select location filter: location_ids + descendants (union)
+            own_selected_ids = None  # None => no location filter (all placed shares in scope)
             if location_ids:
                 # Get org tree to find descendants
                 org_setup = self.db.query(OrganizationSetup).filter(
@@ -1711,7 +1919,10 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                         for node in nodes if isinstance(nodes, list) else []:
                             node_id = node.get('nodeId')
                             if node_id is not None:
-                                node_id = int(node_id) if isinstance(node_id, str) else node_id
+                                try:
+                                    node_id = int(node_id) if isinstance(node_id, str) else node_id
+                                except (TypeError, ValueError):
+                                    node_id = None  # virtual/shared or malformed id — skip
                             children = node.get('children', [])
                             if collecting:
                                 if node_id is not None:
@@ -1727,7 +1938,34 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                     descendant_ids = collect_descendants(org_setup.root_nodes)
                     all_origin_ids.update(descendant_ids)
 
-                query = query.filter(Transaction.origin_id.in_(list(all_origin_ids)))
+                own_selected_ids = all_origin_ids
+                own_conditions.append(Transaction.origin_id.in_(list(all_origin_ids)))
+
+            own_clause = and_(*own_conditions) if own_conditions else true()
+
+            # Cross-org shared-location injection: read-only, date-bounded, rolled up under
+            # the shared location's name. Source transactions belong to another org, so they
+            # are OR'd in as separate branches keyed on each share's [start_date, end_date].
+            # Placement is read from the share record (placed_parent_node_id), decoupled from
+            # root_nodes. When a location filter is active, a share is included only if its
+            # placement parent is within the selected set.
+            shared_branches, share_meta_by_origin = self._resolve_shared_branches(
+                organization_id, own_selected_ids)
+            if shared_branches:
+                shared_clauses = []
+                for b in shared_branches:
+                    conds = [
+                        Transaction.organization_id == b['source_org_id'],
+                        Transaction.origin_id.in_(b['src_ids']),
+                    ]
+                    if b.get('start_date'):
+                        conds.append(Transaction.transaction_date >= b['start_date'])
+                    if b.get('end_date'):
+                        conds.append(Transaction.transaction_date <= b['end_date'])
+                    shared_clauses.append(and_(*conds))
+                query = query.filter(or_(own_clause, *shared_clauses))
+            else:
+                query = query.filter(own_clause)
 
             # New multi-select tag/tenant filters (intersect with location results)
             if filter_tag_ids:
@@ -1872,6 +2110,51 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                               .all()
             logger.info(f"Retrieved {len(transactions)} transactions")
 
+            # Ancestor breadcrumb per origin (e.g. ["Bangkok Branch", "UOB Phetkasem"]), built ONCE
+            # from the org tree and bundled INTO each row below — so the location column shows the
+            # full path in the SAME payload as the name, instead of waiting on the separate
+            # filter-options request. Same source/order as the create-transaction location picker.
+            loc_parent_map: Dict[int, int] = {}
+            loc_names: Dict[int, str] = {}
+            try:
+                _rn = self._active_root_nodes(organization_id)
+                if _rn:
+                    def _walk_paths(nodes, parent=None):
+                        for node in nodes if isinstance(nodes, list) else []:
+                            nid = node.get('nodeId')
+                            if nid is None:
+                                continue
+                            nid = int(nid) if isinstance(nid, str) else nid
+                            if parent is not None:
+                                loc_parent_map[nid] = parent
+                            kids = node.get('children') or []
+                            if kids:
+                                _walk_paths(kids, nid)
+                    _walk_paths(_rn)
+                    for row in self.db.query(
+                        UserLocation.id, UserLocation.display_name,
+                        UserLocation.name_th, UserLocation.name_en,
+                    ).filter(
+                        UserLocation.organization_id == organization_id,
+                        UserLocation.is_active == True,
+                        UserLocation.deleted_date.is_(None),
+                    ).all():
+                        loc_names[row.id] = (row.display_name or row.name_th
+                                             or row.name_en or f"Location {row.id}")
+            except Exception as e:  # noqa: BLE001 — path is decorative; never fail the list
+                logger.warning("Failed to build location path map: %s", str(e))
+
+            def _ancestor_names(loc_id):
+                """Ancestor names root→parent (excludes the location itself)."""
+                out, seen = [], set()
+                cur = loc_parent_map.get(loc_id)
+                while cur is not None and cur not in seen:
+                    seen.add(cur)
+                    out.append(loc_names.get(cur, f"Location {cur}"))
+                    cur = loc_parent_map.get(cur)
+                out.reverse()
+                return out
+
             # Convert to dict format
             logger.info("Converting transactions to dict format...")
             transactions_list = []
@@ -1879,6 +2162,31 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                 try:
                     logger.info(f"Processing transaction {i+1}/{len(transactions)}: ID={transaction.id}")
                     transaction_dict = self._transaction_to_dict(transaction)
+
+                    # Roll up cross-org shared rows under the shared location's name.
+                    meta = share_meta_by_origin.get(transaction.origin_id)
+                    if meta:
+                        transaction_dict['is_shared'] = True
+                        transaction_dict['shared_share_id'] = meta['share_id']
+                        transaction_dict['shared_from_org'] = meta['source_org_name']
+                        transaction_dict['origin_location'] = {
+                            'id': None,
+                            'name_en': meta['label'],
+                            'name_th': meta['label'],
+                            'display_name': meta['label'],
+                        }
+                        # Path = the placement location's breadcrumb in THIS org's chart.
+                        _pid = meta.get('placed_parent_node_id')
+                        transaction_dict['origin_path'] = (
+                            _ancestor_names(_pid) + [loc_names.get(_pid, f"Location {_pid}")]
+                            if _pid is not None else []
+                        )
+                    else:
+                        transaction_dict['is_shared'] = False
+                        transaction_dict['origin_path'] = (
+                            _ancestor_names(transaction.origin_id)
+                            if transaction.origin_id is not None else []
+                        )
 
                     if include_records:
                         logger.info(f"Including records for transaction {transaction.id}")
