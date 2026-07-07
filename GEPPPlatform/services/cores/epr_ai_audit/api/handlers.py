@@ -40,6 +40,14 @@ def handle_epr_ai_audit_routes(event: Dict[str, Any], data: Dict[str, Any], **pa
             raise APIException("No files provided")
         return {"success": True, "data": read_transaction(files, fields)}
 
+    if path.endswith("/epr/ai_audit/recycler-audit-ocr") and method == "POST":
+        from .ocr import read_audit
+        files = data.get("files") or []
+        fields = data.get("fields") or []
+        if not files:
+            raise APIException("No files provided")
+        return {"success": True, "data": read_audit(files, fields)}
+
     if path.endswith("/epr/ai_audit/embed-transaction") and method == "POST":
         return {"success": True, "data": service.embed_transaction(data)}
 
