@@ -819,11 +819,17 @@ class ReportsService:
         """3-tier ACCESS gate for cross-org shared nodes (passed to _resolve_shared_branches).
 
         A shared node inherits the visibility of the real location it is placed under, so a
-        non-owner may see it only when that placement parent is in their assigned set. Returns
-        None when there is no restriction (owner, or member-filtering disabled), otherwise the
-        set of assigned location ids (possibly empty → the user sees no shared data).
+        non-owner may see it only when that placement parent is in their assigned set.
+
+        This MUST mirror `_apply_member_filter_to_transaction_query` (own-data gate) exactly:
+        that gate restricts EVERY non-owner to `assigned_ids` purely by the 3-tier model — it
+        does NOT consult role (`_should_filter_reports_by_member`). Using the role check here was
+        the leak: a non-owner the role-check exempts (no role, or admin) had own-data tier-limited
+        but saw ALL shared data. Gate by tier only:
+          - owner (or no org / no user) → None (unrestricted)
+          - any other user → their assigned_ids (possibly empty → sees no shared data)
         """
-        if organization_id is None or not self._should_filter_reports_by_member(current_user_id):
+        if organization_id is None or current_user_id is None:
             return None
         from ..users.user_service import UserService
         user_service = UserService(self.db)
