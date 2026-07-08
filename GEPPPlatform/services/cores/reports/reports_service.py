@@ -33,7 +33,7 @@ class ReportsService:
 
     # ========== TRANSACTION RECORDS REPORTS ==========
 
-    def _fetch_shared_report_records(self, organization_id, filters, report_type):
+    def _fetch_shared_report_records(self, organization_id, filters, report_type, current_user_id=None):
         """Fetch TransactionRecords shared TO this org for reports.
 
         Returns (records, shared_map, node_meta):
@@ -51,7 +51,9 @@ class ReportsService:
         if filters.get('location_ids'):
             own_selected = set(self._resolve_descendant_ids(organization_id, filters['location_ids']))
         txnsvc = TransactionService(self.db)
-        branches, _meta = txnsvc._resolve_shared_branches(organization_id, own_selected)
+        visible_parent_ids = self._shared_visible_parent_ids(organization_id, current_user_id)
+        branches, _meta = txnsvc._resolve_shared_branches(
+            organization_id, own_selected, visible_parent_ids=visible_parent_ids)
         if not branches:
             return [], {}, {}
 
@@ -238,7 +240,7 @@ class ReportsService:
             # Merge cross-org shared records (read-only). Branches are disjoint (deepest share wins),
             # so a transaction is never pulled in twice and totals are not double-counted.
             shared_records, shared_map, _shared_node_meta = self._fetch_shared_report_records(
-                organization_id, filters, report_type)
+                organization_id, filters, report_type, current_user_id=current_user_id)
             if shared_records:
                 transaction_records = list(transaction_records) + shared_records
 
@@ -437,7 +439,7 @@ class ReportsService:
             logger.error(f"Unexpected error in get_transaction_records_by_organization: {str(e)}")
             raise
 
-    def _fetch_shared_overview_rows(self, organization_id, filters, report_type):
+    def _fetch_shared_overview_rows(self, organization_id, filters, report_type, current_user_id=None):
         """Shared (cross-org) rows for get_overview_data, as the SAME 20-column tuples but with
         origin_id replaced by the virtual shared-node id (so a shared location acts as a node at its
         placement level). Branches are disjoint (deepest share wins) → never double-counted.
@@ -448,7 +450,9 @@ class ReportsService:
         own_selected = None
         if filters.get('location_ids'):
             own_selected = set(self._resolve_descendant_ids(organization_id, filters['location_ids']))
-        branches, _m = TransactionService(self.db)._resolve_shared_branches(organization_id, own_selected)
+        visible_parent_ids = self._shared_visible_parent_ids(organization_id, current_user_id)
+        branches, _m = TransactionService(self.db)._resolve_shared_branches(
+            organization_id, own_selected, visible_parent_ids=visible_parent_ids)
         if not branches:
             return [], {}
         report_from = filters.get('date_from')
@@ -627,7 +631,7 @@ class ReportsService:
             # so shared data flows into overview / performance / comparison / materials / waste alike.
             # Branches are disjoint (deepest share wins) → no transaction is double-counted.
             shared_rows, _shared_node_meta = self._fetch_shared_overview_rows(
-                organization_id, filters, report_type)
+                organization_id, filters, report_type, current_user_id=current_user_id)
             if shared_rows:
                 rows = list(rows) + shared_rows
 
@@ -811,6 +815,30 @@ class ReportsService:
 
         return query.filter(Transaction.origin_id.in_(list(assigned_ids)))
 
+    def _shared_visible_parent_ids(self, organization_id, current_user_id) -> Optional[set]:
+        """3-tier ACCESS gate for cross-org shared nodes (passed to _resolve_shared_branches).
+
+        A shared node inherits the visibility of the real location it is placed under, so a
+        non-owner may see it only when that placement parent is in their assigned set.
+
+        This MUST mirror `_apply_member_filter_to_transaction_query` (own-data gate) exactly:
+        that gate restricts EVERY non-owner to `assigned_ids` purely by the 3-tier model — it
+        does NOT consult role (`_should_filter_reports_by_member`). Using the role check here was
+        the leak: a non-owner the role-check exempts (no role, or admin) had own-data tier-limited
+        but saw ALL shared data. Gate by tier only:
+          - owner (or no org / no user) → None (unrestricted)
+          - any other user → their assigned_ids (possibly empty → sees no shared data)
+        """
+        if organization_id is None or current_user_id is None:
+            return None
+        from ..users.user_service import UserService
+        user_service = UserService(self.db)
+        locations = user_service.crud.get_user_locations(organization_id=organization_id)
+        tiers = user_service._resolve_location_tiers(locations, int(organization_id), int(current_user_id))
+        if tiers['is_owner']:
+            return None
+        return tiers['assigned_ids'] or set()
+
     def get_origin_by_organization(self, organization_id: int, filters: Optional[Dict[str, Any]] = None, current_user_id: Any = None) -> Dict[str, Any]:
         """
         Get origin filter options with composite origin+tag+tenant combinations from existing transaction data.
@@ -983,8 +1011,11 @@ class ReportsService:
                 # Cross-org shared nodes appear as filterable entries at their placement level. Pull
                 # in each placed share and ensure its placement-parent chain is present in the tree.
                 from ..transactions.transaction_service import TransactionService, shared_node_id_for
+                # Same 3-tier gate as the data path: a non-owner only sees a shared node in the
+                # filter tree when its placement parent is in their assigned set.
+                _shared_visible = self._shared_visible_parent_ids(organization_id, current_user_id)
                 shared_branches_for_filter, _sb_meta = TransactionService(self.db)._resolve_shared_branches(
-                    organization_id, None)
+                    organization_id, None, visible_parent_ids=_shared_visible)
                 shared_filter_nodes = []  # {vid, label, parent_id, source_org_name}
                 for b in shared_branches_for_filter:
                     pid = b.get('placed_parent_node_id')

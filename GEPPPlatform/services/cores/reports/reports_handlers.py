@@ -1517,6 +1517,13 @@ def _handle_comparison_report(
         }
         if filters.get('material_ids'):
             side_filters['material_ids'] = filters['material_ids']
+        # New multi-select location/tag/tenant filters (same convention as the other tabs).
+        if filters.get('location_ids'):
+            side_filters['location_ids'] = filters['location_ids']
+        if filters.get('filter_tag_ids'):
+            side_filters['filter_tag_ids'] = filters['filter_tag_ids']
+        if filters.get('filter_tenant_ids'):
+            side_filters['filter_tenant_ids'] = filters['filter_tenant_ids']
         if filters.get('origin_combos'):
             side_filters['origin_combos'] = filters['origin_combos']
         elif filters.get('origin_ids'):

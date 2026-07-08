@@ -68,7 +68,8 @@ def handle_transaction_routes(event: Dict[str, Any], data: Dict[str, Any], **par
                 user_service,
                 transaction_id,
                 include_records,
-                current_user_organization_id
+                current_user_organization_id,
+                current_user_id
             )
 
         elif '/api/transactions/' in path and '/with-records' in path and method == 'PUT':
@@ -251,7 +252,8 @@ def handle_get_transaction(
     user_service: UserService,
     transaction_id: int,
     include_records: bool,
-    current_user_organization_id: int
+    current_user_organization_id: int,
+    current_user_id: Any = None
 ) -> Dict[str, Any]:
     """
     Handle GET /api/transactions/{id} - Get transaction by ID
@@ -270,7 +272,7 @@ def handle_get_transaction(
         transaction = result['transaction']
         is_shared_view = False
         if transaction['organization_id'] != current_user_organization_id:
-            if transaction_service.is_transaction_shared_to_org(transaction, current_user_organization_id):
+            if transaction_service.is_transaction_shared_to_org(transaction, current_user_organization_id, current_user_id):
                 is_shared_view = True
                 transaction['is_shared'] = True
                 transaction['read_only'] = True
