@@ -138,5 +138,9 @@ class OrganizationSetup(Base, BaseModel):
     floor_level_name = Column(String(255), nullable=True)
     room_level_name = Column(String(255), nullable=True)
 
+    # Data-entry config: when true, the create-transaction modal requires a destination per record
+    # and auto-creates the traceability first hop on create ("กรอกปลายทาง" toggle in General Settings).
+    input_destination = Column(Boolean, nullable=False, default=False)
+
     # Relationships
     organization = relationship("Organization", foreign_keys=[organization_id])

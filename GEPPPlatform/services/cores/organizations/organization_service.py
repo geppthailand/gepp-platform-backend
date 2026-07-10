@@ -197,6 +197,7 @@ class OrganizationService:
             'building_level_name': setup.building_level_name,
             'floor_level_name': setup.floor_level_name,
             'room_level_name': setup.room_level_name,
+            'input_destination': bool(setup.input_destination),
             'created_date': setup.created_date.isoformat() if setup.created_date else None,
             'updated_date': setup.updated_date.isoformat() if setup.updated_date else None
         }
@@ -676,6 +677,10 @@ class OrganizationService:
             if key in level_names:
                 setattr(setup, key, level_names[key])
 
+        # General-settings scalar toggles persisted on the same active setup (no new version).
+        if 'input_destination' in level_names:
+            setup.input_destination = bool(level_names['input_destination'])
+
         self.db.flush()
 
         return {
@@ -690,6 +695,7 @@ class OrganizationService:
             'building_level_name': setup.building_level_name,
             'floor_level_name': setup.floor_level_name,
             'room_level_name': setup.room_level_name,
+            'input_destination': bool(setup.input_destination),
             'created_date': setup.created_date.isoformat() if setup.created_date else None,
             'updated_date': setup.updated_date.isoformat() if setup.updated_date else None
         }

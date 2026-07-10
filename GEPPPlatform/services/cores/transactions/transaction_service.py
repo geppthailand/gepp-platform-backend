@@ -156,6 +156,8 @@ class TransactionService:
             # Create transaction records if provided
             transaction_record_ids = []
             destination_ids = []
+            # (record_id, destination_id, weight) for the auto first-hop when input_destination is on.
+            hop_specs: List[Dict[str, Any]] = []
             if transaction_records_data:
                 for record_data in transaction_records_data:
                     record_result = self._create_transaction_record(
@@ -163,9 +165,18 @@ class TransactionService:
                         transaction.id
                     )
                     if record_result['success']:
-                        transaction_record_ids.append(record_result['transaction_record'].id)
+                        _rec = record_result['transaction_record']
+                        transaction_record_ids.append(_rec.id)
                         # Collect destination_id from each record (in same order as records)
-                        destination_ids.append(record_data.get('destination_id'))
+                        _dest = record_data.get('destination_id')
+                        destination_ids.append(_dest)
+                        if _dest is not None:
+                            hop_specs.append({
+                                'record_id': _rec.id,
+                                'destination_id': _dest,
+                                'weight': float(record_data.get('origin_weight_kg')
+                                                or getattr(_rec, 'origin_weight_kg', 0) or 0),
+                            })
                     else:
                         # Rollback transaction if any record fails
                         self.db.rollback()
@@ -222,6 +233,30 @@ class TransactionService:
                     properties={'transaction_id': transaction.id},
                 )
 
+            # ── Auto-create the traceability FIRST HOP when input_destination mode is on ──
+            # The origin transaction "sends 1 hop": each record with a destination gets a
+            # transport transaction and its destination stamped (same effect as the manual flow).
+            # Best-effort & post-commit: a hop failure must not fail the already-committed create.
+            if hop_specs and self._org_input_destination(transaction.organization_id):
+                try:
+                    from ..traceability.traceability_service import TraceabilityService
+                    tsvc = TraceabilityService(self.db)
+                    for spec in hop_specs:
+                        tsvc.create_transport_transaction(
+                            record_id=spec['record_id'],
+                            weight=spec['weight'],
+                            origin_id=transaction.origin_id,
+                            destination_id=spec['destination_id'],
+                            vehicle_info=None,
+                            messenger_info=None,
+                            created_by_id=transaction.created_by_id,
+                            organization_id=transaction.organization_id,
+                        )
+                    self.db.commit()
+                except Exception as e:  # noqa: BLE001 — first hop is best-effort
+                    self.db.rollback()
+                    logger.error(f"Auto first-hop failed for transaction {transaction.id}: {str(e)}")
+
             return {
                 'success': True,
                 'message': 'Transaction created successfully',
@@ -245,6 +280,23 @@ class TransactionService:
                 'message': 'An unexpected error occurred',
                 'errors': [str(e)]
             }
+
+    def _org_input_destination(self, organization_id: Optional[int]) -> bool:
+        """True when the org's active setup has input_destination enabled ("กรอกปลายทาง" mode)."""
+        if not organization_id:
+            return False
+        try:
+            setup = self.db.query(OrganizationSetup).filter(
+                OrganizationSetup.organization_id == organization_id,
+                OrganizationSetup.is_active == True,
+            ).first()
+            if not setup:
+                setup = self.db.query(OrganizationSetup).filter(
+                    OrganizationSetup.organization_id == organization_id,
+                ).order_by(OrganizationSetup.created_date.desc()).first()
+            return bool(setup and setup.input_destination)
+        except Exception:
+            return False
 
     def _send_email_via_lambda(
         self,
