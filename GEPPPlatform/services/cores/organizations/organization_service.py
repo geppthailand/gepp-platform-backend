@@ -681,7 +681,10 @@ class OrganizationService:
         if 'input_destination' in level_names:
             setup.input_destination = bool(level_names['input_destination'])
 
-        self.db.flush()
+        # Persist — flush alone left the change uncommitted (rolled back at request end), so the
+        # toggle reverted on refresh. Mirror update_ai_audit_permission which commits directly.
+        self.db.commit()
+        self.db.refresh(setup)
 
         return {
             'id': setup.id,

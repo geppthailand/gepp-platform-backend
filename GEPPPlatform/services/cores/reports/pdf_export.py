@@ -45,16 +45,17 @@ BuildingColors = [
     "#180055"
 ]
 
+# Keyed by ENGLISH category name — must match the dashboard palette (OverviewTab MATERIAL_COLORS)
+# so the PDF pie matches what users see on screen.
 MATERIAL_COLORS = {
+    "General Waste": colors.HexColor("#cfe2f3"),
     "Recyclable Waste": colors.HexColor("#fff8c8"),
     "Organic Waste": colors.HexColor("#b0dad6"),
-    "Electronic Waste": colors.HexColor("#e8e5ef"),
-    "Bio-Hazardous Waste": colors.HexColor("#e6b8af"),
     "Hazardous Waste": colors.HexColor("#f4cccc"),
+    "Bio-Hazardous Waste": colors.HexColor("#e6b8af"),
     "Waste To Energy": colors.HexColor("#fce5cd"),
-    "General Waste": colors.HexColor("#cfe2f3"),
-    "Construction Waste": colors.HexColor("#e8e5ef"),
     "Electronic Waste": colors.HexColor("#d9d9d9"),
+    "Construction Waste": colors.HexColor("#e8e5ef"),
 }
 main_material_colorPalette = [
   "#305b4a","#3b6f5a","#417b64","#4b8970","#50987c","#56a586","#5fb593",
@@ -890,15 +891,17 @@ def draw_overview_breakdown(pdf, page_width_points: float, page_height_points: f
     for it in (wt_props or []):
         try:
             name = str(it.get("category_name") or it.get("name") or it.get("category") or "")
+            # Color is keyed by the ENGLISH category name; category_name may be translated for display.
+            color_key = str(it.get("category_name_en") or it.get("name_en") or name)
             total = float(it.get("total_waste", it.get("value", 0)) or 0)
             perc = it.get("proportion_percent")
             perc = float(perc) if perc is not None else None
-            items.append({"name": name, "total": total, "perc": perc})
+            items.append({"name": name, "color_key": color_key, "total": total, "perc": perc})
         except Exception:
             continue
     # Fallback example if empty
     if not items:
-        items = [{"name": _t('general_waste', data), "total": 1.0, "perc": 100.0}]
+        items = [{"name": _t('general_waste', data), "color_key": "General Waste", "total": 1.0, "perc": 100.0}]
     # Values for pie: prefer totals; if all totals are zero, use percents or 1
     totals_sum = sum(max(0.0, it["total"]) for it in items)
     if totals_sum <= 0:
@@ -907,7 +910,7 @@ def draw_overview_breakdown(pdf, page_width_points: float, page_height_points: f
         values = [max(0.0, it["total"]) for it in items]
     colors_list = []
     for it in items:
-        c = MATERIAL_COLORS.get(it["name"], None)
+        c = MATERIAL_COLORS.get(it.get("color_key") or it["name"], None)
         if c is None:
             c = colors.HexColor("#cfe2f3")
         colors_list.append(c)
