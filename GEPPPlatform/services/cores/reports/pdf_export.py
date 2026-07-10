@@ -68,6 +68,21 @@ sub_material_colorPalette = [
     "#b1ffe1","#ceffec","#ddfff2","#eafff7","#f3fffa","#fafffd"
 ]
 
+
+def _fit_text_to_width(text: str, font_name: str, font_size: float, max_w: float) -> str:
+    """Truncate `text` with an ellipsis so it fits within `max_w` at the given font.
+    Prevents long org/branch/building names from overlapping adjacent content in the PDF."""
+    from reportlab.pdfbase.pdfmetrics import stringWidth as _sw
+    t = str(text or "")
+    if max_w <= 0:
+        return ""
+    if _sw(t, font_name, font_size) <= max_w:
+        return t
+    ell = "…"
+    while t and _sw(t + ell, font_name, font_size) > max_w:
+        t = t[:-1]
+    return (t + ell) if t else ell
+
 PAGE_WIDTH_IN = 11.69
 PAGE_HEIGHT_IN = 8.27
 
@@ -1007,16 +1022,23 @@ def draw_performance(pdf, page_width_points: float, page_height_points: float, d
     left_card_y = content_top - left_card_h
     _rounded_card(pdf, margin, left_card_y, left_card_w, left_card_h, radius=8, fill=WHITE)
     pdf.setFillColor(TEXT)
-    pdf.setFont("IBMPlexSansThai-Medium", 12)
-    # Position text relative to card top (content_top)
-    pdf.drawString(1 * inch, content_top - 0.4 * inch - 4, f"{performance_data['branchName']}")
-    pdf.setFont("IBMPlexSansThai-Regular", 8)
+    # Recycle-rate block (right-aligned, ends at 3.82in). Compute its widths FIRST so the org name
+    # on the left can be truncated to the free space before it — long names used to overlap it.
     label_text = _t('recycling_rate', data)
     label_width = stringWidth(label_text, "IBMPlexSansThai-Medium", 8)
-    pdf.drawString(3.82 * inch - label_width, content_top - 0.27 * inch - 4, label_text)
-    pdf.setFont("IBMPlexSansThai-Bold", 13)
     value_text = f"{_format_number(performance_data['recyclingRatePercent'])} %"
     value_width = stringWidth(value_text, "IBMPlexSansThai-Medium", 13)
+    rate_block_left = 3.82 * inch - max(label_width, value_width)
+
+    # Org / branch name (left) — bounded to the space before the recycle-rate block (6pt gap).
+    pdf.setFont("IBMPlexSansThai-Medium", 12)
+    name_max_w = rate_block_left - (1 * inch) - 6
+    branch_name = _fit_text_to_width(str(performance_data.get('branchName', '')), "IBMPlexSansThai-Medium", 12, name_max_w)
+    pdf.drawString(1 * inch, content_top - 0.4 * inch - 4, branch_name)
+
+    pdf.setFont("IBMPlexSansThai-Regular", 8)
+    pdf.drawString(3.82 * inch - label_width, content_top - 0.27 * inch - 4, label_text)
+    pdf.setFont("IBMPlexSansThai-Bold", 13)
     pdf.drawString(3.82 * inch - value_width, content_top - 0.52 * inch - 4, value_text)
     # Progress bars section (first: Total Waste at 100%)
     start_y = content_top - 1.2 * inch
@@ -1089,10 +1111,14 @@ def draw_performance(pdf, page_width_points: float, page_height_points: float, d
         for idx, building in enumerate(buildings):
             y = inner_y + inner_h - 0.85 * inch - idx * (0.55 * inch)
             pdf.setFillColor(TEXT)
-            pdf.drawString(inner_x + 16, y, building.get("buildingName", ""))
             value_text = f"{_format_number(building.get('totalWasteKg', 0))} kg"
             value_width = stringWidth(value_text, "IBMPlexSansThai-Regular", 8)
-            pdf.drawString(inner_x + 4 * inch - value_width, y, value_text)
+            _val_x = inner_x + 4 * inch - value_width
+            _name_left = inner_x + 16
+            # Bound the building name to the space before the right-aligned kg value (6pt gap).
+            _bname = _fit_text_to_width(building.get("buildingName", ""), "IBMPlexSansThai-Regular", 10, _val_x - _name_left - 6)
+            pdf.drawString(_name_left, y, _bname)
+            pdf.drawString(_val_x, y, value_text)
             _color = _assigned_colors[idx] if idx < len(_assigned_colors) else colors.HexColor("#b7cbd6")
             total_waste = float(performance_data.get("totalWasteKg", 0) or 0)
             if total_waste > 0:
@@ -1168,7 +1194,10 @@ def draw_performance_table(pdf, page_width_points: float, page_height_points: fl
             pdf.setFont("IBMPlexSansThai-Regular", 9)
             y_text = y_base + 12
             pdf.drawImage(icon_path, padding + 16, y_base + 11, width=icon_size, height=icon_size, mask='auto')
-            pdf.drawString(padding + 30, y_base + 12, branch["branchName"])
+            # Bound the name to the space before the first numeric column (total_waste at +1.8in).
+            _bn = _fit_text_to_width(branch["branchName"], "IBMPlexSansThai-Regular", 9,
+                                     (padding + 1.8 * inch) - (padding + 30) - 6)
+            pdf.drawString(padding + 30, y_base + 12, _bn)
             _txt_total = _format_number(branch["totalWasteKg"])
             _w_total = stringWidth(_txt_total, "IBMPlexSansThai-Regular", 9)
             pdf.drawString(_right_total - _w_total, y_text, _txt_total)
