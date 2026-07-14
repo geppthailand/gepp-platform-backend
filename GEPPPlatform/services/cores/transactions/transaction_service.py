@@ -163,8 +163,12 @@ class TransactionService:
                         transaction.id
                     )
                     if record_result['success']:
-                        transaction_record_ids.append(record_result['transaction_record'].id)
-                        # Collect destination_id from each record (in same order as records)
+                        _rec = record_result['transaction_record']
+                        transaction_record_ids.append(_rec.id)
+                        # Collect destination_id from each record (in same order as records).
+                        # NOTE: in input_destination mode the traceability first hop is created on
+                        # APPROVE (see _create_first_hops_for_approved_transaction), not here —
+                        # groups are approved-centric, so a pending transaction gets no hop yet.
                         destination_ids.append(record_data.get('destination_id'))
                     else:
                         # Rollback transaction if any record fails
@@ -222,6 +226,10 @@ class TransactionService:
                     properties={'transaction_id': transaction.id},
                 )
 
+            # If the transaction is created already-approved (rare), generate the first hop now.
+            if getattr(transaction, 'status', None) == TransactionStatus.approved:
+                self._create_first_hops_for_approved_transaction(transaction)
+
             return {
                 'success': True,
                 'message': 'Transaction created successfully',
@@ -245,6 +253,122 @@ class TransactionService:
                 'message': 'An unexpected error occurred',
                 'errors': [str(e)]
             }
+
+    def _org_input_destination(self, organization_id: Optional[int]) -> bool:
+        """True when the org's active setup has input_destination enabled ("กรอกปลายทาง" mode)."""
+        if not organization_id:
+            return False
+        try:
+            setup = self.db.query(OrganizationSetup).filter(
+                OrganizationSetup.organization_id == organization_id,
+                OrganizationSetup.is_active == True,
+            ).first()
+            if not setup:
+                setup = self.db.query(OrganizationSetup).filter(
+                    OrganizationSetup.organization_id == organization_id,
+                ).order_by(OrganizationSetup.created_date.desc()).first()
+            return bool(setup and setup.input_destination)
+        except Exception:
+            return False
+
+    def _create_first_hops_for_approved_transaction(self, transaction) -> None:
+        """input_destination mode: when a transaction is APPROVED, auto-create the traceability
+        FIRST HOP (origin → the destination chosen at data entry) as an in_transit
+        TransportTransaction, so it lands in the midway "อยู่ระหว่างขนส่ง" bucket on the
+        Traceability board. Idempotent (dedupes on re-approval) and best-effort — a failure here
+        must never fail the approval itself.
+
+        Groups are found/created here at approve-time (the board keys groups by
+        origin+material+tag+tenant+month); the record's reverse pointer is set so the lazy
+        materialization on read reuses this group and never double-creates.
+        """
+        try:
+            if not transaction or not self._org_input_destination(getattr(transaction, 'organization_id', None)):
+                return
+            from ....models.transactions.traceability_transaction_group import TraceabilityTransactionGroup
+            from ....models.transactions.transport_transaction import TransportTransaction
+            from ..traceability.traceability_service import TraceabilityService
+
+            records = self.db.query(TransactionRecord).filter(
+                TransactionRecord.created_transaction_id == transaction.id,
+                TransactionRecord.is_active == True,
+                TransactionRecord.deleted_date.is_(None),
+                TransactionRecord.destination_id.isnot(None),
+            ).all()
+            if not records:
+                return
+
+            org_id = transaction.organization_id
+            origin_id = transaction.origin_id
+            tag_id = getattr(transaction, 'location_tag_id', None)
+            tenant_id = getattr(transaction, 'tenant_id', None)
+            tsvc = TraceabilityService(self.db)
+
+            for rec in records:
+                date_for_ym = getattr(rec, 'transaction_date', None) or getattr(transaction, 'transaction_date', None)
+                year, month = self._transaction_date_year_month(date_for_ym)
+                if year is None or month is None:
+                    continue
+
+                group = self.db.query(TraceabilityTransactionGroup).filter(
+                    TraceabilityTransactionGroup.origin_id == origin_id,
+                    TraceabilityTransactionGroup.material_id == rec.material_id,
+                    TraceabilityTransactionGroup.organization_id == org_id,
+                    TraceabilityTransactionGroup.location_tag_id == tag_id,
+                    TraceabilityTransactionGroup.tenant_id == tenant_id,
+                    TraceabilityTransactionGroup.transaction_year == year,
+                    TraceabilityTransactionGroup.transaction_month == month,
+                    TraceabilityTransactionGroup.is_active == True,
+                    TraceabilityTransactionGroup.deleted_date.is_(None),
+                ).first()
+                if not group:
+                    group = TraceabilityTransactionGroup(
+                        origin_id=origin_id, material_id=rec.material_id, organization_id=org_id,
+                        transaction_record_id=[rec.id], transaction_carried_over=[],
+                        transaction_year=year, transaction_month=month,
+                        location_tag_id=tag_id, tenant_id=tenant_id, is_active=True,
+                    )
+                    self.db.add(group)
+                    self.db.flush()
+                else:
+                    ids = list(group.transaction_record_id or [])
+                    if rec.id not in ids:
+                        group.transaction_record_id = ids + [rec.id]
+                if getattr(rec, 'traceability_group_id', None) != group.id:
+                    rec.traceability_group_id = group.id
+
+                # Dedup: skip if a matching root hop already exists (e.g. transaction re-approved).
+                existing = self.db.query(TransportTransaction.id).filter(
+                    TransportTransaction.transaction_group_id == group.id,
+                    TransportTransaction.is_root == True,
+                    TransportTransaction.destination_id == rec.destination_id,
+                    TransportTransaction.material_id == rec.material_id,
+                    TransportTransaction.deleted_date.is_(None),
+                ).first()
+                if existing:
+                    continue
+
+                hop_res = tsvc.create_transport_transactions(
+                    data=[{
+                        'weight': float(getattr(rec, 'origin_weight_kg', 0) or 0),
+                        'origin_id': origin_id,
+                        'destination_id': rec.destination_id,
+                        'material_id': rec.material_id,
+                    }],
+                    organization_id=org_id,
+                    transaction_group_id=group.id,
+                )
+                # Approving = the waste has ARRIVED at the midway destination. Confirm arrival so the
+                # hop moves from "อยู่ระหว่างขนส่ง" (in_transit) to "รอดำเนินการขนส่งต่อ"
+                # (status='arrived', no disposal_method → awaiting the next hop).
+                for _tid in (hop_res.get('ids') or []):
+                    tsvc.confirm_arrival(_tid, org_id)
+
+            self.db.commit()
+        except Exception as e:  # noqa: BLE001 — best-effort, must not fail the approval
+            self.db.rollback()
+            logger.error(f"Auto first-hop (on approve) failed for transaction "
+                         f"{getattr(transaction, 'id', '?')}: {str(e)}")
 
     def _send_email_via_lambda(
         self,
@@ -1900,6 +2024,13 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                 joinedload(Transaction.created_by)
             ).filter(Transaction.deleted_date.is_(None))
 
+            # Traceability hops (transaction_method='transport') are NOT data-entry transactions —
+            # they're the movement records shown on the Traceability page, not this audit list.
+            # Exclude them so the auto first-hop (input_destination mode) and manual hops don't
+            # appear here as empty "extra" rows. Origin/QR/scale data-entry transactions stay.
+            query = query.filter(or_(Transaction.transaction_method != 'transport',
+                                     Transaction.transaction_method.is_(None)))
+
             # Global filters (apply to own AND shared rows alike)
             if status:
                 query = query.filter(Transaction.status == status)
@@ -2352,6 +2483,9 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                         self.db, 'transaction_approved', transaction,
                         properties={'transaction_id': transaction_id, 'updated_by_id': updated_by_id},
                     )
+                    # input_destination mode: approving sends the first traceability hop
+                    # (origin → chosen destination) to the midway "อยู่ระหว่างขนส่ง" bucket.
+                    self._create_first_hops_for_approved_transaction(transaction)
                 elif _status_val == 'rejected':
                     _emit_transaction_event(
                         self.db, 'transaction_rejected', transaction,

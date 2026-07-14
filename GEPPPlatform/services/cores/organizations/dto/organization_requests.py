@@ -367,9 +367,11 @@ class UpdateOrganizationSetupRequest:
         )
 
     def has_level_names_only(self, body: Dict[str, Any]) -> bool:
-        """Check if the request only contains level naming fields (no tree structure)."""
-        level_keys = {'branch_level_name', 'building_level_name', 'floor_level_name', 'room_level_name'}
-        return not self.tree_structure and bool(level_keys & set(body.keys()))
+        """True when the request only contains scalar settings (level names / input_destination)
+        and no tree structure — routed to the in-place scalar update (no new version)."""
+        scalar_keys = {'branch_level_name', 'building_level_name', 'floor_level_name', 'room_level_name',
+                       'input_destination'}
+        return not self.tree_structure and bool(scalar_keys & set(body.keys()))
 
     def validate(self, allow_level_names_only: bool = False) -> List[str]:
         """Validate the request data"""

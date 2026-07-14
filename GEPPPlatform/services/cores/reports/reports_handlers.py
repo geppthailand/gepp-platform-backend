@@ -2382,10 +2382,13 @@ def _handle_export_pdf_report(
         except Exception:
             pass
 
-        # Translate waste_type_proportions category names
+        # Translate waste_type_proportions category names for DISPLAY, but keep the English
+        # name as `category_name_en` so the PDF can still resolve the pie color (MATERIAL_COLORS
+        # is keyed by English). Without this, every TH row missed the palette → all slices blue.
         if wtp:
             for item in wtp:
                 en_name = item.get('category_name', '')
+                item['category_name_en'] = en_name
                 if en_name in _all_cats:
                     item['category_name'] = _all_cats[en_name]
 
@@ -2491,22 +2494,34 @@ def _handle_export_pdf_report(
     except Exception:
         profile_img_view_url = profile_img_url
 
-    # 4) Resolve location names from origin_ids filter; fallback to "all"
-    _current_user_id = (current_user or {}).get('user_id') or (current_user or {}).get('id')
+    # 4) Resolve location names from the location filter; fallback to "all".
+    # The dashboard sends the location filter as `location_ids` (branch/building/floor/room);
+    # legacy callers use `origin_ids`. Consider BOTH, and resolve any level's name directly from
+    # user_locations (get_origin_by_organization only covers leaf origins, so it would miss a
+    # selected branch/building). Reading only origin_ids here was why the header showed "all"
+    # even when the dashboard was filtered by a location.
     def _resolve_locations_from_filters(_filters: Dict[str, Any]) -> list[str] | str:
         _all_text = 'ทั้งหมด' if language == 'th' else 'all'
-        origin_ids = _filters.get('origin_ids') or []
-        if not origin_ids:
+        raw_ids = list(_filters.get('origin_ids') or []) + list(_filters.get('location_ids') or [])
+        seen: set = set()
+        sel_ids = []
+        for i in raw_ids:
+            if i is not None and i not in seen:
+                seen.add(i)
+                sel_ids.append(i)
+        if not sel_ids:
             return _all_text
         try:
-            origins_result = reports_service.get_origin_by_organization(organization_id=organization_id, current_user_id=_current_user_id)
+            rows = reports_service.db.query(
+                UserLocation.id, UserLocation.display_name,
+                UserLocation.name_th, UserLocation.name_en,
+            ).filter(UserLocation.id.in_(sel_ids)).all()
             name_map = {}
-            for o in origins_result.get('data', []):
-                oid = o.get('origin_id')
-                name = o.get('display_name') or o.get('name_en') or o.get('name_th') or o.get('name')
-                if oid is not None and oid not in name_map:
-                    name_map[oid] = name
-            names = [name_map.get(oid, f"Location {oid}") for oid in origin_ids]
+            for r in rows:
+                name_map[r.id] = (r.display_name
+                                  or (r.name_th if language == 'th' else r.name_en)
+                                  or r.name_en or r.name_th or f"Location {r.id}")
+            names = [name_map.get(i, f"Location {i}") for i in sel_ids]
             names = [n for n in names if n]
             return names or _all_text
         except Exception:
