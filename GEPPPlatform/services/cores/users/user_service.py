@@ -1585,6 +1585,18 @@ class UserService:
 
         walk_tree(root_nodes, [])
 
+        # Also walk hub_node.children so hub (destination) memberships grant the SAME
+        # assigned/ancestor visibility as origins. Hub nodes live under hub_node, not
+        # root_nodes, so the root walk above never reaches them — without this, a hub
+        # member would never land in assigned_ids and every hub stays unseen for
+        # non-owners (org chart, destination pickers, and report filters all rely on
+        # these sets). Hubs are typically flat leaves; walk_tree still handles nesting.
+        hub_node = org_setup.hub_node if org_setup else None
+        if isinstance(hub_node, dict):
+            hub_children = hub_node.get('children') or []
+            if isinstance(hub_children, list) and hub_children:
+                walk_tree(hub_children, [])
+
         # Remove any ancestor IDs that ended up in assigned (edge case: overlapping paths)
         ancestor_ids -= assigned_ids
 

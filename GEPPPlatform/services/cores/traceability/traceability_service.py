@@ -368,6 +368,46 @@ class TraceabilityService:
             except (ValueError, TypeError):
                 pass
 
+        # New-style multi-select report filters (reports diversion tab). Combine as AND
+        # with each other and with the composite origin_id above. Origin ids arrive already
+        # expanded to descendants by the caller. This is what makes the reports filter bar
+        # actually apply on the diversion tab (previously only a single origin was honored).
+        def _int_list(raw):
+            try:
+                return [int(x.strip()) for x in str(raw).split(",") if x.strip()]
+            except (ValueError, TypeError):
+                return []
+
+        origin_ids_list = _int_list(kwargs.get("origin_ids"))
+        if origin_ids_list:
+            group_filters.append(TraceabilityTransactionGroup.origin_id.in_(origin_ids_list))
+        tag_ids_list = _int_list(kwargs.get("tag_ids"))
+        if tag_ids_list:
+            group_filters.append(TraceabilityTransactionGroup.location_tag_id.in_(tag_ids_list))
+        tenant_ids_list = _int_list(kwargs.get("tenant_ids"))
+        if tenant_ids_list:
+            group_filters.append(TraceabilityTransactionGroup.tenant_id.in_(tenant_ids_list))
+
+        # Destination filter ("สถานที่รับขยะ"): keep only groups that have at least one
+        # transport landing at a selected destination. Filtered at GROUP granularity (not
+        # per-transport) so the group→transport tree the diversion walk relies on stays
+        # intact — a transport-level filter would orphan child legs and break the percentages.
+        destination_ids_list = _int_list(kwargs.get("destination_ids"))
+        if destination_ids_list:
+            matching_group_ids = [
+                gid for (gid,) in self.db.query(TransportTransaction.transaction_group_id)
+                .filter(
+                    TransportTransaction.organization_id == organization_id,
+                    TransportTransaction.destination_id.in_(destination_ids_list),
+                    TransportTransaction.is_active == True,
+                    TransportTransaction.deleted_date.is_(None),
+                    TransportTransaction.transaction_group_id.isnot(None),
+                )
+                .distinct()
+                .all()
+            ]
+            group_filters.append(TraceabilityTransactionGroup.id.in_(matching_group_ids or [-1]))
+
         # Apply member-based filtering: restrict to user's assigned locations
         current_user_id = kwargs.get("current_user_id")
         if current_user_id and organization_id:
@@ -1597,7 +1637,11 @@ class TraceabilityService:
             })
         return out
 
-    def get_destination_locations(self, organization_id: Optional[int] = None) -> List[Dict[str, Any]]:
+    def get_destination_locations(
+        self,
+        organization_id: Optional[int] = None,
+        current_user_id: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
         """
         Get locations that may be selected as a destination.
 
@@ -1611,6 +1655,13 @@ class TraceabilityService:
              too so consolidations can land on any of those origins.
 
         Each entry includes ``path``. The list is deduplicated by location id.
+
+        Member-based visibility: when ``current_user_id`` is a non-owner, the
+        merged list is intersected with that user's assigned locations (same
+        3-tier rule as origins — hub memberships now feed ``assigned_ids`` via
+        ``_resolve_location_tiers``). Owners (and callers that omit the user)
+        see every destination. Mirrors origins exactly: a hub with no members is
+        unseen for non-owners.
         """
         if organization_id is None:
             return []
@@ -1680,6 +1731,15 @@ class TraceabilityService:
             by_id[loc.id] = loc
         for loc in flagged_locations:
             by_id.setdefault(loc.id, loc)
+
+        # Member-based visibility: non-owners only see destinations they are
+        # assigned to (hub membership or a visible is_destination origin). Owner
+        # → assigned_ids is None → no filtering.
+        if current_user_id is not None:
+            assigned_ids = self._get_assigned_location_ids(organization_id, int(current_user_id))
+            if assigned_ids is not None:
+                by_id = {lid: loc for lid, loc in by_id.items() if lid in assigned_ids}
+
         merged = list(by_id.values())
         if not merged:
             return []
