@@ -909,6 +909,16 @@ def main(event, context):
                             "data": reward_result
                         }
 
+                    elif "/api/import-files" in path:
+                        # Handle all bulk data-import routes (Excel upload → transactions)
+                        from GEPPPlatform.services.cores.imports.import_handlers import handle_import_routes
+
+                        import_result = handle_import_routes(event, data=body, **commonParams)
+                        results = {
+                            "success": True,
+                            "data": import_result
+                        }
+
                     elif "/api/transactions" in path:
                         # Handle all transaction management routes
                         from GEPPPlatform.services.cores.transactions.transaction_handlers import handle_transaction_routes

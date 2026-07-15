@@ -447,6 +447,11 @@ class ReportsService:
         from ..transactions.transaction_service import TransactionService, shared_node_id_for
         from sqlalchemy import literal
         filters = filters or {}
+        # A destination filter ("สถานที่รับขยะ") selects destinations in THIS org.
+        # Cross-org shared data is received at the SOURCE org's destinations, so it can
+        # never match a this-org destination id — exclude shared rows entirely.
+        if filters.get('destination_ids'):
+            return [], {}
         own_selected = None
         if filters.get('location_ids'):
             own_selected = set(self._resolve_descendant_ids(organization_id, filters['location_ids']))
@@ -791,6 +796,12 @@ class ReportsService:
         if filters.get('filter_tenant_ids'):
             query = query.filter(Transaction.tenant_id.in_(filters['filter_tenant_ids']))
             applied = True
+        # Destination filter ("สถานที่รับขยะ") — orthogonal to origin, so it ANDs with
+        # whichever origin path runs (new location_ids OR the legacy origin_combos fallback).
+        # Do NOT flip `applied`: that flag only governs the legacy origin fallback; a
+        # destination-only selection must still let the origin fallback run (as a no-op).
+        if filters.get('destination_ids'):
+            query = query.filter(TransactionRecord.destination_id.in_(filters['destination_ids']))
         return query, applied
 
     def _apply_member_filter_to_transaction_query(self, query, current_user_id: Any, organization_id: Optional[int] = None):

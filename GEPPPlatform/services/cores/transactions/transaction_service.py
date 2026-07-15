@@ -146,6 +146,7 @@ class TransactionService:
                 treatment_method=transaction_data.get('treatment_method'),
                 disposal_method=transaction_data.get('disposal_method'),
                 created_by_id=transaction_data.get('created_by_id'),
+                import_file_id=transaction_data.get('import_file_id'),  # bulk-import batch tag (revert unit)
                 weight_kg=Decimal('0'),  # Will be calculated from transaction records
                 total_amount=Decimal('0')  # Will be calculated from transaction records
             )
