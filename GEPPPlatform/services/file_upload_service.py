@@ -104,6 +104,70 @@ class S3FileUploadService:
 
         return uploaded_files
 
+    def upload_import_file(
+        self,
+        file_data: bytes,
+        filename: str,
+        content_type: Optional[str],
+        import_type: str,
+        organization_id: int,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Upload a raw import file (e.g. an .xlsx) to S3 under business/imports/.
+
+        Returns a dict {s3_key, s3_url, s3_bucket, file_size, content_type, original_filename}
+        or None on failure.
+        """
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            ext = os.path.splitext(filename or '')[1] or '.xlsx'
+            unique_filename = f"{organization_id}_{timestamp}_{uuid.uuid4().hex[:8]}{ext}"
+            s3_key = f"business/imports/{import_type}/{organization_id}/{unique_filename}"
+
+            if not content_type:
+                content_type, _ = mimetypes.guess_type(filename or '')
+                content_type = content_type or 'application/octet-stream'
+
+            file_size = len(file_data) if isinstance(file_data, (bytes, bytearray)) else 0
+            self.s3_client.put_object(
+                Bucket=self.bucket_name,
+                Key=s3_key,
+                Body=file_data,
+                ContentType=content_type,
+                Metadata={
+                    'original_filename': filename or 'unknown',
+                    'import_type': import_type,
+                    'organization_id': str(organization_id),
+                    'upload_timestamp': timestamp,
+                },
+            )
+            return {
+                'original_filename': filename,
+                's3_key': s3_key,
+                's3_url': f"https://{self.bucket_name}.s3.amazonaws.com/{s3_key}",
+                's3_bucket': self.bucket_name,
+                'file_size': file_size,
+                'content_type': content_type,
+            }
+        except (ClientError, BotoCoreError) as e:
+            print(f"Error uploading import file {filename}: {str(e)}")
+            return None
+        except Exception as e:
+            print(f"Unexpected error uploading import file {filename}: {str(e)}")
+            return None
+
+    def download_file(self, s3_key: str) -> Optional[bytes]:
+        """Download a file's bytes from S3; None on failure."""
+        try:
+            response = self.s3_client.get_object(Bucket=self.bucket_name, Key=s3_key)
+            return response['Body'].read()
+        except (ClientError, BotoCoreError) as e:
+            print(f"Error downloading file {s3_key}: {str(e)}")
+            return None
+        except Exception as e:
+            print(f"Unexpected error downloading file {s3_key}: {str(e)}")
+            return None
+
     def delete_file(self, s3_key: str) -> bool:
         """
         Delete a file from S3

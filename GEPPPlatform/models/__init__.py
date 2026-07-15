@@ -53,6 +53,9 @@ from .esg import *
 # Import shared user location model (cross-org location data sharing)
 from .shared_user_location import SharedUserLocation
 
+# Import bulk data-import batch model (Excel upload → transactions)
+from .import_file import ImportFile
+
 # Add input_channels relationship to UserLocation
 from sqlalchemy.orm import relationship
 from .users.user_location import UserLocation
@@ -141,6 +144,7 @@ __all__ = [
 
     # Shared user location (cross-org location data sharing)
     'SharedUserLocation',
+    'ImportFile',
 
     # ESG models
     'EsgOrganizationSettings', 'EsgEmissionFactor',
