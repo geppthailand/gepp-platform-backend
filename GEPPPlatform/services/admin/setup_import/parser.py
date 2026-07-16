@@ -105,10 +105,33 @@ def _cell(row: List[Any], idx: int) -> Any:
     return row[idx] if idx < len(row) else None
 
 
+def _find_id_col(header_row) -> Optional[int]:
+    """Index of the optional 'ID' column (case-insensitive) in the header row, or None.
+    Used for upsert: an ID that matches an existing record updates it instead of creating new."""
+    for idx, cell in enumerate(header_row or []):
+        if _norm(cell) == 'id':
+            return idx
+    return None
+
+
+def _parse_id(row: List[Any], id_idx: Optional[int]) -> Optional[int]:
+    """Read the ID cell → int, or None when absent / blank / '-' (→ treated as create-new)."""
+    if id_idx is None:
+        return None
+    v = _cell(row, id_idx)
+    if _is_blank(v):
+        return None
+    try:
+        return int(float(str(v).strip()))
+    except (TypeError, ValueError):
+        return None
+
+
 # ── section parsers ─────────────────────────────────────────────────────────────
 def _parse_users(ws) -> List[Dict[str, Any]]:
     out = []
     rows = _rows(ws)
+    id_idx = _find_id_col(rows[0]) if rows else None
     for i, row in enumerate(rows[1:], start=2):  # row 1 = header
         if all(_is_blank(c) for c in row):
             continue
@@ -118,6 +141,7 @@ def _parse_users(ws) -> List[Dict[str, Any]]:
             continue
         out.append({
             'row_index': i,
+            'id': _parse_id(row, id_idx),
             'display_name': display,
             'email': email,
             'password': _clean(_cell(row, 2)) or None,
@@ -133,6 +157,7 @@ def _parse_named_group(ws) -> List[Dict[str, Any]]:
     """Shared shape for Tags + Tenants: name, description, start, end, members."""
     out = []
     rows = _rows(ws)
+    id_idx = _find_id_col(rows[0]) if rows else None
     for i, row in enumerate(rows[1:], start=2):
         if all(_is_blank(c) for c in row):
             continue
@@ -141,6 +166,7 @@ def _parse_named_group(ws) -> List[Dict[str, Any]]:
             continue
         out.append({
             'row_index': i,
+            'id': _parse_id(row, id_idx),
             'name': name,
             'description': _clean(_cell(row, 1)),
             'start_date': _parse_date(_cell(row, 2)),
@@ -158,6 +184,7 @@ def _parse_origins(ws) -> List[Dict[str, Any]]:
     """
     out = []
     rows = _rows(ws)
+    id_idx = _find_id_col(rows[0]) if rows else None
     for i, row in enumerate(rows[1:], start=2):
         levels_raw = [_cell(row, c) for c in range(4)]
         if all(_is_blank(c) for c in row):
@@ -179,6 +206,7 @@ def _parse_origins(ws) -> List[Dict[str, Any]]:
         depth = len(path)
         out.append({
             'row_index': i,
+            'id': _parse_id(row, id_idx),
             'levels': [_clean(c) for c in levels_raw],
             'path': path,
             'parent_path': path[:-1],
@@ -200,6 +228,7 @@ def _parse_destinations(ws) -> List[Dict[str, Any]]:
     """Columns: Destinations(name), Members, Address, Business Type, Materials."""
     out = []
     rows = _rows(ws)
+    id_idx = _find_id_col(rows[0]) if rows else None
     for i, row in enumerate(rows[1:], start=2):
         if all(_is_blank(c) for c in row):
             continue
@@ -208,6 +237,7 @@ def _parse_destinations(ws) -> List[Dict[str, Any]]:
             continue
         out.append({
             'row_index': i,
+            'id': _parse_id(row, id_idx),
             'name': name,
             'members': _split_names(_cell(row, 1)),
             'address': _clean(_cell(row, 2)),

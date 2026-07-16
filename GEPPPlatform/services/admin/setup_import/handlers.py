@@ -59,6 +59,10 @@ def handle_setup_import_route(
         if method == 'GET' and len(path_parts) == 3 and path_parts[2] == 'setup-imports':
             return service.list_history(organization_id)
 
+        # GET .../setup-export  → current setup as a re-importable .xlsx (base64)
+        if method == 'GET' and len(path_parts) == 3 and path_parts[2] == 'setup-export':
+            return service.export_setup(organization_id)
+
         if method == 'POST' and len(path_parts) == 3 and path_parts[2] == 'setup-import':
             return service.upload(
                 organization_id, admin_id,

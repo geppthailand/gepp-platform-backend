@@ -259,8 +259,8 @@ def handle_admin_routes(path: str, data: dict, **commonParams):
                     method=method, db_session=db_session, data={},
                     query_params=query_params, current_user=commonParams.get('current_user', {}),
                 )
-            # GET /admin/organizations/{id}/setup-imports — import version history
-            if resource == 'organizations' and path_parts[2] == 'setup-imports':
+            # GET /admin/organizations/{id}/setup-imports (history) or /setup-export (xlsx)
+            if resource == 'organizations' and path_parts[2] in ('setup-imports', 'setup-export'):
                 from .setup_import.handlers import handle_setup_import_route
                 return handle_setup_import_route(
                     'GET', path_parts, {}, query_params, db_session,
