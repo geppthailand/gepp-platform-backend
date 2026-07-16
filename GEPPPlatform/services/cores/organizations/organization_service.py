@@ -198,6 +198,7 @@ class OrganizationService:
             'floor_level_name': setup.floor_level_name,
             'room_level_name': setup.room_level_name,
             'input_destination': bool(setup.input_destination),
+            'show_all_location_options': bool(setup.show_all_location_options) if setup.show_all_location_options is not None else True,
             'created_date': setup.created_date.isoformat() if setup.created_date else None,
             'updated_date': setup.updated_date.isoformat() if setup.updated_date else None
         }
@@ -680,6 +681,8 @@ class OrganizationService:
         # General-settings scalar toggles persisted on the same active setup (no new version).
         if 'input_destination' in level_names:
             setup.input_destination = bool(level_names['input_destination'])
+        if 'show_all_location_options' in level_names:
+            setup.show_all_location_options = bool(level_names['show_all_location_options'])
 
         # Persist — flush alone left the change uncommitted (rolled back at request end), so the
         # toggle reverted on refresh. Mirror update_ai_audit_permission which commits directly.
@@ -699,6 +702,7 @@ class OrganizationService:
             'floor_level_name': setup.floor_level_name,
             'room_level_name': setup.room_level_name,
             'input_destination': bool(setup.input_destination),
+            'show_all_location_options': bool(setup.show_all_location_options) if setup.show_all_location_options is not None else True,
             'created_date': setup.created_date.isoformat() if setup.created_date else None,
             'updated_date': setup.updated_date.isoformat() if setup.updated_date else None
         }

@@ -142,5 +142,10 @@ class OrganizationSetup(Base, BaseModel):
     # and auto-creates the traceability first hop on create ("กรอกปลายทาง" toggle in General Settings).
     input_destination = Column(Boolean, nullable=False, default=False)
 
+    # Location-picker display: when true (default), the create-transaction location dropdown also
+    # lists each location as a PLAIN row (no tag/tenant) alongside its tag/tenant combos. When false,
+    # a location that has tags/tenants shows only the combo rows ("แสดงเฉพาะ tag/tenant").
+    show_all_location_options = Column(Boolean, nullable=False, default=True)
+
     # Relationships
     organization = relationship("Organization", foreign_keys=[organization_id])

@@ -370,7 +370,7 @@ class UpdateOrganizationSetupRequest:
         """True when the request only contains scalar settings (level names / input_destination)
         and no tree structure — routed to the in-place scalar update (no new version)."""
         scalar_keys = {'branch_level_name', 'building_level_name', 'floor_level_name', 'room_level_name',
-                       'input_destination'}
+                       'input_destination', 'show_all_location_options'}
         return not self.tree_structure and bool(scalar_keys & set(body.keys()))
 
     def validate(self, allow_level_names_only: bool = False) -> List[str]:
