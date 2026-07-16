@@ -73,6 +73,9 @@ def handle_import_routes(event: Dict[str, Any], data: Dict[str, Any], **params) 
         return service.get_preview(import_file_id, organization_id)
     if method == 'POST' and action == 'extract':
         return service.extract(import_file_id, organization_id)
+    if method == 'POST' and action == 'save':
+        # Persist edited/deleted review rows without confirming (so reopening reflects them).
+        return service.save_preview(import_file_id, organization_id, data.get('rows'))
     if method == 'POST' and action == 'confirm':
         rows = data.get('rows')
         return service.confirm(import_file_id, organization_id, user_id, rows)

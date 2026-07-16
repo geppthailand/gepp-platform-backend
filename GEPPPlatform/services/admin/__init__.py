@@ -32,6 +32,17 @@ def handle_admin_routes(path: str, data: dict, **commonParams):
         if internal_path == "/login":
             return admin_handler.admin_login(data)
 
+        # Import Organization Setup (back-office):
+        #   POST /admin/organizations/{id}/setup-import                    (upload)
+        #   POST /admin/organizations/{id}/setup-import/{importId}/{extract|confirm|revert}
+        if len(path_parts) in (3, 5) and path_parts[0] == 'organizations' and path_parts[2] == 'setup-import':
+            from .setup_import.handlers import handle_setup_import_route
+            return handle_setup_import_route(
+                method, path_parts, data,
+                commonParams.get('query_params', {}) or {},
+                db_session, commonParams.get('current_user', {}) or {},
+            )
+
         # IoT devices: POST /admin/iot-devices/snapshot-aggregate
         # — manually trigger the 5-min health snapshot worker. Idempotent.
         if (
@@ -247,6 +258,13 @@ def handle_admin_routes(path: str, data: dict, **commonParams):
                     resource=resource, resource_id=int(path_parts[1]), sub_path=path_parts[2],
                     method=method, db_session=db_session, data={},
                     query_params=query_params, current_user=commonParams.get('current_user', {}),
+                )
+            # GET /admin/organizations/{id}/setup-imports — import version history
+            if resource == 'organizations' and path_parts[2] == 'setup-imports':
+                from .setup_import.handlers import handle_setup_import_route
+                return handle_setup_import_route(
+                    'GET', path_parts, {}, query_params, db_session,
+                    commonParams.get('current_user', {}) or {},
                 )
             # GET /admin/organizations/{id}/transactions-export — XLSX export
             if resource == 'organizations' and path_parts[2] == 'transactions-export':

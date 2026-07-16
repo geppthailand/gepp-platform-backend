@@ -142,6 +142,34 @@ class ImportService:
         payload = row.preview_payload or {}
         return {'success': True, 'data': {**self._row_meta(row), **payload}}
 
+    def save_preview(self, import_file_id: int, organization_id: int,
+                     rows: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+        """
+        Persist the in-progress (edited/row-deleted) review rows WITHOUT confirming, so reopening
+        the import from history reflects the user's edits + deletions instead of the original
+        extract. Options are preserved; the summary is recomputed. No-op once confirmed/reverted.
+        """
+        row = self._get_row(import_file_id, organization_id)
+        if not row:
+            return {'success': False, 'message': 'Import file not found'}
+        if row.status in ('confirmed', 'confirming', 'reverted'):
+            # Already committed — the review is read-only; don't overwrite.
+            return {'success': True, 'data': self._row_meta(row)}
+        try:
+            review_rows = rows if rows is not None else (row.preview_payload or {}).get('review_rows', [])
+            payload = dict(row.preview_payload or {})
+            payload['review_rows'] = review_rows
+            row.preview_payload = payload
+            row.summary = self._summarize(review_rows)
+            row.status = 'extracted'
+            self.db.commit()
+            self.db.refresh(row)
+            return {'success': True, 'data': self._row_meta(row)}
+        except Exception as e:
+            self.db.rollback()
+            logger.error(f"import save_preview error: {e}")
+            return {'success': False, 'message': 'Could not save preview', 'errors': [str(e)]}
+
     # ── 4. Confirm → create grouped transactions ────────────────────────────────
     def confirm(
         self,
