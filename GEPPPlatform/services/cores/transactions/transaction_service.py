@@ -6,7 +6,7 @@ Handles CRUD operations, validation, and transaction record linking
 from typing import List, Optional, Dict, Any, Tuple
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy import cast, String, exists, and_, func, or_, true
+from sqlalchemy import cast, String, exists, and_, func, or_, true, false
 from sqlalchemy.dialects.postgresql import JSONB
 import json
 import logging
@@ -1801,6 +1801,42 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
             return []
         return setup.root_nodes if isinstance(setup.root_nodes, list) else []
 
+    def _active_setup_node_ids(self, organization_id: int) -> Optional[set]:
+        """
+        All nodeIds currently in the active org-setup tree (root_nodes + hub_node children).
+        Returns None when the org has NO setup row at all (→ caller should not filter, "no tree =
+        no filtering"); an empty set when a setup exists but its tree is empty (→ everything is
+        orphaned, so the caller hides all). Used to hide transactions whose origin was dropped
+        from the chart (e.g. a setup-import replaced it → recycle bin); restoring the location
+        puts it back in the tree and the transactions reappear.
+        """
+        setup = self.db.query(OrganizationSetup).filter(
+            OrganizationSetup.organization_id == organization_id,
+            OrganizationSetup.is_active == True,  # noqa: E712
+        ).first()
+        if not setup:
+            setup = self.db.query(OrganizationSetup).filter(
+                OrganizationSetup.organization_id == organization_id
+            ).order_by(OrganizationSetup.created_date.desc()).first()
+        if not setup:
+            return None
+        ids: set = set()
+
+        def _collect(nodes):
+            for n in nodes if isinstance(nodes, list) else []:
+                nid = n.get('nodeId')
+                if nid is not None:
+                    try:
+                        ids.add(int(nid))
+                    except (TypeError, ValueError):
+                        pass  # virtual/shared string id — not a real origin
+                _collect(n.get('children') or [])
+
+        _collect(setup.root_nodes or [])
+        hub = setup.hub_node if isinstance(setup.hub_node, dict) else {}
+        _collect(hub.get('children') or [])
+        return ids
+
     def _collect_source_subtree_ids(self, source_org_id: int, source_location_id: int) -> set:
         """Real (positive) location ids for source_location_id + its descendants, from the
         SOURCE org's tree. Excludes any nested shared/virtual nodes (defensive vs. re-share)."""
@@ -2061,6 +2097,17 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                         own_conditions.append(Transaction.origin_id.is_(None))
                     else:
                         own_conditions.append(Transaction.origin_id.in_(list(assigned_ids)))
+
+            # Hide transactions whose origin is no longer in the active org chart — e.g. a location
+            # a setup-import replaced (moved to the recycle bin) or a reverted import stripped out.
+            # They come back automatically if the location is restored to the tree. Applies to
+            # everyone incl. owners. `None` = the org has no setup at all → don't filter.
+            active_node_ids = self._active_setup_node_ids(organization_id)
+            if active_node_ids is not None:
+                own_conditions.append(or_(
+                    Transaction.origin_id.in_(list(active_node_ids)) if active_node_ids else false(),
+                    Transaction.origin_id.is_(None),
+                ))
 
             # New multi-select location filter: location_ids + descendants (union)
             own_selected_ids = None  # None => no location filter (all placed shares in scope)

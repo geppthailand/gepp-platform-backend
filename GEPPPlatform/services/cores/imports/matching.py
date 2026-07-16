@@ -168,6 +168,8 @@ def _canonical_header(raw: str) -> Optional[str]:
         return 'waste_type'
     if n.startswith('weight'):
         return 'weight'
+    if n.startswith('destination'):
+        return 'destination'
     return None
 
 
@@ -285,7 +287,9 @@ def parse_waste_data(file_bytes: bytes, filename: Optional[str] = None) -> List[
     filename extension as a fallback. Fully-empty rows are skipped. Each returned dict carries
     the 1-based source row number as `row_index` plus the canonical columns:
         date, level1..level4, tag, tenant, waste_type, weight (all raw cell values).
-    Raises ValueError if the required Date / Waste Type headers are missing.
+    An OPTIONAL trailing `destination` column (header "Destination") is also picked up when
+    present (9 canonical columns without it, 10 with) — mapped by header name, so column
+    order stays flexible. Raises ValueError if the required Date / Waste Type headers are missing.
     """
     if _looks_like_xlsx(file_bytes, filename):
         return _parse_xlsx(file_bytes)

@@ -412,7 +412,7 @@ def handle_update_organization_setup(org_service: OrganizationService, user_id: 
         if level_names_only:
             # Only update scalar settings on the existing active setup (no new version):
             # level names + the input_destination toggle (General Settings).
-            level_names = {k: body[k] for k in ('branch_level_name', 'building_level_name', 'floor_level_name', 'room_level_name', 'input_destination') if k in body}
+            level_names = {k: body[k] for k in ('branch_level_name', 'building_level_name', 'floor_level_name', 'room_level_name', 'input_destination', 'show_all_location_options') if k in body}
             setup_data = org_service.update_organization_setup_level_names(
                 organization_id=organization.id,
                 level_names=level_names

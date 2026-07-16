@@ -142,6 +142,34 @@ class ImportService:
         payload = row.preview_payload or {}
         return {'success': True, 'data': {**self._row_meta(row), **payload}}
 
+    def save_preview(self, import_file_id: int, organization_id: int,
+                     rows: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+        """
+        Persist the in-progress (edited/row-deleted) review rows WITHOUT confirming, so reopening
+        the import from history reflects the user's edits + deletions instead of the original
+        extract. Options are preserved; the summary is recomputed. No-op once confirmed/reverted.
+        """
+        row = self._get_row(import_file_id, organization_id)
+        if not row:
+            return {'success': False, 'message': 'Import file not found'}
+        if row.status in ('confirmed', 'confirming', 'reverted'):
+            # Already committed — the review is read-only; don't overwrite.
+            return {'success': True, 'data': self._row_meta(row)}
+        try:
+            review_rows = rows if rows is not None else (row.preview_payload or {}).get('review_rows', [])
+            payload = dict(row.preview_payload or {})
+            payload['review_rows'] = review_rows
+            row.preview_payload = payload
+            row.summary = self._summarize(review_rows)
+            row.status = 'extracted'
+            self.db.commit()
+            self.db.refresh(row)
+            return {'success': True, 'data': self._row_meta(row)}
+        except Exception as e:
+            self.db.rollback()
+            logger.error(f"import save_preview error: {e}")
+            return {'success': False, 'message': 'Could not save preview', 'errors': [str(e)]}
+
     # ── 4. Confirm → create grouped transactions ────────────────────────────────
     def confirm(
         self,
@@ -212,6 +240,10 @@ class ImportService:
                         'origin_quantity': (weight / unit_weight) if unit_weight else weight,
                         'origin_price_per_unit': 0,
                         'total_amount': 0,
+                        # Optional destination (matched from the "Destination" column). create_transaction
+                        # collects these per record into Transaction.destination_ids + sets each record's
+                        # destination_id. None → no destination for that record.
+                        'destination_id': r.get('destination_id'),
                         'created_by_id': user_id,
                         'transaction_date': tx_dt,
                     })
@@ -310,6 +342,49 @@ class ImportService:
             self.db.rollback()
             logger.error(f"import reimport error: {e}")
             return {'success': False, 'message': 'Re-import failed', 'errors': [str(e)]}
+
+    # ── Template ────────────────────────────────────────────────────────────────
+    def get_template(self, with_destination: bool = False) -> Dict[str, Any]:
+        """
+        Build a blank .xlsx import template (headers + one example row) and return it as
+        base64 (the Lambda dispatcher is JSON-only). Two variants: with vs without the
+        optional trailing "Destination" column — the caller picks based on the org's
+        input_destination setting.
+        """
+        import io
+        import base64
+        from openpyxl import Workbook
+
+        headers = [
+            'Date', 'Level 1 (Branch)', 'Level 2 (Building)', 'Level 3 (Floor)',
+            'Level 4 (Room)', 'Tag (Event)', 'Tenant (Company)', 'Waste Type', 'Weight (kg.)',
+        ]
+        example = [
+            '2026-06-01 09:30', 'Branch A', 'Building 1', 'Floor 2', 'Room 201',
+            '-', '-', 'ขยะทั่วไป', 12.5,
+        ]
+        if with_destination:
+            headers.append('Destination')
+            example.append('โรงคัดแยกวัสดุรีไซเคิล')
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = M.WASTE_DATA_SHEET  # "Waste Data" — the only sheet the parser reads
+        ws.append(headers)
+        ws.append(example)
+        buf = io.BytesIO()
+        wb.save(buf)
+
+        filename = 'GEPP_Import_Template_with_destination.xlsx' if with_destination \
+            else 'GEPP_Import_Template.xlsx'
+        return {
+            'success': True,
+            'data': {
+                'filename': filename,
+                'content_base64': base64.b64encode(buf.getvalue()).decode('ascii'),
+                'mime_type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            },
+        }
 
     # ── Internal helpers ────────────────────────────────────────────────────────
     def _get_row(self, import_file_id: int, organization_id: int) -> Optional[ImportFile]:
@@ -459,6 +534,38 @@ class ImportService:
 
         _walk(root_nodes, [], 0)
 
+        # Destination candidates = the same universe as the app's destination picker:
+        #   (1) hub-type locations, and (2) origin nodes flagged is_destination in root_nodes.
+        # Matched against a row's optional "Destination" column by name (th/en/display).
+        dest_ids: set = set()
+        for lid, info in loc_by_id.items():
+            if info.get('type') == 'hub':
+                dest_ids.add(lid)
+
+        def _collect_dest(nodes):
+            for node in nodes or []:
+                if node.get('is_destination'):
+                    try:
+                        dest_ids.add(int(node.get('nodeId')))
+                    except (TypeError, ValueError):
+                        pass
+                _collect_dest(node.get('children'))
+        _collect_dest(root_nodes)
+
+        destinations: List[Dict[str, Any]] = []
+        for lid in dest_ids:
+            info = loc_by_id.get(lid)
+            if not info:
+                continue
+            destinations.append({
+                'id': lid,
+                'names': info['names'],
+                'display': info['display'],
+                'path': ancestor_labels.get(lid, ''),  # hubs live outside root_nodes → ''
+            })
+        # Origins (in the tree) first in pre-order; hubs (not in tree) after.
+        destinations.sort(key=lambda d: tree_order.index(d['id']) if d['id'] in tree_order else 10**9)
+
         # Order locations in tree pre-order (parents before children); any not in the tree last.
         ordered_ids = [lid for lid in tree_order if lid in loc_by_id]
         ordered_ids += [lid for lid in loc_by_id if lid not in depth_by_id]
@@ -480,6 +587,9 @@ class ImportService:
             'materials': mat_list,
             'tags': [{'id': tid, 'name': name} for tid, name in tag_by_id.items()],
             'tenants': [{'id': tid, 'name': name} for tid, name in tenant_by_id.items()],
+            'destinations': [
+                {'id': d['id'], 'name': d['display'], 'path': d['path']} for d in destinations
+            ],
         }
 
         return {
@@ -488,6 +598,7 @@ class ImportService:
             'tag_by_id': tag_by_id,
             'tenant_by_id': tenant_by_id,
             'materials': mat_list,
+            'destinations': destinations,
             'path_labels': path_labels,
             'options': options,
         }
@@ -564,6 +675,18 @@ class ImportService:
             tenant_cands = [(tid, [tenant_by_id[tid]]) for tid in loc_info.get('tenant_ids', []) if tid in tenant_by_id]
             tenant_id, _ = M.best_candidate(str(raw.get('tenant') or ''), tenant_cands)
 
+        # Destination (optional) — matched against hubs + is_destination origins by name.
+        # Blank / no column → None (destination is optional and never causes exclusion).
+        destination_id = None
+        dest_val = raw.get('destination')
+        if not M.is_blank(dest_val) and ctx.get('destinations'):
+            dest_cands = [(d['id'], d['names']) for d in ctx['destinations']]
+            destination_id, _ = M.best_candidate(str(dest_val), dest_cands)
+        destination_label = None
+        if destination_id is not None:
+            destination_label = next(
+                (d['display'] for d in ctx['destinations'] if d['id'] == destination_id), None)
+
         # Exclusion: a row must resolve to a location + material + positive weight + a date.
         reason = None
         if origin_id is None:
@@ -594,12 +717,14 @@ class ImportService:
             'material_label': (mat['name_th'] or mat['name_en']) if mat else None,
             'unit_label': (mat['unit_name_th'] or mat['unit_name_en']) if mat else None,
             'weight': weight,
+            'destination_id': destination_id,
+            'destination_label': destination_label,
             'raw': {
                 'level1': M._clean(raw.get('level1')), 'level2': M._clean(raw.get('level2')),
                 'level3': M._clean(raw.get('level3')), 'level4': M._clean(raw.get('level4')),
                 'tag': M._clean(raw.get('tag')), 'tenant': M._clean(raw.get('tenant')),
                 'waste_type': M._clean(raw.get('waste_type')), 'weight': M._clean(raw.get('weight')),
-                'date': M._clean(raw.get('date')),
+                'date': M._clean(raw.get('date')), 'destination': M._clean(raw.get('destination')),
             },
         }
 

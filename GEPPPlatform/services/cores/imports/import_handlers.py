@@ -42,6 +42,12 @@ def handle_import_routes(event: Dict[str, Any], data: Dict[str, Any], **params) 
     service = ImportService(db_session)
     data = data or {}
 
+    # Template download — GET /api/import-files/template?with_destination=true|false.
+    # Handled before id-parsing since "template" is not a numeric import_file_id.
+    if method == 'GET' and path.rstrip('/').endswith('/template'):
+        with_destination = str(query_params.get('with_destination', '')).lower() in ('1', 'true', 'yes')
+        return service.get_template(with_destination=with_destination)
+
     # Parse path → import_file_id + action.
     segments = [s for s in path.strip('/').split('/') if s]  # e.g. ['api','import-files','12','extract']
     import_file_id = None
@@ -67,6 +73,9 @@ def handle_import_routes(event: Dict[str, Any], data: Dict[str, Any], **params) 
         return service.get_preview(import_file_id, organization_id)
     if method == 'POST' and action == 'extract':
         return service.extract(import_file_id, organization_id)
+    if method == 'POST' and action == 'save':
+        # Persist edited/deleted review rows without confirming (so reopening reflects them).
+        return service.save_preview(import_file_id, organization_id, data.get('rows'))
     if method == 'POST' and action == 'confirm':
         rows = data.get('rows')
         return service.confirm(import_file_id, organization_id, user_id, rows)
