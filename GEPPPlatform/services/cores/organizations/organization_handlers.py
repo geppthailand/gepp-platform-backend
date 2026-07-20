@@ -410,13 +410,29 @@ def handle_update_organization_setup(org_service: OrganizationService, user_id: 
             raise ValidationException(validation_errors)
 
         if level_names_only:
-            # Only update scalar settings on the existing active setup (no new version):
-            # level names + the input_destination toggle (General Settings).
-            level_names = {k: body[k] for k in ('branch_level_name', 'building_level_name', 'floor_level_name', 'room_level_name', 'input_destination', 'show_all_location_options') if k in body}
-            setup_data = org_service.update_organization_setup_level_names(
-                organization_id=organization.id,
-                level_names=level_names
-            )
+            # Scalar-settings update (no new version). Level names stay per-ORG; the two
+            # data-entry toggles are PER USER → routed to user_locations_settings.
+            user_patch = {k: body[k] for k in ('input_destination', 'show_all_location_options') if k in body}
+            level_names = {k: body[k] for k in ('branch_level_name', 'building_level_name', 'floor_level_name', 'room_level_name') if k in body}
+
+            if user_patch:
+                org_service.upsert_user_location_settings(
+                    user_location_id=user_id, organization_id=organization.id, patch=user_patch,
+                )
+
+            if level_names:
+                setup_data = org_service.update_organization_setup_level_names(
+                    organization_id=organization.id,
+                    level_names=level_names
+                )
+            else:
+                setup_data = org_service.get_organization_setup(organization.id) or {}
+
+            # Reflect the acting user's effective (per-user) toggles in the response.
+            eff = org_service.get_user_location_settings(user_id)
+            if setup_data is not None:
+                setup_data['input_destination'] = eff['input_destination']
+                setup_data['show_all_location_options'] = eff['show_all_location_options']
         else:
             # Prepare setup data including locations
             setup_data_dict = setup_request.to_dict()

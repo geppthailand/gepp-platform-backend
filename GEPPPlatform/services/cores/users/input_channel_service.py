@@ -218,6 +218,7 @@ class InputChannelService:
                 channel_type='qr',
                 form_type=data.get('form_type', 'daily'),
                 enable_upload_image=data.get('enable_upload_image', False),
+                enable_upload_image_per_material=data.get('enable_upload_image_per_material', False),
                 required_tag=data.get('required_tag', False),
                 is_drop_off_point=data.get('is_drop_off_point', False),
                 sub_material_ids=[],
@@ -325,6 +326,8 @@ class InputChannelService:
                 channel.form_type = data['form_type']
             if 'enable_upload_image' in data:
                 channel.enable_upload_image = data['enable_upload_image']
+            if 'enable_upload_image_per_material' in data:
+                channel.enable_upload_image_per_material = data['enable_upload_image_per_material']
             if 'required_tag' in data:
                 channel.required_tag = data['required_tag']
             if 'is_drop_off_point' in data:
@@ -604,6 +607,7 @@ class InputChannelService:
             existing.sub_material_destination_ids = data.get('sub_material_destination_ids', [])
             existing.subuser_names = data.get('subuser_names', [])
             existing.enable_upload_image = data.get('enable_upload_image', False)
+            existing.enable_upload_image_per_material = data.get('enable_upload_image_per_material', False)
             existing.required_tag = data.get('required_tag', False)
             existing.is_drop_off_point = data.get('is_drop_off_point', False)
             existing.updated_date = datetime.utcnow()
@@ -622,6 +626,7 @@ class InputChannelService:
             sub_material_destination_ids=data.get('sub_material_destination_ids', []),
             subuser_names=data.get('subuser_names', []),
             enable_upload_image=data.get('enable_upload_image', False),
+            enable_upload_image_per_material=data.get('enable_upload_image_per_material', False),
             required_tag=data.get('required_tag', False),
             is_drop_off_point=data.get('is_drop_off_point', False),
             is_active=True
@@ -661,6 +666,8 @@ class InputChannelService:
             channel.subuser_names = data['subuser_names']
         if 'enable_upload_image' in data:
             channel.enable_upload_image = data['enable_upload_image']
+        if 'enable_upload_image_per_material' in data:
+            channel.enable_upload_image_per_material = data['enable_upload_image_per_material']
         if 'required_tag' in data:
             channel.required_tag = data['required_tag']
         if 'is_drop_off_point' in data:
@@ -732,6 +739,7 @@ class InputChannelService:
             'sub_material_destination_ids': channel.sub_material_destination_ids or [],
             'subuser_names': channel.subuser_names or [],
             'enable_upload_image': channel.enable_upload_image,
+            'enable_upload_image_per_material': bool(getattr(channel, 'enable_upload_image_per_material', False)),
             'required_tag': channel.required_tag,
             'is_drop_off_point': channel.is_drop_off_point,
             'is_active': channel.is_active,
@@ -744,6 +752,7 @@ class InputChannelService:
             'subMaterialDestinationIds': channel.sub_material_destination_ids or [],
             'subUsers': channel.subuser_names or [],
             'enableUploadImage': channel.enable_upload_image,
+            'enableUploadImagePerMaterial': bool(getattr(channel, 'enable_upload_image_per_material', False)),
             'requiredTag': channel.required_tag,
             'isDropOffPoint': channel.is_drop_off_point,
         }
@@ -1481,9 +1490,9 @@ class InputChannelService:
                 self.db.flush()
                 transaction_record_ids.append(record.id)
 
-                # Upload per-record images from matData
+                # Upload per-record images from matData — gated on the PER-MATERIAL flag.
                 record_images = record_data.get('images', [])
-                if record_images and channel.enable_upload_image:
+                if record_images and getattr(channel, 'enable_upload_image_per_material', False):
                     try:
                         record_file_ids = upload_b64_images(
                             record_images, 'transaction_record', record.id, f"qr_record_{transaction.id}"
