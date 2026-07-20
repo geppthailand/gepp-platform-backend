@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from GEPPPlatform.models.base import Base
 from GEPPPlatform.models.users.user_location import UserLocation
 from GEPPPlatform.models.users.user_related import UserPreference, UserInvitation, UserBank, UserSubscription, UserActivity, UserDevice
+from GEPPPlatform.models.users.user_locations_settings import UserLocationSettings
 from GEPPPlatform.models.cores.roles import SystemRole, SystemPermission
 from GEPPPlatform.models.subscriptions.organizations import Organization, OrganizationInfo
 from GEPPPlatform.models.subscriptions.subscription_models import SubscriptionPlan, Subscription, OrganizationPermission, OrganizationRole

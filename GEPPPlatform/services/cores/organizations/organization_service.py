@@ -9,8 +9,13 @@ from sqlalchemy import and_, text
 from ....models.subscriptions.organizations import Organization, OrganizationInfo, OrganizationSetup
 from ....models.subscriptions.subscription_models import OrganizationRole
 from ....models.users.user_location import UserLocation
+from ....models.users.user_locations_settings import UserLocationSettings
 from ....exceptions import ValidationException
 from .organization_role_presets import OrganizationRolePresets
+
+# System defaults for the per-user data-entry settings when a user has no row yet.
+DEFAULT_INPUT_DESTINATION = False
+DEFAULT_SHOW_ALL_LOCATION_OPTIONS = True
 
 
 class OrganizationService:
@@ -163,6 +168,51 @@ class OrganizationService:
         return self.role_presets.delete_role(organization_id, role_id)
 
     # Organization Setup CRUD operations
+    # ── Per-user data-entry settings (input_destination / show_all_location_options) ──────
+    def get_user_location_settings(self, user_location_id: Optional[int]) -> Dict[str, Any]:
+        """The user's effective data-entry settings. Falls back to system defaults when the
+        user has no row yet — these toggles are PER USER, not per org."""
+        row = None
+        if user_location_id:
+            row = self.db.query(UserLocationSettings).filter(
+                UserLocationSettings.user_location_id == user_location_id,
+                UserLocationSettings.deleted_date.is_(None),
+            ).first()
+        return {
+            'input_destination': bool(row.input_destination) if row else DEFAULT_INPUT_DESTINATION,
+            'show_all_location_options': (
+                bool(row.show_all_location_options) if row else DEFAULT_SHOW_ALL_LOCATION_OPTIONS
+            ),
+        }
+
+    def upsert_user_location_settings(self, user_location_id: int, organization_id: Optional[int],
+                                      patch: Dict[str, Any]) -> Dict[str, Any]:
+        """Create/update the acting user's settings row (one live row per user). Only the keys
+        present in `patch` are changed; the rest keep their stored/default value."""
+        row = self.db.query(UserLocationSettings).filter(
+            UserLocationSettings.user_location_id == user_location_id,
+            UserLocationSettings.deleted_date.is_(None),
+        ).first()
+        if not row:
+            row = UserLocationSettings(
+                user_location_id=user_location_id, organization_id=organization_id,
+                input_destination=DEFAULT_INPUT_DESTINATION,
+                show_all_location_options=DEFAULT_SHOW_ALL_LOCATION_OPTIONS,
+            )
+            self.db.add(row)
+        if organization_id and not row.organization_id:
+            row.organization_id = organization_id
+        if 'input_destination' in patch and patch['input_destination'] is not None:
+            row.input_destination = bool(patch['input_destination'])
+        if 'show_all_location_options' in patch and patch['show_all_location_options'] is not None:
+            row.show_all_location_options = bool(patch['show_all_location_options'])
+        self.db.commit()
+        self.db.refresh(row)
+        return {
+            'input_destination': bool(row.input_destination),
+            'show_all_location_options': bool(row.show_all_location_options),
+        }
+
     def get_organization_setup(self, organization_id: int) -> Optional[Dict[str, Any]]:
         """
         Get the current organization setup structure.
@@ -218,6 +268,12 @@ class OrganizationService:
         setup = self.get_organization_setup(organization_id)
         if not setup:
             return setup
+
+        # These two toggles are PER USER — override the org-setup values with the acting user's
+        # effective settings (defaults when unset) so every setup-GET consumer is per-user.
+        eff = self.get_user_location_settings(current_user_id)
+        setup['input_destination'] = eff['input_destination']
+        setup['show_all_location_options'] = eff['show_all_location_options']
 
         # Get tiers from user_service
         from ..users.user_service import UserService
@@ -678,11 +734,8 @@ class OrganizationService:
             if key in level_names:
                 setattr(setup, key, level_names[key])
 
-        # General-settings scalar toggles persisted on the same active setup (no new version).
-        if 'input_destination' in level_names:
-            setup.input_destination = bool(level_names['input_destination'])
-        if 'show_all_location_options' in level_names:
-            setup.show_all_location_options = bool(level_names['show_all_location_options'])
+        # NOTE: input_destination / show_all_location_options are now PER USER
+        # (user_locations_settings) — the handler routes them there, not to this org row.
 
         # Persist — flush alone left the change uncommitted (rolled back at request end), so the
         # toggle reverted on refresh. Mirror update_ai_audit_permission which commits directly.
@@ -897,6 +950,14 @@ class OrganizationService:
                         updated = True
                         print(f"  Updated existing location {node_id} with members: {users}")
 
+                    # Update materials only if the field was explicitly provided (a list).
+                    # The tree carries each node's materials from load, so this is idempotent
+                    # for untouched nodes and applies the new selection for edited ones.
+                    if 'materials' in location_data and isinstance(location_data.get('materials'), list):
+                        existing_location.materials = location_data['materials']
+                        updated = True
+                        print(f"  Updated existing location {node_id} with materials: {location_data['materials']}")
+
                     # Update display_name and name_en if provided
                     if display_name:
                         # Check for duplicate destination names if this is a hub/destination
@@ -978,6 +1039,7 @@ class OrganizationService:
                     hub_type=location_data.get('hub_type'),  # Hub type from hubData.type
                     members=location_data.get('users', []),  # Store user assignments in members column
                     address=location_data.get('address'),  # Address of the location
+                    materials=location_data.get('materials') or [],  # Material IDs assigned to this location
                 )
 
                 print(f"  Creating new location: {display_name}")

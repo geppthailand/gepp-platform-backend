@@ -255,20 +255,19 @@ class TransactionService:
                 'errors': [str(e)]
             }
 
-    def _org_input_destination(self, organization_id: Optional[int]) -> bool:
-        """True when the org's active setup has input_destination enabled ("กรอกปลายทาง" mode)."""
-        if not organization_id:
+    def _user_input_destination(self, user_location_id: Optional[int]) -> bool:
+        """True when THIS user has input_destination enabled ("กรอกปลายทาง" mode). The toggle is
+        per-user (user_locations_settings); default False when the user has no row. Used at
+        approval time keyed on the transaction's creator."""
+        if not user_location_id:
             return False
         try:
-            setup = self.db.query(OrganizationSetup).filter(
-                OrganizationSetup.organization_id == organization_id,
-                OrganizationSetup.is_active == True,
+            from ....models.users.user_locations_settings import UserLocationSettings
+            row = self.db.query(UserLocationSettings).filter(
+                UserLocationSettings.user_location_id == user_location_id,
+                UserLocationSettings.deleted_date.is_(None),
             ).first()
-            if not setup:
-                setup = self.db.query(OrganizationSetup).filter(
-                    OrganizationSetup.organization_id == organization_id,
-                ).order_by(OrganizationSetup.created_date.desc()).first()
-            return bool(setup and setup.input_destination)
+            return bool(row.input_destination) if row else False
         except Exception:
             return False
 
@@ -284,7 +283,9 @@ class TransactionService:
         materialization on read reuses this group and never double-creates.
         """
         try:
-            if not transaction or not self._org_input_destination(getattr(transaction, 'organization_id', None)):
+            # Per-user "กรอกปลายทาง": gate on the transaction CREATOR's setting (the person who
+            # entered the destination at data-entry), not an org-wide flag.
+            if not transaction or not self._user_input_destination(getattr(transaction, 'created_by_id', None)):
                 return
             from ....models.transactions.traceability_transaction_group import TraceabilityTransactionGroup
             from ....models.transactions.transport_transaction import TransportTransaction
