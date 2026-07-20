@@ -897,6 +897,14 @@ class OrganizationService:
                         updated = True
                         print(f"  Updated existing location {node_id} with members: {users}")
 
+                    # Update materials only if the field was explicitly provided (a list).
+                    # The tree carries each node's materials from load, so this is idempotent
+                    # for untouched nodes and applies the new selection for edited ones.
+                    if 'materials' in location_data and isinstance(location_data.get('materials'), list):
+                        existing_location.materials = location_data['materials']
+                        updated = True
+                        print(f"  Updated existing location {node_id} with materials: {location_data['materials']}")
+
                     # Update display_name and name_en if provided
                     if display_name:
                         # Check for duplicate destination names if this is a hub/destination
@@ -978,6 +986,7 @@ class OrganizationService:
                     hub_type=location_data.get('hub_type'),  # Hub type from hubData.type
                     members=location_data.get('users', []),  # Store user assignments in members column
                     address=location_data.get('address'),  # Address of the location
+                    materials=location_data.get('materials') or [],  # Material IDs assigned to this location
                 )
 
                 print(f"  Creating new location: {display_name}")

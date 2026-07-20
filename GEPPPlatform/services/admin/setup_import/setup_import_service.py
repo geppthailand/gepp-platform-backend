@@ -207,9 +207,20 @@ class SetupImportService:
             if u.display_name:
                 existing_dest_id_by_name.setdefault(_norm(u.display_name), int(u.id))
 
+        # Owner is excluded from import (never created/updated). Rows resolving to the owner
+        # (by id or by email) are dropped from the preview entirely.
+        owner_id, owner_email = self._owner_info(organization_id)
+
         # Existing record ids per type — an ID in the file that matches one of these is an UPSERT
         # (mode='update'); otherwise mode='new'. Also used to validate ID-uniqueness within a type.
         existing_user_ids = {int(u.id) for u in existing_users}
+        # email(lower) → this-org live user id — lets an update be matched by EMAIL when the file's
+        # ID column is stale/blank (e.g. a prior import re-created the user under a new id), so a
+        # re-import stays idempotent instead of flagging a false "email already exists".
+        existing_user_id_by_email = {}
+        for eu in existing_users:
+            if eu.email:
+                existing_user_id_by_email.setdefault(eu.email.strip().lower(), int(eu.id))
         existing_tag_ids = {int(r[0]) for r in self.db.query(UserLocationTag.id).filter(
             UserLocationTag.organization_id == organization_id, UserLocationTag.deleted_date.is_(None)).all()}
         existing_tenant_ids = {int(r[0]) for r in self.db.query(UserTenant.id).filter(
@@ -232,21 +243,44 @@ class SetupImportService:
         # -- Users --
         users_out, seen_emails, seen_user_ids = [], {}, set()
         for u in parsed['users']:
-            errors = []
-            mode = _id_check(u.get('id'), seen_user_ids, existing_user_ids, errors)
             email = (u['email'] or '').strip()
+            email_lower = email.lower()
+            rid = u.get('id')
+
+            # Skip the org owner — never imported (create or update).
+            if owner_id is not None and (
+                (rid is not None and int(rid) == owner_id)
+                or (owner_email and email_lower == owner_email)
+                or (email and self._email_owner_id(email) == owner_id)
+            ):
+                continue
+
+            errors = []
+            # Resolve which existing user (this org) this row targets: by explicit ID first, then
+            # by email. Either match ⇒ mode='update' and we reuse that id (so confirm updates it).
+            by_id = int(rid) if (rid is not None and int(rid) in existing_user_ids) else None
+            by_email = existing_user_id_by_email.get(email_lower) if email_lower else None
+            target_id = by_id if by_id is not None else by_email
+            mode = 'update' if target_id is not None else 'new'
+            # duplicate-ID within the file (only meaningful for an explicit ID)
+            if rid is not None:
+                if int(rid) in seen_user_ids:
+                    errors.append('duplicate_id')
+                seen_user_ids.add(int(rid))
+
             if not email:
                 errors.append('email_required')
             elif not _EMAIL_RE.match(email):
                 errors.append('email_invalid')
             else:
-                key = email.lower()
-                if key in seen_emails:
+                if email_lower in seen_emails:
                     errors.append('email_duplicate_in_file')
-                seen_emails[key] = True
-                # exclude self id so an UPSERT row keeping its own email is not flagged.
-                if self._email_exists(email, exclude_id=u.get('id')):
-                    errors.append('email_exists')  # GLOBAL uniqueness
+                seen_emails[email_lower] = True
+                # An email is a blocking duplicate ONLY when a LIVE user other than the one this
+                # row updates owns it. Same owner as target_id (or target_id itself) ⇒ update, fine.
+                owner_of_email = self._email_owner_id(email)
+                if owner_of_email is not None and owner_of_email != target_id:
+                    errors.append('email_exists')  # belongs to a different existing user
             role_key = _role_key(u['role'])
             if not role_key:
                 errors.append('role_unknown')
@@ -261,7 +295,7 @@ class SetupImportService:
                 pwd = _gen_password()
             blocking += len(errors)
             users_out.append({
-                **u, 'password': pwd, 'password_generated': password_generated,
+                **u, 'id': target_id, 'password': pwd, 'password_generated': password_generated,
                 'role_key': role_key, 'mode': mode, 'errors': errors,
             })
 
@@ -363,6 +397,9 @@ class SetupImportService:
         import base64
         from openpyxl import Workbook
 
+        # Owner is excluded from the export — every other user is exported, never the owner.
+        owner_id, _owner_email = self._owner_info(organization_id)
+
         setup = self.db.query(OrganizationSetup).filter(
             OrganizationSetup.organization_id == organization_id,
             OrganizationSetup.is_active == True,  # noqa: E712
@@ -442,6 +479,8 @@ class SetupImportService:
         ws.title = 'Users'
         ws.append(['Display Name', 'Email', 'Password', 'Role', 'First Name', 'Last Name', 'QR Name', 'ID'])
         for l in sorted((x for x in locs if x.is_user), key=lambda x: int(x.id)):
+            if owner_id is not None and int(l.id) == owner_id:
+                continue  # never export the owner
             role_label = _ROLE_LABEL.get(role_key_by_id.get(int(l.organization_role_id) if l.organization_role_id else None), '')
             ws.append([l.display_name, l.email, '', role_label, l.first_name, l.last_name, l.qr_name, int(l.id)])
         # Role column (D) is a dropdown in Excel — the 4 valid roles. Covers extra rows the admin
@@ -530,7 +569,7 @@ class SetupImportService:
 
         preview = edited or row.preview_payload or {}
         # Re-validate emails on the (possibly edited) payload — the admin may have fixed dups.
-        revalidation = self._revalidate_users(preview.get('users', []))
+        revalidation = self._revalidate_users(preview.get('users', []), organization_id)
         if revalidation:
             return {'success': False, 'message': 'Validation failed', 'errors': revalidation}
 
@@ -558,10 +597,19 @@ class SetupImportService:
                 UserLocation.organization_id == organization_id, UserLocation.is_location == True,  # noqa: E712
                 UserLocation.is_active == True, UserLocation.deleted_date.is_(None)).all()}  # noqa: E712
 
+            # Owner is excluded from import (defensive — the preview already drops owner rows).
+            owner_id, owner_email = self._owner_info(organization_id)
+
             # 1) Users (UPSERT by id). display_name(norm) → id (+ role for location membership).
             user_by_name: Dict[str, int] = {}
             user_role_by_name: Dict[str, str] = {}
             for u in preview.get('users', []):
+                _uemail = (u.get('email') or '').strip().lower()
+                if owner_id is not None and (
+                    (u.get('id') is not None and int(u['id']) == owner_id)
+                    or (owner_email and _uemail == owner_email)
+                ):
+                    continue  # never create/update the owner
                 role_key = u.get('role_key') or _role_key(u.get('role')) or 'viewer'
                 existing = existing_user_by_id.get(int(u['id'])) if u.get('id') else None
                 if existing:
@@ -851,21 +899,58 @@ class SetupImportService:
             self.db.rollback()
 
     def _email_exists(self, email: str, exclude_id: Optional[int] = None) -> bool:
-        """Global email uniqueness. exclude_id lets an upsert row keep its own current email."""
+        """
+        Global email uniqueness among LIVE users. A soft-deleted user (deleted_date set OR
+        is_active=False) frees its email — it can be imported again. exclude_id lets an upsert
+        row keep its own current email.
+        """
         from sqlalchemy import func
         q = self.db.query(UserLocation.id).filter(
             func.lower(UserLocation.email) == email.strip().lower(),
             UserLocation.is_user == True,  # noqa: E712
+            UserLocation.is_active == True,  # noqa: E712 — deleted-by-flag users don't block
             UserLocation.deleted_date.is_(None),
         )
         if exclude_id is not None:
             q = q.filter(UserLocation.id != int(exclude_id))
         return q.first() is not None
 
-    def _revalidate_users(self, users: List[Dict[str, Any]]) -> List[str]:
+    def _email_owner_id(self, email: str) -> Optional[int]:
+        """Live global owner (user_location id) of an email, or None. Global uniqueness ⇒ ≤1."""
+        if not email:
+            return None
+        from sqlalchemy import func
+        r = self.db.query(UserLocation.id).filter(
+            func.lower(UserLocation.email) == email.strip().lower(),
+            UserLocation.is_user == True,  # noqa: E712
+            UserLocation.is_active == True,  # noqa: E712
+            UserLocation.deleted_date.is_(None),
+        ).order_by(UserLocation.id.asc()).first()
+        return int(r[0]) if r else None
+
+    def _owner_info(self, organization_id: int) -> Tuple[Optional[int], Optional[str]]:
+        """(owner_user_id, owner_email_lower) for an org. The owner is excluded from
+        import AND export — you can import/export every other user, never the owner."""
+        row = self.db.query(Organization.owner_id).filter(Organization.id == organization_id).first()
+        owner_id = int(row[0]) if row and row[0] is not None else None
+        owner_email = None
+        if owner_id is not None:
+            er = self.db.query(UserLocation.email).filter(UserLocation.id == owner_id).first()
+            owner_email = (er[0].strip().lower() if er and er[0] else None)
+        return owner_id, owner_email
+
+    def _revalidate_users(self, users: List[Dict[str, Any]],
+                          organization_id: Optional[int] = None) -> List[str]:
         errors, seen = [], set()
+        owner_id, owner_email = self._owner_info(organization_id) if organization_id else (None, None)
         for u in users:
             email = (u.get('email') or '').strip()
+            # Owner rows are never imported → skip (defensive; preview already drops them).
+            if owner_id is not None and (
+                (u.get('id') is not None and int(u['id']) == owner_id)
+                or (owner_email and email.lower() == owner_email)
+            ):
+                continue
             if not email or not _EMAIL_RE.match(email):
                 errors.append(f"Row {u.get('row_index')}: invalid email")
                 continue
@@ -873,6 +958,8 @@ class SetupImportService:
             if k in seen:
                 errors.append(f"Row {u.get('row_index')}: duplicate email in file ({email})")
             seen.add(k)
+            # An update row reuses its own id → owning that email is fine; only a DIFFERENT
+            # live user owning it blocks (exclude_id handles the self-ownership case).
             if self._email_exists(email, exclude_id=u.get('id')):
                 errors.append(f"Row {u.get('row_index')}: email already exists ({email})")
             if not (u.get('role_key') or _role_key(u.get('role'))):
