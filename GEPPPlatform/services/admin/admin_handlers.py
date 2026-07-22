@@ -141,6 +141,10 @@ class AdminHandlers:
             'system-permissions': self.admin_service.list_system_permissions,
             'iot-devices': self.admin_service.list_iot_devices,
             'iot-scales': self.admin_service.list_iot_scales,
+            # Materials + reference lists (for the material form's selects)
+            'materials': self.admin_service.list_materials,
+            'main-materials': self.admin_service.list_main_materials,
+            'material-categories': self.admin_service.list_material_categories,
             # CRM / Marketing module
             'crm-segments': lambda qp: crm.list_crm_segments(self.db_session, qp),
             'crm-templates': lambda qp: crm.list_crm_templates(self.db_session, qp),
@@ -169,6 +173,7 @@ class AdminHandlers:
             'system-permissions': self.admin_service.get_system_permission,
             'iot-devices': self.admin_service.get_iot_device,
             'iot-scales': self.admin_service.get_iot_scale,
+            'materials': self.admin_service.get_material,
             # CRM / Marketing
             'crm-segments': lambda rid: crm.get_crm_segment(self.db_session, rid),
             'crm-templates': lambda rid: crm.get_crm_template(self.db_session, rid),
@@ -192,6 +197,7 @@ class AdminHandlers:
             'system-permissions': self.admin_service.create_system_permission,
             'iot-devices': self.admin_service.create_iot_device,
             'iot-scales': self.admin_service.create_iot_scale,
+            'materials': self.admin_service.create_material,
             # CRM / Marketing
             'crm-segments': lambda d: crm.create_crm_segment(self.db_session, d),
             'crm-templates': lambda d: crm.create_crm_template(self.db_session, d),
@@ -214,6 +220,7 @@ class AdminHandlers:
             'system-permissions': self.admin_service.update_system_permission,
             'iot-devices': self.admin_service.update_iot_device,
             'iot-scales': self.admin_service.update_iot_scale,
+            'materials': self.admin_service.update_material,
             # CRM / Marketing
             'crm-segments': lambda rid, d: crm.update_crm_segment(self.db_session, rid, d),
             'crm-templates': lambda rid, d: crm.update_crm_template(self.db_session, rid, d),
@@ -234,6 +241,7 @@ class AdminHandlers:
             'system-permissions': self.admin_service.delete_system_permission,
             'iot-devices': lambda rid: self.admin_service.delete_iot_device(rid, current_user=self.current_user),
             'iot-scales': self.admin_service.delete_iot_scale,
+            'materials': self.admin_service.delete_material,
             # CRM / Marketing
             'crm-segments': lambda rid: crm.delete_crm_segment(self.db_session, rid),
             'crm-templates': lambda rid: crm.delete_crm_template(self.db_session, rid),

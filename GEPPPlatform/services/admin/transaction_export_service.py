@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session, joinedload
 
 from GEPPPlatform.exceptions import BadRequestException, NotFoundException
@@ -315,10 +316,13 @@ class AdminTransactionExportService:
         q = (
             self.db.query(Transaction)
             .options(joinedload(Transaction.origin))
-            .filter(Transaction.organization_id == organization_id)
             .filter(Transaction.is_active == True)  # noqa: E712
             .filter(Transaction.deleted_date.is_(None))
         )
+
+        # Own-org clause (+ optional origin-subtree filter).
+        own_conditions = [Transaction.organization_id == organization_id]
+        own_selected_ids: Optional[set] = None
         if origin_id is not None:
             # Expand the origin filter to the node's whole subtree in
             # `root_nodes`. A node X's descendants are exactly the nodes
@@ -331,7 +335,38 @@ class AdminTransactionExportService:
             ]
             if not subtree_ids:
                 subtree_ids = [origin_id]
-            q = q.filter(Transaction.origin_id.in_(subtree_ids))
+            own_conditions.append(Transaction.origin_id.in_(subtree_ids))
+            own_selected_ids = set(subtree_ids)
+        own_clause = and_(*own_conditions)
+
+        # Cross-org shared-location injection — mirrors the business platform's
+        # transaction list (transaction_service.list_transactions): transactions from
+        # locations another org shared to THIS org are OR'd in as read-only, date-bounded
+        # branches, rolled up under the shared location's name. Reuse the exact resolver so
+        # the export can never drift from what the app shows. Back-office admin export sees
+        # all placed shares (no member gate → visible_parent_ids=None). When an origin filter
+        # is active, a share is included only if its placement parent is within the selection.
+        from ..cores.transactions.transaction_service import TransactionService
+        tx_service = TransactionService(self.db)
+        shared_branches, share_meta_by_origin = tx_service._resolve_shared_branches(
+            organization_id, own_selected_ids, visible_parent_ids=None
+        )
+        shared_clauses = []
+        for b in shared_branches:
+            conds = [
+                Transaction.organization_id == b['source_org_id'],
+                Transaction.origin_id.in_(b['src_ids']),
+            ]
+            if b.get('start_date'):
+                conds.append(Transaction.transaction_date >= b['start_date'])
+            if b.get('end_date'):
+                conds.append(Transaction.transaction_date <= b['end_date'])
+            shared_clauses.append(and_(*conds))
+
+        q = q.filter(or_(own_clause, *shared_clauses) if shared_clauses else own_clause)
+
+        # The user's date range applies to own AND shared rows alike (the share's own
+        # window is additionally enforced inside each shared branch above).
         if date_from is not None:
             q = q.filter(Transaction.transaction_date >= date_from)
         if date_to is not None:
@@ -392,6 +427,9 @@ class AdminTransactionExportService:
         # land in the Branch column as a best-effort label.
         all_lookup_ids: set = set()
         for tx in transactions:
+            # Shared (cross-org) rows are labelled from the share meta, not this org's tree.
+            if tx.origin_id and tx.origin_id in share_meta_by_origin:
+                continue
             if tx.origin_id and tx.origin_id in path_by_node_id:
                 all_lookup_ids.update(path_by_node_id[tx.origin_id])
             elif tx.origin_id:
@@ -409,7 +447,15 @@ class AdminTransactionExportService:
             tag_label = tag_name_by_id.get(tx.location_tag_id, '') if tx.location_tag_id else ''
 
             level_columns: List[str] = ['', '', '', '']
-            if tx.origin_id:
+            shared_meta = share_meta_by_origin.get(tx.origin_id) if tx.origin_id else None
+            if shared_meta:
+                # Cross-org shared row: roll up under the shared location's name and hide the
+                # source org's internal hierarchy (same contract as the business platform — the
+                # children collapse under the shared node). Add the source org for context.
+                label = shared_meta.get('label') or _loc_label(tx.origin) or ''
+                src_org = shared_meta.get('source_org_name')
+                level_columns[0] = f'{label} ({src_org})' if src_org else label
+            elif tx.origin_id:
                 ancestor_ids = path_by_node_id.get(tx.origin_id)
                 if ancestor_ids:
                     for col_idx, pid in enumerate(ancestor_ids[:4]):

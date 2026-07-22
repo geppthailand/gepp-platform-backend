@@ -90,6 +90,7 @@ class Material(Base, BaseModel):
 
     # New tag-based structure (using main_material_id instead of base_material_id)
     tags = Column(JSONB, nullable=False, default=[])  # Array of tuples [(tag_group_id, tag_id), ...]
+    fixed_tags = Column(JSONB, nullable=False, default=[])  # Fixed/locked tag assignments
 
     # Multi-tenant support
     is_global = Column(Boolean, nullable=False, default=True)
@@ -108,6 +109,17 @@ class Material(Base, BaseModel):
     category = relationship("MaterialCategory")
     main_material = relationship("MainMaterial")
     organization = relationship("Organization")
+
+
+class MaterialImage(Base, BaseModel):
+    """Images attached to a material (0..N). Stored on S3; `image_url` is the public URL."""
+    __tablename__ = 'material_images'
+
+    material_id = Column(BigInteger, ForeignKey('materials.id'), nullable=False)
+    image_url = Column(Text, nullable=False)
+
+    material = relationship("Material")
+
 
 class Nationality(Base, BaseModel):
     __tablename__ = 'nationalities'

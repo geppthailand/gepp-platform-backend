@@ -21,6 +21,9 @@ from GEPPPlatform.models.subscriptions.subscription_models import (
 from GEPPPlatform.models.cores.roles import SystemPermission, subscription_permissions
 from GEPPPlatform.models.cores.iot_devices import IoTDevice
 from GEPPPlatform.models.cores.iot_scales import IoTScale
+from GEPPPlatform.models.cores.references import (
+    Material, MainMaterial, MaterialCategory, MaterialImage,
+)
 from GEPPPlatform.exceptions import (
     NotFoundException,
     BadRequestException,
@@ -3332,6 +3335,276 @@ class AdminService:
         scale.is_active = False
         self.db_session.flush()
         return {'id': scale.id, 'message': 'IoT scale deleted'}
+
+    # ── Materials (back-office CRUD) ─────────────────────────────────────
+    def _serialize_material(self, m: 'Material', images: Optional[List[dict]] = None) -> Dict[str, Any]:
+        return {
+            'id': m.id,
+            'nameTh': m.name_th,
+            'nameEn': m.name_en,
+            'categoryId': m.category_id,
+            'categoryName': (m.category.name_en or m.category.name_th) if m.category else None,
+            'mainMaterialId': m.main_material_id,
+            'mainMaterialName': (m.main_material.name_en or m.main_material.name_th) if m.main_material else None,
+            'unitNameTh': m.unit_name_th,
+            'unitNameEn': m.unit_name_en,
+            'unitWeight': float(m.unit_weight) if m.unit_weight is not None else None,
+            'color': m.color,
+            'calcGhg': float(m.calc_ghg) if m.calc_ghg is not None else None,
+            'isGlobal': bool(m.is_global),
+            'organizationId': m.organization_id,
+            'organizationName': m.organization.name if m.organization else None,
+            'tags': m.tags or [],
+            'fixedTags': getattr(m, 'fixed_tags', None) or [],
+            'createdDate': m.created_date.isoformat() if m.created_date else None,
+            'updatedDate': m.updated_date.isoformat() if m.updated_date else None,
+            'images': images if images is not None else [],
+        }
+
+    def _material_images_map(self, material_ids: List[int]) -> Dict[int, List[dict]]:
+        """{material_id: [{id, imageUrl}]} for the given ids (live images only)."""
+        if not material_ids:
+            return {}
+        rows = (
+            self.db_session.query(MaterialImage)
+            .filter(
+                MaterialImage.material_id.in_(material_ids),
+                MaterialImage.is_active == True,  # noqa: E712
+                MaterialImage.deleted_date.is_(None),
+            )
+            .order_by(MaterialImage.id.asc())
+            .all()
+        )
+        out: Dict[int, List[dict]] = {}
+        for r in rows:
+            out.setdefault(r.material_id, []).append({'id': r.id, 'imageUrl': r.image_url})
+        return out
+
+    def _apply_material_images(self, material_id: int, new_images: list, remove_ids: list) -> None:
+        """Soft-delete removed images, then upload+attach any new base64 images (S3)."""
+        if remove_ids:
+            ids = [int(x) for x in remove_ids if str(x).strip()]
+            if ids:
+                self.db_session.query(MaterialImage).filter(
+                    MaterialImage.id.in_(ids),
+                    MaterialImage.material_id == material_id,
+                ).update(
+                    {MaterialImage.is_active: False, MaterialImage.deleted_date: datetime.now(timezone.utc)},
+                    synchronize_session=False,
+                )
+        if new_images:
+            import base64
+            from ..file_upload_service import S3FileUploadService
+            s3 = S3FileUploadService()
+            for img in new_images:
+                if not isinstance(img, dict):
+                    continue
+                b64 = img.get('file_base64') or img.get('fileBase64') or img.get('base64')
+                if not b64:
+                    continue
+                try:
+                    raw = base64.b64decode(b64)
+                except Exception:
+                    continue
+                url = s3.upload_material_image(
+                    raw, img.get('filename'),
+                    img.get('content_type') or img.get('contentType'), material_id,
+                )
+                if url:
+                    self.db_session.add(MaterialImage(material_id=material_id, image_url=url))
+            self.db_session.flush()
+
+    def list_materials(self, query_params: dict) -> Dict[str, Any]:
+        page = int(query_params.get('page', 1) or 1)
+        page_size = int(query_params.get('pageSize', 10) or 10)
+
+        q = (
+            self.db_session.query(Material)
+            .options(
+                joinedload(Material.category),
+                joinedload(Material.main_material),
+                joinedload(Material.organization),
+            )
+            .filter(Material.is_active == True, Material.deleted_date.is_(None))  # noqa: E712
+        )
+
+        search = (query_params.get('q') or query_params.get('search') or '').strip()
+        if search:
+            like = f'%{search}%'
+            q = q.filter(or_(Material.name_th.ilike(like), Material.name_en.ilike(like)))
+        if query_params.get('categoryId'):
+            q = q.filter(Material.category_id == int(query_params['categoryId']))
+        if query_params.get('mainMaterialId'):
+            q = q.filter(Material.main_material_id == int(query_params['mainMaterialId']))
+        if query_params.get('organizationId'):
+            q = q.filter(Material.organization_id == int(query_params['organizationId']))
+        is_global = query_params.get('isGlobal')
+        if is_global is not None and str(is_global).strip() != '':
+            q = q.filter(Material.is_global == (str(is_global).lower() in ('true', '1', 'yes')))
+
+        # Unit-weight range filter.
+        def _num(v):
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
+        uw_min = _num(query_params.get('unitWeightMin'))
+        uw_max = _num(query_params.get('unitWeightMax'))
+        if uw_min is not None:
+            q = q.filter(Material.unit_weight >= uw_min)
+        if uw_max is not None:
+            q = q.filter(Material.unit_weight <= uw_max)
+
+        # Sorting: `sort=<field>:<asc|desc>` against a whitelist (default: newest first).
+        sortable = {
+            'id': Material.id, 'nameEn': Material.name_en, 'nameTh': Material.name_th,
+            'unitWeight': Material.unit_weight, 'calcGhg': Material.calc_ghg,
+            'isGlobal': Material.is_global, 'categoryId': Material.category_id,
+            'mainMaterialId': Material.main_material_id, 'createdDate': Material.created_date,
+        }
+        sort_raw = (query_params.get('sort') or '').strip()
+        order_by = Material.id.desc()
+        if sort_raw:
+            field, _, direction = sort_raw.partition(':')
+            col = sortable.get(field)
+            if col is not None:
+                order_by = col.asc() if direction.lower() == 'asc' else col.desc()
+
+        total = q.count()
+        mats = q.order_by(order_by, Material.id.desc()).offset((page - 1) * page_size).limit(page_size).all()
+        images_map = self._material_images_map([m.id for m in mats])
+
+        items = []
+        for m in mats:
+            imgs = images_map.get(m.id, [])
+            d = self._serialize_material(m, imgs)
+            d['imageUrl'] = imgs[0]['imageUrl'] if imgs else None  # thumbnail for the list
+            items.append(d)
+        return {'items': items, 'total': total, 'page': page, 'pageSize': page_size}
+
+    def get_material(self, material_id: int) -> Dict[str, Any]:
+        m = (
+            self.db_session.query(Material)
+            .options(
+                joinedload(Material.category),
+                joinedload(Material.main_material),
+                joinedload(Material.organization),
+            )
+            .filter(Material.id == material_id, Material.deleted_date.is_(None))
+            .first()
+        )
+        if not m:
+            raise NotFoundException(f'Material {material_id} not found')
+        imgs = self._material_images_map([m.id]).get(m.id, [])
+        return self._serialize_material(m, imgs)
+
+    def create_material(self, data: dict) -> Dict[str, Any]:
+        name_th = (data.get('nameTh') or data.get('name_th') or '').strip()
+        name_en = (data.get('nameEn') or data.get('name_en') or '').strip()
+        if not name_th and not name_en:
+            raise BadRequestException('Material name (Thai or English) is required')
+
+        is_global = bool(data.get('isGlobal', True))
+        org_id = data.get('organizationId')
+        # An org-specific material must name its org; a global one must not be tied to one.
+        organization_id = None if is_global else (int(org_id) if org_id else None)
+
+        m = Material(
+            name_th=name_th or name_en,
+            name_en=name_en or name_th,
+            category_id=data.get('categoryId') or None,
+            main_material_id=data.get('mainMaterialId') or None,
+            unit_name_th=(data.get('unitNameTh') or 'กิโลกรัม'),
+            unit_name_en=(data.get('unitNameEn') or 'kg'),
+            unit_weight=data.get('unitWeight') if data.get('unitWeight') is not None else 1,
+            color=data.get('color') or '#808080',
+            calc_ghg=data.get('calcGhg') if data.get('calcGhg') is not None else 0,
+            is_global=is_global,
+            organization_id=organization_id,
+            tags=data.get('tags') or [],
+            fixed_tags=data.get('fixedTags') or [],
+        )
+        self.db_session.add(m)
+        self.db_session.flush()
+        self._apply_material_images(m.id, data.get('newImages') or [], [])
+        return {'id': m.id, 'message': 'Material created'}
+
+    def update_material(self, material_id: int, data: dict) -> Dict[str, Any]:
+        m = (
+            self.db_session.query(Material)
+            .filter(Material.id == material_id, Material.deleted_date.is_(None))
+            .first()
+        )
+        if not m:
+            raise NotFoundException(f'Material {material_id} not found')
+
+        # camelCase payload key → model attribute.
+        field_map = {
+            'nameTh': 'name_th', 'nameEn': 'name_en',
+            'categoryId': 'category_id', 'mainMaterialId': 'main_material_id',
+            'unitNameTh': 'unit_name_th', 'unitNameEn': 'unit_name_en',
+            'unitWeight': 'unit_weight', 'color': 'color', 'calcGhg': 'calc_ghg',
+            'tags': 'tags', 'fixedTags': 'fixed_tags',
+        }
+        for key, attr in field_map.items():
+            if key in data:
+                val = data[key]
+                if attr in ('category_id', 'main_material_id') and (val == '' or val is None):
+                    val = None
+                setattr(m, attr, val)
+
+        if 'isGlobal' in data:
+            m.is_global = bool(data['isGlobal'])
+        # Keep org/global consistent: global => no org; org-specific => the given org.
+        if 'isGlobal' in data or 'organizationId' in data:
+            if m.is_global:
+                m.organization_id = None
+            elif 'organizationId' in data:
+                oid = data.get('organizationId')
+                m.organization_id = int(oid) if oid else None
+
+        self.db_session.flush()
+        self._apply_material_images(
+            m.id, data.get('newImages') or [], data.get('removeImageIds') or [],
+        )
+        return {'id': m.id, 'message': 'Material updated'}
+
+    def delete_material(self, material_id: int) -> Dict[str, Any]:
+        m = self.db_session.query(Material).filter(Material.id == material_id).first()
+        if not m:
+            raise NotFoundException(f'Material {material_id} not found')
+        m.is_active = False
+        m.deleted_date = datetime.now(timezone.utc)
+        self.db_session.flush()
+        return {'id': m.id, 'message': 'Material deleted'}
+
+    def list_main_materials(self, query_params: dict) -> Dict[str, Any]:
+        """Reference list for the material form's Main Material select (returns all; small table)."""
+        rows = (
+            self.db_session.query(MainMaterial)
+            .filter(MainMaterial.is_active == True, MainMaterial.deleted_date.is_(None))  # noqa: E712
+            .order_by(MainMaterial.display_order.asc(), MainMaterial.id.asc())
+            .all()
+        )
+        items = [
+            {'id': r.id, 'nameTh': r.name_th, 'nameEn': r.name_en, 'code': r.code, 'color': r.color}
+            for r in rows
+        ]
+        return {'items': items, 'total': len(items)}
+
+    def list_material_categories(self, query_params: dict) -> Dict[str, Any]:
+        """Reference list for the material form's Category select."""
+        rows = (
+            self.db_session.query(MaterialCategory)
+            .filter(MaterialCategory.is_active == True, MaterialCategory.deleted_date.is_(None))  # noqa: E712
+            .order_by(MaterialCategory.id.asc())
+            .all()
+        )
+        items = [
+            {'id': r.id, 'nameTh': r.name_th, 'nameEn': r.name_en, 'code': r.code, 'color': r.color}
+            for r in rows
+        ]
+        return {'items': items, 'total': len(items)}
 
     # ── Helpers ────────────────────────────────────────────────────────
 

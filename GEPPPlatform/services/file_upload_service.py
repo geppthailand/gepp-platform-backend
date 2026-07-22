@@ -156,6 +156,42 @@ class S3FileUploadService:
             print(f"Unexpected error uploading import file {filename}: {str(e)}")
             return None
 
+    def upload_material_image(
+        self,
+        file_data: bytes,
+        filename: Optional[str],
+        content_type: Optional[str],
+        material_id: int,
+    ) -> Optional[str]:
+        """Upload a single material image to S3 under business/materials/{id}/ and return its
+        public URL (or None on failure)."""
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            ext = os.path.splitext(filename or '')[1] or '.png'
+            unique_filename = f"{material_id}_{timestamp}_{uuid.uuid4().hex[:8]}{ext}"
+            s3_key = f"business/materials/{material_id}/{unique_filename}"
+            if not content_type:
+                content_type, _ = mimetypes.guess_type(filename or '')
+                content_type = content_type or 'image/png'
+            self.s3_client.put_object(
+                Bucket=self.bucket_name,
+                Key=s3_key,
+                Body=file_data,
+                ContentType=content_type,
+                Metadata={
+                    'material_id': str(material_id),
+                    'original_filename': filename or 'unknown',
+                    'upload_timestamp': timestamp,
+                },
+            )
+            return f"https://{self.bucket_name}.s3.amazonaws.com/{s3_key}"
+        except (ClientError, BotoCoreError) as e:
+            print(f"Error uploading material image {filename}: {str(e)}")
+            return None
+        except Exception as e:
+            print(f"Unexpected error uploading material image {filename}: {str(e)}")
+            return None
+
     def download_file(self, s3_key: str) -> Optional[bytes]:
         """Download a file's bytes from S3; None on failure."""
         try:
