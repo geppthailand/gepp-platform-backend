@@ -1,0 +1,254 @@
+"""Runs get_daily_summary against a real PostgreSQL instance.
+
+The unit tests around this feature cover the day-window maths and the public
+payload projection, but neither exercises the SQL. Several things can only fail
+against a real server:
+
+  * `GROUP BY` must list every non-aggregated selected column, or Postgres
+    rejects the statement outright.
+  * `Material.name_th` and `MainMaterial.name_th` collide by name; only the
+    MainMaterial pair is labelled, so row attribute access has to resolve to
+    the right one.
+  * `DECIMAL` columns arrive as `Decimal`, which `json.dumps` cannot serialize.
+  * The Bangkok window has to exclude a reading at exactly 17:00:00 UTC.
+
+Only the columns the query touches are created — it is a column-only select, so
+the rest of each model is irrelevant here. Skipped when no local Postgres is
+reachable (the DSN matches run_local.sh's default).
+"""
+
+import json
+from datetime import date
+
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.exc import OperationalError
+
+from GEPPPlatform.libs.exceptions import UnauthorizedException
+from GEPPPlatform.services.cores.scale_reports.scale_report_service import (
+    get_daily_summary,
+    to_public_payload,
+)
+
+_ADMIN_DSN = 'postgresql://postgres:@localhost:5432/postgres'
+_PROBE_DB = 'scale_report_itest'
+_PROBE_DSN = 'postgresql://postgres:@localhost:5432/' + _PROBE_DB
+
+_SCHEMA = """
+CREATE TABLE user_locations (
+    id BIGINT PRIMARY KEY,
+    display_name VARCHAR(255),
+    name_th VARCHAR(255),
+    name_en VARCHAR(255),
+    organization_id BIGINT,
+    deleted_date TIMESTAMPTZ
+);
+CREATE TABLE main_materials (
+    id BIGINT PRIMARY KEY,
+    name_th VARCHAR(255),
+    name_en VARCHAR(255)
+);
+CREATE TABLE materials (
+    id BIGINT PRIMARY KEY,
+    name_th VARCHAR(255),
+    name_en VARCHAR(255),
+    unit_name_th VARCHAR(255),
+    unit_name_en VARCHAR(255),
+    color VARCHAR(7),
+    calc_ghg DECIMAL(10,3)
+);
+CREATE TABLE transactions (
+    id BIGINT PRIMARY KEY,
+    origin_id BIGINT,
+    organization_id BIGINT,
+    transaction_date TIMESTAMP,
+    deleted_date TIMESTAMPTZ
+);
+CREATE TABLE transaction_records (
+    id BIGSERIAL PRIMARY KEY,
+    created_transaction_id BIGINT,
+    material_id BIGINT,
+    main_material_id BIGINT,
+    category_id BIGINT,
+    origin_weight_kg DECIMAL(15,4),
+    origin_quantity DECIMAL(15,4),
+    transaction_date TIMESTAMP,
+    status VARCHAR(50),
+    deleted_date TIMESTAMPTZ
+);
+"""
+
+# Thai day 2026-07-26 spans UTC 2026-07-25 17:00 → 2026-07-26 17:00.
+_FIXTURES = """
+INSERT INTO user_locations (id, display_name, name_th, name_en, organization_id)
+VALUES (1, 'ศูนย์รับซื้อ สาขาบางนา', 'สาขาบางนา', 'Bangna', 10),
+       (2, 'สาขาอื่น', 'อื่น', 'Other', 99);
+
+INSERT INTO main_materials (id, name_th, name_en) VALUES (7, 'พลาสติก', 'Plastic');
+
+INSERT INTO materials (id, name_th, name_en, unit_name_th, unit_name_en, color, calc_ghg)
+VALUES (100, 'ขวด PET ใส', 'Clear PET', 'กก.', 'kg', '#4CAF50', 2.000),
+       (200, 'กระดาษลัง',  'Cardboard', 'กก.', 'kg', '#8D6E63', 1.500);
+
+INSERT INTO transactions (id, origin_id, organization_id, transaction_date)
+VALUES (1000, 1, 10, '2026-07-26 02:00:00'),
+       (1001, 1, 10, '2026-07-26 09:00:00'),
+       (1002, 1, 10, '2026-07-26 17:00:00'),   -- 00:00 Thai on the 27th
+       (1003, 2, 99, '2026-07-26 03:00:00');   -- different location
+
+INSERT INTO transaction_records
+ (created_transaction_id, material_id, main_material_id, category_id,
+  origin_weight_kg, origin_quantity, transaction_date, status, deleted_date)
+VALUES
+ (1000, 100,  7, 3, 10.0, 10.0, '2026-07-26 02:00:00', 'pending',  NULL),
+ (1001, 100,  7, 3,  5.0,  5.0, '2026-07-26 09:00:00', NULL,       NULL),
+ (1000, 200,  7, 3, 20.0, 20.0, '2026-07-26 02:30:00', 'pending',  NULL),
+ (1001, NULL, 7, 3,  1.0,  1.0, '2026-07-26 10:00:00', NULL,       NULL),
+ (1000, 100,  7, 3, 999.0, 999.0, '2026-07-26 02:00:00', 'rejected', NULL),
+ (1000, 100,  7, 3, 888.0, 888.0, '2026-07-26 02:00:00', 'pending',  now()),
+ (1002, 100,  7, 3, 777.0, 777.0, '2026-07-26 17:00:00', 'pending',  NULL),
+ (1003, 100,  7, 3, 666.0, 666.0, '2026-07-26 03:00:00', 'pending',  NULL);
+"""
+
+#: Weights that must never appear: rejected, soft-deleted, next Thai day, other site.
+_EXCLUDED_WEIGHTS = (999.0, 888.0, 777.0, 666.0)
+
+
+@pytest.fixture(scope='module')
+def session():
+    # exec_driver_sql, not text(): tests/crm_features/test_deliveries_csv.py
+    # replaces sqlalchemy.text with an identity lambda *on the real module
+    # object*, so text() elsewhere in the session returns a bare string and
+    # Connection.execute rejects it. Going straight to the driver avoids
+    # depending on that name at all.
+    try:
+        admin = create_engine(_ADMIN_DSN, isolation_level='AUTOCOMMIT')
+        with admin.connect() as conn:
+            conn.exec_driver_sql('DROP DATABASE IF EXISTS ' + _PROBE_DB)
+            conn.exec_driver_sql('CREATE DATABASE ' + _PROBE_DB)
+    except OperationalError as exc:
+        # Genuinely no reachable server — skip. Anything else is a real
+        # failure and must not be hidden behind a skip.
+        pytest.skip('local PostgreSQL not reachable: {0}'.format(exc))
+
+    engine = create_engine(_PROBE_DSN)
+    with engine.begin() as conn:
+        for statement in (_SCHEMA + _FIXTURES).split(';'):
+            if statement.strip():
+                conn.exec_driver_sql(statement)
+
+    # sqlalchemy.orm.Session is overwritten with `object` by the same
+    # polluting test (`_sqlalchemy.orm.Session = object`), so reach for the
+    # class in its defining submodule, which nothing rebinds. Imported here
+    # rather than at module scope so it resolves after conftest has restored
+    # sys.modules for this test.
+    from sqlalchemy.orm.session import Session as OrmSession
+
+    db = OrmSession(engine)
+    yield db
+    db.close()
+    engine.dispose()
+    with admin.connect() as conn:
+        conn.exec_driver_sql('DROP DATABASE IF EXISTS ' + _PROBE_DB)
+
+
+@pytest.fixture(scope='module')
+def summary(session):
+    return get_daily_summary(session, origin_id=1, organization_id=10,
+                             day=date(2026, 7, 26))
+
+
+# ── totals ───────────────────────────────────────────────────────────────────
+
+def test_totals_count_only_the_eligible_records(summary):
+    # 10 + 5 (PET) + 20 (cardboard) + 1 (no material) = 36
+    assert summary['totals']['weight_kg'] == 36.0
+    assert summary['totals']['entries'] == 4
+    assert summary['totals']['material_count'] == 3
+
+
+def test_co2e_follows_weight_times_calc_ghg(summary):
+    # 15×2.0 + 20×1.5 + 1×(no material → 0) = 60
+    assert summary['totals']['co2e_kg'] == 60.0
+    assert summary['totals']['trees_equivalent'] == 6.3      # 60 / 9.5
+    assert summary['totals']['forest_rai_equivalent'] == 0.06  # 60 / 950
+
+
+def test_first_and_last_entry_span_the_day(summary):
+    assert summary['totals']['first_entry_at'] == '2026-07-26T02:00:00'
+    assert summary['totals']['last_entry_at'] == '2026-07-26T10:00:00'
+
+
+# ── exclusions ───────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize('weight', _EXCLUDED_WEIGHTS)
+def test_ineligible_records_are_absent(summary, weight):
+    assert weight not in [m['weight_kg'] for m in summary['materials']]
+
+
+def test_reading_at_1700_utc_belongs_to_the_next_thai_day(session):
+    """The 7-hour bug, end to end: this reading must be absent from the 26th
+    and present on the 27th."""
+    next_day = get_daily_summary(session, 1, 10, date(2026, 7, 27))
+    assert next_day['totals']['weight_kg'] == 777.0
+
+
+# ── shape ────────────────────────────────────────────────────────────────────
+
+def test_records_without_a_material_still_count(summary):
+    """Guards the outerjoin. An inner join would drop this row and quietly
+    understate the day's total."""
+    nameless = [m for m in summary['materials'] if m['material_id'] is None]
+    assert len(nameless) == 1
+    assert nameless[0]['weight_kg'] == 1.0
+
+
+def test_material_names_resolve_to_material_not_main_material(summary):
+    """`materials.name_th` and `main_materials.name_th` collide by name."""
+    top = summary['materials'][0]
+    assert top['name_th'] == 'กระดาษลัง'
+    assert top['main_material_name_th'] == 'พลาสติก'
+
+
+def test_materials_are_sorted_by_weight_descending(summary):
+    weights = [m['weight_kg'] for m in summary['materials']]
+    assert weights == sorted(weights, reverse=True)
+
+
+def test_share_pct_is_relative_to_the_day_total(summary):
+    by_name = {m['name_th']: m for m in summary['materials']}
+    assert by_name['กระดาษลัง']['share_pct'] == 55.6   # 20 / 36
+    assert by_name['ขวด PET ใส']['share_pct'] == 41.7  # 15 / 36
+
+
+def test_payload_is_json_serialisable(summary):
+    """DECIMAL columns arrive as Decimal, which json.dumps refuses."""
+    assert isinstance(json.dumps(summary), str)
+
+
+def test_location_details_are_included(summary):
+    assert summary['location']['origin_id'] == 1
+    assert summary['location']['display_name'] == 'ศูนย์รับซื้อ สาขาบางนา'
+
+
+# ── empty and refused ────────────────────────────────────────────────────────
+
+def test_a_day_with_no_readings_returns_zeros_not_an_error(session):
+    """"Nobody came in today" is a valid answer, not a 404."""
+    empty = get_daily_summary(session, 1, 10, date(2026, 1, 1))
+    assert empty['totals']['weight_kg'] == 0.0
+    assert empty['totals']['entries'] == 0
+    assert empty['materials'] == []
+
+
+def test_location_from_another_organization_is_refused(session):
+    with pytest.raises(UnauthorizedException):
+        get_daily_summary(session, origin_id=1, organization_id=999,
+                          day=date(2026, 7, 26))
+
+
+def test_public_payload_over_real_data_withholds_the_breakdown(summary):
+    public = to_public_payload(summary)
+    assert 'materials' not in public
+    assert 'PET' not in repr(public)
+    assert public['totals']['weight_kg'] == 36.0
