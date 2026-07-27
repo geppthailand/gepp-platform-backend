@@ -40,6 +40,73 @@ def _full_summary(**extra):
     return summary
 
 
+def _summary_with_subtree(**extra):
+    """A building-level summary: readings arrive at the floors underneath it.
+
+    Shaped like what `_split_by_location` builds, including the row for the
+    building itself (`is_self`) which is what a scale plugged in at the lobby
+    produces.
+    """
+    return _full_summary(subtree={
+        'location_count': 3,
+        'has_descendants': True,
+        'totals': {
+            'weight_kg': 900.0, 'entries': 30, 'material_count': 2,
+            'co2e_kg': 700.0, 'trees_equivalent': 73.7,
+            'forest_rai_equivalent': 0.74,
+            'first_entry_at': '2026-07-26T01:15:00',
+            'last_entry_at': '2026-07-26T09:40:00',
+        },
+        'materials': [
+            {'material_id': 1, 'name_th': 'ขวด PET ใส', 'weight_kg': 600.0,
+             'entries': 20, 'co2e_kg': 500.0, 'share_pct': 66.7},
+            {'material_id': 2, 'name_th': 'กระดาษ', 'weight_kg': 300.0,
+             'entries': 10, 'co2e_kg': 200.0, 'share_pct': 33.3},
+        ],
+        'locations': [
+            {
+                'origin_id': 991,
+                'display_name': 'ชั้น 1',
+                'is_self': False,
+                'share_pct': 66.7,
+                'totals': {
+                    'weight_kg': 600.0, 'entries': 20, 'material_count': 2,
+                    'co2e_kg': 500.0, 'trees_equivalent': 52.6,
+                    'forest_rai_equivalent': 0.53,
+                    'first_entry_at': '2026-07-26T01:15:00',
+                    'last_entry_at': '2026-07-26T09:40:00',
+                },
+                'materials': [
+                    {'material_id': 1, 'name_th': 'ขวด PET ใส',
+                     'weight_kg': 400.0, 'entries': 14, 'quantity': 14.0,
+                     'co2e_kg': 330.0, 'share_pct': 66.7},
+                    {'material_id': 2, 'name_th': 'กระดาษ',
+                     'weight_kg': 200.0, 'entries': 6, 'quantity': 6.0,
+                     'co2e_kg': 170.0, 'share_pct': 33.3},
+                ],
+            },
+            {
+                'origin_id': 123,
+                'display_name': 'ศูนย์รับซื้อ สาขาบางนา',
+                'is_self': True,
+                'share_pct': 33.3,
+                'totals': {
+                    'weight_kg': 300.0, 'entries': 10, 'material_count': 1,
+                    'co2e_kg': 200.0, 'trees_equivalent': 21.1,
+                    'forest_rai_equivalent': 0.21,
+                    'first_entry_at': '2026-07-26T02:00:00',
+                    'last_entry_at': '2026-07-26T08:00:00',
+                },
+                'materials': [
+                    {'material_id': 1, 'name_th': 'ขวด PET ใส',
+                     'weight_kg': 300.0, 'entries': 10, 'quantity': 10.0,
+                     'co2e_kg': 200.0, 'share_pct': 100.0},
+                ],
+            },
+        ],
+    }, **extra)
+
+
 # ── what must never leave the organisation ───────────────────────────────────
 
 def test_per_material_breakdown_is_exposed():
@@ -120,7 +187,8 @@ def test_exposed_key_set_is_exactly_what_we_intend():
     """Locks the contract so widening it has to be an explicit edit here."""
     public = to_public_payload(_full_summary())
     assert set(public) == {
-        'date', 'timezone', 'location', 'totals', 'materials', 'generated_at',
+        'date', 'timezone', 'location', 'totals', 'materials', 'locations',
+        'generated_at',
     }
     assert set(public['location']) == {'display_name', 'name_th', 'name_en'}
     assert set(public['totals']) == {
@@ -132,6 +200,78 @@ def test_exposed_key_set_is_exactly_what_we_intend():
         'unit_name_th', 'unit_name_en', 'color', 'weight_kg', 'share_pct',
         'co2e_kg',
     }
+
+
+# ── the per-location split ───────────────────────────────────────────────────
+
+def test_per_location_split_is_exposed():
+    """Answers "which floor", which the material list alone cannot."""
+    locations = to_public_payload(_summary_with_subtree())['locations']
+    assert [loc['display_name'] for loc in locations] == [
+        'ชั้น 1', 'ศูนย์รับซื้อ สาขาบางนา',
+    ]
+    assert locations[0]['weight_kg'] == 600.0
+    assert locations[0]['share_pct'] == 66.7
+
+
+def test_a_location_carries_its_own_material_breakdown():
+    """The whole point of the accordion — expanding a floor shows its mix."""
+    first = to_public_payload(_summary_with_subtree())['locations'][0]
+    assert [m['name_th'] for m in first['materials']] == ['ขวด PET ใส', 'กระดาษ']
+    # share_pct under a location is relative to that location, not the branch
+    assert sum(m['share_pct'] for m in first['materials']) == 100.0
+
+
+def test_is_self_survives_so_the_page_can_label_the_own_node_row():
+    """A scale plugged in at the building itself produces a row that reads
+    wrong as just another floor name — the page needs to mark it."""
+    locations = to_public_payload(_summary_with_subtree())['locations']
+    assert [loc['is_self'] for loc in locations] == [False, True]
+
+
+def test_origin_ids_never_reach_a_location_entry():
+    """Same rule as materials: internal ids stay in. The page keys its rows on
+    array position, so it never needs one."""
+    public = to_public_payload(_summary_with_subtree())
+    for loc in public['locations']:
+        assert 'origin_id' not in loc
+        assert set(loc) == {
+            'display_name', 'is_self', 'weight_kg', 'entries',
+            'material_count', 'co2e_kg', 'share_pct', 'materials',
+        }
+    assert '991' not in repr(public)
+
+
+def test_the_material_allowlist_applies_inside_a_location_too():
+    """The nested list is the easy one to forget — it must go through the same
+    allowlist as the top-level one, not be passed through."""
+    nested = to_public_payload(_summary_with_subtree())['locations'][0]['materials'][0]
+    for forbidden in ('material_id', 'main_material_id', 'category_id',
+                      'entries', 'quantity'):
+        assert forbidden not in nested, forbidden
+    assert set(nested) == {
+        'name_th', 'name_en', 'main_material_name_th', 'main_material_name_en',
+        'unit_name_th', 'unit_name_en', 'color', 'weight_kg', 'share_pct',
+        'co2e_kg',
+    }
+
+
+def test_a_field_added_later_to_a_location_does_not_leak():
+    """Same allowlist guarantee as the top level, checked at the nested level
+    where a `del`-based implementation would most plausibly slip through."""
+    summary = _summary_with_subtree()
+    summary['subtree']['locations'][0]['operator_names'] = ['สมชาย']
+    summary['subtree']['locations'][0]['materials'][0]['unit_price_thb'] = 12.5
+    public = to_public_payload(summary)
+    assert 'สมชาย' not in repr(public)
+    assert 'unit_price_thb' not in repr(public)
+
+
+def test_a_leaf_station_reports_no_location_split():
+    """Most stations are leaves. `locations` stays present but empty so the
+    page can branch on length instead of on a missing key."""
+    public = to_public_payload(_full_summary())
+    assert public['locations'] == []
 
 
 def test_survives_an_empty_day():

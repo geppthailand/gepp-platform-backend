@@ -321,3 +321,73 @@ def test_a_leaf_location_reports_itself_as_having_no_descendants(session):
     assert leaf['totals']['weight_kg'] == 50.0
     assert leaf['subtree']['totals']['weight_kg'] == 50.0
     assert leaf['subtree']['has_descendants'] is False
+
+
+# ── แตกยอดรายจุด (กล่อง "แยกตามจุด" บนหน้าเว็บ) ────────────────────────────────
+
+def test_locations_split_the_branch_by_where_it_was_weighed(summary):
+    locations = summary['subtree']['locations']
+    # เรียงตามน้ำหนักมากไปน้อย — คนเปิดดูอยากรู้ว่า "ที่ไหนเยอะ" เป็นอย่างแรก
+    assert [(loc['display_name'], loc['totals']['weight_kg']) for loc in locations] == [
+        ('ชั้น 1', 50.0),
+        ('ศูนย์รับซื้อ สาขาบางนา', 36.0),   # ชั่งที่ตัวอาคารเอง
+    ]
+
+
+def test_locations_sum_back_to_the_branch_total(summary):
+    """โครงสร้างรับประกันเอง เพราะมาจากแถวชุดเดียวกัน — เทสนี้กันการรีแฟกเตอร์
+    ที่เผลอไปยิง query ใหม่คนละเงื่อนไข"""
+    total = sum(loc['totals']['weight_kg'] for loc in summary['subtree']['locations'])
+    assert total == summary['subtree']['totals']['weight_kg']
+
+
+def test_the_own_node_row_is_flagged_so_the_page_can_name_it(summary):
+    by_name = {loc['display_name']: loc for loc in summary['subtree']['locations']}
+    assert by_name['ศูนย์รับซื้อ สาขาบางนา']['is_self'] is True
+    assert by_name['ชั้น 1']['is_self'] is False
+
+
+def test_a_location_share_is_relative_to_the_branch(summary):
+    by_name = {loc['display_name']: loc for loc in summary['subtree']['locations']}
+    assert by_name['ชั้น 1']['share_pct'] == 58.1               # 50 / 86
+    assert by_name['ศูนย์รับซื้อ สาขาบางนา']['share_pct'] == 41.9  # 36 / 86
+
+
+def test_a_material_share_under_a_location_is_relative_to_that_location(summary):
+    """สองความหมายของ share_pct ในโครงสร้างเดียวกัน ตั้งใจให้ต่างกัน —
+    ถ้าเผลอทำให้เหมือนกัน แถบสัดส่วนในกล่องที่ขยายออกมาจะสั้นจู๋ทุกอัน"""
+    floor = [loc for loc in summary['subtree']['locations']
+             if loc['display_name'] == 'ชั้น 1'][0]
+    # ชั้น 1 ชั่ง PET อย่างเดียว 50 กก. → 100% ของตัวเอง แต่ 58.1% ของอาคาร
+    assert [m['share_pct'] for m in floor['materials']] == [100.0]
+    assert floor['share_pct'] == 58.1
+
+
+def test_a_leaf_location_still_reports_one_row(session):
+    """หน้าเว็บซ่อนกล่องเองเมื่อมีจุดเดียว — service ไม่ต้องรู้เรื่องนั้น"""
+    leaf = get_daily_summary(session, 3, 10, date(2026, 7, 26))
+    assert len(leaf['subtree']['locations']) == 1
+    assert leaf['subtree']['locations'][0]['is_self'] is True
+
+
+def test_a_quiet_day_lists_no_locations_at_all(session):
+    """อาคาร 20 ชั้นที่ยังไม่มีใครชั่ง ไม่ควรได้รายงานแถว 0 กก. ยี่สิบแถว"""
+    quiet = get_daily_summary(session, 1, 10, date(2026, 7, 20))
+    assert quiet['subtree']['locations'] == []
+
+
+def test_public_payload_carries_the_split_without_the_ids(summary):
+    public = to_public_payload(summary)
+    assert [loc['display_name'] for loc in public['locations']] == [
+        'ชั้น 1', 'ศูนย์รับซื้อ สาขาบางนา',
+    ]
+    for loc in public['locations']:
+        assert 'origin_id' not in loc
+        for entry in loc['materials']:
+            assert 'material_id' not in entry
+            assert 'category_id' not in entry
+
+
+def test_the_split_is_json_serialisable(summary):
+    """Decimal จาก Postgres ต้องถูกแปลงในชั้นที่ซ้อนอยู่ด้วย ไม่ใช่แค่ชั้นบน"""
+    json.dumps(to_public_payload(summary))
