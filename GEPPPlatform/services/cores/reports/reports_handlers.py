@@ -127,6 +127,13 @@ def _build_filters_from_query_params(query_params: Dict[str, Any], timezone_name
     if tenant_ids_raw:
         filters['filter_tenant_ids'] = [int(x) for x in tenant_ids_raw.split(',') if x.strip()]
 
+    # Destination filter ("สถานที่รับขยะ"): filter by per-record destination_id.
+    # Combines with the origin filter as AND (transaction origin ∈ origins AND
+    # record destination ∈ destinations). Applies across every report tab.
+    destination_ids_raw = query_params.get('destination_ids')
+    if destination_ids_raw:
+        filters['destination_ids'] = [int(x) for x in destination_ids_raw.split(',') if x.strip()]
+
     # Handle date filters (preserve provided times; apply local day bounds for date-only)
     date_from_input = query_params.get('date_from') or query_params.get('datefrom')
     if date_from_input:
@@ -852,21 +859,42 @@ def _handle_diversion_report(
             "materials_data": [],
         }
 
-    # --- Build kwargs for traceability hierarchy (material / origin filters) ---
-    # material filter -> passed as material_id (comma-separated)
+    # --- Build kwargs for traceability hierarchy (full report filter set) ---
+    # Historically only material + a single origin were honored here, so the report
+    # filter bar (cascading location levels, tag, tenant, destination) silently did
+    # nothing on the diversion tab. We now thread the whole filter set through.
     hierarchy_kwargs: Dict[str, Any] = {}
     mat_ids = filters.get("material_ids")
     if mat_ids:
         hierarchy_kwargs["material_id"] = ",".join(str(m) for m in mat_ids)
-    # origin filter -> passed as origin_id (pipe-separated composite)
-    origin_combos = filters.get("origin_combos")
-    origin_ids = filters.get("origin_ids")
-    if origin_combos:
-        # Use first combo for per-month query; multi-origin handled below via post-filter
-        combo = origin_combos[0]
-        hierarchy_kwargs["origin_id"] = "|".join(str(v) if v is not None else "" for v in combo)
-    elif origin_ids:
-        hierarchy_kwargs["origin_id"] = str(origin_ids[0])
+
+    # Origin-side: prefer the new-style multi-select location_ids (expanded to
+    # descendants, same as the other tabs), else fall back to the legacy origin composite.
+    location_ids = filters.get("location_ids")
+    if location_ids:
+        expanded_origin_ids = reports_service._resolve_descendant_ids(organization_id, location_ids)
+        if expanded_origin_ids:
+            hierarchy_kwargs["origin_ids"] = ",".join(str(x) for x in expanded_origin_ids)
+    else:
+        origin_combos = filters.get("origin_combos")
+        origin_ids = filters.get("origin_ids")
+        if origin_combos:
+            # Use first combo for per-month query; multi-origin handled below via post-filter
+            combo = origin_combos[0]
+            hierarchy_kwargs["origin_id"] = "|".join(str(v) if v is not None else "" for v in combo)
+        elif origin_ids:
+            hierarchy_kwargs["origin_id"] = str(origin_ids[0])
+
+    # Tag / tenant multi-select (AND). Destination filter ("สถานที่รับขยะ"). Member gate.
+    if filters.get("filter_tag_ids"):
+        hierarchy_kwargs["tag_ids"] = ",".join(str(x) for x in filters["filter_tag_ids"])
+    if filters.get("filter_tenant_ids"):
+        hierarchy_kwargs["tenant_ids"] = ",".join(str(x) for x in filters["filter_tenant_ids"])
+    if filters.get("destination_ids"):
+        hierarchy_kwargs["destination_ids"] = ",".join(str(x) for x in filters["destination_ids"])
+    cu_id = (current_user or {}).get("user_id")
+    if cu_id:
+        hierarchy_kwargs["current_user_id"] = cu_id
 
     # --- Collect hierarchy data across all months ---
     all_hierarchy: list = []
@@ -1517,6 +1545,13 @@ def _handle_comparison_report(
         }
         if filters.get('material_ids'):
             side_filters['material_ids'] = filters['material_ids']
+        # New multi-select location/tag/tenant filters (same convention as the other tabs).
+        if filters.get('location_ids'):
+            side_filters['location_ids'] = filters['location_ids']
+        if filters.get('filter_tag_ids'):
+            side_filters['filter_tag_ids'] = filters['filter_tag_ids']
+        if filters.get('filter_tenant_ids'):
+            side_filters['filter_tenant_ids'] = filters['filter_tenant_ids']
         if filters.get('origin_combos'):
             side_filters['origin_combos'] = filters['origin_combos']
         elif filters.get('origin_ids'):
@@ -2375,10 +2410,13 @@ def _handle_export_pdf_report(
         except Exception:
             pass
 
-        # Translate waste_type_proportions category names
+        # Translate waste_type_proportions category names for DISPLAY, but keep the English
+        # name as `category_name_en` so the PDF can still resolve the pie color (MATERIAL_COLORS
+        # is keyed by English). Without this, every TH row missed the palette → all slices blue.
         if wtp:
             for item in wtp:
                 en_name = item.get('category_name', '')
+                item['category_name_en'] = en_name
                 if en_name in _all_cats:
                     item['category_name'] = _all_cats[en_name]
 
@@ -2484,22 +2522,34 @@ def _handle_export_pdf_report(
     except Exception:
         profile_img_view_url = profile_img_url
 
-    # 4) Resolve location names from origin_ids filter; fallback to "all"
-    _current_user_id = (current_user or {}).get('user_id') or (current_user or {}).get('id')
+    # 4) Resolve location names from the location filter; fallback to "all".
+    # The dashboard sends the location filter as `location_ids` (branch/building/floor/room);
+    # legacy callers use `origin_ids`. Consider BOTH, and resolve any level's name directly from
+    # user_locations (get_origin_by_organization only covers leaf origins, so it would miss a
+    # selected branch/building). Reading only origin_ids here was why the header showed "all"
+    # even when the dashboard was filtered by a location.
     def _resolve_locations_from_filters(_filters: Dict[str, Any]) -> list[str] | str:
         _all_text = 'ทั้งหมด' if language == 'th' else 'all'
-        origin_ids = _filters.get('origin_ids') or []
-        if not origin_ids:
+        raw_ids = list(_filters.get('origin_ids') or []) + list(_filters.get('location_ids') or [])
+        seen: set = set()
+        sel_ids = []
+        for i in raw_ids:
+            if i is not None and i not in seen:
+                seen.add(i)
+                sel_ids.append(i)
+        if not sel_ids:
             return _all_text
         try:
-            origins_result = reports_service.get_origin_by_organization(organization_id=organization_id, current_user_id=_current_user_id)
+            rows = reports_service.db.query(
+                UserLocation.id, UserLocation.display_name,
+                UserLocation.name_th, UserLocation.name_en,
+            ).filter(UserLocation.id.in_(sel_ids)).all()
             name_map = {}
-            for o in origins_result.get('data', []):
-                oid = o.get('origin_id')
-                name = o.get('display_name') or o.get('name_en') or o.get('name_th') or o.get('name')
-                if oid is not None and oid not in name_map:
-                    name_map[oid] = name
-            names = [name_map.get(oid, f"Location {oid}") for oid in origin_ids]
+            for r in rows:
+                name_map[r.id] = (r.display_name
+                                  or (r.name_th if language == 'th' else r.name_en)
+                                  or r.name_en or r.name_th or f"Location {r.id}")
+            names = [name_map.get(i, f"Location {i}") for i in sel_ids]
             names = [n for n in names if n]
             return names or _all_text
         except Exception:

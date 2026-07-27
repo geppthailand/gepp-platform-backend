@@ -286,6 +286,14 @@ class ManualAuditService:
             # Commit changes
             db.commit()
 
+            # input_destination mode: approving sends the traceability first hop
+            # (origin → chosen destination) to the midway "อยู่ระหว่างขนส่ง" bucket. Best-effort.
+            try:
+                from ..transactions.transaction_service import TransactionService
+                TransactionService(db)._create_first_hops_for_approved_transaction(transaction)
+            except Exception as _hop_err:  # noqa: BLE001
+                logger.warning(f"first-hop on audit-approve failed for {transaction_id}: {_hop_err}")
+
             logger.info(f"Transaction {transaction_id} approved successfully")
 
             return {
@@ -534,6 +542,15 @@ class ManualAuditService:
             # Commit all changes
             db.commit()
             db.refresh(record)
+
+            # input_destination mode: if the parent transaction is now approved, send the
+            # traceability first hop(s). Idempotent (dedupes), best-effort.
+            if transaction is not None and transaction.status == TransactionStatus.approved:
+                try:
+                    from ..transactions.transaction_service import TransactionService
+                    TransactionService(db)._create_first_hops_for_approved_transaction(transaction)
+                except Exception as _hop_err:  # noqa: BLE001
+                    logger.warning(f"first-hop on record-approve failed for tx {transaction.id}: {_hop_err}")
 
             logger.info(f"Transaction record {record_id} approved successfully with status: {record.status}")
 

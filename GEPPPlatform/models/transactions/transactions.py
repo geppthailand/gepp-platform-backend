@@ -115,6 +115,10 @@ class Transaction(Base, BaseModel):
     # Integration tracking
     integration_id = Column(BigInteger, ForeignKey('integration_tokens.id', ondelete='SET NULL'), nullable=True)
 
+    # Bulk-import batch this transaction was created by (Excel upload). Lets an entire
+    # upload be reverted (soft-deleted) as one unit. NULL for normal/manual transactions.
+    import_file_id = Column(BigInteger, ForeignKey('import_files.id'), nullable=True)
+
     # Constraints
     __table_args__ = (
         CheckConstraint('transaction_method IN (\'origin\', \'transport\', \'transform\', \'qr_input\', \'scale_input\')', name='chk_transaction_method'),

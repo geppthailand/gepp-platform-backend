@@ -84,6 +84,8 @@ def handler(event, context):
     """
     if isinstance(event, dict) and event.get("test_mode") == "integrity_project_41":
         return _run_test_integrity_project_41()
+    if isinstance(event, dict) and event.get("test_mode") == "ocr_random":
+        return _run_test_ocr_random(event)
     return _normal_cron_tick()
 
 
@@ -312,6 +314,109 @@ def _fetch_legacy_payload(mysql_conn, tx_id: int) -> dict:
             for r in imgs
         ],
         "eprMaterials": materials,
+    }
+
+
+# Default form used by the OCR test when the event doesn't supply one.
+# Mirrors the real frontend payload shape (txn-level fields + one record_field).
+_OCR_TEST_FIELDS = [
+    {"name": "invoiceNo", "type": "text"},
+    {"name": "transactionDate", "type": "text"},
+    {"name": "weight", "type": "text"},
+    {"name": "invoice/tax_invoice/cash_bill/payment_voucher/id_card", "type": "file"},
+    {"record_field": [
+        {"name": "weight", "type": "text"},
+        {"name": "pricePerUnit", "type": "text"},
+        {"name": "totalPrice", "type": "text"},
+        {"name": "transactionDate", "type": "text"},
+        {"name": "Baling", "type": "tags", "options": ["Non-Baled", "Baled"]},
+        {"name": "product_weighing_sheet/product_weighing_image", "type": "file"},
+        {"name": "product_image", "type": "file"},
+    ]},
+]
+
+
+def _run_test_ocr_random(event):
+    """OCR test: pick a random embedded transaction that has files, dump ALL
+    its files (transaction-level + every record's) at the OCR reader, and
+    return what the vision LLM extracts.
+
+    Event knobs (all optional):
+      {"test_mode": "ocr_random", "project_id": 41, "transaction_id": 123,
+       "fields": [...custom form...]}
+    """
+    from GEPPPlatform.services.cores.epr_ai_audit.api.ocr import read_transaction
+
+    project_id = event.get("project_id")
+    tx_id = event.get("transaction_id")
+    fields = event.get("fields") or _OCR_TEST_FIELDS
+
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            if tx_id is None:
+                # random tx that actually has at least one file (either level)
+                where = "t.deleted_date IS NULL"
+                params = []
+                if project_id is not None:
+                    where += " AND t.epr_project_id = %s"
+                    params.append(project_id)
+                cur.execute(
+                    f"""
+                    SELECT t.id FROM epr_transactions_embeded t
+                    WHERE {where} AND (
+                        EXISTS (SELECT 1 FROM epr_transaction_image i
+                                WHERE i.transaction_id = t.id)
+                        OR EXISTS (SELECT 1 FROM epr_transaction_record_image ri
+                                   JOIN epr_transaction_records_embeded r
+                                     ON r.id = ri.epr_transaction_record_id
+                                   WHERE r.transaction_id = t.id)
+                    )
+                    ORDER BY t.id
+                    """,
+                    params,
+                )
+                ids = [r[0] for r in cur.fetchall()]
+                if not ids:
+                    return {"test": "ocr_random", "error": "no transactions with files found"}
+                tx_id = random.choice(ids)
+
+            # transaction-level files
+            cur.execute(
+                "SELECT image_url FROM epr_transaction_image WHERE transaction_id = %s",
+                (tx_id,),
+            )
+            urls = [r[0] for r in cur.fetchall() if r[0]]
+            # record-level files
+            cur.execute(
+                """
+                SELECT ri.image_url FROM epr_transaction_record_image ri
+                JOIN epr_transaction_records_embeded r
+                  ON r.id = ri.epr_transaction_record_id
+                WHERE r.transaction_id = %s
+                """,
+                (tx_id,),
+            )
+            urls += [r[0] for r in cur.fetchall() if r[0]]
+    finally:
+        conn.close()
+
+    if not urls:
+        return {"test": "ocr_random", "transaction_id": tx_id, "error": "transaction has no files"}
+
+    try:
+        extracted = read_transaction(urls, fields)
+    except Exception as exc:
+        logger.exception("ocr_random test failed for tx=%s", tx_id)
+        return {"test": "ocr_random", "transaction_id": tx_id,
+                "file_count": len(urls), "error": repr(exc)}
+
+    return {
+        "test": "ocr_random",
+        "transaction_id": tx_id,
+        "file_count": len(urls),
+        "files": urls,
+        "extracted": extracted,
     }
 
 

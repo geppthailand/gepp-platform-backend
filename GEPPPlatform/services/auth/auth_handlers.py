@@ -940,9 +940,42 @@ class AuthHandlers:
         raise APIException('Update profile endpoint not implemented')
 
     def change_password(self, data: Dict[str, Any], **kwargs) -> Dict[str, Any]:
-        """Change user password"""
-        # TODO: Implement change password logic
-        raise APIException('Change password endpoint not implemented')
+        """
+        Change the authenticated user's own password. Auth routes skip the global JWT middleware,
+        so the bearer token is parsed here. Requires the current password (verified) + a new one.
+        """
+        headers = kwargs.get('headers', {}) or {}
+        auth_header = headers.get('Authorization') or headers.get('authorization') or ''
+        token = auth_header.split(' ', 1)[1].strip() if auth_header.startswith('Bearer ') else ''
+        payload = self.verify_jwt_token(token) if token else None
+        if not payload or not payload.get('user_id'):
+            raise UnauthorizedException('Authentication required')
+
+        data = data or {}
+        current_password = data.get('current_password') or data.get('old_password')
+        new_password = data.get('new_password') or data.get('password')
+        if not current_password or not new_password:
+            raise BadRequestException('current_password and new_password are required')
+        if len(new_password) < 8:
+            raise BadRequestException('New password must be at least 8 characters')
+
+        session = self.db_session
+        user = session.query(UserLocation).filter(
+            UserLocation.id == payload['user_id'],
+            UserLocation.is_user == True,  # noqa: E712
+            UserLocation.is_active == True,  # noqa: E712
+            UserLocation.deleted_date.is_(None),
+        ).first()
+        if not user:
+            raise NotFoundException('User not found')
+        if not user.password or not self.verify_password(current_password, user.password):
+            raise BadRequestException('Current password is incorrect')
+        if self.verify_password(new_password, user.password):
+            raise BadRequestException('New password must be different from the current password')
+
+        user.password = self.hash_password(new_password)
+        session.commit()
+        return {'success': True, 'message': 'Password changed successfully'}
 
     def logout(self, **kwargs) -> Dict[str, Any]:
         """Logout user — emits CRM user_logout event and returns success."""

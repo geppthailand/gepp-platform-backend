@@ -328,6 +328,8 @@ class OrganizationSetupResponse:
     building_level_name: Optional[str] = None
     floor_level_name: Optional[str] = None
     room_level_name: Optional[str] = None
+    input_destination: bool = False
+    show_all_location_options: bool = True
     created_date: Optional[str] = None
     updated_date: Optional[str] = None
 
@@ -350,6 +352,8 @@ class OrganizationSetupResponse:
         result['building_level_name'] = self.building_level_name
         result['floor_level_name'] = self.floor_level_name
         result['room_level_name'] = self.room_level_name
+        result['input_destination'] = bool(self.input_destination)
+        result['show_all_location_options'] = bool(self.show_all_location_options)
         if self.created_date:
             result['created_date'] = self.created_date
         if self.updated_date:
@@ -372,6 +376,8 @@ class OrganizationSetupResponse:
             building_level_name=data.get('building_level_name'),
             floor_level_name=data.get('floor_level_name'),
             room_level_name=data.get('room_level_name'),
+            input_destination=bool(data.get('input_destination', False)),
+            show_all_location_options=bool(data.get('show_all_location_options', True)),
             created_date=data.get('created_date'),
             updated_date=data.get('updated_date')
         )

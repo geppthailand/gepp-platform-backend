@@ -885,6 +885,16 @@ def main(event, context):
                             "data": org_result
                         }
 
+                    elif "/api/shared-locations" in path:
+                        # Cross-organization location data sharing routes
+                        from GEPPPlatform.services.cores.sharing.shared_location_handlers import shared_location_routes
+
+                        shared_result = shared_location_routes(event, context, **commonParams)
+                        results = {
+                            "success": True,
+                            "data": shared_result
+                        }
+
                     elif "/api/materials" in path:
                         # Handle all materials management routes
                         from GEPPPlatform.services.cores.materials.materials_handlers import handle_materials_routes
@@ -930,6 +940,16 @@ def main(event, context):
                         results = {
                             "success": True,
                             "data": reward_result
+                        }
+
+                    elif "/api/import-files" in path:
+                        # Handle all bulk data-import routes (Excel upload → transactions)
+                        from GEPPPlatform.services.cores.imports.import_handlers import handle_import_routes
+
+                        import_result = handle_import_routes(event, data=body, **commonParams)
+                        results = {
+                            "success": True,
+                            "data": import_result
                         }
 
                     elif "/api/transactions" in path:
