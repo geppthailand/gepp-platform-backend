@@ -13,6 +13,12 @@ from GEPPPlatform.services.auth.auth_handlers import AuthHandlers
 from GEPPPlatform.services.cores.transactions.transaction_service import TransactionService
 from GEPPPlatform.services.cores.users.user_service import UserService
 from GEPPPlatform.services.cores.users.user_handlers import handle_get_location_allowed_materials
+from GEPPPlatform.services.cores.scale_reports.bkk_time import parse_day
+from GEPPPlatform.services.cores.scale_reports.scale_report_service import get_daily_summary
+from GEPPPlatform.services.cores.scale_reports.scale_report_token import (
+    build_report_url,
+    make_report_token,
+)
 from GEPPPlatform.models.users.user_location import UserLocation
 from GEPPPlatform.models.users.user_related import UserLocationTag, UserTenant
 from GEPPPlatform.models.subscriptions.organizations import OrganizationSetup
@@ -251,6 +257,82 @@ def _emit_iot_event(db_session, event_type: str, organization_id=None, user_id=N
         except Exception:
             pass
         _iot_logger.warning("CRM emit_event non-fatal (iot): %s", _exc)
+
+
+def member_origin_ids(db_session, user_id: Any, organization_id: Any) -> Set[int]:
+    """Every `origin_id` this user may act on, including setup-tree descendants.
+
+    Membership is stored per-node, but a user assigned to a parent node is
+    implicitly a member of everything under it, so the direct list has to be
+    expanded through `OrganizationSetup.root_nodes` before it can be used as
+    an authorisation set.
+
+    Extracted from the `/allowed-materials` route so the daily-summary route
+    can apply the identical rule. Two copies of an access-control check drift
+    apart eventually, and the drift is silent — one endpoint keeps letting
+    people through after the other is tightened.
+    """
+    user_service = UserService(db_session)
+    member_locations = user_service.get_locations_by_member(
+        member_user_id=user_id,
+        organization_id=organization_id
+    )
+    origin_ids: Set[int] = {
+        int(loc.get('origin_id'))
+        for loc in member_locations
+        if loc.get('origin_id') is not None
+    }
+
+    setup = (
+        db_session.query(OrganizationSetup)
+        .filter(
+            OrganizationSetup.organization_id == organization_id,
+            OrganizationSetup.is_active == True,
+            OrganizationSetup.deleted_date.is_(None),
+        )
+        .order_by(OrganizationSetup.created_date.desc())
+        .first()
+    )
+    if not setup or not setup.root_nodes:
+        return origin_ids
+
+    roots = setup.root_nodes
+    if isinstance(roots, dict):
+        roots = [roots]
+    if not isinstance(roots, list):
+        return origin_ids
+
+    def _to_int(v) -> Optional[int]:
+        if v is None:
+            return None
+        if isinstance(v, int):
+            return v
+        if isinstance(v, str) and v.isdigit():
+            return int(v)
+        return None
+
+    def _collect_all(node: Dict[str, Any], ids: Set[int]) -> None:
+        nid = _to_int(node.get('nodeId'))
+        if nid is not None:
+            ids.add(nid)
+        for ch in (node.get('children') or []):
+            if isinstance(ch, dict):
+                _collect_all(ch, ids)
+
+    def _walk(nodes: List[Dict[str, Any]], seed: Set[int], out: Set[int]) -> None:
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            nid = _to_int(node.get('nodeId'))
+            children = node.get('children') or []
+            if nid is not None and nid in seed:
+                _collect_all(node, out)
+            elif isinstance(children, list) and children:
+                _walk([ch for ch in children if isinstance(ch, dict)], seed, out)
+
+    expanded: Set[int] = set(origin_ids)
+    _walk([n for n in roots if isinstance(n, dict)], origin_ids, expanded)
+    return expanded
 
 
 def handle_get_locations_by_membership(user_service: UserService, query_params: Dict[str, Any], current_user: Dict[str, Any], db_session) -> Dict[str, Any]:
@@ -1312,6 +1394,44 @@ def handle_iot_devices_routes(event: Dict[str, Any], data: Dict[str, Any], **com
                 },
             )
             return result
+        # ── Daily weighing summary for one station, shown on the tablet ──
+        # Same auth bar as /records (device token AND user token): the figure
+        # is the station's daily intake by material, which is commercial
+        # information — it must not be readable by whoever walks up to an
+        # idle tablet.
+        if path == '/api/iot-devices/daily-summary':
+            if method != 'POST':
+                raise APIException('Method not allowed', status_code=405, error_code='INVALID_METHOD')
+            if not current_user or not current_user.get('user_id'):
+                raise UnauthorizedException('Valid user_token is required')
+            organization_id = current_user.get('organization_id')
+            if not organization_id:
+                raise ValidationException('User is not associated with an organization')
+
+            body = data or {}
+            try:
+                origin_id = int(body.get('origin_id'))
+            except (TypeError, ValueError):
+                raise ValidationException('origin_id is required')
+            try:
+                day = parse_day(body.get('date'))
+            except ValueError:
+                raise ValidationException('date must be YYYY-MM-DD')
+
+            # Scoped to the logged-in operator's memberships, not merely the
+            # device's organisation — a borrowed tablet must not be able to
+            # read the intake of every site in the org.
+            if origin_id not in member_origin_ids(
+                db_session, current_user['user_id'], organization_id
+            ):
+                raise UnauthorizedException('User is not a member of this location')
+
+            summary = get_daily_summary(db_session, origin_id, organization_id, day)
+            token, expires_at = make_report_token(origin_id, organization_id, day)
+            summary['report_url'] = build_report_url(token)
+            summary['report_expires_at'] = expires_at.isoformat()
+            return {'success': True, 'data': summary}
+
         if path == '/api/iot-devices/qr-login':
             auth_handler = AuthHandlers(db_session)
             return auth_handler.login_iot_user(data, **common_params)
@@ -1368,65 +1488,9 @@ def handle_iot_devices_routes(event: Dict[str, Any], data: Dict[str, Any], **com
             if not organization_id:
                 raise ValidationException('User is not associated with an organization')
             # Verify user is a member of the requested location (including descendants)
-            user_service = UserService(db_session)
-            member_locations = user_service.get_locations_by_member(
-                member_user_id=current_user['user_id'],
-                organization_id=organization_id
-            )
-            member_origin_ids: Set[int] = {
-                int(loc.get('origin_id'))
-                for loc in member_locations
-                if loc.get('origin_id') is not None
-            }
-            # Expand to include descendants via org setup tree
-            setup = (
-                db_session.query(OrganizationSetup)
-                .filter(
-                    OrganizationSetup.organization_id == organization_id,
-                    OrganizationSetup.is_active == True,
-                    OrganizationSetup.deleted_date.is_(None),
-                )
-                .order_by(OrganizationSetup.created_date.desc())
-                .first()
-            )
-            if setup and setup.root_nodes:
-                roots = setup.root_nodes
-                if isinstance(roots, dict):
-                    roots = [roots]
-                if isinstance(roots, list):
-                    def _to_int(v) -> Optional[int]:
-                        if v is None:
-                            return None
-                        if isinstance(v, int):
-                            return v
-                        if isinstance(v, str) and v.isdigit():
-                            return int(v)
-                        return None
-
-                    def _collect_all(node: Dict[str, Any], ids: Set[int]) -> None:
-                        nid = _to_int(node.get('nodeId'))
-                        if nid is not None:
-                            ids.add(nid)
-                        for ch in (node.get('children') or []):
-                            if isinstance(ch, dict):
-                                _collect_all(ch, ids)
-
-                    def _walk(nodes: List[Dict[str, Any]], seed: Set[int], out: Set[int]) -> None:
-                        for node in nodes:
-                            if not isinstance(node, dict):
-                                continue
-                            nid = _to_int(node.get('nodeId'))
-                            children = node.get('children') or []
-                            if nid is not None and nid in seed:
-                                _collect_all(node, out)
-                            elif isinstance(children, list) and children:
-                                _walk([ch for ch in children if isinstance(ch, dict)], seed, out)
-
-                    expanded: Set[int] = set(member_origin_ids)
-                    _walk([n for n in roots if isinstance(n, dict)], member_origin_ids, expanded)
-                    member_origin_ids = expanded
-
-            if int(location_id) not in member_origin_ids:
+            if int(location_id) not in member_origin_ids(
+                db_session, current_user['user_id'], organization_id
+            ):
                 raise UnauthorizedException('User is not a member of this location')
             return handle_get_location_allowed_materials(db_session, location_id, organization_id)
 
