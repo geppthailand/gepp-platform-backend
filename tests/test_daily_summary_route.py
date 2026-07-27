@@ -122,30 +122,42 @@ _SUMMARY = {
 }
 
 
-def test_returns_summary_with_a_report_url(monkeypatch):
+def test_returns_the_summary_payload_unwrapped(monkeypatch):
+    """The handler must return the payload itself, NOT {'success', 'data'}.
+
+    GEPPPlatform.py already wraps every /api/iot-devices result as
+    `{"success": True, "data": <handler return>}`. Wrapping again here put the
+    real payload two levels deep, and the tablet — which reads
+    `response['data']['date']` — got null and crashed on the type cast.
+
+    These route tests call the handler directly, so they never see the entry
+    point's wrapper; that is exactly why the original version of this test
+    passed while production was broken. Asserting the *unwrapped* shape is
+    what keeps the two ends agreeing.
+    """
     result = _call(monkeypatch, data={"origin_id": 1}, members={1}, summary=_SUMMARY)
-    assert result["success"] is True
-    assert result["data"]["totals"]["weight_kg"] == 12.5
-    assert result["data"]["report_url"].endswith("/scale-report/tok")
-    assert result["data"]["report_expires_at"] == "2026-07-28T09:00:00"
+    assert "success" not in result and "data" not in result
+    assert result["totals"]["weight_kg"] == 12.5
+    assert result["report_url"].endswith("/scale-report/tok")
+    assert result["report_expires_at"] == "2026-07-28T09:00:00"
 
 
 def test_report_url_points_at_the_web_host_not_the_api(monkeypatch):
     result = _call(monkeypatch, data={"origin_id": 1}, members={1}, summary=_SUMMARY)
-    assert "/scale-report/" in result["data"]["report_url"]
-    assert "api." not in result["data"]["report_url"]
+    assert "/scale-report/" in result["report_url"]
+    assert "api." not in result["report_url"]
 
 
 def test_omitted_date_is_accepted_and_means_today(monkeypatch):
     result = _call(monkeypatch, data={"origin_id": 1}, members={1}, summary=_SUMMARY)
-    assert result["success"] is True
+    assert result["date"] == "2026-07-26"
 
 
 def test_tablet_response_keeps_the_material_breakdown(monkeypatch):
     """Counterpart to test_scale_report_public_payload: staff *do* get the
     detail. Only the public QR route is trimmed."""
     result = _call(monkeypatch, data={"origin_id": 1}, members={1}, summary=_SUMMARY)
-    assert "materials" in result["data"]
+    assert "materials" in result
 
 
 def test_preserves_status_code_from_the_service(monkeypatch):
