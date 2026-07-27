@@ -247,8 +247,16 @@ def test_location_from_another_organization_is_refused(session):
                           day=date(2026, 7, 26))
 
 
-def test_public_payload_over_real_data_withholds_the_breakdown(summary):
+def test_public_payload_over_real_data_keeps_the_breakdown_but_not_ids(summary):
+    """The public page shows what was collected, not the plumbing behind it."""
     public = to_public_payload(summary)
-    assert 'materials' not in public
-    assert 'PET' not in repr(public)
     assert public['totals']['weight_kg'] == 36.0
+    assert [m['name_th'] for m in public['materials']] == [
+        'กระดาษลัง', 'ขวด PET ใส', None,
+    ]
+    for entry in public['materials']:
+        assert 'material_id' not in entry
+        assert 'category_id' not in entry
+    # internal-only sections still never leave
+    assert 'window_utc' not in public
+    assert 'origin_id' not in public['location']

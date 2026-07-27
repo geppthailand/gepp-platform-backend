@@ -42,11 +42,19 @@ def _full_summary(**extra):
 
 # ── what must never leave the organisation ───────────────────────────────────
 
-def test_per_material_breakdown_is_withheld():
-    """Volumes by material are the station's commercial position."""
+def test_per_material_breakdown_is_exposed():
+    """Deliberate reversal of the original decision.
+
+    It was withheld at first because volumes by material are the station's
+    commercial position. The business chose to show it anyway: "the community
+    brought in 300 kg of PET" is the reason a customer scans at all. The
+    trade-off was accepted knowingly, so the test states the new intent
+    rather than being quietly deleted.
+    """
     public = to_public_payload(_full_summary())
-    assert 'materials' not in public
-    assert 'material_count' not in public['totals']
+    assert len(public['materials']) == 1
+    assert public['materials'][0]['name_th'] == 'ขวด PET ใส'
+    assert public['totals']['material_count'] == 7
 
 
 def test_internal_identifiers_are_withheld():
@@ -55,11 +63,13 @@ def test_internal_identifiers_are_withheld():
     assert 'origin_id' not in public['location']
 
 
-def test_material_names_do_not_survive_anywhere_in_the_output():
-    """Belt and braces: assert on the serialised form, so a nested leak
-    somewhere unexpected still fails."""
-    public = to_public_payload(_full_summary())
-    assert 'PET' not in repr(public)
+def test_internal_ids_never_reach_a_material_entry():
+    """The breakdown is public now, but the ids behind it are not — they have
+    no reader value and invite scraping the material catalogue."""
+    entry = to_public_payload(_full_summary())['materials'][0]
+    for forbidden in ('material_id', 'main_material_id', 'category_id',
+                      'entries', 'quantity'):
+        assert forbidden not in entry, forbidden
 
 
 def test_a_field_added_later_does_not_leak_automatically():
@@ -110,12 +120,17 @@ def test_exposed_key_set_is_exactly_what_we_intend():
     """Locks the contract so widening it has to be an explicit edit here."""
     public = to_public_payload(_full_summary())
     assert set(public) == {
-        'date', 'timezone', 'location', 'totals', 'generated_at',
+        'date', 'timezone', 'location', 'totals', 'materials', 'generated_at',
     }
     assert set(public['location']) == {'display_name', 'name_th', 'name_en'}
     assert set(public['totals']) == {
-        'weight_kg', 'entries', 'co2e_kg',
+        'weight_kg', 'entries', 'material_count', 'co2e_kg',
         'trees_equivalent', 'forest_rai_equivalent',
+    }
+    assert set(public['materials'][0]) == {
+        'name_th', 'name_en', 'main_material_name_th', 'main_material_name_en',
+        'unit_name_th', 'unit_name_en', 'color', 'weight_kg', 'share_pct',
+        'co2e_kg',
     }
 
 
@@ -131,7 +146,7 @@ def test_survives_an_empty_day():
         'generated_at': '2026-07-26T01:00:00',
     })
     assert public['totals']['weight_kg'] == 0.0
-    assert 'materials' not in public
+    assert public['materials'] == []
 
 
 def test_missing_sections_do_not_raise():

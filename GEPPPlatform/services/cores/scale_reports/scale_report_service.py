@@ -213,13 +213,21 @@ def to_public_payload(summary: Dict[str, Any]) -> Dict[str, Any]:
     """Trim a summary down to what a customer scanning the QR may see.
 
     Built as an **allowlist** — every exposed field is named here explicitly.
-    A denylist (`del summary['materials']`) would leak any field added to
+    A denylist (`del summary['x']`) would leak any field added to
     `get_daily_summary` later, silently and with no test failing.
 
-    Withheld on purpose:
-      * `materials[]` / `material_count` — per-material volumes are the
-        station's commercial position, not something a walk-in should read.
-      * `origin_id`, `window_utc` — internal identifiers, no reader value.
+    The per-material breakdown *is* exposed. That was a deliberate reversal:
+    it was withheld at first because volumes by material are the station's
+    commercial position, but showing "the community brought in 300 kg of PET"
+    is the reason a customer bothers to scan at all, and the business accepted
+    that trade-off knowingly.
+
+    Still withheld:
+      * `material_id` / `main_material_id` / `category_id` — internal ids, no
+        reader value, and they invite scraping the catalogue.
+      * `origin_id`, `window_utc` — internal identifiers.
+      * `quantity` / `entries` per material — closer to transaction-level
+        detail than the headline the page is for.
       * prices and operator identity are never in the summary at all.
     """
     totals = summary.get('totals', {})
@@ -235,9 +243,25 @@ def to_public_payload(summary: Dict[str, Any]) -> Dict[str, Any]:
         'totals': {
             'weight_kg': totals.get('weight_kg'),
             'entries': totals.get('entries'),
+            'material_count': totals.get('material_count'),
             'co2e_kg': totals.get('co2e_kg'),
             'trees_equivalent': totals.get('trees_equivalent'),
             'forest_rai_equivalent': totals.get('forest_rai_equivalent'),
         },
+        'materials': [
+            {
+                'name_th': m.get('name_th'),
+                'name_en': m.get('name_en'),
+                'main_material_name_th': m.get('main_material_name_th'),
+                'main_material_name_en': m.get('main_material_name_en'),
+                'unit_name_th': m.get('unit_name_th'),
+                'unit_name_en': m.get('unit_name_en'),
+                'color': m.get('color'),
+                'weight_kg': m.get('weight_kg'),
+                'share_pct': m.get('share_pct'),
+                'co2e_kg': m.get('co2e_kg'),
+            }
+            for m in (summary.get('materials') or [])
+        ],
         'generated_at': summary.get('generated_at'),
     }
