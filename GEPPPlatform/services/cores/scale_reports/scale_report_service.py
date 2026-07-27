@@ -11,7 +11,7 @@ Both call :func:`get_daily_summary`; the public one passes the result through
 
 import logging
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Set
 
 from sqlalchemy import func, or_
 
@@ -19,6 +19,7 @@ from GEPPPlatform.libs.exceptions import NotFoundException, UnauthorizedExceptio
 from GEPPPlatform.models.cores.references import MainMaterial, Material
 from GEPPPlatform.models.transactions.transaction_records import TransactionRecord
 from GEPPPlatform.models.transactions.transactions import Transaction
+from GEPPPlatform.models.subscriptions.organizations import OrganizationSetup
 from GEPPPlatform.models.users.user_location import UserLocation
 
 from ..reports.ghg_equivalents import kg_co2_to_forest_rai, kg_co2_to_trees
@@ -30,6 +31,65 @@ logger = logging.getLogger(__name__)
 def _f(value) -> float:
     """Decimal/None → float. `json.dumps` cannot serialize Decimal."""
     return float(value) if value is not None else 0.0
+
+
+def descendant_origin_ids(db_session, organization_id: int, origin_id: int) -> List[int]:
+    """`origin_id` บวกกับทุกจุดที่อยู่ใต้มันในผังองค์กร
+
+    สถานที่เป็นต้นไม้ (สาขา → อาคาร → ชั้น) และตาชั่งมักตั้งอยู่ที่ใบล่างสุด
+    หัวหน้าที่ดูแลระดับอาคารจึงต้องเห็นยอดรวมของชั้นข้างใต้ด้วย ไม่ใช่ 0
+    เพราะไม่มีใครชั่งโดยระบุตัวอาคารตรง ๆ
+
+    หมายเหตุ: `ReportsService._resolve_descendant_ids()` ทำเรื่องเดียวกัน แต่
+    เป็น method ส่วนตัวของคลาสอื่น จึงไม่เรียกข้ามมา ถ้าวันหลังมีการรวมโค้ด
+    เดินต้นไม้ทั้งหมดเข้าด้วยกัน ควรรวมตัวนี้ไปด้วย
+    """
+    setup = (
+        db_session.query(OrganizationSetup)
+        .filter(
+            OrganizationSetup.organization_id == organization_id,
+            OrganizationSetup.is_active == True,  # noqa: E712
+            OrganizationSetup.deleted_date.is_(None),
+        )
+        .order_by(OrganizationSetup.created_date.desc())
+        .first()
+    )
+    if not setup or not setup.root_nodes:
+        return [origin_id]
+
+    roots = setup.root_nodes
+    if isinstance(roots, dict):
+        roots = [roots]
+    if not isinstance(roots, list):
+        return [origin_id]
+
+    def _to_int(v):
+        if isinstance(v, int):
+            return v
+        if isinstance(v, str) and v.isdigit():
+            return int(v)
+        return None
+
+    def _collect(node, out):
+        nid = _to_int(node.get('nodeId'))
+        if nid is not None:
+            out.add(nid)
+        for child in (node.get('children') or []):
+            if isinstance(child, dict):
+                _collect(child, out)
+
+    found: Set[int] = {origin_id}
+
+    def _walk(nodes):
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            if _to_int(node.get('nodeId')) == origin_id:
+                _collect(node, found)
+            _walk([c for c in (node.get('children') or []) if isinstance(c, dict)])
+
+    _walk([n for n in roots if isinstance(n, dict)])
+    return sorted(found)
 
 
 def _resolve_location(db_session, origin_id: int, organization_id: int) -> Dict[str, Any]:
@@ -81,6 +141,10 @@ def get_daily_summary(
     location = _resolve_location(db_session, origin_id, organization_id)
     start_utc, end_utc = bkk_day_to_utc_window(day)
 
+    # ดึงทีเดียวครอบทั้งกิ่ง แล้วค่อยแยกเป็นสองถังฝั่ง Python — ประหยัดกว่า
+    # ยิง query สองรอบ และรับประกันว่าสองตัวเลขมาจากข้อมูลชุดเดียวกัน
+    subtree_ids = descendant_origin_ids(db_session, organization_id, origin_id)
+
     rows = (
         db_session.query(
             TransactionRecord.material_id,
@@ -99,6 +163,7 @@ def get_daily_summary(
             Material.calc_ghg,
             MainMaterial.name_th.label('mm_name_th'),
             MainMaterial.name_en.label('mm_name_en'),
+            Transaction.origin_id.label('row_origin_id'),
         )
         .join(Transaction, TransactionRecord.created_transaction_id == Transaction.id)
         # outer joins: material_id is nullable, and an inner join would make
@@ -106,7 +171,7 @@ def get_daily_summary(
         .outerjoin(Material, TransactionRecord.material_id == Material.id)
         .outerjoin(MainMaterial, TransactionRecord.main_material_id == MainMaterial.id)
         .filter(
-            Transaction.origin_id == origin_id,
+            Transaction.origin_id.in_(subtree_ids),
             Transaction.organization_id == organization_id,
             Transaction.deleted_date.is_(None),
             TransactionRecord.deleted_date.is_(None),
@@ -139,10 +204,40 @@ def get_daily_summary(
             Material.calc_ghg,
             MainMaterial.name_th,
             MainMaterial.name_en,
+            Transaction.origin_id,
         )
         .all()
     )
 
+    own_rows = [r for r in rows if r.row_origin_id == origin_id]
+
+    return {
+        'date': day.strftime('%Y-%m-%d'),
+        'timezone': 'Asia/Bangkok',
+        'window_utc': {
+            'start': start_utc.isoformat(),
+            'end': end_utc.isoformat(),
+        },
+        'location': location,
+        # ยอดของจุดที่เลือกเป๊ะ ๆ
+        **_fold_rows(own_rows),
+        # ยอดรวมทั้งกิ่ง (จุดนี้ + ทุกจุดข้างใต้) — ตาชั่งมักตั้งที่ใบล่างสุด
+        # หัวหน้าที่ดูแลระดับอาคารจึงต้องเห็นตัวนี้ ไม่ใช่ 0
+        'subtree': {
+            'location_count': len(subtree_ids),
+            'has_descendants': len(subtree_ids) > 1,
+            **_fold_rows(rows),
+        },
+        'generated_at': datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
+    }
+
+
+def _fold_rows(rows) -> Dict[str, Any]:
+    """รวมแถวจาก query เป็น {'totals': ..., 'materials': ...}
+
+    แยกเป็นฟังก์ชันเพราะต้องเรียกสองครั้งด้วยชุดแถวคนละชุด (เฉพาะจุดนี้ กับ
+    ทั้งกิ่ง) การคำนวณต้องเหมือนกันเป๊ะ ไม่งั้นสองตัวเลขบนจอจะเทียบกันไม่ได้
+    """
     materials: List[Dict[str, Any]] = []
     total_weight = 0.0
     total_entries = 0
@@ -150,10 +245,12 @@ def get_daily_summary(
     first_at = None
     last_at = None
 
+    # หนึ่งวัสดุอาจมาจากหลายจุดในกิ่ง — ยุบให้เหลือรายการเดียวต่อวัสดุ
+    merged: Dict[Any, Dict[str, Any]] = {}
+
     for r in rows:
         weight = _f(r.weight_kg)
-        # kgCO2e = weight × materials.calc_ghg — same formula the overview
-        # report uses (reports_handlers: `record_ghg = weight * calc_ghg`).
+        # kgCO2e = weight × materials.calc_ghg — สูตรเดียวกับรายงาน overview
         co2e = weight * _f(r.calc_ghg)
 
         total_weight += weight
@@ -164,36 +261,43 @@ def get_daily_summary(
         if r.last_at and (last_at is None or r.last_at > last_at):
             last_at = r.last_at
 
-        materials.append({
-            'material_id': r.material_id,
-            'main_material_id': r.main_material_id,
-            'category_id': r.category_id,
-            'name_th': r.name_th,
-            'name_en': r.name_en,
-            'main_material_name_th': r.mm_name_th,
-            'main_material_name_en': r.mm_name_en,
-            'unit_name_th': r.unit_name_th,
-            'unit_name_en': r.unit_name_en,
-            'color': r.color,
-            'weight_kg': round(weight, 2),
-            'quantity': round(_f(r.quantity), 2),
-            'entries': int(r.entries or 0),
-            'co2e_kg': round(co2e, 2),
-            # share_pct filled in below, once the total is known
-        })
+        key = (r.material_id, r.main_material_id, r.category_id)
+        entry = merged.get(key)
+        if entry is None:
+            merged[key] = {
+                'material_id': r.material_id,
+                'main_material_id': r.main_material_id,
+                'category_id': r.category_id,
+                'name_th': r.name_th,
+                'name_en': r.name_en,
+                'main_material_name_th': r.mm_name_th,
+                'main_material_name_en': r.mm_name_en,
+                'unit_name_th': r.unit_name_th,
+                'unit_name_en': r.unit_name_en,
+                'color': r.color,
+                'weight_kg': weight,
+                'quantity': _f(r.quantity),
+                'entries': int(r.entries or 0),
+                'co2e_kg': co2e,
+            }
+        else:
+            entry['weight_kg'] += weight
+            entry['quantity'] += _f(r.quantity)
+            entry['entries'] += int(r.entries or 0)
+            entry['co2e_kg'] += co2e
 
+    materials = list(merged.values())
+    for m in materials:
+        m['weight_kg'] = round(m['weight_kg'], 2)
+        m['quantity'] = round(m['quantity'], 2)
+        m['co2e_kg'] = round(m['co2e_kg'], 2)
     materials.sort(key=lambda m: m['weight_kg'], reverse=True)
     for m in materials:
-        m['share_pct'] = round(m['weight_kg'] / total_weight * 100, 1) if total_weight else 0.0
+        m['share_pct'] = (
+            round(m['weight_kg'] / total_weight * 100, 1) if total_weight else 0.0
+        )
 
     return {
-        'date': day.strftime('%Y-%m-%d'),
-        'timezone': 'Asia/Bangkok',
-        'window_utc': {
-            'start': start_utc.isoformat(),
-            'end': end_utc.isoformat(),
-        },
-        'location': location,
         'totals': {
             'weight_kg': round(total_weight, 2),
             'entries': total_entries,
@@ -205,7 +309,6 @@ def get_daily_summary(
             'last_entry_at': last_at.isoformat() if last_at else None,
         },
         'materials': materials,
-        'generated_at': datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
     }
 
 
@@ -230,7 +333,14 @@ def to_public_payload(summary: Dict[str, Any]) -> Dict[str, Any]:
         detail than the headline the page is for.
       * prices and operator identity are never in the summary at all.
     """
-    totals = summary.get('totals', {})
+    # ใช้ยอด "รวมทั้งกิ่ง" ไม่ใช่ยอดเฉพาะจุด — พนักงานยื่น QR ให้ลูกค้าขณะที่
+    # ตัวเองมองตัวเลขรวมอยู่บนจอ ถ้าสองจอโชว์คนละเลขจะอธิบายกันไม่ถูก
+    # จุดที่เป็นใบล่างสุด (ส่วนใหญ่) สองค่านี้เท่ากันอยู่แล้ว
+    subtree = summary.get('subtree') or {}
+    totals = subtree.get('totals') or summary.get('totals', {})
+    materials_src = subtree.get('materials')
+    if materials_src is None:
+        materials_src = summary.get('materials') or []
     location = summary.get('location', {})
     return {
         'date': summary.get('date'),
@@ -261,7 +371,7 @@ def to_public_payload(summary: Dict[str, Any]) -> Dict[str, Any]:
                 'share_pct': m.get('share_pct'),
                 'co2e_kg': m.get('co2e_kg'),
             }
-            for m in (summary.get('materials') or [])
+            for m in materials_src
         ],
         'generated_at': summary.get('generated_at'),
     }
