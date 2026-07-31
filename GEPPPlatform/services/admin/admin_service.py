@@ -3361,10 +3361,42 @@ class AdminService:
             'images': images if images is not None else [],
         }
 
+    def _presentable_image_url(self, url: Optional[str], s3=None) -> Optional[str]:
+        """Turn a stored image_url into something the browser can actually load.
+
+        New material images live in the PRIVATE `prod-gepp-platform-assets` bucket (same bucket
+        the org-setup import uses), so a raw S3 URL 403s. Presign a short-lived GET for those.
+        Legacy images (public `gepp-prod` bucket) are returned as-is. Never raises — falls back
+        to the stored URL so display degrades gracefully rather than breaking the whole list."""
+        if not url or not isinstance(url, str):
+            return url
+        marker = ".amazonaws.com/"
+        if "prod-gepp-platform-assets" in url and marker in url:
+            key = url.split(marker, 1)[1]
+            try:
+                if s3 is None:
+                    from ..file_upload_service import S3FileUploadService
+                    s3 = S3FileUploadService()
+                return s3.s3_client.generate_presigned_url(
+                    "get_object",
+                    Params={"Bucket": s3.bucket_name, "Key": key},
+                    ExpiresIn=3600,
+                )
+            except Exception:
+                return url
+        return url
+
     def _material_images_map(self, material_ids: List[int]) -> Dict[int, List[dict]]:
-        """{material_id: [{id, imageUrl}]} for the given ids (live images only)."""
+        """{material_id: [{id, imageUrl}]} for the given ids (live images only). Private-bucket
+        URLs are presigned so the browser can load them; legacy public URLs pass through."""
         if not material_ids:
             return {}
+        s3 = None
+        try:
+            from ..file_upload_service import S3FileUploadService
+            s3 = S3FileUploadService()
+        except Exception:
+            s3 = None
         rows = (
             self.db_session.query(MaterialImage)
             .filter(
@@ -3377,7 +3409,9 @@ class AdminService:
         )
         out: Dict[int, List[dict]] = {}
         for r in rows:
-            out.setdefault(r.material_id, []).append({'id': r.id, 'imageUrl': r.image_url})
+            out.setdefault(r.material_id, []).append(
+                {'id': r.id, 'imageUrl': self._presentable_image_url(r.image_url, s3)}
+            )
         return out
 
     def _apply_material_images(self, material_id: int, new_images: list, remove_ids: list) -> None:
@@ -3394,7 +3428,9 @@ class AdminService:
                 )
         if new_images:
             import base64
+            import logging
             from ..file_upload_service import S3FileUploadService
+            log = logging.getLogger(__name__)
             s3 = S3FileUploadService()
             for img in new_images:
                 if not isinstance(img, dict):
@@ -3404,7 +3440,8 @@ class AdminService:
                     continue
                 try:
                     raw = base64.b64decode(b64)
-                except Exception:
+                except Exception as e:
+                    log.error(f"material image base64 decode failed for material {material_id}: {e}")
                     continue
                 url = s3.upload_material_image(
                     raw, img.get('filename'),
@@ -3412,6 +3449,11 @@ class AdminService:
                 )
                 if url:
                     self.db_session.add(MaterialImage(material_id=material_id, image_url=url))
+                else:
+                    # S3 unreachable (e.g. local dev without AWS creds/region) — the material still
+                    # saves; the image just isn't attached. Log so it's diagnosable, don't fail.
+                    log.error(f"material image upload returned no URL for material {material_id} "
+                              f"(S3 unavailable?) — image not attached")
             self.db_session.flush()
 
     def list_materials(self, query_params: dict) -> Dict[str, Any]:
@@ -3605,6 +3647,26 @@ class AdminService:
             for r in rows
         ]
         return {'items': items, 'total': len(items)}
+
+    # ── Organizations (back-office registration) ────────────────────────
+    def register_organization(self, data: dict) -> Dict[str, Any]:
+        """Register a new organization + its owner user from the back-office, using the SAME
+        fields and flow as the business platform's self-serve /register. Reuses the auth
+        registration path (org_info + organization + owner + default subscription + roles) so
+        back-office and self-serve never drift.
+
+        Expected keys (camelCase, mirroring /register): email, password, firstName, lastName,
+        phoneNumber, displayName, accountType, industry, subIndustry, usePurpose.
+        """
+        from ..auth.auth_handlers import AuthHandlers
+
+        result = AuthHandlers(self.db_session).register(data) or {}
+        uid = (result.get('user') or {}).get('id')
+        org_id = None
+        if uid:
+            u = self.db_session.query(UserLocation).filter(UserLocation.id == uid).first()
+            org_id = u.organization_id if u else None
+        return {'id': org_id, 'ownerUserId': uid, 'message': 'Organization registered'}
 
     # ── Helpers ────────────────────────────────────────────────────────
 

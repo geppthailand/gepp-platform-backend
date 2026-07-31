@@ -192,6 +192,7 @@ class AdminHandlers:
 
     def create_resource(self, resource: str, data: dict) -> Dict[str, Any]:
         handler_map = {
+            'organizations': self.admin_service.register_organization,
             'subscription-plans': self.admin_service.create_subscription_plan,
             'subscriptions': self.admin_service.create_subscription,
             'system-permissions': self.admin_service.create_system_permission,
