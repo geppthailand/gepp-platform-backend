@@ -504,6 +504,39 @@ def main(event, context):
                     logger.error(f"[LINE-WEBHOOK] Error: {webhook_err}", exc_info=True)
                     results = {"success": False, "message": str(webhook_err)}
 
+            elif "/api/scale-report/" in path:
+                # PUBLIC: daily scale report opened by scanning the QR shown on
+                # a weighing tablet. Access is controlled by an expiring HMAC
+                # token in the path rather than a JWT, so it has to sit ahead of
+                # the auth gate — same placement rationale as
+                # /api/input-channel/ below.
+                #
+                # The reader is a walk-in customer, so the response is trimmed
+                # by to_public_payload(): headline weight and carbon only, no
+                # per-material breakdown. Returning the full summary here would
+                # publish the station's intake mix outside the organisation.
+                from GEPPPlatform.services.cores.scale_reports.scale_report_service import (
+                    get_daily_summary,
+                    to_public_payload,
+                )
+                from GEPPPlatform.services.cores.scale_reports.scale_report_token import (
+                    verify_report_token,
+                )
+
+                report_token = path.split('/api/scale-report/')[1].split('/')[0].split('?')[0]
+                claims = verify_report_token(report_token)   # raises 401 / 410
+                results = {
+                    "success": True,
+                    "data": to_public_payload(
+                        get_daily_summary(
+                            session,
+                            claims['origin_id'],
+                            claims['org_id'],
+                            claims['day'],
+                        )
+                    ),
+                }
+
             elif "/api/input-channel/" in path:
                 # Public input channel access (no authorization required)
                 # Used for QR code mobile input
