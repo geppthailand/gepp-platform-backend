@@ -64,6 +64,24 @@ CREATE TABLE transactions (
     transaction_date TIMESTAMP,
     deleted_date TIMESTAMPTZ
 );
+CREATE TABLE organization_setup (
+    id BIGSERIAL PRIMARY KEY,
+    organization_id BIGINT,
+    version VARCHAR(50),
+    root_nodes JSONB,
+    hub_node JSONB,
+    metadata JSONB,
+    branch_level_name VARCHAR(255),
+    building_level_name VARCHAR(255),
+    floor_level_name VARCHAR(255),
+    room_level_name VARCHAR(255),
+    input_destination JSONB,
+    show_all_location_options BOOLEAN,
+    is_active BOOLEAN,
+    created_date TIMESTAMPTZ DEFAULT now(),
+    updated_date TIMESTAMPTZ,
+    deleted_date TIMESTAMPTZ
+);
 CREATE TABLE transaction_records (
     id BIGSERIAL PRIMARY KEY,
     created_transaction_id BIGINT,
@@ -82,7 +100,12 @@ CREATE TABLE transaction_records (
 _FIXTURES = """
 INSERT INTO user_locations (id, display_name, name_th, name_en, organization_id)
 VALUES (1, 'ศูนย์รับซื้อ สาขาบางนา', 'สาขาบางนา', 'Bangna', 10),
-       (2, 'สาขาอื่น', 'อื่น', 'Other', 99);
+       (2, 'สาขาอื่น', 'อื่น', 'Other', 99),
+       (3, 'ชั้น 1', 'ชั้น 1', 'Floor 1', 10);
+
+-- ผังองค์กร: จุด 1 (อาคาร) มีลูกคือจุด 3 (ชั้น) ตาชั่งตั้งอยู่ที่ชั้น
+INSERT INTO organization_setup (organization_id, is_active, root_nodes)
+VALUES (10, true, '[{"nodeId": 1, "children": [{"nodeId": 3, "children": []}]}]');
 
 INSERT INTO main_materials (id, name_th, name_en) VALUES (7, 'พลาสติก', 'Plastic');
 
@@ -94,7 +117,8 @@ INSERT INTO transactions (id, origin_id, organization_id, transaction_date)
 VALUES (1000, 1, 10, '2026-07-26 02:00:00'),
        (1001, 1, 10, '2026-07-26 09:00:00'),
        (1002, 1, 10, '2026-07-26 17:00:00'),   -- 00:00 Thai on the 27th
-       (1003, 2, 99, '2026-07-26 03:00:00');   -- different location
+       (1003, 2, 99, '2026-07-26 03:00:00'),   -- different location
+       (1004, 3, 10, '2026-07-26 04:00:00');   -- ชั้น 1 (ลูกของจุด 1)
 
 INSERT INTO transaction_records
  (created_transaction_id, material_id, main_material_id, category_id,
@@ -107,7 +131,9 @@ VALUES
  (1000, 100,  7, 3, 999.0, 999.0, '2026-07-26 02:00:00', 'rejected', NULL),
  (1000, 100,  7, 3, 888.0, 888.0, '2026-07-26 02:00:00', 'pending',  now()),
  (1002, 100,  7, 3, 777.0, 777.0, '2026-07-26 17:00:00', 'pending',  NULL),
- (1003, 100,  7, 3, 666.0, 666.0, '2026-07-26 03:00:00', 'pending',  NULL);
+ (1003, 100,  7, 3, 666.0, 666.0, '2026-07-26 03:00:00', 'pending',  NULL),
+ -- ชั่งที่ "ชั้น 1" (ลูกของจุด 1) — ต้องไม่นับในยอดเฉพาะจุด แต่ต้องนับในยอดรวมกิ่ง
+ (1004, 100,  7, 3,  50.0,  50.0, '2026-07-26 04:00:00', 'pending',  NULL);
 """
 
 #: Weights that must never appear: rejected, soft-deleted, next Thai day, other site.
@@ -247,8 +273,121 @@ def test_location_from_another_organization_is_refused(session):
                           day=date(2026, 7, 26))
 
 
-def test_public_payload_over_real_data_withholds_the_breakdown(summary):
+def test_public_payload_over_real_data_keeps_the_breakdown_but_not_ids(summary):
+    """The public page shows what was collected, not the plumbing behind it."""
     public = to_public_payload(summary)
-    assert 'materials' not in public
-    assert 'PET' not in repr(public)
-    assert public['totals']['weight_kg'] == 36.0
+    # ใช้ยอดรวมทั้งกิ่ง ให้ตรงกับตัวเลขที่พนักงานเห็นตอนยื่น QR ให้ลูกค้า
+    assert public['totals']['weight_kg'] == 86.0
+    assert [m['name_th'] for m in public['materials']] == [
+        'ขวด PET ใส', 'กระดาษลัง', None,
+    ]
+    for entry in public['materials']:
+        assert 'material_id' not in entry
+        assert 'category_id' not in entry
+    # internal-only sections still never leave
+    assert 'window_utc' not in public
+    assert 'origin_id' not in public['location']
+
+
+# ── ยอดเฉพาะจุด vs ยอดรวมทั้งกิ่ง ─────────────────────────────────────────────
+
+def test_own_total_counts_only_the_location_itself(summary):
+    """ตาชั่งตั้งที่ชั้น ยอด "เฉพาะอาคาร" จึงไม่รวม 50 กก. ของชั้น"""
+    assert summary['totals']['weight_kg'] == 36.0
+
+
+def test_subtree_total_rolls_up_the_children(summary):
+    """หัวหน้าที่ดูแลระดับอาคารต้องเห็นของชั้นข้างใต้ด้วย ไม่ใช่ 0
+    เพราะไม่มีใครชั่งโดยระบุตัวอาคารตรง ๆ"""
+    assert summary['subtree']['totals']['weight_kg'] == 86.0   # 36 + 50
+    assert summary['subtree']['has_descendants'] is True
+    assert summary['subtree']['location_count'] == 2
+
+
+def test_subtree_merges_the_same_material_across_locations(summary):
+    """PET ถูกชั่งทั้งที่อาคารและที่ชั้น — ต้องยุบเป็นรายการเดียว ไม่ใช่สองแถว"""
+    pet = [m for m in summary['subtree']['materials'] if m['name_th'] == 'ขวด PET ใส']
+    assert len(pet) == 1
+    assert pet[0]['weight_kg'] == 65.0        # 15 (อาคาร) + 50 (ชั้น)
+
+
+def test_subtree_shares_add_up_against_the_subtree_total(summary):
+    shares = sum(m['share_pct'] for m in summary['subtree']['materials'])
+    assert 99.0 <= shares <= 101.0            # ปัดทศนิยมแล้วยังต้องใกล้ 100
+
+
+def test_a_leaf_location_reports_itself_as_having_no_descendants(session):
+    leaf = get_daily_summary(session, 3, 10, date(2026, 7, 26))
+    assert leaf['totals']['weight_kg'] == 50.0
+    assert leaf['subtree']['totals']['weight_kg'] == 50.0
+    assert leaf['subtree']['has_descendants'] is False
+
+
+# ── แตกยอดรายจุด (กล่อง "แยกตามจุด" บนหน้าเว็บ) ────────────────────────────────
+
+def test_locations_split_the_branch_by_where_it_was_weighed(summary):
+    locations = summary['subtree']['locations']
+    # เรียงตามน้ำหนักมากไปน้อย — คนเปิดดูอยากรู้ว่า "ที่ไหนเยอะ" เป็นอย่างแรก
+    assert [(loc['display_name'], loc['totals']['weight_kg']) for loc in locations] == [
+        ('ชั้น 1', 50.0),
+        ('ศูนย์รับซื้อ สาขาบางนา', 36.0),   # ชั่งที่ตัวอาคารเอง
+    ]
+
+
+def test_locations_sum_back_to_the_branch_total(summary):
+    """โครงสร้างรับประกันเอง เพราะมาจากแถวชุดเดียวกัน — เทสนี้กันการรีแฟกเตอร์
+    ที่เผลอไปยิง query ใหม่คนละเงื่อนไข"""
+    total = sum(loc['totals']['weight_kg'] for loc in summary['subtree']['locations'])
+    assert total == summary['subtree']['totals']['weight_kg']
+
+
+def test_the_own_node_row_is_flagged_so_the_page_can_name_it(summary):
+    by_name = {loc['display_name']: loc for loc in summary['subtree']['locations']}
+    assert by_name['ศูนย์รับซื้อ สาขาบางนา']['is_self'] is True
+    assert by_name['ชั้น 1']['is_self'] is False
+
+
+def test_a_location_share_is_relative_to_the_branch(summary):
+    by_name = {loc['display_name']: loc for loc in summary['subtree']['locations']}
+    assert by_name['ชั้น 1']['share_pct'] == 58.1               # 50 / 86
+    assert by_name['ศูนย์รับซื้อ สาขาบางนา']['share_pct'] == 41.9  # 36 / 86
+
+
+def test_a_material_share_under_a_location_is_relative_to_that_location(summary):
+    """สองความหมายของ share_pct ในโครงสร้างเดียวกัน ตั้งใจให้ต่างกัน —
+    ถ้าเผลอทำให้เหมือนกัน แถบสัดส่วนในกล่องที่ขยายออกมาจะสั้นจู๋ทุกอัน"""
+    floor = [loc for loc in summary['subtree']['locations']
+             if loc['display_name'] == 'ชั้น 1'][0]
+    # ชั้น 1 ชั่ง PET อย่างเดียว 50 กก. → 100% ของตัวเอง แต่ 58.1% ของอาคาร
+    assert [m['share_pct'] for m in floor['materials']] == [100.0]
+    assert floor['share_pct'] == 58.1
+
+
+def test_a_leaf_location_still_reports_one_row(session):
+    """หน้าเว็บซ่อนกล่องเองเมื่อมีจุดเดียว — service ไม่ต้องรู้เรื่องนั้น"""
+    leaf = get_daily_summary(session, 3, 10, date(2026, 7, 26))
+    assert len(leaf['subtree']['locations']) == 1
+    assert leaf['subtree']['locations'][0]['is_self'] is True
+
+
+def test_a_quiet_day_lists_no_locations_at_all(session):
+    """อาคาร 20 ชั้นที่ยังไม่มีใครชั่ง ไม่ควรได้รายงานแถว 0 กก. ยี่สิบแถว"""
+    quiet = get_daily_summary(session, 1, 10, date(2026, 7, 20))
+    assert quiet['subtree']['locations'] == []
+
+
+def test_public_payload_carries_the_split_without_the_ids(summary):
+    public = to_public_payload(summary)
+    assert [loc['display_name'] for loc in public['locations']] == [
+        'ชั้น 1', 'ศูนย์รับซื้อ สาขาบางนา',
+    ]
+    for loc in public['locations']:
+        assert 'origin_id' not in loc
+        for entry in loc['materials']:
+            assert 'material_id' not in entry
+            assert 'category_id' not in entry
+
+
+def test_the_split_is_json_serialisable(summary):
+    """Decimal จาก Postgres ต้องถูกแปลงในชั้นที่ซ้อนอยู่ด้วย ไม่ใช่แค่ชั้นบน"""
+    json.dumps(to_public_payload(summary))
