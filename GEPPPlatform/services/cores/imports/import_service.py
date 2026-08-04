@@ -96,8 +96,14 @@ class ImportService:
             return {'success': False, 'message': 'Upload failed', 'errors': [str(e)]}
 
     # ── 2. Extract + match ──────────────────────────────────────────────────────
-    def extract(self, import_file_id: int, organization_id: int) -> Dict[str, Any]:
-        """Download the file, parse Waste Data, fuzzy-match, build + store preview_payload."""
+    def extract(self, import_file_id: int, organization_id: int,
+                current_user_id: Optional[int] = None) -> Dict[str, Any]:
+        """Download the file, parse Waste Data, fuzzy-match, build + store preview_payload.
+
+        ``current_user_id`` scopes the selectable origins (and auto-matching) to the
+        locations that user is assigned to — a data-entry user only imports data for the
+        origins they manage, mirroring the manual create-transaction flow.
+        """
         row = self._get_row(import_file_id, organization_id)
         if not row:
             return {'success': False, 'message': 'Import file not found'}
@@ -111,7 +117,7 @@ class ImportService:
                 raise ValueError('Could not read the uploaded file from storage')
 
             parsed = M.parse_waste_data(file_bytes, row.original_filename)
-            ctx = self._load_org_context(organization_id)
+            ctx = self._load_org_context(organization_id, current_user_id)
             review_rows = [self._build_review_row(r, ctx) for r in parsed]
 
             summary = self._summarize(review_rows)
@@ -456,8 +462,15 @@ class ImportService:
         }
 
     # ── Org context + matching ──────────────────────────────────────────────────
-    def _load_org_context(self, organization_id: int) -> Dict[str, Any]:
-        """Load the org's location tree, materials, tags and tenants + build edit-option lists."""
+    def _load_org_context(self, organization_id: int,
+                          current_user_id: Optional[int] = None) -> Dict[str, Any]:
+        """Load the org's location tree, materials, tags and tenants + build edit-option lists.
+
+        When ``current_user_id`` is a non-owner, the selectable origins are scoped to that
+        user's assigned locations (Tier 1: member locations + their descendants), computed
+        with the same ``_resolve_location_tiers`` used by the org-setup filter. Owners (and
+        an unset user) see every origin.
+        """
         setup = self.db.query(OrganizationSetup).filter(
             OrganizationSetup.organization_id == organization_id,
             OrganizationSetup.is_active == True,  # noqa: E712
@@ -468,6 +481,16 @@ class ImportService:
             UserLocation.organization_id == organization_id,
             UserLocation.is_active == True,  # noqa: E712
         ).all()
+
+        # Scope selectable origins to the acting user's assigned locations (non-owners only).
+        # allowed_origin_ids is None → no scoping (owner or caller passed no user).
+        allowed_origin_ids: Optional[set] = None
+        if current_user_id is not None:
+            from ..users.user_service import UserService
+            tiers = UserService(self.db)._resolve_location_tiers(
+                locations, organization_id, current_user_id)
+            if not tiers['is_owner']:
+                allowed_origin_ids = set(tiers['assigned_ids'])
         loc_by_id: Dict[int, Dict[str, Any]] = {}
         for loc in locations:
             loc_by_id[int(loc.id)] = {
@@ -570,6 +593,11 @@ class ImportService:
         ordered_ids = [lid for lid in tree_order if lid in loc_by_id]
         ordered_ids += [lid for lid in loc_by_id if lid not in depth_by_id]
 
+        # Non-owner: keep only the origins this user is assigned to (Tier 1). Ancestor nodes
+        # stay in loc_by_id/labels so paths still render, but they aren't selectable options.
+        if allowed_origin_ids is not None:
+            ordered_ids = [lid for lid in ordered_ids if lid in allowed_origin_ids]
+
         options = {
             'locations': [
                 {
@@ -601,6 +629,7 @@ class ImportService:
             'destinations': destinations,
             'path_labels': path_labels,
             'options': options,
+            'allowed_origin_ids': allowed_origin_ids,  # None = owner/unscoped
         }
 
     def _match_location(self, raw: Dict[str, Any], ctx: Dict[str, Any]) -> Tuple[Optional[int], str, List[str]]:
@@ -658,6 +687,11 @@ class ImportService:
         dt = M.parse_datetime(raw.get('date'))
         # Location path
         origin_id, path_label, _labels = self._match_location(raw, ctx)
+        # Scope: if the auto-matched origin isn't one this user is assigned to, drop it so the
+        # row surfaces as no_location and can only be re-pointed to an allowed origin.
+        allowed_origin_ids = ctx.get('allowed_origin_ids')
+        if allowed_origin_ids is not None and origin_id is not None and origin_id not in allowed_origin_ids:
+            origin_id, path_label = None, ''
         # Weight
         weight = M.parse_weight(raw.get('weight'))
         # Material (prefer kg)

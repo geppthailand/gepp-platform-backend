@@ -16,11 +16,24 @@ from ...exceptions import BadRequestException
 
 logger = logging.getLogger(__name__)
 
-# Origins permitted to call this endpoint. The product requirement is exact:
-# accept https://gepp.me only, not sibling origins.
+# Origins permitted to call this endpoint. gepp.me (marketing site) + the GEPP-Business
+# app (which now routes its /contact form here instead of self-serve /register).
 ALLOWED_ORIGINS = frozenset({
     "https://gepp.me",
+    "https://geppdata.com",        # gepp-business-v3 (prod)
+    "https://dev.geppdata.com",    # gepp-business-v3 (dev)
+    "http://localhost:5173",       # local dev
+    "http://localhost:5174",
 })
+
+# Per-source presentation: the funnel tags/site label depend on where the lead came from,
+# so a gepp-business-v3 submission is attributed to gepp-business-v3, not gepp.me. The
+# frontend sends a `source` string; unknown values fall back to a generic profile.
+_SOURCE_PROFILES = {
+    "gepp-me-contact": {"site": "gepp.me", "tag": "gepp_me", "detail": "gepp.me/contact"},
+    "gepp-business-v3": {"site": "gepp-business-v3", "tag": "gepp_business_v3",
+                          "detail": "gepp-business-v3/contact"},
+}
 
 _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 _MAX_TEXT_LEN = 1000
@@ -79,6 +92,9 @@ def handle_customer_lead_capture(
 
     message      = _clean(data.get("message"), max_len=_MAX_MESSAGE_LEN)
     source_label = _clean(data.get("source"),  max_len=64) or "landing-page"
+    profile = _SOURCE_PROFILES.get(source_label) or {
+        "site": source_label, "tag": "contact_form", "detail": f"{source_label}/contact",
+    }
 
     metadata = data.get("metadata") or {}
     if not isinstance(metadata, dict):
@@ -92,7 +108,7 @@ def handle_customer_lead_capture(
         max_len=2000,
     )
     source_metadata = {
-        "source_site": "gepp.me",
+        "source_site": profile["site"],
         "source_form": "contact",
         "source_label": source_label,
         "lead_type": lead_type,
@@ -116,7 +132,7 @@ def handle_customer_lead_capture(
             "last_name": last_name,
             "company": company,
             "notes": message,
-            "tags": ["gepp_me", "contact_form", lead_type],
+            "tags": list(dict.fromkeys([profile["tag"], "contact_form", lead_type])),
         },
         source="web_form",
         source_metadata=source_metadata,
@@ -157,7 +173,7 @@ def handle_customer_lead_capture(
         "ok": True,
         "id": lead_id,
         "source": "web_form",
-        "sourceDetail": "gepp.me/contact",
+        "sourceDetail": profile["detail"],
         "emailNotification": email_status,
     }
 

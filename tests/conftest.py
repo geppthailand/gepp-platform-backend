@@ -49,6 +49,17 @@ _PRE_IMPORTS = (
     "GEPPPlatform.services.admin.crm.logger",
     "GEPPPlatform.services.admin.crm.inbox_service",
     "GEPPPlatform.services.admin.crm.inbox_handlers",
+    # Canonical exception module. The GEPPPlatform.exceptions shim re-exports
+    # from here, so if this copy is swapped mid-run the shim's snapshot ends up
+    # holding classes from a stale copy and `pytest.raises(APIException)` stops
+    # matching what production code actually raises.
+    "GEPPPlatform.libs.exceptions",
+    # Scale daily-report modules: they raise APIException / UnauthorizedException
+    # from module-level imports and are asserted on by test_scale_report_*.py
+    # and test_daily_summary_route.py.
+    "GEPPPlatform.services.cores.scale_reports.bkk_time",
+    "GEPPPlatform.services.cores.scale_reports.scale_report_token",
+    "GEPPPlatform.services.cores.scale_reports.scale_report_service",
     # Models referenced by stubbing tests
     "GEPPPlatform.models.crm.events",
     "GEPPPlatform.models.crm.campaigns",
@@ -113,6 +124,57 @@ _REAL_EXC_NAMES = (
     "UnauthorizedException",
     "APIException",
 )
+
+
+@pytest.fixture
+def real_api_exceptions(request, monkeypatch):
+    """Pin the genuine API exception classes for the duration of one test.
+
+    Opt-in, not autouse: it repairs a specific pollution rather than changing
+    behaviour for suites that deliberately run against stubs.
+
+    Why it is needed
+    ────────────────
+    ``tests/crm_features/test_deliveries_csv.py`` (and
+    ``test_list_deliveries_user_filter.py``) do this at *import* time::
+
+        _exc = sys.modules["GEPPPlatform.exceptions"]
+        _exc.APIException = _StubAPIException      # plain Exception subclass
+
+    That mutates the real shim module **in place**, so ``_SNAPSHOT`` — which
+    holds a reference to that same object — cannot undo it, and
+    ``_rebind_exception_names_in_test_modules`` then reads the stub back out of
+    it and propagates it further. Any module left bound to the stub blows up
+    with ``TypeError: _StubAPIException() takes no keyword arguments`` as soon
+    as production code does ``APIException(msg, status_code=…, error_code=…)``.
+
+    ``GEPPPlatform.libs.exceptions`` is never touched by those tests, so it is
+    used here as the source of truth. monkeypatch reverts everything afterwards.
+    """
+    from GEPPPlatform.libs import exceptions as real
+
+    names = (
+        'APIException', 'UnauthorizedException', 'ValidationException',
+        'NotFoundException', 'BadRequestException', 'ForbiddenException',
+        'ConflictException', 'InternalServerException',
+    )
+    targets = [request.module]
+    for _name in (
+        'GEPPPlatform.exceptions',
+        'GEPPPlatform.services.cores.iot_devices.iot_devices_handlers',
+        'GEPPPlatform.services.cores.scale_reports.scale_report_token',
+        'GEPPPlatform.services.cores.scale_reports.scale_report_service',
+    ):
+        _mod = sys.modules.get(_name)
+        if _mod is not None:
+            targets.append(_mod)
+
+    for _mod in targets:
+        for _attr in names:
+            if hasattr(real, _attr) and hasattr(_mod, _attr):
+                monkeypatch.setattr(_mod, _attr, getattr(real, _attr), raising=False)
+
+    return real
 
 
 def _restore_snapshot():

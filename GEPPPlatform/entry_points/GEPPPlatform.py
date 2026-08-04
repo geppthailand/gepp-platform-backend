@@ -504,6 +504,47 @@ def main(event, context):
                     logger.error(f"[LINE-WEBHOOK] Error: {webhook_err}", exc_info=True)
                     results = {"success": False, "message": str(webhook_err)}
 
+            elif "/api/scale-report/" in path:
+                # PUBLIC: daily scale report opened by scanning the QR shown on
+                # a weighing tablet. Access is controlled by an expiring HMAC
+                # token in the path rather than a JWT, so it has to sit ahead of
+                # the auth gate — same placement rationale as
+                # /api/input-channel/ below.
+                #
+                # The reader is a walk-in customer, so the response goes through
+                # to_public_payload(), which is an allowlist — internal ids and
+                # anything transaction-level never leave the organisation.
+                #
+                # ?date= lets the page step between days, but only inside the
+                # window the token authorises (resolve_requested_day). Without
+                # that bound a single QR would unlock the station's whole
+                # history to whoever photographed it.
+                from GEPPPlatform.services.cores.scale_reports.scale_report_service import (
+                    get_daily_summary,
+                    to_public_payload,
+                )
+                from GEPPPlatform.services.cores.scale_reports.scale_report_token import (
+                    resolve_requested_day,
+                    verify_report_token,
+                )
+
+                report_token = path.split('/api/scale-report/')[1].split('/')[0].split('?')[0]
+                claims = verify_report_token(report_token)   # raises 401 / 410
+                report_day = resolve_requested_day(          # raises 422 / 403
+                    claims, query_params.get('date')
+                )
+                results = {
+                    "success": True,
+                    "data": to_public_payload(
+                        get_daily_summary(
+                            session,
+                            claims['origin_id'],
+                            claims['org_id'],
+                            report_day,
+                        )
+                    ),
+                }
+
             elif "/api/input-channel/" in path:
                 # Public input channel access (no authorization required)
                 # Used for QR code mobile input
