@@ -5,7 +5,7 @@ python3.13 -m pip install \
   --python-version 3.13 \
   --only-binary=:all: \
   --upgrade \
-  pgvector psycopg2-binary bcrypt pyjwt sqlalchemy GeoAlchemy2 pillow pypdfium2 \
+  pgvector psycopg2-binary bcrypt pyjwt sqlalchemy GeoAlchemy2 pillow \
   langchain-core \
   langchain-openrouter \
   openai \

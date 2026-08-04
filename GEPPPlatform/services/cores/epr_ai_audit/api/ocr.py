@@ -15,8 +15,8 @@ import logging
 from typing import Any, Dict, List
 
 from GEPPPlatform.libs.exceptions import BadRequestException
-from GEPPPlatform.libs.image_processing import safe_process_pages
-from GEPPPlatform.libs.openrouter import OCR_MODEL, call_llm, pdf_needs_raster
+from GEPPPlatform.libs.image_processing import safe_process_image
+from GEPPPlatform.libs.openrouter import OCR_MODEL, call_llm
 
 logger = logging.getLogger(__name__)
 
@@ -54,29 +54,22 @@ def _check_required(files: List[str], file_fields: List[Dict]) -> None:
 def _load_data_urls(files: List[str]) -> tuple[list, list]:
     """Fetch + prep each file. Returns (data_urls, kept_urls) in parallel order.
 
-    The two lists MUST stay index-parallel — the prompt numbers entries by
+    The two lists MUST stay index-parallel — the prompt numbers files by
     position and _resolve_indices maps the model's index back through
-    kept_urls. When the model needs rasterized PDFs, one source file becomes
-    several entries, so kept_urls repeats that source URL once per page.
-    Both lists therefore count PAGES, not files.
+    kept_urls. Anything that makes one input file produce several entries
+    (rasterizing a PDF into page images, say) has to append the source URL
+    once per entry, or file-slots resolve to the wrong document silently.
     """
-    raster = pdf_needs_raster(OCR_MODEL)
     data_urls, kept_urls = [], []
     for url in files:
-        pages = safe_process_pages(url, raster_pdf=raster)
-        if not pages:
+        d = safe_process_image(url)
+        if d is None:
             logger.warning("OCR: could not process file, skipping: %s", url)
             continue
-        # One source file can expand into several page images. Append the
-        # source URL once PER PAGE so the lists stay index-parallel and any
-        # page index the model returns resolves back to its own document.
-        for page in pages:
-            data_urls.append(page)
-            kept_urls.append(url)
+        data_urls.append(d)
+        kept_urls.append(url)
     if not data_urls:
         raise ValueError("No files could be fetched/processed.")
-    if len(data_urls) != len(kept_urls):  # invariant the whole module leans on
-        raise AssertionError("data_urls/kept_urls drifted out of sync")
     return data_urls, kept_urls
 
 
@@ -109,13 +102,10 @@ def _build_txn_prompt(txn_fields, record_fields, n_files) -> str:
     def slots(ff):
         return "\n".join(f"  - {f['name']}" for f in ff) or "  (none)"
 
-    return f"""You are given {n_files} image(s), numbered 0 to {n_files - 1}, in the
-order provided. A multi-page document appears as one image PER PAGE, so
-consecutive images may be pages of the SAME document — read them together.
-
-They ALL belong to ONE transaction. A transaction has one or more RECORDS
-(e.g. each material / line item is a record); a single record may span
-several images.
+    return f"""You are given {n_files} file(s), numbered 0 to {n_files - 1}, in the
+order provided. They ALL belong to ONE transaction. A transaction has one or
+more RECORDS (e.g. each material / line item is a record); a single record may
+span several files.
 
 Read across all files and return ONE JSON object with this shape:
 
@@ -190,12 +180,9 @@ def _build_audit_prompt(fields: List[Dict], n_files: int) -> str:
         block.append("\n".join(f"    - {f['name']}" for f in files_) or "    (none)")
         blocks.append("\n".join(block))
 
-    return f"""You are given {n_files} image(s), numbered 0 to {n_files - 1}, in the
-order provided. A multi-page document appears as one image PER PAGE, so
-consecutive images may be pages of the SAME document — read them together.
-
-They describe ONE recycler audit. Fields are grouped into sections. There are
-NO repeating records — fill each section exactly once.
+    return f"""You are given {n_files} file(s), numbered 0 to {n_files - 1}, in the
+order provided. They describe ONE recycler audit. Fields are grouped into
+sections. There are NO repeating records — fill each section exactly once.
 
 Read across all files and return ONE JSON object, one key per section, each
 mapping to an object with one key per field in that section. For value fields
