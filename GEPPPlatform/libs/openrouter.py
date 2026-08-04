@@ -48,9 +48,10 @@ INTEGRITY_MODEL = "google/gemini-3.5-flash"
 # ponytail: env override instead of a settings.json, so a trial is a Lambda
 # config flip with no deploy. Promote to a constant once a winner is picked.
 #
-# NOTE: any candidate must expose the "file" input modality on OpenRouter —
-# we hand it base64 PDFs (see libs/image_processing.to_pdf_data_url) and
-# ~60% of audit files are PDFs. Models WITHOUT "file" 400 on those:
+# A candidate WITHOUT OpenRouter's "file" input modality can still be used —
+# pdf_needs_raster() below routes it through page rasterization instead of
+# native PDF. That costs accuracy (no text layer) and tokens, so prefer a
+# file-capable model when one is good enough.
 #   moonshotai/kimi-k3   text+image only, $3.00/M in — 2x gemini-3.5-flash
 #   openai/gpt-4.1-mini  text+image only
 #   anthropic/haiku-4.5  text+image only
@@ -58,6 +59,18 @@ INTEGRITY_MODEL = "google/gemini-3.5-flash"
 #   curl -s https://openrouter.ai/api/v1/models \
 #     | jq '.data[] | select(.id=="<model>") | .architecture.input_modalities'
 OCR_MODEL = os.environ.get("EPR_OCR_MODEL", INTEGRITY_MODEL)
+
+# Model families that accept our base64 PDFs directly.
+# ponytail: prefix allowlist, not a live capability lookup — one string compare
+# beats an HTTP round-trip on every file. Of the families trialled only Gemini
+# exposes "file"; openai/, anthropic/ and moonshotai/ all 400. Verify with the
+# curl above before adding a prefix here.
+PDF_NATIVE_MODEL_PREFIXES = ("google/",)
+
+
+def pdf_needs_raster(model: str) -> bool:
+    """True when `model` cannot take a native PDF and needs page images."""
+    return not model.startswith(PDF_NATIVE_MODEL_PREFIXES)
 
 DEFAULT_TEXT_EMBEDDING_MODEL = "openai/text-embedding-3-small"  # 1536 dim
 DEFAULT_TEMPERATURE = 0.1

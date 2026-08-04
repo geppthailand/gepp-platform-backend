@@ -6,6 +6,7 @@ PyJWT
 sqlalchemy>=2.0
 GeoAlchemy2
 Pillow
+pypdfium2
 langchain-core
 openai
 pyyaml
