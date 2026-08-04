@@ -221,3 +221,66 @@ def test_judge_is_off_by_default(monkeypatch):
     assert worker._use_python_judge() is True
     monkeypatch.setenv("EPR_INTEGRITY_JUDGE", "llm")
     assert worker._use_python_judge() is False
+
+
+# ── regressions found by running against live project-41 data ───────────────
+
+@pytest.mark.parametrize("raw,expected", [
+    ("วันที่: 21 มกราคม 2568", "2025-01-21"),
+    ("21 ม.ค. 2568", "2025-01-21"),
+    ("31 March 2025", "2025-03-31"),
+    ("March 31, 2025", "2025-03-31"),
+    ("26/11/2568", "2025-11-26"),
+])
+def test_month_names_parse(raw, expected):
+    """Thai/English month names. tx 712 flagged a correct date because only
+    numeric formats parsed."""
+    assert expected in [str(d) for d in worker._extract_all_dates(raw)]
+
+
+def test_unparseable_date_is_cant_verify_not_mismatch():
+    r = judge({"transactionDate": "2025-01-20"},
+              sightings(dates=[("x", "no-date-here")]))
+    assert not r["issues"] and r["verdict"] == "passed"
+
+
+def test_money_label_is_not_a_weight():
+    """tx 740/741: a 5,605.00 baht transfer amount was read as a weight and
+    compared against 590 kg because 'จำนวน' matched 'จำนวนเงิน'."""
+    r = judge({"totalQuantity": 590},
+              sightings(numbers=[("จำนวนเงิน", "5,605.00")]))
+    assert not r["issues"], r
+    assert "totalQuantity" not in r["matched_fields"]
+
+
+def test_net_amount_english_is_not_a_weight():
+    r = judge({"totalQuantity": 590}, sightings(numbers=[("Net Amount", "5,605.00")]))
+    assert not r["issues"]
+
+
+def test_no_labelled_figure_is_cant_verify():
+    """A weight asked of a document that carries none. Unrelated numbers
+    differing proves nothing."""
+    r = judge({"totalQuantity": 590},
+              sightings(numbers=[("Account", "1234567"), ("Ref", "998877")]))
+    assert not r["issues"]
+
+
+@pytest.mark.parametrize("gross,tare,net", [
+    ("4,270", "1,780", 2490),
+    ("2,200", "2,030", 170),
+])
+def test_gross_minus_tare_is_the_net_weight(gross, tare, net):
+    """tx 713/714: scale tickets print gross and tare; the payload is the net,
+    which appears nowhere on the page."""
+    r = judge({"totalQuantity": net},
+              sightings(numbers=[("น้ำหนัก", gross), ("น้ำหนัก", tare)]))
+    assert "totalQuantity" in r["matched_fields"], r
+    assert not r["issues"]
+
+
+def test_net_arithmetic_does_not_apply_to_price():
+    """Subtraction is a weighing-slip convention, not a general licence."""
+    r = judge({"totalPrice": 2490},
+              sightings(numbers=[("Total", "4,270"), ("Total", "1,780")]))
+    assert {i["field"] for i in r["issues"]} == {"totalPrice"}
