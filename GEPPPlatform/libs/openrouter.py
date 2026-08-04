@@ -247,6 +247,117 @@ General:
   numbers are explicitly OUT OF SCOPE."""
 
 
+
+# Read-only counterpart to INTEGRITY_PROMPT. The LLM reports what it SEES and
+# makes no comparison; worker._judge_sightings() decides match/mismatch in
+# Python using _parse_number / _dates_within_one_day / _values_numerically_equal.
+#
+# Why: comparison here is arithmetic — Buddhist-era conversion, ±1% tolerance,
+# ±1 day, stripping thousands separators. Python does that exactly every time;
+# an LLM does it usually, and "usually" is what produced the false positives
+# that INTEGRITY_PROMPT's rule blocks and worker._clean_false_positive_issues()
+# both exist to suppress. Read and judge were one job; this splits them.
+#
+# Deliberately carries NO payload values — the model cannot anchor on a number
+# it is supposed to be independently verifying.
+SIGHTING_PROMPT = """You are reading one image from a recycling/waste transaction. It may be a document (invoice, receipt, voucher, scale ticket, QC cert) or a photo (waste pile, scale display, vehicle with cargo).
+
+Report ONLY what is visibly present. Do NOT judge, compare, or verify anything.
+
+Return ONLY this JSON (no commentary, no markdown fences):
+
+{{
+  "dates_seen": [
+    {{"label": "<the nearby label exactly as printed, or \\"\\" if none>",
+      "value": "<the date exactly as printed, e.g. \\"26/11/2568\\">"}}
+  ],
+  "numbers_seen": [
+    {{"label": "<the nearby label/column header exactly as printed, or \\"\\" if none>",
+      "value": "<the number exactly as printed, e.g. \\"29,540.00\\">"}}
+  ],
+  "image_content": "<one short phrase for what this image IS, e.g. \\"printed tax invoice\\", \\"digital scale display\\", \\"pile of PET bottles\\">",
+  "matches_stated_type": true | false | null
+}}
+
+Rules for dates_seen:
+- Include EVERY date-like value on the image: issue date, delivery date, due
+  date, received date, inspection date, signature date, handwritten dates.
+- Copy the year EXACTLY as printed. Do NOT convert Buddhist Era to Gregorian —
+  that conversion happens later. "2568" stays "2568".
+- Do NOT include address numbers, phone numbers, tax IDs, account numbers, or
+  page numbers ("Page 1/3"). If a slash-number has no date label AND no
+  4-digit year, leave it out.
+
+Rules for numbers_seen:
+- Include EVERY number that could be a quantity, weight, price, rate, or total,
+  each with the label printed next to it ("รวมทั้งสิ้น", "Unit Price",
+  "น้ำหนัก", "ราคา/กก.", "Total", "@").
+- Copy the digits EXACTLY as printed, separators and all: "29,540.00".
+- For "A x B = C" expressions, list A, B and C as separate entries.
+- Include handwritten and scribbled numbers, and numbers in unlabeled columns
+  (use "" as the label).
+- Include a labeled field even when its printed value is 0.00 or blank.
+- Do NOT compute, sum, or infer any number that is not printed.
+
+Rules for matches_stated_type:
+- The uploader stated this image's category as: {expected_type}
+- true  = the image plausibly IS that kind of thing.
+- false = the image is OBVIOUSLY a different kind of thing (e.g. stated
+          "national_id" but this is an invoice).
+- null  = the stated category is missing/generic ("other", "photo", "image",
+          "product_image", "product"), or the image is too ambiguous to judge.
+- CONTEXT: this is a waste-management platform — the "product" IS the waste.
+  Piles, scrap, bottles, material in bags, loaded trucks and scrap-yard scenes
+  all legitimately match product/photo categories. Be lenient; prefer true.
+
+If a section has nothing to report, return an empty list."""
+
+
+def read_image_sightings(
+    file_data_url: str,
+    expected_type: Optional[str] = None,
+    model: str = INTEGRITY_MODEL,
+    timeout: int = EXTRACT_TIMEOUT_SECS,
+) -> Dict[str, Any]:
+    """Ask the vision LLM what it can SEE on one image. No verification.
+
+    Returns {"dates_seen": [{label, value}], "numbers_seen": [{label, value}],
+             "image_content": str, "matches_stated_type": True|False|None}.
+    Raises on HTTP error or unparseable JSON (caller decides whether to swallow).
+    """
+    api_key = os.environ.get("OPENROUTER_API_KEY")
+    if not api_key:
+        raise ValueError("OPENROUTER_API_KEY environment variable is not set")
+
+    prompt = SIGHTING_PROMPT.format(
+        expected_type=repr(expected_type) if expected_type else "null",
+    )
+
+    resp = requests.post(
+        f"{OPENROUTER_BASE_URL}/chat/completions",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": model,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": file_data_url}},
+                ],
+            }],
+            "response_format": {"type": "json_object"},
+            "temperature": DEFAULT_TEMPERATURE,
+        },
+        timeout=timeout,
+    )
+    resp.raise_for_status()
+    content = resp.json()["choices"][0]["message"]["content"]
+    return json.loads(content)
+
+
 def get_openrouter_client() -> OpenAI:
     api_key = os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
