@@ -12,11 +12,12 @@ swap indices back to URLs here so the model never has to echo long URLs.
 
 import json
 import logging
+import os
 from typing import Any, Dict, List
 
 from GEPPPlatform.libs.exceptions import BadRequestException
 from GEPPPlatform.libs.image_processing import safe_process_image
-from GEPPPlatform.libs.openrouter import INTEGRITY_MODEL, call_llm
+from GEPPPlatform.libs.openrouter import OCR_MODEL, call_llm
 
 logger = logging.getLogger(__name__)
 
@@ -52,12 +53,26 @@ def _check_required(files: List[str], file_fields: List[Dict]) -> None:
 
 
 def _load_data_urls(files: List[str]) -> tuple[list, list]:
-    """Fetch + prep each file. Returns (data_urls, kept_urls) in parallel order."""
+    """Fetch + prep each file. Returns (data_urls, kept_urls) in parallel order.
+
+    The two lists MUST stay index-parallel — the prompt numbers files by
+    position and _resolve_indices maps the model's index back through
+    kept_urls. Any future change that turns one file into several entries
+    (e.g. rasterizing a PDF into page images) has to append the source URL
+    once per entry, or file-slots resolve to the wrong document silently.
+    """
+    skip_pdf = os.environ.get("EPR_OCR_SKIP_PDF") == "1"
     data_urls, kept_urls = [], []
     for url in files:
         d = safe_process_image(url)
         if d is None:
             logger.warning("OCR: could not process file, skipping: %s", url)
+            continue
+        # ponytail: trial escape hatch for text+image-only models (kimi-k3),
+        # which 400 on base64 PDFs. Lets the image-only subset be measured
+        # without building a rasterizer first. Drop this once a model is set.
+        if skip_pdf and d.startswith("data:application/pdf"):
+            logger.info("OCR: EPR_OCR_SKIP_PDF=1, dropping PDF: %s", url)
             continue
         data_urls.append(d)
         kept_urls.append(url)
@@ -67,7 +82,7 @@ def _load_data_urls(files: List[str]) -> tuple[list, list]:
 
 
 def _call_and_parse(prompt: str, data_urls: List[str]) -> Dict:
-    result = call_llm(prompt, image_urls=data_urls, model=INTEGRITY_MODEL)
+    result = call_llm(prompt, image_urls=data_urls, model=OCR_MODEL)
     text = result["content"].strip()
     text = text.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     return json.loads(text)

@@ -41,6 +41,24 @@ DEFAULT_MODEL = "google/gemini-2.5-flash"
 #                          PDF support. Testing to see if it edges out 2.5 Pro
 #                          on the trickier rule-following cases.
 INTEGRITY_MODEL = "google/gemini-3.5-flash"
+
+# The OCR form-reader used to share INTEGRITY_MODEL. Split so a model trial on
+# one doesn't silently move the other.
+#
+# ponytail: env override instead of a settings.json, so a trial is a Lambda
+# config flip with no deploy. Promote to a constant once a winner is picked.
+#
+# NOTE: any candidate must expose the "file" input modality on OpenRouter —
+# we hand it base64 PDFs (see libs/image_processing.to_pdf_data_url) and
+# ~60% of audit files are PDFs. Models WITHOUT "file" 400 on those:
+#   moonshotai/kimi-k3   text+image only, $3.00/M in — 2x gemini-3.5-flash
+#   openai/gpt-4.1-mini  text+image only
+#   anthropic/haiku-4.5  text+image only
+# Check before switching:
+#   curl -s https://openrouter.ai/api/v1/models \
+#     | jq '.data[] | select(.id=="<model>") | .architecture.input_modalities'
+OCR_MODEL = os.environ.get("EPR_OCR_MODEL", INTEGRITY_MODEL)
+
 DEFAULT_TEXT_EMBEDDING_MODEL = "openai/text-embedding-3-small"  # 1536 dim
 DEFAULT_TEMPERATURE = 0.1
 DEFAULT_MAX_TOKENS = 4096
