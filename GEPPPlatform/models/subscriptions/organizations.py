@@ -18,6 +18,11 @@ class Organization(Base, BaseModel):
     system_role_id = Column(BigInteger, ForeignKey('system_roles.id'))  # System permissions role
     allow_ai_audit = Column(Boolean, default=False)  # Permission to use AI for transaction auditing
 
+    # IoT scale intake: when true, transactions posted by digital scales are written as
+    # `approved` instead of `pending` (see resolve_auto_approve — a device can override
+    # this either way via device_settings.auto_approve_mode). Migration 078.
+    auto_approve_scale_transactions = Column(Boolean, nullable=False, default=False)
+
     # AI Audit Configuration
     ai_audit_rule_set_id = Column(BigInteger, ForeignKey('ai_audit_rule_sets.id'), default=1)
     enable_ai_audit_response_setting = Column(Boolean, default=False)

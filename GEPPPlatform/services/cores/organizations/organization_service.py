@@ -2,6 +2,7 @@
 Organization service for managing organization data and roles
 """
 
+import logging
 from typing import List, Optional, Dict, Any
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import and_, text
@@ -12,6 +13,8 @@ from ....models.users.user_location import UserLocation
 from ....models.users.user_locations_settings import UserLocationSettings
 from ....exceptions import ValidationException
 from .organization_role_presets import OrganizationRolePresets
+
+logger = logging.getLogger(__name__)
 
 # System defaults for the per-user data-entry settings when a user has no row yet.
 DEFAULT_INPUT_DESTINATION = False
@@ -213,6 +216,38 @@ class OrganizationService:
             'show_all_location_options': bool(row.show_all_location_options),
         }
 
+    def set_auto_approve_scale_transactions(
+        self,
+        organization_id: int,
+        enabled: bool,
+        acting_user_id: Optional[int] = None,
+    ) -> bool:
+        """Flip the org-wide "auto-approve scale readings" switch.
+
+        Org-WIDE on purpose (not per user like the two data-entry toggles): a scale is
+        shared hardware and attributes each weighing to whoever is logged in, so a
+        per-user flag would make the same device auto-approve for one operator and not
+        the next.
+
+        Caller is responsible for the owner check — see handle_update_organization_setup.
+        The change is logged because it changes the organisation's audit rules: turning
+        it on means scale readings stop waiting for review.
+        """
+        org = self.db.query(Organization).filter(Organization.id == organization_id).first()
+        if not org:
+            raise ValidationException('Organization not found')
+
+        previous = bool(getattr(org, 'auto_approve_scale_transactions', False))
+        org.auto_approve_scale_transactions = bool(enabled)
+        self.db.commit()
+
+        if previous != bool(enabled):
+            logger.info(
+                "[auto_approve] organization %s scale auto-approval %s -> %s by user %s",
+                organization_id, previous, bool(enabled), acting_user_id,
+            )
+        return bool(enabled)
+
     def get_organization_setup(self, organization_id: int) -> Optional[Dict[str, Any]]:
         """
         Get the current organization setup structure.
@@ -235,9 +270,19 @@ class OrganizationService:
         if not setup:
             return None
 
+        # Org-WIDE settings that live on `organizations`, surfaced through the setup
+        # payload so the settings screen can read everything in one call. Unlike
+        # input_destination / show_all_location_options (which are per user), these
+        # apply to everyone in the org — the UI must say so.
+        org_row = self.db.query(
+            Organization.auto_approve_scale_transactions, Organization.owner_id
+        ).filter(Organization.id == organization_id).first()
+
         return {
             'id': setup.id,
             'organization_id': setup.organization_id,
+            'auto_approve_scale_transactions': bool(org_row[0]) if org_row else False,
+            'organization_owner_id': org_row[1] if org_row else None,
             'version': setup.version,
             'is_active': setup.is_active,
             'root_nodes': setup.root_nodes,
@@ -274,6 +319,16 @@ class OrganizationService:
         eff = self.get_user_location_settings(current_user_id)
         setup['input_destination'] = eff['input_destination']
         setup['show_all_location_options'] = eff['show_all_location_options']
+
+        # Whether THIS user may flip the org-wide auto-approve switch. Only the owner
+        # can: it decides whether scale readings skip review entirely, so a data-entry
+        # user must not be able to switch off the review of their own numbers. The UI
+        # renders the toggle disabled for everyone else.
+        setup['auto_approve_scale_transactions_editable'] = bool(
+            setup.get('organization_owner_id')
+            and current_user_id
+            and int(setup['organization_owner_id']) == int(current_user_id)
+        )
 
         # Get tiers from user_service
         from ..users.user_service import UserService
