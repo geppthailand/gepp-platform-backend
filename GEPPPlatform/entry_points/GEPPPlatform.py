@@ -550,20 +550,28 @@ def main(event, context):
                 # the auth gate — same placement rationale as
                 # /api/input-channel/ below.
                 #
-                # The reader is a walk-in customer, so the response is trimmed
-                # by to_public_payload(): headline weight and carbon only, no
-                # per-material breakdown. Returning the full summary here would
-                # publish the station's intake mix outside the organisation.
+                # The reader is a walk-in customer, so the response goes through
+                # to_public_payload(), which is an allowlist — internal ids and
+                # anything transaction-level never leave the organisation.
+                #
+                # ?date= lets the page step between days, but only inside the
+                # window the token authorises (resolve_requested_day). Without
+                # that bound a single QR would unlock the station's whole
+                # history to whoever photographed it.
                 from GEPPPlatform.services.cores.scale_reports.scale_report_service import (
                     get_daily_summary,
                     to_public_payload,
                 )
                 from GEPPPlatform.services.cores.scale_reports.scale_report_token import (
+                    resolve_requested_day,
                     verify_report_token,
                 )
 
                 report_token = path.split('/api/scale-report/')[1].split('/')[0].split('?')[0]
                 claims = verify_report_token(report_token)   # raises 401 / 410
+                report_day = resolve_requested_day(          # raises 422 / 403
+                    claims, query_params.get('date')
+                )
                 results = {
                     "success": True,
                     "data": to_public_payload(
@@ -571,7 +579,7 @@ def main(event, context):
                             session,
                             claims['origin_id'],
                             claims['org_id'],
-                            claims['day'],
+                            report_day,
                         )
                     ),
                 }

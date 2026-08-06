@@ -35,7 +35,11 @@ from base64 import urlsafe_b64decode, urlsafe_b64encode
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, Tuple
 
-from GEPPPlatform.libs.exceptions import APIException, UnauthorizedException
+from GEPPPlatform.libs.exceptions import (
+    APIException,
+    UnauthorizedException,
+    ValidationException,
+)
 
 from .bkk_time import DAY_FORMAT
 
@@ -147,6 +151,48 @@ def verify_report_token(token: str) -> Dict[str, Any]:
         )
 
     return claims
+
+
+#: หน้า public เลื่อนดูย้อนหลังได้กี่วันจากวันที่ฝังใน token
+#:
+#: 1 = ดูได้ 2 วัน (วันที่สร้าง QR กับวันก่อนหน้า) เจตนาคือให้ลูกค้าเทียบ
+#: "เมื่อวานกับวันนี้" ได้ โดยไม่เปิดประวัติทั้งเดือนให้คนที่ถือ QR ใบเดียว
+#: ยิ่งกว้างยิ่งบอกแนวโน้มปริมาณรับเข้าของจุดนั้นให้คนนอกรู้มากขึ้น
+PUBLIC_DAY_WINDOW_DAYS = 1
+
+
+def resolve_requested_day(claims: Dict[str, Any], requested):
+    """หาว่าจะให้ดูวันไหน จากวันที่ผู้ใช้ขอมา — ภายในกรอบที่ token อนุญาต
+
+    ไม่ส่ง `requested` มา = วันที่ฝังใน token
+
+    Raises:
+        ValidationException: 422 — รูปแบบวันที่ผิด
+        APIException: 403 — วันที่ถูกต้องแต่อยู่นอกกรอบที่ token นี้เปิดให้
+            (แยกจาก 422 เพราะคนละเรื่อง: อันหนึ่งพิมพ์ผิด อีกอันคือขอดู
+            สิ่งที่ไม่ได้รับอนุญาต)
+    """
+    token_day: date = claims['day']
+    if requested is None or requested == '':
+        return token_day
+
+    try:
+        day = datetime.strptime(str(requested), DAY_FORMAT).date()
+    except ValueError:
+        raise ValidationException('date must be YYYY-MM-DD')
+
+    earliest = token_day - timedelta(days=PUBLIC_DAY_WINDOW_DAYS)
+    # ห้ามเลยวันใน token ไปข้างหน้า — QR ที่ออกเมื่อวานต้องไม่กลายเป็น
+    # ช่องทางดูยอดของวันนี้ไปเรื่อย ๆ
+    if day > token_day or day < earliest:
+        raise APIException(
+            'This link only covers {0} to {1}'.format(
+                earliest.strftime(DAY_FORMAT), token_day.strftime(DAY_FORMAT)
+            ),
+            status_code=403,
+            error_code='DATE_OUT_OF_RANGE',
+        )
+    return day
 
 
 def build_report_url(token: str) -> str:

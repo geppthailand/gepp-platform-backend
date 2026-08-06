@@ -1430,7 +1430,12 @@ def handle_iot_devices_routes(event: Dict[str, Any], data: Dict[str, Any], **com
             token, expires_at = make_report_token(origin_id, organization_id, day)
             summary['report_url'] = build_report_url(token)
             summary['report_expires_at'] = expires_at.isoformat()
-            return {'success': True, 'data': summary}
+            # คืน payload ตรง ๆ ห้ามห่อ {'success':..., 'data':...} เอง —
+            # entry point ห่อให้แล้วที่ GEPPPlatform.py (`results = {"success":
+            # True, "data": iot_devices_result}`) ถ้าห่อซ้ำ client จะได้
+            # data.data ซ้อนกันแล้ว parse ไม่ออก
+            # route อื่นในไฟล์นี้ก็คืนตรง ๆ เหมือนกัน
+            return summary
 
         if path == '/api/iot-devices/qr-login':
             auth_handler = AuthHandlers(db_session)
