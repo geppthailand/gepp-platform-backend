@@ -10,8 +10,9 @@ Ported from gepp-v2-backend (GEPPV2.services.ai_audit). Split into two layers:
 
   cron/  — background dedup worker driven by entry_points/GEPPEPRAIAudit.py
            (raw psycopg2 connections, matches the v2 source). Includes the
-           queue helpers, the per-transaction worker, the duplicate scorer,
-           and the legacy MySQL import loop.
+           queue helpers, the per-transaction worker, and the duplicate
+           scorer. Dedup compares each transaction against the others in its
+           own project; there is no legacy-MySQL comparison corpus.
 """
 
 from .api.handlers import handle_epr_ai_audit_routes  # noqa: F401
