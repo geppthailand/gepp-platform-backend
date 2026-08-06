@@ -379,6 +379,15 @@ def handle_list_transactions(
                 district = int(district_raw)
         sub_district = int(query_params['sub_district']) if query_params.get('sub_district') else None
 
+        # Provenance filters: where the row came from, and who approved it. Unknown values
+        # are dropped rather than erroring — a stale bookmark shouldn't break the list.
+        source = query_params.get('source')
+        if source not in ('iot', 'qr_input', 'import', 'manual'):
+            source = None
+        approval_source = query_params.get('approval_source')
+        if approval_source not in ('human', 'ai', 'auto_scale'):
+            approval_source = None
+
         # Always filter by user's organization and only transactions where user is in origin members
         result = transaction_service.list_transactions(
             organization_id=current_user_organization_id,
@@ -400,7 +409,9 @@ def handle_list_transactions(
             location_ids=location_ids,
             filter_tag_ids=filter_tag_ids,
             filter_tenant_ids=filter_tenant_ids,
-            material_ids=material_ids
+            material_ids=material_ids,
+            source=source,
+            approval_source=approval_source
         )
 
         if result['success']:
