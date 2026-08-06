@@ -11,6 +11,7 @@ from reportlab.lib.units import inch
 from reportlab.lib import colors
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
+from GEPPPlatform.services.cores.thai_canvas import ThaiCanvas
 
 PAGE_WIDTH_IN = 11.69
 PAGE_HEIGHT_IN = 8.27
@@ -2562,7 +2563,7 @@ def generate_pdf_bytes(data: dict) -> bytes:
     width_pt = PAGE_WIDTH_IN * inch
     height_pt = PAGE_HEIGHT_IN * inch
     buffer = BytesIO()
-    c = canvas.Canvas(buffer, pagesize=(width_pt, height_pt))
+    c = ThaiCanvas(buffer, pagesize=(width_pt, height_pt))
 
     _draw_header(c, width_pt, height_pt, data)
     y_below_cards = _draw_card_row(c, width_pt, height_pt, data)
