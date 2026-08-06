@@ -40,7 +40,30 @@ DEFAULT_MODEL = "google/gemini-2.5-flash"
 #                          $1.25/M) — the "Flash" name is misleading. Native
 #                          PDF support. Testing to see if it edges out 2.5 Pro
 #                          on the trickier rule-following cases.
+#   moonshotai/kimi-k3   — REJECTED. text+image only (no "file"), so PDFs need
+#                          rasterizing. Measured on 7 real project-41 txs,
+#                          same images and same Python judge, vs 3.5-flash:
+#                          identical verdicts 7/7 (zero accuracy gain), but it
+#                          reported only 66 of the 91 numbers Gemini found
+#                          (73% recall, never more on any tx), ran 1.40x slower
+#                          (134s vs 95s), and costs 2x input ($3.00/M vs
+#                          $1.50/M). Don't retry without a reason; the
+#                          rasterizer built for it was removed with it.
 INTEGRITY_MODEL = "google/gemini-3.5-flash"
+
+# The OCR form-reader used to share INTEGRITY_MODEL. Split so a model trial on
+# one doesn't silently move the other.
+#
+# ponytail: env override instead of a settings.json, so a trial is a Lambda
+# config flip with no deploy. Promote to a constant once a winner is picked.
+#
+# NOTE: a candidate must expose the "file" input modality on OpenRouter — we
+# send base64 PDFs (libs/image_processing.to_pdf_data_url) and ~60% of audit
+# files are PDFs. Check before switching:
+#   curl -s https://openrouter.ai/api/v1/models \
+#     | jq '.data[] | select(.id=="<model>") | .architecture.input_modalities'
+OCR_MODEL = os.environ.get("EPR_OCR_MODEL", INTEGRITY_MODEL)
+
 DEFAULT_TEXT_EMBEDDING_MODEL = "openai/text-embedding-3-small"  # 1536 dim
 DEFAULT_TEMPERATURE = 0.1
 DEFAULT_MAX_TOKENS = 4096
@@ -77,16 +100,12 @@ USER-SUBMITTED PAYLOAD (the claim being verified). A field with value `null` is 
 - pricePerUnit:     {price_per_unit}    (PER-UNIT price — baht per kg or per piece. Verify against the rate column / unit price on the document.)
 - imageType:        {expected_type}     (the user's stated category for THIS image — verify the image's visible content matches this category)
 
-Look carefully at the image. For each NON-NULL payload field, decide if the image's visible content AGREES, CONTRADICTS, or simply DOESN'T SHOW that field.
-
 Where to look for each field:
 - transactionDate: on documents only (printed/written dates).
-- totalQuantity (the claimed weight/quantity of material):
-    * PRECISE source — scale's LED/dial display, document line-item total, printed sticker/label on cargo: read the number directly.
-    * ROUGH ESTIMATE source — a waste pile, cargo bed, bin, or stockpile photo with NO printed number: estimate the apparent quantity from visible volume, packaging, material density, and any container size cues. Note your range in image_indicates (e.g. "approximately 50-100 kg").
-- totalPrice: documents only. Look for "Total", "Grand Total", "รวมเงิน", "รวมทั้งสิ้น", "Net Amount", or the final amount-payable line. Ignore subtotals that aren't the final figure.
-- pricePerUnit: documents only. Look for unit-rate columns like "ราคา/หน่วย", "Unit Price", "Rate", "@", or a "price × quantity = total" expression where the per-unit rate is the first multiplicand.
-- imageType: judge whether the image's CONTENT matches the uploader's stated category. See the imageType rule below for what each category should look like.
+- totalQuantity: PRECISE source — scale display, document line-item total, printed sticker/label: read the number directly. ROUGH ESTIMATE source — a pile, cargo bed, bin, or stockpile photo with NO printed number: estimate from visible volume, packaging, material density, container size cues. Note your range in image_indicates (e.g. "approximately 50-100 kg").
+- totalPrice: documents only. "Total", "Grand Total", "รวมเงิน", "รวมทั้งสิ้น", "Net Amount", or the final amount-payable line. Ignore subtotals that aren't the final figure.
+- pricePerUnit: documents only. Unit-rate columns like "ราคา/หน่วย", "Unit Price", "Rate", "@", or a "price × quantity = total" expression where the per-unit rate is the first multiplicand.
+- imageType: judge whether the image's CONTENT matches the uploader's stated category. See the imageType rule below.
 
 DO NOT check invoice numbers, document numbers, reference codes, or any other identifier strings. They are intentionally OUT OF SCOPE for this verification.
 
@@ -110,238 +129,225 @@ Return ONLY this JSON shape (no commentary, no markdown fences):
 
 Both `explanation.en` and `explanation.th` are REQUIRED whenever an issue is reported. They must convey the same reasoning — Thai is a faithful translation of the English, not an alternative finding.
 
-CRITICAL — per-field decision flow:
-  For each NON-NULL field, make ONE decision:
-    (a) MATCH       → add the field name to "matched_fields"
-    (b) MISMATCH    → add an entry to "issues" describing the contradiction
-    (c) CANT VERIFY → omit from BOTH lists (field not visible / not estimable)
+DECISION FLOW — for each NON-NULL field, exactly one of:
+  (a) MATCH       → field name goes in "matched_fields"
+  (b) MISMATCH    → entry in "issues"
+  (c) CANT VERIFY → omit from BOTH lists
+Skip null fields entirely. Never put a field in both lists.
 
-  Skip null fields entirely — don't list them anywhere.
-  A non-null field MUST appear in EXACTLY ONE of those buckets, or neither (case c).
-  NEVER put a field in BOTH "matched_fields" AND "issues".
+CANT VERIFY is not a mismatch. If the value is not readable or estimable in the
+image, omit the field — do not write an issue saying it "is not visible" or
+"cannot be determined". A genuine MISMATCH requires you to actually read a
+DIFFERENT value on the image.
 
-  An "issues" entry is ONLY for a genuine, substantive MISMATCH. If your
-  explanation contains ANY of the following phrasings, you have NOT found
-  a mismatch — the field belongs in matched_fields, NOT issues:
-    "is a match" / "matches" / "this matches"
-    "within tolerance" / "within the allowed" / "within ±1"
-    "is consistent with" / "consistent with"
-    "fits the type" / "fits the category" / "matches the stated type"
-    "appears to be a [the type]"
-    "missing comma" / "thousands separator" / "decimal formatting"
-    "cosmetic difference" / "formatting difference"
-  If your reasoning trends toward ANY of those: the answer is MATCH. Move the field
-  to matched_fields and emit NO issue entry for it.
+Cosmetic and formatting differences are never mismatches. Neither is "within
+tolerance" or "consistent with" — those are MATCH. WHEN IN DOUBT, MATCH.
 
-  ────────────────────────────────────────────────────────────────────────
-  CRITICAL — CANT VERIFY is NOT a mismatch:
-  If you cannot see the value in the image — no scale display, no document
-  line, no number to read or estimate — that is CANT VERIFY, NOT a mismatch.
-  CANT VERIFY means: OMIT the field from BOTH lists. Do NOT write an issue
-  for it. EVER.
-
-  Specifically, NEVER emit an issue entry where:
-    - image_indicates says "Not visible" / "Not shown" / "Not displayed" /
-      "Not specified" / "Cannot determine" / "No clear value" / "Unknown" /
-      "N/A" / anything similar, OR
-    - explanation says the value "is not visible / is not shown / cannot be
-      determined / cannot be estimated / no clear indication / no specific
-      total/price/weight / no precise figure" or any equivalent.
-  In those cases the field is unverifiable for THIS image — OMIT it entirely.
-
-  A genuine totalQuantity / totalPrice / pricePerUnit MISMATCH requires you
-  to actually READ A DIFFERENT NUMBER on the image. If no number is readable
-  for that field, the field is CANT VERIFY.
-
-  A genuine transactionDate MISMATCH requires you to actually READ A
-  DIFFERENT DATE on the image. If no date is readable, CANT VERIFY.
-
-  A genuine imageType MISMATCH requires the image to OBVIOUSLY depict the
-  wrong category. If the image plausibly fits, MATCH. If the image is too
-  ambiguous to judge, OMIT (CANT VERIFY).
-  ────────────────────────────────────────────────────────────────────────
-
-Rules:
-- "flagged" ONLY when the image CLEARLY and SUBSTANTIVELY contradicts the payload. Cosmetic/format differences are NEVER a mismatch. WHEN IN DOUBT, mark as MATCHED.
-
-Numeric comparison (applies to totalQuantity, totalPrice, pricePerUnit):
-- BEFORE comparing two numbers, NORMALIZE both by stripping ALL of: thousands separators (commas OR dots used as grouping), currency symbols ("฿", "$", "บาท", "THB"), unit suffixes ("kg", "kgs", "กก.", "บาท/กก."), and surrounding whitespace.
-- Treat trailing ".0" / ".00" as equal to no decimals. Convert to a plain numeric value, THEN compare.
-- These are ALL matches and MUST NOT be flagged:
-    payload "29540"      vs image "29,540"        → MATCH (thousands separator)
-    payload "29540"      vs image "29,540.00"     → MATCH (thousands separator + trailing zeros)
-    payload 2040         vs image "2,040 บาท"     → MATCH (thousands separator + currency suffix)
-    payload "12"         vs image "12.00"         → MATCH (decimal zeros)
-    payload "1,234.56"   vs image "1234.56"       → MATCH (separator difference)
-- NEVER write an issue whose explanation talks about "missing comma", "thousands separator", "decimal formatting", "should not have a comma", or any other purely cosmetic rendering difference. Format is NOT data.
+Numeric comparison (totalQuantity, totalPrice, pricePerUnit):
+- Normalize both sides before comparing: strip thousands separators (comma or
+  dot grouping), currency symbols ("฿", "$", "บาท", "THB"), unit suffixes
+  ("kg", "kgs", "กก.", "บาท/กก."), whitespace, and trailing ".0"/".00".
+  Compare as plain numeric values.
 
 transactionDate rule:
-- Compare ONLY THE CALENDAR DATE (year + month + day). NEVER flag based on time-of-day, timezone, or "time not visible". IGNORE any "T17:00:00" / "T00:00" / time portion in the payload completely.
-
-- ONLY use dates that are CLEARLY LABELED as date-related. A bare number like
-  "27/9" with no surrounding date label is NOT a date — it's almost certainly
-  an address, phone number, account number, page number, or ID fragment.
-  Accept a date ONLY if at least one of these is true:
-    (a) It is next to a date label such as: "Date", "วันที่", "ลงวันที่",
-        "Issue Date", "Issued", "ออกเมื่อ", "ออกใบ", "Delivery", "ส่งของ",
-        "Received", "วันที่รับสินค้า", "Due", "Signed", "Inspected", "ตรวจ",
-        "Transaction Date", "วันทำรายการ".
-    (b) It appears in a clearly date-shaped form: a 4-digit year alongside
-        month + day (e.g. "2025-03-31", "31/03/2025", "31/03/2568", or
-        Buddhist-shorthand "31/03/68" with the leading "DD/MM/" structure
-        plus reasonable month/day values).
-    (c) It is written out with a month name in Thai or English (e.g.
-        "21 มกราคม 2568", "March 31, 2025").
-  An isolated short fragment like "27/9", "12/5", or "3/68" with no label
-  AND no 4-digit year is NOT acceptable as a transaction date — DO NOT use
-  it. Treat the field as CANT VERIFY in that situation.
-
-- AVOID these confusable sources (these are NEVER the transaction date):
-  * Address numbers ("27/9 Soi 5", "บ้านเลขที่ 31/2")
-  * Phone numbers (segments may contain "/" or "-")
-  * Tax IDs, ID-card numbers, account numbers
-  * Page numbers ("Page 1/3"), sequence numbers, line numbers
-  * Quantities or prices that happen to use "/" as a separator
-
-- If you cannot find a date with a clear label OR a clear 4-digit-year date
-  format on the image, set image_indicates to "No clearly labeled date found"
-  and OMIT the transactionDate field entirely from your response. DO NOT
-  invent a date or pick a random number-with-a-slash hoping it's a date.
-
-- BUDDHIST-ERA CONVERSION IS MANDATORY before comparing.
-  Thai documents almost always print years in the Buddhist Era (พ.ศ.).
-  Buddhist Era = Gregorian + 543. To convert:  Gregorian = Buddhist - 543.
-  CONVERT FIRST, THEN COMPARE. NEVER compare a Buddhist year directly against
-  a Gregorian year. NEVER write an explanation like "image says 2568, payload
-  says 2025, mismatch" — that is WRONG because you forgot to convert.
-
-  Conversion examples:
-    image year 2568 → Gregorian 2025
-    image year 2567 → Gregorian 2024
-    image year 2561 → Gregorian 2018
-    image year 2569 → Gregorian 2026
-  2-digit Thai shorthand on documents (e.g. "26/11/68") = "26/11/2568" =
-  Gregorian "26/11/2025". Always expand 2-digit years on Thai docs to "25YY"
-  and then subtract 543.
-
-  Concrete examples that MUST MATCH:
-    payload "2025-11-26" + image "26/11/2568"  → MATCH (2568 = 2025)
-    payload "2025-11-26" + image "26/11/68"    → MATCH (68 → 2568 → 2025)
-    payload "2024-03-15" + image "15/3/67"     → MATCH (67 → 2567 → 2024)
-
-- ALLOW ±1 day tolerance AFTER Buddhist conversion. Legacy timezone quirks
-  can shift dates by exactly one day in either direction; treat any 1-day-off
-  as a MATCH. These are ALL matches:
-    payload "2025-10-27T17:00:00" + image "27 October 2025 16:27"     → MATCH (same date, time irrelevant)
-    payload "2025-10-27T17:00:00" + image "26/10/2025"                 → MATCH (within ±1 day)
-    payload "2025-10-27T17:00:00" + image "28/10/2025"                 → MATCH (within ±1 day)
-    payload "2025-01-20" + image "21 มกราคม 2568"                       → MATCH (Buddhist conversion + within ±1 day)
-
-- MULTIPLE DATES ON ONE DOCUMENT (very common): Thai invoices and receipts
-  often display several dates — issue date, delivery date, due date,
-  inspection date, signature date, "วันที่รับสินค้า" (received date),
-  "วันที่ออกใบกำกับ" (issue date), printed-form date plus a handwritten one,
-  etc. If ANY of the visible dates on the document, after Buddhist
-  conversion, lands within ±1 day of the payload, that is a MATCH.
-  DO NOT pick one date and flag because another date would have matched.
-  Sighting any matching date anywhere on the document counts.
-
-  When multiple dates appear, set image_indicates to a brief list of the
-  dates you saw (e.g. "Issue: 29/03/2568, Delivery: 31/03/2568"), then make
-  the MATCH/MISMATCH decision against the closest one to the payload.
-
-  Examples that MUST MATCH (payload "2025-03-31"):
-    image shows "Issue: 29/03/2568, Delivery: 31/03/2568"  → MATCH (delivery matches)
-    image shows "Inspected 28/03/2568, Signed 01/04/2568"  → MATCH (within ±1 day of either)
-    image shows "ออกใบ 28/03/68, รับ 30/03/68"               → MATCH (received date within ±1 day)
-
-- ONLY flag transactionDate when NONE of the visible dates on the document,
-  after Buddhist conversion, falls within ±1 day of the payload:
-    payload "2025-10-27" + image only shows "29/10/2568"           → FLAG (2 days off, no closer date)
-    payload "2025-10-27" + image only shows "27/11/2568"           → FLAG (different month)
-    payload "2025-10-27" + image shows "27/10/2567" + "30/10/2567" → FLAG (2024 not 2025)
+- Compare ONLY the calendar date (year + month + day). Ignore time-of-day and
+  timezone entirely — including any "T17:00:00" portion in the payload.
+- BUDDHIST-ERA CONVERSION IS MANDATORY: Gregorian = Buddhist − 543. Thai
+  documents print พ.ศ. years (2568 = 2025). 2-digit shorthand on Thai docs
+  expands to "25YY" first ("26/11/68" → 2568 → 2025). Convert BEFORE comparing.
+- ALLOW ±1 day tolerance after conversion (legacy timezone quirks).
+- Use only dates that are CLEARLY date-labeled ("Date", "วันที่", "ลงวันที่",
+  "Issue Date", "Issued", "ออกเมื่อ", "ออกใบ", "Delivery", "ส่งของ",
+  "Received", "วันที่รับสินค้า", "Due", "Signed", "Inspected", "ตรวจ",
+  "Transaction Date", "วันทำรายการ"), OR date-shaped with a 4-digit year, OR
+  written out with a month name in Thai or English.
+  A bare fragment like "27/9" with no label and no 4-digit year is NOT a date —
+  it is almost certainly an address, phone number, tax ID, account number, or
+  page number. Treat the field as CANT VERIFY. Never invent a date.
+- MULTIPLE DATES (very common on Thai invoices: issue, delivery, due,
+  inspection, signature, printed plus handwritten): if ANY visible date lands
+  within ±1 day of the payload after conversion, that is a MATCH. Do not pick
+  one date and flag when another would have matched. Set image_indicates to a
+  brief list of the dates you saw. Flag only when NONE falls within ±1 day.
 
 totalQuantity rule:
-- From a PRECISE source (scale, printed total, single number): ±1% tolerance. Flag if off by more than 1%.
-- From a ROUGH ESTIMATE (visual pile/cargo, no printed number): 0.5×–2× tolerance. ONLY flag on a CLEAR order-of-magnitude mismatch (e.g. payload 5000 vs visible pile ~50). When uncertain, DO NOT flag.
-- Do NOT do arithmetic on visible numbers unless the document EXPLICITLY presents the result of that arithmetic as the total. If you see "27,320 x 12" but the document doesn't label "327,840" as the total, treat the payload's 27,320 as a possible match.
+- PRECISE source: ±1% tolerance.
+- ROUGH ESTIMATE: 0.5×–2× tolerance. Flag only on a clear order-of-magnitude
+  mismatch (payload 5000 vs a visible pile of ~50). When uncertain, do not flag.
+- Do NOT do arithmetic on visible numbers unless the document explicitly
+  presents the result of that arithmetic as the total.
 
 totalPrice rule:
-- ±1% tolerance. Currency is THB; ignore currency symbols ("฿", "บาท", "THB"), thousands separators, and decimal-point variants when comparing.
-- Compare against the FINAL total — grand total / net amount / "รวมทั้งสิ้น". Ignore intermediate subtotals if a larger final figure exists below them.
-- If the document is missing a clear total line (e.g. a scale ticket, a photo, a quality cert): mark as CANT VERIFY. Do not synthesize a total by multiplying.
+- ±1% tolerance. Currency is THB.
+- Compare against the FINAL total — grand total / net amount / "รวมทั้งสิ้น".
+  Ignore intermediate subtotals if a larger final figure appears below them.
+- No clear total line (scale ticket, photo, quality cert) → CANT VERIFY. Do not
+  synthesize a total by multiplying.
 
-pricePerUnit rule (LENIENT — "anywhere on the image" sighting):
-- This is a deliberately permissive check. Real-world Thai recycling documents often have handwritten / scribbled prices in margins, on stickers, hand-written over printed forms, etc. Be generous about what counts as a match.
-
-- THE CORE RULE: if payload pricePerUnit's value appears ANYWHERE on the image
-  within ±1% tolerance, you MUST mark it MATCH. This overrides any other
-  signal on the page. The presence of the number is what matters.
-  This includes (non-exhaustive): printed values, handwritten values,
-  scribbled values, values in any column whether labeled or not, values in
-  margins, values on stickers, values embedded in multiplicative expressions
-  ("A × B = C" — either multiplicand counts), values in totals lines,
-  values in any sub-calculation, ANY occurrence.
-
-- A 0.00 / 0 / blank value in the LABELED "ราคา/หน่วย" / "ราคา/กก." / "Unit Price"
-  field is NEVER, EVER evidence of a mismatch. These are template placeholders
-  that the form printer/biller didn't fill in. The handwritten / calculated
-  value elsewhere on the page IS the real price.
-
-  EXPLICIT case (this exact scenario must MATCH):
-    payload pricePerUnit = 8
-    image has labeled field "ราคา/กก. 0.00" AND a handwritten calculation
-      "13,750 × 8 = 110,000" elsewhere on the page
-    → MATCH. The 8 was sighted. The 0.00 placeholder is irrelevant.
-    DO NOT FLAG. DO NOT explain that "the official field shows 0.00" — that
-    reasoning is INVALID under this rule.
-
-- Examples that MUST match (payload pricePerUnit=12):
-    image has "ราคา/กก. 12"               → MATCH
-    image has "@ 12/kg"                    → MATCH
-    image has handwritten "12 บาท"         → MATCH
-    image has "270 × 12 = 2,040"           → MATCH (12 sighted)
-    image has "12 × 270"                   → MATCH
-    image has a scribble "12" near totals  → MATCH
-    image has "12.00" in any field         → MATCH
-    image has labeled "ราคา/กก. 0.00" PLUS handwritten "12" anywhere → MATCH
-
-- CANT VERIFY (omit, do NOT flag) when the payload value is NOT on the image
-  at all. Just leave the field out of both lists.
-
-- ONLY MISMATCH when the image CLEARLY shows a DIFFERENT per-unit price as the
-  authoritative figure AND the payload value is nowhere on the page. Example:
-  clean printed invoice "Unit Price: 50 ฿/kg" labeled, no "12" anywhere on
-  the page, payload says 12 → MISMATCH.
-
-- Currency symbols, unit suffixes, decimals: ignore per the Numeric comparison rule above.
+pricePerUnit rule (DELIBERATELY LENIENT):
+- If the payload value appears ANYWHERE on the image within ±1%, mark MATCH.
+  This overrides every other signal on the page. Printed, handwritten,
+  scribbled in a margin, on a sticker, in a labeled or unlabeled column, inside
+  a multiplicative expression (either multiplicand counts), in a totals line or
+  sub-calculation — any occurrence. Real Thai recycling documents scribble
+  prices anywhere; be generous about what counts.
+- A 0.00 / 0 / blank value in the labeled "ราคา/หน่วย" / "ราคา/กก." / "Unit
+  Price" field is NEVER evidence of a mismatch — it is an unfilled template
+  placeholder. The handwritten or calculated value elsewhere IS the real price.
+  (payload 8, labeled field "ราคา/กก. 0.00", handwritten "13,750 × 8 = 110,000"
+  elsewhere → MATCH. Do not explain that "the official field shows 0.00" —
+  that reasoning is INVALID under this rule.)
+- Payload value nowhere on the image → CANT VERIFY, omit from both lists.
+- MISMATCH only when the image clearly shows a DIFFERENT per-unit price as the
+  authoritative figure AND the payload value appears nowhere on the page.
 
 imageType rule:
-- Compare the uploader's stated `imageType` against what the image VISUALLY IS — not against the rest of the payload.
-- CONTEXT: this is a recycling / WASTE-MANAGEMENT platform. The "product" IS the waste material. Photos of waste piles, scrap, recyclable bottles/UBC/paper/plastic, materials in bags/bins, trucks/pickups loaded with waste, scrap-yard scenes — ALL of these count as legitimate "product" photos. They are NEVER a mismatch when the type is product_image / photo / image / waste_photo / cargo_photo / product / generic.
-- Skip the check entirely (omit from both lists) when imageType is null, "other", "photo", "image", "product_image", "product", "waste_photo", "cargo_photo", or any other clearly generic value. These are too vague to verify.
-- What each SPECIFIC category SHOULD look like:
-    * "invoice", "tax_invoice", "receipt", "payment_voucher": a printed financial document with vendor/buyer info, line items, totals.
-    * "scale_weight", "scale_reading", "product_weighing_sheet", "weighing_slip": a weighing scale's LED/dial display OR a printed weighing slip with a clear weight figure. Multi-photo / composite weighing-slip documents (a scanned slip with attached photos) still count.
-    * "qc_file", "quality_cert", "quality_inspection": a quality control / inspection document, usually with product details and pass/fail. Documents that combine inspection notes with photos of the inspected material count.
-    * "money_transfer_document", "bank_transfer", "payment_slip": a bank/wallet transfer confirmation.
+- Compare the stated `imageType` against what the image VISUALLY IS — not
+  against the rest of the payload.
+- CONTEXT: this is a recycling / WASTE-MANAGEMENT platform. The "product" IS
+  the waste material. Piles, scrap, UBC/bottles/paper/plastic, material in bags
+  or bins, loaded trucks/pickups, scrap-yard scenes are ALL legitimate product
+  photos and are NEVER a mismatch for product_image / photo / image /
+  waste_photo / cargo_photo / product / generic.
+- Skip the check entirely (omit from both lists) when imageType is null or
+  generic ("other", "photo", "image", "product_image", "product",
+  "waste_photo", "cargo_photo"). These are too vague to verify.
+- What each SPECIFIC category should look like:
+    * "invoice", "tax_invoice", "receipt", "payment_voucher": a printed
+      financial document with vendor/buyer info, line items, totals.
+    * "scale_weight", "scale_reading", "product_weighing_sheet",
+      "weighing_slip": a scale's LED/dial display OR a printed weighing slip
+      with a clear weight figure. Composite slips with attached photos count.
+    * "qc_file", "quality_cert", "quality_inspection": a QC / inspection
+      document. Ones combining inspection notes with photos of the material
+      count.
+    * "money_transfer_document", "bank_transfer", "payment_slip": a bank or
+      wallet transfer confirmation.
     * "production_report": a manufacturing/production summary.
-    * "national_id", "id_card", "thai_id": a Thai national ID card (front side: name in Thai+English, 13-digit ID number, date of birth, photo).
-    * "vehicle_with_cargo": a vehicle (truck/pickup) carrying material.
-- ONLY flag a CLEAR category mismatch where the image is OBVIOUSLY the wrong kind of thing. Examples that MUST flag:
-    "national_id" but image is an invoice document → MISMATCH
-    "tax_invoice" but image is a photo of trash bags with NO document visible → MISMATCH
-    "money_transfer_document" but image is a scale ticket → MISMATCH
-- Examples that MUST NOT flag (BE LENIENT):
-    "product_image" + photo of a waste pile / scrap / UBC bottles → MATCH (waste IS the product here)
-    "product_image" + a composite document with multiple waste photos → MATCH
-    "scale_weight" + a weighing slip that has photos attached → MATCH (still a weighing document)
-    Any generic type + any plausibly-related content → MATCH
-- payload_value should be the raw imageType string; image_indicates should describe what the image actually depicts.
+    * "national_id", "id_card", "thai_id": a Thai national ID card, front side.
+    * "vehicle_with_cargo": a vehicle carrying material.
+- Flag ONLY an obvious category mismatch where the image is clearly the wrong
+  kind of thing: "national_id" but the image is an invoice; "tax_invoice" but
+  the image is trash bags with no document visible; "money_transfer_document"
+  but the image is a scale ticket. Anything plausibly related → MATCH.
+- payload_value is the raw imageType string; image_indicates describes what the
+  image actually depicts.
 
 General:
-- If a field is NOT visible / not estimable in this image: do NOT flag it AND do NOT add it to matched_fields. Just omit.
-- Only check the five fields listed above (when non-null). Invoice / document numbers are explicitly OUT OF SCOPE."""
+- Field not visible / not estimable in this image → omit from both lists.
+- Only check the five fields listed above (when non-null). Invoice and document
+  numbers are explicitly OUT OF SCOPE."""
+
+
+
+# Read-only counterpart to INTEGRITY_PROMPT. The LLM reports what it SEES and
+# makes no comparison; worker._judge_sightings() decides match/mismatch in
+# Python using _parse_number / _dates_within_one_day / _values_numerically_equal.
+#
+# Why: comparison here is arithmetic — Buddhist-era conversion, ±1% tolerance,
+# ±1 day, stripping thousands separators. Python does that exactly every time;
+# an LLM does it usually, and "usually" is what produced the false positives
+# that INTEGRITY_PROMPT's rule blocks and worker._clean_false_positive_issues()
+# both exist to suppress. Read and judge were one job; this splits them.
+#
+# Deliberately carries NO payload values — the model cannot anchor on a number
+# it is supposed to be independently verifying.
+SIGHTING_PROMPT = """You are reading one image from a recycling/waste transaction. It may be a document (invoice, receipt, voucher, scale ticket, QC cert) or a photo (waste pile, scale display, vehicle with cargo).
+
+Report ONLY what is visibly present. Do NOT judge, compare, or verify anything.
+
+Return ONLY this JSON (no commentary, no markdown fences):
+
+{{
+  "dates_seen": [
+    {{"label": "<the nearby label exactly as printed, or \\"\\" if none>",
+      "value": "<the date exactly as printed, e.g. \\"26/11/2568\\">"}}
+  ],
+  "numbers_seen": [
+    {{"label": "<the nearby label/column header exactly as printed, or \\"\\" if none>",
+      "value": "<the number exactly as printed, e.g. \\"29,540.00\\">"}}
+  ],
+  "image_content": "<one short phrase for what this image IS, e.g. \\"printed tax invoice\\", \\"digital scale display\\", \\"pile of PET bottles\\">",
+  "matches_stated_type": true | false | null
+}}
+
+Rules for dates_seen:
+- Include EVERY date-like value on the image: issue date, delivery date, due
+  date, received date, inspection date, signature date, handwritten dates.
+- Copy the year EXACTLY as printed. Do NOT convert Buddhist Era to Gregorian —
+  that conversion happens later. "2568" stays "2568".
+- Do NOT include address numbers, phone numbers, tax IDs, account numbers, or
+  page numbers ("Page 1/3"). If a slash-number has no date label AND no
+  4-digit year, leave it out.
+
+Rules for numbers_seen:
+- Include EVERY number that could be a quantity, weight, price, rate, or total,
+  each with the label printed next to it ("รวมทั้งสิ้น", "Unit Price",
+  "น้ำหนัก", "ราคา/กก.", "Total", "@").
+- Copy the digits EXACTLY as printed, separators and all: "29,540.00".
+- For "A x B = C" expressions, list A, B and C as separate entries.
+- Include handwritten and scribbled numbers, and numbers in unlabeled columns
+  (use "" as the label).
+- Include a labeled field even when its printed value is 0.00 or blank.
+- Do NOT compute, sum, or infer any number that is not printed.
+
+Rules for matches_stated_type:
+- The uploader stated this image's category as: {expected_type}
+- true  = the image plausibly IS that kind of thing.
+- false = the image is OBVIOUSLY a different kind of thing (e.g. stated
+          "national_id" but this is an invoice).
+- null  = the stated category is missing/generic ("other", "photo", "image",
+          "product_image", "product"), or the image is too ambiguous to judge.
+- CONTEXT: this is a waste-management platform — the "product" IS the waste.
+  Piles, scrap, bottles, material in bags, loaded trucks and scrap-yard scenes
+  all legitimately match product/photo categories. Be lenient; prefer true.
+
+If a section has nothing to report, return an empty list."""
+
+
+def read_image_sightings(
+    file_data_url: str,
+    expected_type: Optional[str] = None,
+    model: str = INTEGRITY_MODEL,
+    timeout: int = EXTRACT_TIMEOUT_SECS,
+) -> Dict[str, Any]:
+    """Ask the vision LLM what it can SEE on one image. No verification.
+
+    Returns {"dates_seen": [{label, value}], "numbers_seen": [{label, value}],
+             "image_content": str, "matches_stated_type": True|False|None}.
+    Raises on HTTP error or unparseable JSON (caller decides whether to swallow).
+    """
+    api_key = os.environ.get("OPENROUTER_API_KEY")
+    if not api_key:
+        raise ValueError("OPENROUTER_API_KEY environment variable is not set")
+
+    prompt = SIGHTING_PROMPT.format(
+        expected_type=repr(expected_type) if expected_type else "null",
+    )
+
+    resp = requests.post(
+        f"{OPENROUTER_BASE_URL}/chat/completions",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": model,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": file_data_url}},
+                ],
+            }],
+            "response_format": {"type": "json_object"},
+            "temperature": DEFAULT_TEMPERATURE,
+        },
+        timeout=timeout,
+    )
+    resp.raise_for_status()
+    content = resp.json()["choices"][0]["message"]["content"]
+    return json.loads(content)
 
 
 def get_openrouter_client() -> OpenAI:

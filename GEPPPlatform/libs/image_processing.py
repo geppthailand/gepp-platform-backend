@@ -49,16 +49,21 @@ def to_pdf_data_url(pdf_bytes: bytes) -> str:
     return f"data:application/pdf;base64,{b64}"
 
 
+def _jpeg_data_url(img, max_side: int) -> str:
+    """Downscale if needed → JPEG → base64 data URL. Caller owns `img`."""
+    img = img.convert("RGB")
+    if max(img.size) > max_side:
+        img.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=85)
+    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+    return f"data:image/jpeg;base64,{b64}"
+
+
 def to_resized_jpeg_data_url(image_bytes: bytes, max_side: int = MAX_SIDE_PX) -> str:
     """Decode → optionally downscale → re-encode as JPEG → base64 data URL."""
     with Image.open(io.BytesIO(image_bytes)) as img:
-        img = img.convert("RGB")
-        if max(img.size) > max_side:
-            img.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=85)
-    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-    return f"data:image/jpeg;base64,{b64}"
+        return _jpeg_data_url(img, max_side)
 
 
 def safe_process_image(url: str) -> Optional[str]:
@@ -73,3 +78,4 @@ def safe_process_image(url: str) -> Optional[str]:
     except Exception as exc:
         logger.warning("file processing failed for %s: %s", url, exc)
         return None
+

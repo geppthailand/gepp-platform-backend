@@ -25,6 +25,7 @@ from reportlab.graphics.charts.piecharts import Pie
 from reportlab.graphics import renderPDF
 from urllib.request import urlopen
 from reportlab.lib.utils import ImageReader
+from GEPPPlatform.services.cores.thai_canvas import ThaiCanvas
 
 # --- Colors and constants (vendored from scripts/generate_pdf_report.py) ---
 BuildingColors = [
@@ -891,6 +892,11 @@ def draw_performance(pdf, page_width_points: float, page_height_points: float, d
     # per-type bars) and BOTH pie charts (full-data, unchanged) and shows only its slice of buildings.
     buildings = performance_data.get("buildings", [])
     has_buildings = bool(buildings and isinstance(buildings, list) and len(buildings) > 0)
+    _max_waste = 0.0
+    if has_buildings:
+        buildings = sorted(buildings, key=lambda b: float(b.get("totalWasteKg", 0) or 0), reverse=True)
+        # Bars are scaled against the biggest building, not the origin total, so the top row is full.
+        _max_waste = float(buildings[0].get("totalWasteKg", 0) or 0)
 
     # Assign per-building colors ONCE for the whole dataset so the list rows and the (full-data)
     # pie chart agree across every page. Computed up front, before the page loop.
@@ -1030,9 +1036,8 @@ def draw_performance(pdf, page_width_points: float, page_height_points: float, d
                 pdf.drawString(_name_left, y, _bname)
                 pdf.drawString(_val_x, y, value_text)
                 _color = _assigned_colors[abs_idx] if abs_idx < len(_assigned_colors) else colors.HexColor("#b7cbd6")
-                total_waste = float(performance_data.get("totalWasteKg", 0) or 0)
-                if total_waste > 0:
-                    _progress_bar(pdf, inner_x + 16, y - 0.2 * inch, inner_x - 0.5 * inch, 0.08 * inch, building.get('totalWasteKg', 0) / total_waste, _color)
+                if _max_waste > 0:
+                    _progress_bar(pdf, inner_x + 16, y - 0.2 * inch, inner_x - 0.5 * inch, 0.08 * inch, float(building.get('totalWasteKg', 0) or 0) / _max_waste, _color)
 
         pdf.setFillColor(TEXT)
         pdf.setFont("IBMPlexSansThai-Regular", 10)
@@ -2784,7 +2789,7 @@ def generate_pdf_bytes(data: dict) -> bytes:
     # Ensure fonts are registered (works both locally and in Lambda with a layer)
     _register_fonts()
 
-    pdf = canvas.Canvas(buffer, pagesize=(width_points, height_points))
+    pdf = ThaiCanvas(buffer, pagesize=(width_points, height_points))
 
     # Draw pages (mirrors main() in scripts/generate_pdf_report.py)
     draw_cover(pdf, width_points, height_points, data)

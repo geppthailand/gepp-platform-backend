@@ -39,6 +39,7 @@ Cron handler shape (see entry_points/GEPPEPRAIAudit.py):
 """
 
 import logging
+import os
 import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
@@ -578,15 +579,62 @@ def _dates_within_one_day(a, b, tolerance_days=1):
     return False
 
 
+                                                        # noqa: E501
+# Month names, Thai and English, full and abbreviated. Thai documents very
+# often write "21 มกราคม 2568" rather than 21/01/2568, and the numeric
+# patterns above cannot see those at all.
+_MONTH_NAMES = {
+    "มกราคม": 1, "ม.ค.": 1, "ก.พ.": 2, "กุมภาพันธ์": 2, "มีนาคม": 3, "มี.ค.": 3,
+    "เมษายน": 4, "เม.ย.": 4, "พฤษภาคม": 5, "พ.ค.": 5, "มิถุนายน": 6, "มิ.ย.": 6,
+    "กรกฎาคม": 7, "ก.ค.": 7, "สิงหาคม": 8, "ส.ค.": 8, "กันยายน": 9, "ก.ย.": 9,
+    "ตุลาคม": 10, "ต.ค.": 10, "พฤศจิกายน": 11, "พ.ย.": 11, "ธันวาคม": 12, "ธ.ค.": 12,
+    "january": 1, "jan": 1, "february": 2, "feb": 2, "march": 3, "mar": 3,
+    "april": 4, "apr": 4, "may": 5, "june": 6, "jun": 6, "july": 7, "jul": 7,
+    "august": 8, "aug": 8, "september": 9, "sept": 9, "sep": 9,
+    "october": 10, "oct": 10, "november": 11, "nov": 11, "december": 12, "dec": 12,
+}
+# Longest names first so "มี.ค." wins over a shorter prefix, and "march"
+# is not shadowed by "mar".
+_MONTH_ALT = "|".join(
+    re.escape(k) for k in sorted(_MONTH_NAMES, key=len, reverse=True)
+)
+# "21 มกราคม 2568" / "21 Jan 2025"
+_DMY_NAME_RE = re.compile(rf"(\d{{1,2}})\s*({_MONTH_ALT})\s*(\d{{4}})", re.IGNORECASE)
+# "March 31, 2025" / "Jan 5 2025"
+_MDY_NAME_RE = re.compile(rf"({_MONTH_ALT})\s+(\d{{1,2}}),?\s+(\d{{4}})", re.IGNORECASE)
+
+
+def _extract_named_dates(s):
+    """Yield dates written with a Thai or English month name."""
+    for rx, order in ((_DMY_NAME_RE, "dmy"), (_MDY_NAME_RE, "mdy")):
+        for m in rx.finditer(s):
+            if order == "dmy":
+                d, name, y = m.group(1), m.group(2), m.group(3)
+            else:
+                name, d, y = m.group(1), m.group(2), m.group(3)
+            mo = _MONTH_NAMES.get(name.lower()) or _MONTH_NAMES.get(name)
+            if not mo:
+                continue
+            sd = _safe_date(int(y), mo, int(d))
+            if sd:
+                yield sd
+
+
 def _extract_all_dates(s):
     """Yield every date-shaped substring in `s` as a `datetime.date`,
     auto-converting Buddhist years. Tries ISO first, then DD/MM/YYYY,
-    then DD/MM/YY-shorthand. Each match-position is consumed only once
-    per pattern, but the function returns all distinct dates found."""
+    then DD/MM/YY-shorthand, then Thai/English month names. Each
+    match-position is consumed only once per pattern, but the function
+    returns all distinct dates found."""
     if not s:
         return
     s = str(s)
     seen = set()
+
+    for sd in _extract_named_dates(s):
+        if sd not in seen:
+            seen.add(sd)
+            yield sd
 
     # ISO: YYYY-MM-DD
     for m in _DATE_PATTERNS[0].finditer(s):
@@ -850,6 +898,266 @@ def _coalesce(raw, field_names):
     return None
 
 
+def _use_python_judge() -> bool:
+    """True when the integrity verdict is decided in Python from LLM sightings
+    instead of asking the LLM to compare.
+
+    ponytail: env flag, not a settings table — this is a migration switch, so
+    delete the branch (and the LLM-compare path with it) once the Python judge
+    is proven on production traffic. Read per-call so it can be flipped on a
+    warm Lambda.
+    """
+    return os.environ.get("EPR_INTEGRITY_JUDGE", "").lower() == "python"
+
+
+# Label keywords that mark a number as the document's grand total / the weight,
+# used to prefer the authoritative figure over an incidental sighting.
+_TOTAL_LABEL_HINTS = (
+    "total", "grand total", "net amount", "amount", "sum",
+    "รวม", "รวมเงิน", "รวมทั้งสิ้น", "ยอดรวม", "จำนวนเงิน",
+)
+_QUANTITY_LABEL_HINTS = (
+    "weight", "qty", "quantity", "gross", "tare",
+    "น้ำหนัก", "ปริมาณ", "กก", "kg",
+)
+# Deliberately NOT in the quantity hints:
+#   "จำนวน"  — prefix of "จำนวนเงิน" (amount of MONEY), so it matched baht
+#              figures on money-transfer slips and flagged them as weights.
+#   "net"    — appears in "Net Amount", also money.
+# Both were observed misfiring on live project-41 data.
+
+# A label carrying any of these is about money, never a weight.
+_MONEY_LABEL_MARKERS = (
+    "เงิน", "บาท", "ราคา", "amount", "price", "total", "฿", "thb", "baht", "cost",
+)
+
+
+def _label_matches(label, hints):
+    lowered = str(label or "").lower()
+    return any(h in lowered for h in hints)
+
+
+def _is_money_label(label):
+    return _label_matches(label, _MONEY_LABEL_MARKERS)
+
+
+def _all_numbers_in(value):
+    """Every number-shaped token in `value`, as floats.
+
+    _parse_number returns only the FIRST token, which is wrong for a sighting
+    like "270 x 12 = 2,040" — the per-unit rate is the second multiplicand.
+    The sighting prompt asks for A, B and C as separate entries, but the model
+    will sometimes return the whole expression, so sweep it.
+    """
+    if value is None or value == "":
+        return []
+    if isinstance(value, (int, float)):
+        return [float(value)]
+    s = str(value)
+    for noise in ("฿", "$", "บาท", "thb", "kg", "kgs", "กก.", "กก"):
+        s = s.replace(noise, " ")
+    out = []
+    for tok in _NUMERIC_TOKEN_RE.findall(s):
+        try:
+            out.append(float(tok.replace(",", "")))
+        except ValueError:
+            continue
+    return out
+
+
+def _value_sighted(payload_value, seen_values, tolerance=0.01):
+    """True if `payload_value` matches ANY number appearing in `seen_values`."""
+    target = _parse_number(payload_value)
+    if target is None:
+        return False
+    for v in seen_values:
+        for n in _all_numbers_in(v):
+            if target == 0 and n == 0:
+                return True
+            if target == 0 or n == 0:
+                continue
+            if abs(target - n) / max(abs(target), abs(n)) <= tolerance:
+                return True
+    return False
+
+
+def _net_of_two(payload_value, values, tolerance=0.01):
+    """True if `payload_value` is the difference of two numbers in `values`.
+
+    Scale tickets print GROSS and TARE and expect the reader to take the net:
+    4,270 - 1,780 = 2,490, where only 2,490 is submitted. Without this a
+    perfectly good weighing slip reads as a mismatch.
+
+    Deliberately narrow — subtraction of two sighted values only. Not general
+    arithmetic: summing line items would let almost any payload find a
+    combination that fits, which is how a sighting check stops meaning anything.
+    """
+    target = _parse_number(payload_value)
+    if target is None or target <= 0:
+        return False
+    nums = sorted({n for v in values for n in _all_numbers_in(v) if n > 0},
+                  reverse=True)
+    for i, big in enumerate(nums):
+        for small in nums[i + 1:]:
+            diff = big - small
+            if diff <= 0:
+                continue
+            if abs(target - diff) / max(abs(target), abs(diff)) <= tolerance:
+                return True
+    return False
+
+
+def _judge_field_numeric(payload_value, numbers_seen, label_hints=None,
+                         allow_net=False):
+    """Decide MATCH / MISMATCH / CANT_VERIFY for one numeric field.
+
+    Returns ("match", None) | ("mismatch", seen_repr) | ("cant_verify", None).
+
+    Labelled numbers are authoritative: when the image has a number whose
+    label looks like this field, only those decide the outcome. Otherwise fall
+    back to a sighting check — the payload value appearing ANYWHERE on the
+    image counts as a match, matching the deliberately lenient rule the old
+    prompt used for pricePerUnit.
+    """
+    if _is_empty_payload_value(payload_value):
+        return ("cant_verify", None)
+
+    entries = [e for e in (numbers_seen or []) if isinstance(e, dict)]
+    values = [e.get("value") for e in entries]
+    values = [v for v in values if not _is_empty_payload_value(v)]
+    if not values:
+        return ("cant_verify", None)
+
+    if label_hints is None:
+        # Sighting-only field (pricePerUnit). Unit rates get scribbled in
+        # margins, so an appearance anywhere counts. Absence proves nothing —
+        # never a mismatch, only unverifiable.
+        return ("match", None) if _value_sighted(payload_value, values) \
+            else ("cant_verify", None)
+
+    labelled = [e.get("value") for e in entries
+                if _label_matches(e.get("label"), label_hints)
+                and not (label_hints is _QUANTITY_LABEL_HINTS
+                         and _is_money_label(e.get("label")))
+                and not _is_empty_payload_value(e.get("value"))]
+    # A 0.00 in a labelled field is an unfilled template placeholder, not
+    # evidence.
+    labelled = [v for v in labelled if any(n != 0.0 for n in _all_numbers_in(v))]
+
+    if not labelled:
+        # This image carries no authoritative figure for this field — e.g. a
+        # weight asked of a money-transfer slip. Whether some unrelated number
+        # happens to differ says nothing, so CANT VERIFY rather than mismatch.
+        return ("cant_verify", None)
+
+    if _value_sighted(payload_value, labelled):
+        return ("match", None)
+    if allow_net and _net_of_two(payload_value, labelled):
+        return ("match", None)
+    return ("mismatch", ", ".join(str(v) for v in labelled))
+
+
+def _judge_sightings(payload, sightings, expected_type=None):
+    """Compare a payload against what the LLM reported seeing, in Python.
+
+    Same return shape as openrouter.verify_integrity_against_image() so this
+    drops straight into _check_integrity_for_images:
+      {"verdict": "passed"|"flagged", "issues": [...], "matched_fields": [...]}
+
+    Every comparison here is arithmetic and deterministic — the same sightings
+    always yield the same verdict. Nothing needs
+    _clean_false_positive_issues(), because no prose is produced to misfile.
+    """
+    sightings = sightings or {}
+    dates_seen = [e for e in (sightings.get("dates_seen") or []) if isinstance(e, dict)]
+    numbers_seen = sightings.get("numbers_seen") or []
+
+    issues = []
+    matched = []
+
+    def flag(field, payload_value, seen, en, th):
+        issues.append({
+            "field": field,
+            "payload_value": payload_value,
+            "image_indicates": seen or "not shown",
+            "explanation": {"en": en, "th": th},
+        })
+
+    # ── transactionDate ────────────────────────────────────────────────────
+    tx_date = payload.get("transactionDate")
+    if not _is_empty_payload_value(tx_date):
+        normalized = _normalize_payload_date_local(tx_date)
+        date_blob = " ".join(str(e.get("value") or "") for e in dates_seen)
+        # Compare against BOTH the raw calendar date and the T17-shifted one,
+        # each ±1 day. The legacy "T17:00:00 = next day in Bangkok" convention
+        # does not hold for every historical row, so a date that matches
+        # either reading is a match — this is what the old prompt's two-layer
+        # normalize-then-tolerate approach was reaching for.
+        candidates = {normalized, str(tx_date)[:10]}
+        # A date string we cannot PARSE is CANT VERIFY, never a mismatch. The
+        # model reports dates verbatim, so an unrecognised format (or a script
+        # we have no pattern for) must not manufacture a false flag — that is
+        # the whole failure mode this design exists to remove.
+        if not date_blob.strip() or not any(_extract_all_dates(date_blob)):
+            pass  # CANT VERIFY — nothing readable to compare against
+        elif any(_dates_within_one_day(c, date_blob) for c in candidates if c):
+            matched.append("transactionDate")
+        else:
+            seen = ", ".join(
+                f"{e.get('label') or 'date'}: {e.get('value')}" for e in dates_seen
+            )
+            flag("transactionDate", tx_date, seen,
+                 f"No date on the image is within 1 day of {normalized}. Seen: {seen}.",
+                 f"ไม่พบวันที่ในรูปที่ตรงกับ {normalized} (ยอมรับคลาดเคลื่อน 1 วัน) พบ: {seen}")
+
+    # ── numeric fields ─────────────────────────────────────────────────────
+    for field, hints, en_label, th_label, allow_net in (
+        ("totalQuantity", _QUANTITY_LABEL_HINTS, "quantity", "ปริมาณ", True),
+        ("totalPrice", _TOTAL_LABEL_HINTS, "total price", "ยอดรวม", False),
+        # pricePerUnit stays sighting-only (no label hints) — unit rates are
+        # scribbled in margins on real Thai recycling documents.
+        ("pricePerUnit", None, "unit price", "ราคาต่อหน่วย", False),
+    ):
+        value = payload.get(field)
+        outcome, seen = _judge_field_numeric(value, numbers_seen, hints,
+                                            allow_net=allow_net)
+        if outcome == "match":
+            matched.append(field)
+        elif outcome == "mismatch":
+            flag(field, value, seen,
+                 f"Submitted {en_label} {value} does not match the image. Seen: {seen}.",
+                 f"{th_label}ที่กรอก {value} ไม่ตรงกับในรูป พบ: {seen}")
+
+    # ── imageType ──────────────────────────────────────────────────────────
+    # The one genuinely semantic judgement, so it stays with the LLM — but as
+    # a tri-state boolean, not prose that has to be string-matched afterwards.
+    stated = expected_type
+    if stated and str(stated).lower() not in _GENERIC_IMAGE_TYPES:
+        verdict = sightings.get("matches_stated_type")
+        content = sightings.get("image_content") or "unclear"
+        if verdict is True:
+            matched.append("imageType")
+        elif verdict is False:
+            flag("imageType", stated, content,
+                 f"Stated type '{stated}' but the image appears to be {content}.",
+                 f"ระบุประเภทเป็น '{stated}' แต่ในรูปเป็น {content}")
+
+    return {
+        "verdict": "flagged" if issues else "passed",
+        "issues": issues,
+        "matched_fields": matched,
+    }
+
+
+def _normalize_payload_date_local(date_str):
+    """Apply the legacy T17:00:00-is-next-day-in-Bangkok convention.
+
+    Delegates to openrouter._normalize_payload_date so the LLM path and the
+    Python judge cannot drift apart on this rule.
+    """
+    return openrouter._normalize_payload_date(date_str)
+
+
 def _process_one_integrity_image(payload, img, extra_ctx):
     """Fetch + LLM-verify one image. Pure; no DB access, no shared state.
     Returns ('ok', img_ctx, llm_result) | ('error', err_dict) | ('skip',).
@@ -873,9 +1181,17 @@ def _process_one_integrity_image(payload, img, extra_ctx):
         return ("error", {**img_ctx, "error": "fetch_or_decode_failed"})
 
     try:
-        result = openrouter.verify_integrity_against_image(
-            data_url, payload, expected_type=img.get("type"),
-        )
+        if _use_python_judge():
+            sightings = openrouter.read_image_sightings(
+                data_url, expected_type=img.get("type"),
+            )
+            result = _judge_sightings(payload, sightings, expected_type=img.get("type"))
+            # Issues came from arithmetic, not prose — nothing to un-misfile.
+            result["_prejudged"] = True
+        else:
+            result = openrouter.verify_integrity_against_image(
+                data_url, payload, expected_type=img.get("type"),
+            )
     except Exception as exc:
         logger.warning("integrity LLM call failed for image_id=%s url=%s: %s",
                        img.get("id"), image_url, exc)
@@ -927,7 +1243,13 @@ def _check_integrity_for_images(payload, images, extra_ctx=None):
         # ok
         _, img_ctx, llm_result = r
         checked += 1
-        cleaned_issues = _clean_false_positive_issues(llm_result.get("issues"), matched_set)
+        # The Python judge emits no prose, so there is nothing to un-misfile.
+        # Running the phrase-matching cleanup over it could only cause harm.
+        if llm_result.get("_prejudged"):
+            cleaned_issues = llm_result.get("issues") or []
+        else:
+            cleaned_issues = _clean_false_positive_issues(
+                llm_result.get("issues"), matched_set)
         for issue in cleaned_issues:
             issue.update(img_ctx)
             issues.append(issue)
