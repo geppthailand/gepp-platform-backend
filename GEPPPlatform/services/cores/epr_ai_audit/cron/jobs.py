@@ -91,25 +91,6 @@ def mark_done(conn, job_id: int, result: dict, new_stage: Optional[str] = None) 
             )
 
 
-def release_job(conn, job_id: int) -> None:
-    """Send a claimed job back to 'pending' without bumping the attempts counter.
-
-    Used when the worker did partial work (e.g., advanced a per-project import
-    checkpoint) but couldn't finish the transaction's dedup yet — the same job
-    should be picked up by the next cron tick and re-tried as if it had never
-    been claimed. Unlike mark_failed, this doesn't count toward MAX_ATTEMPTS.
-    """
-    with conn.cursor() as cur:
-        cur.execute(
-            "UPDATE epr_dedup_jobs "
-            "SET status = %s, "
-            "    started_date = NULL, "
-            "    attempts = GREATEST(attempts - 1, 0) "
-            "WHERE id = %s",
-            (PENDING, job_id),
-        )
-
-
 def reap_stale_processing_jobs(conn, stage: str, stale_after_seconds: int = 1200):
     """Recover jobs stuck in `processing` because the worker died mid-flight
     (Lambda timeout, crash, OOM, etc.).

@@ -4,7 +4,7 @@ The platform-backend's primary connection model is SQLAlchemy
 (see GEPPPlatform.libs.database). The cron Lambda for EPR AI audit was
 ported verbatim from gepp-v2-backend and uses raw psycopg2 throughout —
 keeping the same model here avoids rewriting ~2000 lines of worker /
-dedup / legacy_import code.
+dedup code.
 
 Same DB_* env vars as the SQLAlchemy setup.
 """

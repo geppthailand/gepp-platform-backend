@@ -18,19 +18,14 @@ Cron handler shape (see entry_points/GEPPEPRAIAudit.py):
         conn = get_connection()
         try:
             with conn:
-                # Small batch so a few in-progress legacy imports per project
-                # don't blow past Lambda's 15-min timeout.
+                # Small batch so a few slow multi-image transactions don't
+                # blow past Lambda's 15-min timeout.
                 claimed = jobs.claim_next_jobs(conn, jobs.STAGE_EMBEDDING, batch_size=3)
             for job_id, tx_id in claimed:
                 try:
                     report = worker.process_transaction(conn, tx_id)
                     with conn:
-                        if report and report.get("retry_later"):
-                            # Legacy import still in progress for this project
-                            # — release the job so it retries next tick.
-                            jobs.release_job(conn, job_id)
-                        else:
-                            jobs.mark_done(conn, job_id, report or {"missing": True})
+                        jobs.mark_done(conn, job_id, report or {"missing": True})
                 except Exception as exc:
                     with conn:
                         jobs.mark_failed(conn, job_id, repr(exc))
@@ -49,7 +44,7 @@ from psycopg2.extras import Json
 
 from GEPPPlatform.libs import image_processing, legacy_db, openrouter
 
-from . import duplicates, legacy_import
+from . import duplicates
 
 logger = logging.getLogger(__name__)
 
@@ -1468,9 +1463,7 @@ def _other_active_tx_exists(conn, project_id: int, tx_id: int) -> bool:
 
 def process_transaction(conn, tx_id: int) -> Optional[dict]:
     """Background-process one transaction end-to-end:
-       1. Ensure legacy data for this project has been imported (chunked,
-          resumable). If still in progress, return early — the cron releases
-          this job back to pending so it retries next tick.
+       1. Project gate — skip entirely if the project has ai_audit disabled.
        2. LLM-extract + description-embed every image with NULL extracted_data.
           Runs whether or not there's comparison data — extractions are
           needed for the per-transaction integrity check.
@@ -1493,12 +1486,9 @@ def process_transaction(conn, tx_id: int) -> Optional[dict]:
             return None
         project_id = row[0]
 
-    # Step 0/1: project gate + legacy import. One legacy connection serves both.
-    #   0. Check `epr_project_ai_audit_setting.enabled` in legacy DB — if
-    #      disabled, mark the tx + records as 'skipped' and return early. No
-    #      LLM work runs.
-    #   1. Drive one chunk of legacy import for the project (may return
-    #      'in_progress' if more chunks remain).
+    # Step 1: project gate. Check `epr_project_ai_audit_setting.enabled` in the
+    # legacy DB — if disabled, mark the tx + records as 'skipped' and return
+    # early. No LLM work runs.
     if project_id is not None:
         legacy_conn = legacy_db.get_legacy_connection()
         try:
@@ -1513,24 +1503,8 @@ def process_transaction(conn, tx_id: int) -> Optional[dict]:
                     "reason": "ai_audit_disabled",
                     "project_id": project_id,
                 }
-            import_status, chunk_count = legacy_import.ensure_imported(
-                legacy_conn, conn, project_id,
-            )
         finally:
             legacy_conn.close()
-
-        if import_status == "in_progress":
-            logger.info(
-                "process_transaction tx_id=%s: project %s import in progress "
-                "(this tick imported %d), releasing job for retry",
-                tx_id, project_id, chunk_count,
-            )
-            return {
-                "retry_later": True,
-                "reason": "import_in_progress",
-                "project_id": project_id,
-                "imported_this_tick": chunk_count,
-            }
 
     # Step 2: extract any pending images for this transaction. Runs even when
     # there's no comparison data — the integrity check needs these.
