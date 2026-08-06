@@ -174,6 +174,9 @@ class AdminService:
             ],
             'currentSubscriptionId': org.subscription_id,
             'allowAiAudit': org.allow_ai_audit,
+            'autoApproveScaleTransactions': bool(
+                getattr(org, 'auto_approve_scale_transactions', False)
+            ),
             'maxOrgStructureNodes': org.max_org_structure_nodes if hasattr(org, 'max_org_structure_nodes') else 50,
             'isActive': org.is_active,
             'createdDate': org.created_date.isoformat() if org.created_date else None,
@@ -321,6 +324,8 @@ class AdminService:
             org.description = data['description']
         if 'allowAiAudit' in data:
             org.allow_ai_audit = bool(data['allowAiAudit'])
+        if 'autoApproveScaleTransactions' in data:
+            org.auto_approve_scale_transactions = bool(data['autoApproveScaleTransactions'])
         if 'isActive' in data:
             org.is_active = bool(data['isActive'])
         if 'maxOrgStructureNodes' in data:
@@ -2288,11 +2293,18 @@ class AdminService:
 
     _SETTINGS_LOGIN_KEYS = ('qr', 'user_id', 'pin')
 
+    # Per-device override for the org's auto_approve_scale_transactions flag.
+    # 'inherit' (default) follows the organization; 'on'/'off' win over it in
+    # BOTH directions so a single misbehaving scale can be pulled out of
+    # auto-approval — or piloted into it — without touching the whole org.
+    _SETTINGS_AUTO_APPROVE_MODES = ('inherit', 'on', 'off')
+
     _SETTINGS_DEFAULTS = {
         'login_methods': {'qr': True, 'user_id': True, 'pin': True},
         'require_photo_on_save': True,
         'show_user_manual': True,
         'font_scale': 1.0,
+        'auto_approve_mode': 'inherit',
     }
 
     def _normalize_device_settings(self, raw: Any) -> Dict[str, Any]:
@@ -2340,6 +2352,16 @@ class AdminService:
         fs_f = max(0.85, min(1.5, fs_f))
         # Round to 2 dp so the tablet UI doesn't show 1.0000000001.
         out['font_scale'] = round(fs_f, 2)
+
+        # auto_approve_mode — whitelist, NOT bool(): this is a tri-state string
+        # and bool('off') is True, so coercing it the way the flags above are
+        # coerced would silently turn every "off" into "on". Anything we don't
+        # recognise falls back to 'inherit' (follow the org).
+        aam = src.get('auto_approve_mode', self._SETTINGS_DEFAULTS['auto_approve_mode'])
+        aam = str(aam).strip().lower() if aam is not None else ''
+        if aam not in self._SETTINGS_AUTO_APPROVE_MODES:
+            aam = self._SETTINGS_DEFAULTS['auto_approve_mode']
+        out['auto_approve_mode'] = aam
         return out
 
     def get_iot_device_settings(self, device_id: int) -> Dict[str, Any]:

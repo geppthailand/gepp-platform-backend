@@ -146,6 +146,10 @@ class TransactionService:
                 treatment_method=transaction_data.get('treatment_method'),
                 disposal_method=transaction_data.get('disposal_method'),
                 created_by_id=transaction_data.get('created_by_id'),
+                # Set only by callers that create an already-approved transaction
+                # (IoT scale auto-approval). Normal creates leave it NULL and the
+                # approver is stamped when someone actually approves.
+                approved_by_id=transaction_data.get('approved_by_id'),
                 import_file_id=transaction_data.get('import_file_id'),  # bulk-import batch tag (revert unit)
                 weight_kg=Decimal('0'),  # Will be calculated from transaction records
                 total_amount=Decimal('0')  # Will be calculated from transaction records
@@ -254,6 +258,152 @@ class TransactionService:
                 'message': 'An unexpected error occurred',
                 'errors': [str(e)]
             }
+
+    # ── Provenance shown in the transaction list ─────────────────────────
+    # Two INDEPENDENT axes, deliberately not collapsed into one badge:
+    #   source          — the channel the data arrived through (true forever)
+    #   approval_source — who decided the current status (only once decided)
+    # Merging them would make scale rows lose their marking the day an org turns
+    # auto-approval off, which is exactly when tracing them matters again.
+
+    @staticmethod
+    def _transaction_source(transaction) -> str:
+        """'iot' | 'qr_input' | 'import' | 'manual' — derived from the row itself, no joins."""
+        method = getattr(transaction, 'transaction_method', None)
+        if method == 'scale_input':
+            return 'iot'
+        if method == 'qr_input':
+            return 'qr_input'
+        if getattr(transaction, 'import_file_id', None):
+            return 'import'
+        return 'manual'
+
+    @staticmethod
+    def _approval_source(transaction, is_auto_scale: bool) -> Optional[str]:
+        """'human' | 'ai' | 'auto_scale', or None while the transaction is undecided.
+
+        Precedence human > ai > auto_scale: a later human or AI verdict overrides the
+        machine approval that created the row, so the badge always names whoever the
+        CURRENT status belongs to.
+        """
+        status = getattr(transaction, 'status', None)
+        status_val = getattr(status, 'value', status)
+        if status_val not in ('approved', 'rejected'):
+            return None
+        if getattr(transaction, 'is_user_audit', False):
+            return 'human'
+        ai_status = getattr(transaction, 'ai_audit_status', None)
+        if getattr(ai_status, 'value', ai_status) in ('approved', 'rejected'):
+            return 'ai'
+        if is_auto_scale:
+            return 'auto_scale'
+        # Decided through the plain status-update endpoint — a person, just not via audit.
+        return 'human'
+
+    def _auto_approved_ids(self, transaction_ids: List[int]) -> set:
+        """Which of these transactions carry a machine-approval audit row.
+
+        One query for the whole page — never per row: this runs on the main transaction
+        list, which is already the heaviest query in the app.
+        """
+        if not transaction_ids:
+            return set()
+        try:
+            from ....models.transactions.transaction_audits import TransactionAudit
+            rows = self.db.query(TransactionAudit.transaction_id).filter(
+                TransactionAudit.transaction_id.in_(transaction_ids),
+                TransactionAudit.audit_type == 'auto_scale',
+                TransactionAudit.deleted_date.is_(None),
+            ).distinct().all()
+            return {r[0] for r in rows}
+        except Exception as exc:  # noqa: BLE001 — a missing badge must not break the list
+            logger.warning("[auto_approve] approval-source lookup failed: %s", exc)
+            return set()
+
+    def record_auto_approval(
+        self,
+        transaction_id: int,
+        actor_user_location_id: Optional[int],
+        flag_source: str,
+        device_id: Optional[int] = None,
+        channel: str = 'iot_auto_approve',
+    ) -> None:
+        """Write the audit trail for a transaction that was created already-approved
+        by a machine (IoT scale auto-approval).
+
+        `create_transaction` sets the statuses and the traceability first hop; this
+        records WHY, so an auto-approval is as traceable afterwards as a human one.
+        Mirrors ManualAuditService.approve_transaction, minus the two fields that
+        would misrepresent a machine decision as a human review:
+
+          • is_user_audit stays FALSE  — nobody reviewed this
+          • audit_date    stays NULL   — reserved for a real audit
+          • ai_audit_status stays 'null' — keeps the row eligible for AI audit later
+
+        Best-effort: a failure here must never fail the weighing that the operator
+        already saved on the tablet.
+        """
+        try:
+            from ....models.transactions.transaction_audits import TransactionAudit
+
+            transaction = self.db.query(Transaction).filter(
+                Transaction.id == transaction_id
+            ).first()
+            if not transaction:
+                logger.warning("[auto_approve] transaction %s vanished before audit log", transaction_id)
+                return
+
+            note_line = (
+                f"Auto-approved on save by {channel} "
+                f"(flag source: {flag_source}"
+                + (f", device #{device_id}" if device_id else "")
+                + ")"
+            )
+            transaction.notes = (
+                f"{transaction.notes}\n\n{note_line}" if transaction.notes else note_line
+            )
+
+            audit_notes = {
+                's': 'approved',
+                'v': [],  # no violations — nothing was checked
+                'src': channel,
+                'flag_source': flag_source,
+            }
+            if device_id:
+                audit_notes['device_id'] = device_id
+
+            self.db.add(TransactionAudit(
+                transaction_id=transaction_id,
+                audit_notes=audit_notes,
+                by_human=False,  # machine decision — do not claim a human reviewed it
+                auditor_id=actor_user_location_id,
+                organization_id=transaction.organization_id,
+                audit_type='auto_scale',
+                audit_status=TransactionStatus.approved.value,
+                ai_audit_status=(
+                    transaction.ai_audit_status.value
+                    if getattr(transaction.ai_audit_status, 'value', None)
+                    else AIAuditStatus.null.value
+                ),
+                created_by_id=actor_user_location_id,
+            ))
+            self.db.commit()
+
+            # The normal approve path emits this from update_transaction; a
+            # create-as-approved never passes through there, so CRM segments and
+            # automations keyed on approval would miss every scale reading.
+            _emit_transaction_event(
+                self.db, 'transaction_approved', transaction,
+                properties={
+                    'transaction_id': transaction_id,
+                    'auto': True,
+                    'flag_source': flag_source,
+                    'device_id': device_id,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.db.rollback()
+            logger.warning("[auto_approve] audit trail failed for transaction %s: %s", transaction_id, exc)
 
     def _user_input_destination(self, user_location_id: Optional[int]) -> bool:
         """True when THIS user has input_destination enabled ("กรอกปลายทาง" mode). The toggle is
@@ -2015,7 +2165,9 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
         location_ids: Optional[list] = None,
         filter_tag_ids: Optional[list] = None,
         filter_tenant_ids: Optional[list] = None,
-        material_ids: Optional[list] = None
+        material_ids: Optional[list] = None,
+        source: Optional[str] = None,
+        approval_source: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         List transactions with filtering and pagination
@@ -2180,6 +2332,47 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                 query = query.filter(or_(own_clause, *shared_clauses))
             else:
                 query = query.filter(own_clause)
+
+            # ── Provenance filters (mirror the badges in the list) ──────────────
+            # source: only rows created AFTER this shipped carry the marker — older scale
+            # rows are indistinguishable from web entries and cannot be back-filled.
+            if source == 'iot':
+                query = query.filter(Transaction.transaction_method == 'scale_input')
+            elif source == 'qr_input':
+                query = query.filter(Transaction.transaction_method == 'qr_input')
+            elif source == 'import':
+                query = query.filter(Transaction.import_file_id.isnot(None))
+            elif source == 'manual':
+                query = query.filter(
+                    or_(Transaction.transaction_method.is_(None),
+                        Transaction.transaction_method.notin_(['scale_input', 'qr_input'])),
+                    Transaction.import_file_id.is_(None),
+                )
+
+            # approval_source: same precedence as _approval_source() so the filter and the
+            # badge can never disagree.
+            if approval_source:
+                from ....models.transactions.transaction_audits import TransactionAudit
+                auto_scale_exists = exists().where(
+                    and_(
+                        TransactionAudit.transaction_id == Transaction.id,
+                        TransactionAudit.audit_type == 'auto_scale',
+                        TransactionAudit.deleted_date.is_(None),
+                    )
+                )
+                ai_decided = Transaction.ai_audit_status.in_([AIAuditStatus.approved, AIAuditStatus.rejected])
+                if approval_source == 'human':
+                    query = query.filter(
+                        or_(Transaction.is_user_audit == True,
+                            and_(Transaction.is_user_audit == False, ~ai_decided, ~auto_scale_exists,
+                                 Transaction.status.in_([TransactionStatus.approved, TransactionStatus.rejected])))
+                    )
+                elif approval_source == 'ai':
+                    query = query.filter(Transaction.is_user_audit == False, ai_decided)
+                elif approval_source == 'auto_scale':
+                    query = query.filter(
+                        Transaction.is_user_audit == False, ~ai_decided, auto_scale_exists
+                    )
 
             # New multi-select tag/tenant filters (intersect with location results)
             if filter_tag_ids:
@@ -2371,11 +2564,16 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
 
             # Convert to dict format
             logger.info("Converting transactions to dict format...")
+            # Machine approvals for this page, resolved in one query up front.
+            auto_approved_ids = self._auto_approved_ids([t.id for t in transactions])
             transactions_list = []
             for i, transaction in enumerate(transactions):
                 try:
                     logger.info(f"Processing transaction {i+1}/{len(transactions)}: ID={transaction.id}")
                     transaction_dict = self._transaction_to_dict(transaction)
+                    transaction_dict['approval_source'] = self._approval_source(
+                        transaction, transaction.id in auto_approved_ids
+                    )
 
                     # Roll up cross-org shared rows under the shared location's name.
                     meta = share_meta_by_origin.get(transaction.origin_id)
@@ -3258,6 +3456,9 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
             'id': transaction.id,
             'transaction_records': transaction.transaction_records,
             'transaction_method': transaction.transaction_method,
+            # Channel the row came in through — the list shows this next to the creator,
+            # since the creator of a scale reading is just whoever was logged in.
+            'source': self._transaction_source(transaction),
             'status': transaction.status.value if transaction.status else None,
             'organization_id': transaction.organization_id,
             'origin_id': transaction.origin_id,

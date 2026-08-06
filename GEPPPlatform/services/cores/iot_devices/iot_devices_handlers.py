@@ -19,6 +19,11 @@ from GEPPPlatform.services.cores.scale_reports.scale_report_token import (
     build_report_url,
     make_report_token,
 )
+from GEPPPlatform.services.cores.iot_devices.auto_approve import (
+    apply_auto_approve_to_payload,
+    resolve_auto_approve,
+    stamp_scale_origin,
+)
 from GEPPPlatform.models.users.user_location import UserLocation
 from GEPPPlatform.models.users.user_related import UserLocationTag, UserTenant
 from GEPPPlatform.models.subscriptions.organizations import OrganizationSetup
@@ -1375,12 +1380,69 @@ def handle_iot_devices_routes(event: Dict[str, Any], data: Dict[str, Any], **com
             transaction_service = TransactionService(db_session)
             current_user_id = current_user.get('user_id')
             current_user_organization_id = current_user.get('organization_id')
+            device_id = current_device.get('device_id')
+
+            # Stamp the channel before anything else: this runs whether or not
+            # auto-approval is on, so "came from a scale" stays visible in the
+            # transaction list even when the org keeps the review step.
+            stamp_scale_origin(data)
+
+            # ── Auto-approval (org switch + per-device override) ──────────
+            # When enabled the weighing is stored as `approved` instead of
+            # `pending`: the operator on the tablet confirmed the reading, so
+            # there is nothing for a human to add. The approver we stamp is that
+            # operator — is_user_audit stays FALSE, since nobody reviewed it.
+            # ai_audit_status is deliberately left at 'null' so AI audit can
+            # still pick the transaction up later.
+            auto_approve, flag_source = resolve_auto_approve(
+                db_session, device_id, current_user_organization_id
+            )
+            try:
+                operator_id = int(current_user_id)
+            except (TypeError, ValueError):
+                operator_id = None
+            if auto_approve:
+                apply_auto_approve_to_payload(data)
+                if operator_id is not None:
+                    data['approved_by_id'] = operator_id
+
+                # Smoke alarm, not a fire extinguisher. In "กรอกปลายทาง" mode an approval
+                # auto-creates the traceability first hop — so under auto-approval that hop
+                # is created on every weighing with nobody reviewing, and if the AI later
+                # rejects the transaction nothing removes the hop (no revert path exists).
+                # Nobody uses that mode today, which is why this is a warning rather than a
+                # fix: the day someone turns it on we find out from the logs instead of from
+                # months of wrong traceability data.
+                try:
+                    if transaction_service._user_input_destination(operator_id):
+                        _iot_logger.warning(
+                            "[auto_approve] device %s: operator %s has input_destination ON — "
+                            "traceability first hop is being auto-created without review and "
+                            "cannot be reverted if the AI rejects it later (org %s)",
+                            device_id, operator_id, current_user_organization_id,
+                        )
+                except Exception:  # noqa: BLE001 — a warning must never break a weighing
+                    pass
+
             result = handle_create_transaction(
                 transaction_service,
                 data,
                 current_user_id,
                 current_user_organization_id
             )
+
+            transaction_id = None
+            if isinstance(result, dict):
+                transaction_id = (result.get('transaction') or {}).get('id')
+
+            if auto_approve and transaction_id:
+                transaction_service.record_auto_approval(
+                    transaction_id=transaction_id,
+                    actor_user_location_id=operator_id,
+                    flag_source=flag_source,
+                    device_id=device_id,
+                )
+
             # ── CRM: emit scale_reading_received ──
             _emit_iot_event(
                 db_session,
@@ -1388,9 +1450,12 @@ def handle_iot_devices_routes(event: Dict[str, Any], data: Dict[str, Any], **com
                 organization_id=current_user_organization_id,
                 user_id=current_user_id,
                 properties={
-                    'device_id': current_device.get('device_id'),
-                    'transaction_id': result.get('transaction_id') if isinstance(result, dict) else None,
+                    'device_id': device_id,
+                    # handle_create_transaction returns the row under 'transaction';
+                    # the old result.get('transaction_id') was always None here.
+                    'transaction_id': transaction_id,
                     'origin_id': data.get('origin_id') if isinstance(data, dict) else None,
+                    'auto_approved': auto_approve,
                 },
             )
             return result

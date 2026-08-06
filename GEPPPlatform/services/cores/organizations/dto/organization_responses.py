@@ -330,6 +330,11 @@ class OrganizationSetupResponse:
     room_level_name: Optional[str] = None
     input_destination: bool = False
     show_all_location_options: bool = True
+    # ORG-WIDE (the two above are per user): IoT scale readings are saved as `approved`
+    # instead of `pending`. `_editable` tells the UI whether THIS user (owner only) may
+    # flip it — the enforcement itself lives in the handler.
+    auto_approve_scale_transactions: bool = False
+    auto_approve_scale_transactions_editable: bool = False
     created_date: Optional[str] = None
     updated_date: Optional[str] = None
 
@@ -354,6 +359,10 @@ class OrganizationSetupResponse:
         result['room_level_name'] = self.room_level_name
         result['input_destination'] = bool(self.input_destination)
         result['show_all_location_options'] = bool(self.show_all_location_options)
+        result['auto_approve_scale_transactions'] = bool(self.auto_approve_scale_transactions)
+        result['auto_approve_scale_transactions_editable'] = bool(
+            self.auto_approve_scale_transactions_editable
+        )
         if self.created_date:
             result['created_date'] = self.created_date
         if self.updated_date:
@@ -378,6 +387,10 @@ class OrganizationSetupResponse:
             room_level_name=data.get('room_level_name'),
             input_destination=bool(data.get('input_destination', False)),
             show_all_location_options=bool(data.get('show_all_location_options', True)),
+            auto_approve_scale_transactions=bool(data.get('auto_approve_scale_transactions', False)),
+            auto_approve_scale_transactions_editable=bool(
+                data.get('auto_approve_scale_transactions_editable', False)
+            ),
             created_date=data.get('created_date'),
             updated_date=data.get('updated_date')
         )
