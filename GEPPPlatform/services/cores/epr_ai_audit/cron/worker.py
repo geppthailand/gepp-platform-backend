@@ -54,11 +54,15 @@ def _to_vec_literal(vec):
     return "[" + ",".join(f"{float(x)}" for x in vec) + "]"
 
 
-def _extract_and_embed(image_url: str):
-    """Run vision LLM + description embedding for one file URL.
+def _extract_and_embed(image_url: str, embed: bool = True):
+    """Run vision LLM + (optionally) description embedding for one file URL.
 
     Returns (extracted_dict_or_None, description_vec_literal_or_None).
     All errors fail-soft so the caller can write NULLs and continue.
+
+    `embed=False` skips the embedding call entirely — used for record-level
+    images, whose embeddings nothing reads (dedup only searches parent-level
+    images). Saves one embed_text call per record image.
     """
     extracted = None
     desc_vec_literal = None
@@ -73,7 +77,7 @@ def _extract_and_embed(image_url: str):
         logger.warning("LLM extraction failed for %s: %s", image_url, exc)
 
     description = (extracted or {}).get("visual_description")
-    if description:
+    if embed and description:
         try:
             vec = openrouter.embed_text(description)
             desc_vec_literal = _to_vec_literal(vec)
@@ -83,13 +87,22 @@ def _extract_and_embed(image_url: str):
     return extracted, desc_vec_literal
 
 
+# Only parent-level images are searched by dedup (see duplicates.py), so only
+# they need a description_embedding.
+# ponytail: if record images ever join dedup, add the table here and to both
+# candidate queries in duplicates.py.
+_EMBEDDED_IMAGE_TABLES = {"epr_transaction_image"}
+
+
 def _update_image(conn, table: str, img_id: int, image_url: str) -> bool:
     """Process one image row, write extracted_data + description_embedding,
     commit. Returns True if extraction populated `extracted_data`.
 
     `table` is a hardcoded literal from the caller, not user input. The
     commit-per-image policy keeps partial progress durable across crashes."""
-    extracted, desc_vec_literal = _extract_and_embed(image_url)
+    extracted, desc_vec_literal = _extract_and_embed(
+        image_url, embed=table in _EMBEDDED_IMAGE_TABLES,
+    )
     try:
         with conn.cursor() as cur:
             cur.execute(
