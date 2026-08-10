@@ -211,11 +211,13 @@ def handle_create_transaction(
         for record_data in transaction_records_data:
             record_data['created_by_id'] = int(current_user_id)
 
-        print(transaction_data)
-        # Create transaction
+        # Create transaction. enforce_access: this is the authenticated web path, so the
+        # caller must actually have access to the origin (and to the tag/tenant, when the
+        # location is only reachable through one).
         result = transaction_service.create_transaction(
             transaction_data,
-            transaction_records_data if transaction_records_data else None
+            transaction_records_data if transaction_records_data else None,
+            enforce_access=True
         )
 
         if result['success']:
