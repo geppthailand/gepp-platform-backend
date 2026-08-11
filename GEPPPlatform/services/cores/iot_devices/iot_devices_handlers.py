@@ -1457,6 +1457,12 @@ def handle_iot_devices_routes(event: Dict[str, Any], data: Dict[str, Any], **com
                         'That destination is not available for this organization'
                     )
                 data['origin_id'] = sorter_location_id
+                # These kilograms were already weighed in from the tenant that
+                # produced them, so counting them again as waste generated would
+                # report 100 kg of real material as 200. The records still exist —
+                # the traceability pile's weight comes from them — they are just
+                # left out of tonnage. See migration 082.
+                data['is_internal_transfer'] = True
                 # Carried on every record so the traceability leg knows where the
                 # material went; the record path stores it verbatim.
                 for _rec in (data.get('records') or []):

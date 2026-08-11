@@ -156,6 +156,9 @@ class TransactionService:
                 # approver is stamped when someone actually approves.
                 approved_by_id=transaction_data.get('approved_by_id'),
                 import_file_id=transaction_data.get('import_file_id'),  # bulk-import batch tag (revert unit)
+                # Set by the sorter path only: material already reported at its
+                # origin, so its weight is excluded from waste-generated totals.
+                is_internal_transfer=bool(transaction_data.get('is_internal_transfer', False)),
                 weight_kg=Decimal('0'),  # Will be calculated from transaction records
                 total_amount=Decimal('0')  # Will be calculated from transaction records
             )

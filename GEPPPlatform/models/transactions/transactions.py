@@ -119,6 +119,13 @@ class Transaction(Base, BaseModel):
     # upload be reverted (soft-deleted) as one unit. NULL for normal/manual transactions.
     import_file_id = Column(BigInteger, ForeignKey('import_files.id'), nullable=True)
 
+    # TRUE = this weighing recorded MOVEMENT of material that was already reported at
+    # its origin — a ผู้คัดแยก weighing out of a waste room measures kilograms a tenant
+    # already reported on the way in. The records are real and their traceability legs
+    # matter, but the weight must not be added to how much waste the org produced, or
+    # the same material is counted twice. FALSE everywhere else. Migration 082.
+    is_internal_transfer = Column(Boolean, nullable=False, default=False, server_default='false')
+
     # Constraints
     __table_args__ = (
         CheckConstraint('transaction_method IN (\'origin\', \'transport\', \'transform\', \'qr_input\', \'scale_input\')', name='chk_transaction_method'),

@@ -77,6 +77,7 @@ class ReportsService:
                 Transaction.organization_id == b['source_org_id'],
                 Transaction.origin_id.in_(b['src_ids']),
                 Transaction.deleted_date.is_(None),
+                Transaction.is_internal_transfer.isnot(True),  # see migration 082
                 TransactionRecord.deleted_date.is_(None),
                 or_(TransactionRecord.status != 'rejected', TransactionRecord.status.is_(None)),
             )
@@ -501,6 +502,7 @@ class ReportsService:
                 Transaction.organization_id == b['source_org_id'],
                 Transaction.origin_id.in_(b['src_ids']),
                 Transaction.deleted_date.is_(None),
+                Transaction.is_internal_transfer.isnot(True),  # see migration 082
                 TransactionRecord.deleted_date.is_(None),
                 or_(TransactionRecord.status != 'rejected', TransactionRecord.status.is_(None)),
             )
@@ -565,6 +567,13 @@ class ReportsService:
             ).filter(
                 Transaction.organization_id == organization_id,
                 Transaction.deleted_date.is_(None),
+                # A ผู้คัดแยก weighing material OUT of a waste room measures kilograms
+                # the tenant already reported on the way in. Both weighings are real
+                # and both matter for traceability, but summing both reports the same
+                # material twice. This query answers "how much waste did this
+                # organization produce", so the movement leg is left out. isnot(True)
+                # also covers rows written before the column existed. Migration 082.
+                Transaction.is_internal_transfer.isnot(True),
                 TransactionRecord.deleted_date.is_(None),
                 or_(
                     TransactionRecord.status != 'rejected',
@@ -1183,6 +1192,13 @@ class ReportsService:
             ).filter(
                 Transaction.organization_id == organization_id,
                 Transaction.deleted_date.is_(None),
+                # A ผู้คัดแยก weighing material OUT of a waste room measures kilograms
+                # the tenant already reported on the way in. Both weighings are real
+                # and both matter for traceability, but summing both reports the same
+                # material twice. This query answers "how much waste did this
+                # organization produce", so the movement leg is left out. isnot(True)
+                # also covers rows written before the column existed. Migration 082.
+                Transaction.is_internal_transfer.isnot(True),
                 TransactionRecord.deleted_date.is_(None),
                 or_(
                     TransactionRecord.status != 'rejected',
