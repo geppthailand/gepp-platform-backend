@@ -4,7 +4,7 @@ Business logic for traceability.
 """
 
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional, Tuple
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import and_, func, or_, true
@@ -862,6 +862,11 @@ class TraceabilityService:
             material_id = orig_group.material_id
             location_tag_id = orig_group.location_tag_id
             tenant_id = orig_group.tenant_id
+            # Carry the grain across the month boundary too. Without this a scale
+            # pile's idle weight lands in whichever monthly group came back first,
+            # and the group minted below would be NULL-keyed (monthly) while holding
+            # scale material — a silent cross-grain merge every 1st of the month.
+            source_transaction_id = orig_group.source_transaction_id
             target = (
                 self.db.query(TraceabilityTransactionGroup)
                 .filter(
@@ -872,9 +877,14 @@ class TraceabilityService:
                     TraceabilityTransactionGroup.tenant_id == tenant_id,
                     TraceabilityTransactionGroup.transaction_year == requested_year,
                     TraceabilityTransactionGroup.transaction_month == requested_month,
+                    TraceabilityTransactionGroup.source_transaction_id == source_transaction_id,
                     TraceabilityTransactionGroup.deleted_date.is_(None),
                     TraceabilityTransactionGroup.is_active == True,
                 )
+                # The key has no unique constraint, so duplicates exist; picking the
+                # oldest makes a repeated board load land on the same row every time
+                # instead of an arbitrary one.
+                .order_by(TraceabilityTransactionGroup.id.asc())
                 .first()
             )
             if target:
@@ -895,6 +905,7 @@ class TraceabilityService:
                     transaction_year=requested_year,
                     transaction_month=requested_month,
                     is_active=True,
+                    source_transaction_id=source_transaction_id,
                 )
                 self.db.add(new_group)
         self.db.flush()
@@ -1278,6 +1289,85 @@ class TraceabilityService:
             import logging
             logging.getLogger(__name__).error(f"materialize_tentative_group failed: {e}", exc_info=True)
             return {"success": False, "message": str(e)}
+
+    # Two root weights may differ from the pile by this much before the guard below
+    # complains. Record weight is DECIMAL(15,4) and the web app rounds what it sends
+    # to 2dp, so an exact equality test would reject legitimate whole-pile dispatches.
+    _PILE_WEIGHT_TOLERANCE_KG = 0.01
+
+    def _pile_weight_kg(self, group: TraceabilityTransactionGroup) -> float:
+        """Weight of everything sitting in a pile, using the board's own definition.
+
+        Deliberately the same expression as `_groups_to_dict_list` below — approved
+        records plus carried-over transports — because that is the number the user is
+        looking at when they decide what to dispatch. Other definitions exist in this
+        file for other purposes; the guard must use the visible one.
+        """
+        record_ids = list(group.transaction_record_id or [])
+        carried_ids = list(group.transaction_carried_over or [])
+        total = 0.0
+        if record_ids:
+            rows = self.db.query(TransactionRecord.origin_weight_kg).filter(
+                TransactionRecord.id.in_(record_ids),
+                TransactionRecord.status == 'approved',
+            ).all()
+            total += sum(float(r[0] or 0) for r in rows)
+        if carried_ids:
+            rows = self.db.query(TransportTransaction.weight).filter(
+                TransportTransaction.id.in_(carried_ids),
+                TransportTransaction.is_active == True,
+                TransportTransaction.deleted_date.is_(None),
+            ).all()
+            total += sum(float(r[0] or 0) for r in rows)
+        return total
+
+    def _reject_partial_dispatch(
+        self,
+        group: TraceabilityTransactionGroup,
+        new_root_weights: List[Decimal],
+        ignore_transport_ids: Optional[List[int]] = None,
+    ) -> Optional[str]:
+        """Refuse to leave part of a per-weigh-in pile undispatched. None = allowed.
+
+        A pile created by one scale reading (migration 081) is only arithmetically
+        honest while its root transports sum to the whole pile, because
+        `_recalculate_absolute_percentage` divides by the sum of the roots, not by the
+        pile weight — dispatch 40 of 100 and the leg is stamped 100%, and the other
+        60 kg becomes unreachable because a pile that has a transport is dropped from
+        the "waiting to ship" column.
+
+        Scoped to piles that carry a source_transaction_id, which is NULL on every row
+        that existed before this and on every non-scale flow, so no current behaviour
+        changes. Material that will not fit on the truck stays in the waste room as its
+        own arriving pile rather than as a remainder inside this one.
+        """
+        if getattr(group, 'source_transaction_id', None) is None:
+            return None
+
+        pile_weight = self._pile_weight_kg(group)
+        if pile_weight <= 0:
+            return None
+
+        existing_q = self.db.query(TransportTransaction.weight).filter(
+            TransportTransaction.transaction_group_id == group.id,
+            TransportTransaction.parent_id.is_(None),
+            TransportTransaction.is_active == True,
+            TransportTransaction.deleted_date.is_(None),
+        )
+        if ignore_transport_ids:
+            existing_q = existing_q.filter(~TransportTransaction.id.in_(ignore_transport_ids))
+        dispatched = sum(float(r[0] or 0) for r in existing_q.all())
+        dispatched += sum(float(w or 0) for w in new_root_weights)
+
+        # Round before comparing: the subtraction alone puts 100.01 - 100.0 slightly
+        # over 0.01 in binary floating point, which would reject a dispatch that is
+        # exactly at the tolerance the frontend's own 2dp rounding can produce.
+        if round(abs(dispatched - pile_weight), 2) <= self._PILE_WEIGHT_TOLERANCE_KG:
+            return None
+        return (
+            f"This pile was recorded by a scale and must be dispatched whole: "
+            f"{dispatched:.2f} kg entered against a pile of {pile_weight:.2f} kg."
+        )
 
     def _groups_to_dict_list(
         self, groups: List[TraceabilityTransactionGroup], organization_id: int
@@ -1966,6 +2056,20 @@ class TraceabilityService:
             )
             if not group:
                 return {"success": False, "message": "Transaction group not found or access denied", "ids": []}
+
+        # A batch may mix roots and children; only roots consume the pile.
+        _new_root_weights: List[Decimal] = []
+        for _item in data:
+            _parent_raw = parent_id_override if parent_id_override is not None else _item.get("parent_id")
+            if _parent_raw is not None:
+                continue
+            try:
+                _new_root_weights.append(Decimal(str(_item.get("weight"))))
+            except (TypeError, ValueError, InvalidOperation):
+                continue
+        _partial = self._reject_partial_dispatch(group, _new_root_weights)
+        if _partial:
+            return {"success": False, "message": _partial, "ids": []}
 
         created_ids: List[int] = []
         for item in data:
@@ -2811,9 +2915,25 @@ class TraceabilityService:
             # Update fields
             if "weight" in item and item["weight"] is not None:
                 try:
-                    row.weight = Decimal(str(item["weight"]))
+                    new_weight = Decimal(str(item["weight"]))
                 except (TypeError, ValueError):
                     return {"success": False, "message": "weight must be a number", "ids": updated_ids}
+                # Editing a root afterwards can re-open the same hole the create-time
+                # guard closes, so re-check the pile against the edited value. Only
+                # roots consume the pile; children are bounded by their parent.
+                if row.parent_id is None and row.transaction_group_id:
+                    group = (
+                        self.db.query(TraceabilityTransactionGroup)
+                        .filter(TraceabilityTransactionGroup.id == row.transaction_group_id)
+                        .first()
+                    )
+                    if group is not None:
+                        partial = self._reject_partial_dispatch(
+                            group, [new_weight], ignore_transport_ids=[row.id]
+                        )
+                        if partial:
+                            return {"success": False, "message": partial, "ids": updated_ids}
+                row.weight = new_weight
 
             if "origin_id" in item and item["origin_id"] is not None:
                 try:
