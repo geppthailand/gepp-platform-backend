@@ -17,6 +17,11 @@ from decimal import Decimal
 # Timezone for traceability group year/month (record date interpreted in this zone)
 TRACEABILITY_DATE_TZ = "Asia/Bangkok"
 
+# Decides whether a transaction's traceability piles are per weigh-in or per month.
+# auto_approve is a leaf module (logging + typing + sqlalchemy.text only), so this
+# import cannot cycle back into transactions.
+from ..iot_devices.auto_approve import scale_pile_source_transaction_id
+
 import boto3
 
 from sqlalchemy import cast, String, text
@@ -454,6 +459,9 @@ class TransactionService:
             origin_id = transaction.origin_id
             tag_id = getattr(transaction, 'location_tag_id', None)
             tenant_id = getattr(transaction, 'tenant_id', None)
+            # See _upsert_traceability_groups_for_transaction — one pile per
+            # weigh-in for a scale, the monthly pile for everything else.
+            source_transaction_id = scale_pile_source_transaction_id(transaction)
             tsvc = TraceabilityService(self.db)
 
             for rec in records:
@@ -470,6 +478,7 @@ class TransactionService:
                     TraceabilityTransactionGroup.tenant_id == tenant_id,
                     TraceabilityTransactionGroup.transaction_year == year,
                     TraceabilityTransactionGroup.transaction_month == month,
+                    TraceabilityTransactionGroup.source_transaction_id == source_transaction_id,
                     TraceabilityTransactionGroup.is_active == True,
                     TraceabilityTransactionGroup.deleted_date.is_(None),
                 ).first()
@@ -479,6 +488,7 @@ class TransactionService:
                         transaction_record_id=[rec.id], transaction_carried_over=[],
                         transaction_year=year, transaction_month=month,
                         location_tag_id=tag_id, tenant_id=tenant_id, is_active=True,
+                        source_transaction_id=source_transaction_id,
                     )
                     self.db.add(group)
                     self.db.flush()
@@ -3383,6 +3393,10 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
             organization_id = transaction.organization_id
             location_tag_id = getattr(transaction, 'location_tag_id', None)
             tenant_id = getattr(transaction, 'tenant_id', None)
+            # A scale weigh-in gets its own pile rather than joining the month's;
+            # None for every other flow, which compares as IS NULL and therefore
+            # still matches the monthly piles it always matched.
+            source_transaction_id = scale_pile_source_transaction_id(transaction)
 
             for (material_id, year, month), record_ids in by_material_year_month.items():
                 if year is None or month is None:
@@ -3395,6 +3409,7 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                     TraceabilityTransactionGroup.tenant_id == tenant_id,
                     TraceabilityTransactionGroup.transaction_year == year,
                     TraceabilityTransactionGroup.transaction_month == month,
+                    TraceabilityTransactionGroup.source_transaction_id == source_transaction_id,
                     TraceabilityTransactionGroup.deleted_date.is_(None),
                     TraceabilityTransactionGroup.is_active == True,
                 ).first()

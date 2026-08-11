@@ -7,10 +7,14 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import and_, func, or_
+from sqlalchemy import and_, func, or_, true
 
 # Timezone for traceability group year/month (same as transaction_service)
 TRACEABILITY_DATE_TZ = "Asia/Bangkok"
+
+# Same grain rule the transaction service writes with; the backfill must agree with
+# it or it would merge a scale weigh-in back into the monthly pile.
+from ..iot_devices.auto_approve import scale_pile_source_transaction_id
 
 from ....models.transactions.transactions import Transaction, TransactionStatus
 from ....models.transactions.transaction_records import TransactionRecord
@@ -149,10 +153,16 @@ class TraceabilityService:
             )
             _dedup_transport_ids = {r[0] for r in _dt_rows if r[0] is not None}
 
+        # This collapses duplicate piles that share a key, which exists because the
+        # key has never been enforced by a constraint. source_transaction_id must be
+        # part of the key: without it two legitimate weigh-ins from the same tenant
+        # on the same day would look like duplicates and one would be dropped from
+        # the board — the exact weight-loss this per-weigh-in grain exists to stop.
+        # It is NULL on every monthly pile, so pre-scale data dedups as before.
         _seen_keys: dict = {}
         groups = []
         for g in raw_groups:
-            key = (g.origin_id, g.material_id, g.location_tag_id, g.tenant_id)
+            key = (g.origin_id, g.material_id, g.location_tag_id, g.tenant_id, g.source_transaction_id)
             if key not in _seen_keys:
                 _seen_keys[key] = g
                 groups.append(g)
@@ -975,7 +985,8 @@ class TraceabilityService:
         for g in existing_groups:
             for rid in g.transaction_record_id or []:
                 record_ids_in_groups.add(rid)
-            key = (g.origin_id, g.material_id, g.location_tag_id, g.tenant_id, year, month)
+            key = (g.origin_id, g.material_id, g.location_tag_id, g.tenant_id, year, month,
+                   g.source_transaction_id)
             key_to_existing_group[key] = g
         remaining = [r for r in records if r.id not in record_ids_in_groups]
         if not remaining:
@@ -987,11 +998,17 @@ class TraceabilityService:
             origin_id = txn.origin_id if txn else None
             location_tag_id = getattr(txn, "location_tag_id", None) if txn else None
             tenant_id = getattr(txn, "tenant_id", None) if txn else None
-            key = (origin_id, r.material_id, location_tag_id, tenant_id, year, month)
+            # Same grain rule as the two write paths in transaction_service: a scale
+            # weigh-in backfills into its own pile, everything else into the month's.
+            source_transaction_id = scale_pile_source_transaction_id(txn)
+            key = (origin_id, r.material_id, location_tag_id, tenant_id, year, month,
+                   source_transaction_id)
             key_to_records[key].append(r)
-        for (origin_id, material_id, location_tag_id, tenant_id, _, _), group_records in key_to_records.items():
+        for (origin_id, material_id, location_tag_id, tenant_id, _, _,
+             source_transaction_id), group_records in key_to_records.items():
             record_ids = list(dict.fromkeys(r.id for r in group_records))
-            key = (origin_id, material_id, location_tag_id, tenant_id, year, month)
+            key = (origin_id, material_id, location_tag_id, tenant_id, year, month,
+                   source_transaction_id)
             existing = key_to_existing_group.get(key)
             if existing and existing.id not in group_ids_already_processed:
                 existing_record_ids = list(dict.fromkeys(existing.transaction_record_id or []))
@@ -1014,6 +1031,7 @@ class TraceabilityService:
                     location_tag_id=location_tag_id,
                     tenant_id=tenant_id,
                     is_active=True,
+                    source_transaction_id=source_transaction_id,
                 )
                 self.db.add(group)
         self.db.flush()
@@ -1049,7 +1067,10 @@ class TraceabilityService:
         if not orphaned:
             return []
 
-        # Group by (origin_id, material_id, location_tag_id, tenant_id)
+        # Group by (origin_id, material_id, location_tag_id, tenant_id, source_transaction_id).
+        # The last component keeps two scale weigh-ins from the same tenant on the
+        # same material apart, so they stay two cards and materialize into two piles
+        # — matching the grain the real groups use. It is None for everything else.
         from collections import defaultdict
         key_to_records: Dict[Tuple[Any, ...], List[TransactionRecord]] = defaultdict(list)
         for r in orphaned:
@@ -1057,13 +1078,14 @@ class TraceabilityService:
             origin_id = txn.origin_id if txn else None
             location_tag_id = getattr(txn, "location_tag_id", None) if txn else None
             tenant_id = getattr(txn, "tenant_id", None) if txn else None
-            key = (origin_id, r.material_id, location_tag_id, tenant_id)
+            source_transaction_id = scale_pile_source_transaction_id(txn)
+            key = (origin_id, r.material_id, location_tag_id, tenant_id, source_transaction_id)
             key_to_records[key].append(r)
 
         # Enrich: collect location/material IDs
         location_ids = set()
         material_ids = set()
-        for (origin_id, material_id, _, _) in key_to_records:
+        for (origin_id, material_id, _, _, _) in key_to_records:
             if origin_id is not None:
                 location_ids.add(origin_id)
             if material_id is not None:
@@ -1086,10 +1108,14 @@ class TraceabilityService:
 
         # Build tentative group dicts
         out = []
-        for (origin_id, material_id, location_tag_id, tenant_id), recs in key_to_records.items():
+        for (origin_id, material_id, location_tag_id, tenant_id, source_transaction_id), recs in key_to_records.items():
             record_ids = list(dict.fromkeys(r.id for r in recs))
             total_weight = sum(float(r.origin_weight_kg or 0) for r in recs)
+            # An 8th segment is appended only for a scale pile, so keys already held
+            # by an open browser tab stay 7 parts and keep working.
             tentative_id = f"tentative:{origin_id}:{material_id}:{location_tag_id}:{tenant_id}:{year}:{month}"
+            if source_transaction_id is not None:
+                tentative_id = f"{tentative_id}:{source_transaction_id}"
 
             origin = None
             if origin_id and origin_id in location_map:
@@ -1129,7 +1155,10 @@ class TraceabilityService:
         """Parse tentative key, create real TraceabilityTransactionGroup, link approved records."""
         try:
             parts = tentative_group_key.split(":")
-            if len(parts) != 7 or parts[0] != "tentative":
+            # 7 parts = a monthly pile, the only shape that existed before scales.
+            # 8 = a per-weigh-in scale pile, whose 8th part is the source transaction.
+            # Both are accepted so a key held by an already-open page keeps working.
+            if len(parts) not in (7, 8) or parts[0] != "tentative":
                 return {"success": False, "message": "Invalid tentative group key"}
 
             def _parse(val: str):
@@ -1141,6 +1170,7 @@ class TraceabilityService:
             tenant_id = _parse(parts[4])
             year = int(parts[5])
             month = int(parts[6])
+            source_transaction_id = _parse(parts[7]) if len(parts) == 8 else None
 
             # Check if a real group already exists for this key
             existing = self.db.query(TraceabilityTransactionGroup).filter(
@@ -1155,6 +1185,9 @@ class TraceabilityService:
                     else TraceabilityTransactionGroup.tenant_id.is_(None),
                 TraceabilityTransactionGroup.transaction_year == year,
                 TraceabilityTransactionGroup.transaction_month == month,
+                TraceabilityTransactionGroup.source_transaction_id == source_transaction_id
+                    if source_transaction_id is not None
+                    else TraceabilityTransactionGroup.source_transaction_id.is_(None),
                 TraceabilityTransactionGroup.is_active == True,
                 TraceabilityTransactionGroup.deleted_date.is_(None),
             ).first()
@@ -1180,6 +1213,10 @@ class TraceabilityService:
                         else Transaction.location_tag_id.is_(None),
                     Transaction.tenant_id == tenant_id if tenant_id is not None
                         else Transaction.tenant_id.is_(None),
+                    # A scale pile covers exactly one weigh-in, so it must not sweep
+                    # up that tenant's other orphaned records for the month.
+                    Transaction.id == source_transaction_id if source_transaction_id is not None
+                        else true(),
                     or_(
                         TransactionRecord.traceability_group_id.is_(None),
                         ~TransactionRecord.traceability_group_id.in_(
@@ -1222,6 +1259,7 @@ class TraceabilityService:
                 location_tag_id=location_tag_id,
                 tenant_id=tenant_id,
                 is_active=True,
+                source_transaction_id=source_transaction_id,
             )
             self.db.add(group)
             self.db.flush()
