@@ -836,36 +836,45 @@ class TraceabilityService:
         Idle carry-over: find idle TransportTransactions whose group is in *last* month (relative to requested).
         For each such idle, find a group in the *requested* month with the same (origin_id, material_id, location_tag_id, tenant_id).
         Append the idle's id to that group's transaction_carried_over. If no such group exists, create one with no records and only this carried_over.
+
+        Idempotent within one request: loading the board calls this once directly and
+        once more via get_traceability_hierarchy, and the second pass can only repeat
+        work the first already did.
         """
+        already = getattr(self, '_carry_over_done', None)
+        if already is None:
+            already = set()
+            self._carry_over_done = already
+        request_key = (organization_id, requested_year, requested_month)
+        if request_key in already:
+            return
+        already.add(request_key)
+
         last_year, last_month = self._last_month(requested_year, requested_month)
-        idles = (
-            self.db.query(TransportTransaction)
+        # Runs on every board load, so it is bounded to the month it can actually act
+        # on. It used to load EVERY idle transport the organization has ever had and
+        # discard all but last month's in Python — with one pile per weigh-in that is
+        # an unbounded scan that grows for the life of the account. The join returns
+        # exactly the rows the loop below kept, so behaviour is unchanged.
+        idle_rows = (
+            self.db.query(TransportTransaction, TraceabilityTransactionGroup)
+            .join(
+                TraceabilityTransactionGroup,
+                TransportTransaction.transaction_group_id == TraceabilityTransactionGroup.id,
+            )
             .filter(
                 TransportTransaction.status == "idle",
                 TransportTransaction.is_active == True,
                 TransportTransaction.deleted_date.is_(None),
-                TransportTransaction.transaction_group_id.isnot(None),
                 TransportTransaction.organization_id == organization_id,
-            )
-            .all()
-        )
-        group_ids = list({t.transaction_group_id for t in idles if t.transaction_group_id is not None})
-        if not group_ids:
-            return
-        groups_last_month = (
-            self.db.query(TraceabilityTransactionGroup)
-            .filter(
-                TraceabilityTransactionGroup.id.in_(group_ids),
                 TraceabilityTransactionGroup.transaction_year == last_year,
                 TraceabilityTransactionGroup.transaction_month == last_month,
             )
             .all()
         )
-        group_by_id = {g.id: g for g in groups_last_month}
-        for t in idles:
-            if t.transaction_group_id is None:
-                continue
-            orig_group = group_by_id.get(t.transaction_group_id)
+        if not idle_rows:
+            return
+        for t, orig_group in idle_rows:
             if orig_group is None:
                 continue
             origin_id = orig_group.origin_id
