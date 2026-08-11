@@ -874,6 +874,34 @@ class TraceabilityService:
         )
         if not idle_rows:
             return
+
+        # Index this month's piles once instead of querying per idle transport. The
+        # per-iteration lookup was one round trip per carried-over pile — fine at a few
+        # piles a month, up to hundreds of sequential queries inside a single board GET
+        # once every weigh-in has its own pile. Bounded by the month, same as above.
+        # Lowest id wins, matching the previous ORDER BY: the key has no unique
+        # constraint so duplicates exist, and a repeated board load must land on the
+        # same row rather than an arbitrary one.
+        def _target_key(g):
+            return (g.origin_id, g.material_id, g.location_tag_id, g.tenant_id,
+                    g.source_transaction_id)
+
+        targets_by_key: Dict[Tuple[Any, ...], TraceabilityTransactionGroup] = {}
+        this_month = (
+            self.db.query(TraceabilityTransactionGroup)
+            .filter(
+                TraceabilityTransactionGroup.organization_id == organization_id,
+                TraceabilityTransactionGroup.transaction_year == requested_year,
+                TraceabilityTransactionGroup.transaction_month == requested_month,
+                TraceabilityTransactionGroup.deleted_date.is_(None),
+                TraceabilityTransactionGroup.is_active == True,
+            )
+            .order_by(TraceabilityTransactionGroup.id.asc())
+            .all()
+        )
+        for g in this_month:
+            targets_by_key.setdefault(_target_key(g), g)
+
         for t, orig_group in idle_rows:
             if orig_group is None:
                 continue
@@ -886,26 +914,8 @@ class TraceabilityService:
             # and the group minted below would be NULL-keyed (monthly) while holding
             # scale material — a silent cross-grain merge every 1st of the month.
             source_transaction_id = orig_group.source_transaction_id
-            target = (
-                self.db.query(TraceabilityTransactionGroup)
-                .filter(
-                    TraceabilityTransactionGroup.organization_id == organization_id,
-                    TraceabilityTransactionGroup.origin_id == origin_id,
-                    TraceabilityTransactionGroup.material_id == material_id,
-                    TraceabilityTransactionGroup.location_tag_id == location_tag_id,
-                    TraceabilityTransactionGroup.tenant_id == tenant_id,
-                    TraceabilityTransactionGroup.transaction_year == requested_year,
-                    TraceabilityTransactionGroup.transaction_month == requested_month,
-                    TraceabilityTransactionGroup.source_transaction_id == source_transaction_id,
-                    TraceabilityTransactionGroup.deleted_date.is_(None),
-                    TraceabilityTransactionGroup.is_active == True,
-                )
-                # The key has no unique constraint, so duplicates exist; picking the
-                # oldest makes a repeated board load land on the same row every time
-                # instead of an arbitrary one.
-                .order_by(TraceabilityTransactionGroup.id.asc())
-                .first()
-            )
+            key = (origin_id, material_id, location_tag_id, tenant_id, source_transaction_id)
+            target = targets_by_key.get(key)
             if target:
                 carried = list(target.transaction_carried_over or [])
                 if t.id not in carried:
@@ -927,6 +937,10 @@ class TraceabilityService:
                     source_transaction_id=source_transaction_id,
                 )
                 self.db.add(new_group)
+                # Two idle transports can share a key. The per-iteration query used to
+                # find the row the previous iteration had just added; the index has to
+                # be kept current or the second one mints a duplicate pile.
+                targets_by_key[key] = new_group
         self.db.flush()
 
     def _records_for_org_month_year(
