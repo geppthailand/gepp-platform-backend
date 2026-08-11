@@ -1233,6 +1233,8 @@ class UserService:
                 # Location and address information
                 'coordinate': location.coordinate,
                 'address': location.address,
+                # ห้องขยะ this location's material is collected in (migration 080)
+                'waste_room_location_id': location.waste_room_location_id,
                 'postal_code': location.postal_code,
                 'country_id': location.country_id,
                 'province_id': location.province_id,

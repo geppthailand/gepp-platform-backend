@@ -1135,6 +1135,52 @@ def _normalize_members_payload(members: Any) -> Any:
     return normalized
 
 
+def _validate_waste_room_location(
+    db_session,
+    location_id: int,
+    organization_id: int,
+    raw_value: Any,
+) -> Optional[int]:
+    """Check a ห้องขยะ binding before it is written. Returns the id, or None to clear it.
+
+    Every rule here exists because the server will later route material into this
+    location without a human confirming it, so a bad row silently moves waste to
+    the wrong place:
+      • the waste room must be in the SAME organization as the location
+      • it must be a real location (is_location), active and not deleted
+      • it may not be the location itself — that would be a self-loop hop
+
+    Deliberately NOT checked: whether the waste room is a descendant of this
+    location in the org tree. The tree lives in organization_setup.root_nodes as
+    JSON and is rebuilt by the setup importer, so a structural rule enforced here
+    would start rejecting rows the next time someone re-imports their setup.
+    Same-organization is the boundary we can actually hold.
+    """
+    if raw_value in (None, '', 0, '0'):
+        return None
+    try:
+        waste_room_id = int(raw_value)
+    except (TypeError, ValueError):
+        raise ValidationException('waste_room_location_id must be a location id')
+
+    if waste_room_id == int(location_id):
+        raise ValidationException('A location cannot be its own waste room')
+
+    from GEPPPlatform.models.users.user_location import UserLocation as _UserLocation
+    waste_room = db_session.query(_UserLocation).filter(
+        _UserLocation.id == waste_room_id,
+        _UserLocation.organization_id == organization_id,
+        _UserLocation.is_location == True,
+        _UserLocation.is_active == True,
+        _UserLocation.deleted_date.is_(None),
+    ).first()
+    if not waste_room:
+        raise ValidationException(
+            'Waste room not found in this organization, or it has been deleted'
+        )
+    return waste_room_id
+
+
 def handle_update_location(
     db_session,
     location_id: str,
@@ -1168,6 +1214,12 @@ def handle_update_location(
             location.display_name = data['name']
         if 'address' in data:
             location.address = data['address']
+        # ห้องขยะ. Guarded by `in data` so a caller that never sends the key — the
+        # org-chart save, the setup importer — cannot clear an existing binding.
+        if 'waste_room_location_id' in data:
+            location.waste_room_location_id = _validate_waste_room_location(
+                db_session, location.id, organization_id, data['waste_room_location_id']
+            )
 
         # Handle user assignments - store in members JSONB column
         if 'users' in data:
@@ -1320,6 +1372,7 @@ def handle_update_location(
                 'id': location.id,
                 'name': location.display_name or location.name_en,
                 'address': getattr(location, 'address', None),
+                'waste_room_location_id': getattr(location, 'waste_room_location_id', None),
                 'members': location.members or [],
                 'tags': [
                     {

@@ -62,6 +62,13 @@ class UserLocation(Base, BaseModel):
     # one place" true by construction. Migration 079.
     sorter_location_id = Column(BigInteger, ForeignKey('user_locations.id'), nullable=True)
 
+    # ห้องขยะ: where material weighed in AT this location physically ends up. Set on
+    # a LOCATION row (is_location=True) and points at another location in the same
+    # organization. Lets the server route the first traceability hop on its own
+    # instead of waiting for someone to drag a card on the web board.
+    # NULL = no routing, today's behaviour. Migration 080.
+    waste_room_location_id = Column(BigInteger, ForeignKey('user_locations.id'), nullable=True)
+
     # Location and address information
     coordinate = Column(Text)  # Stored as "lat,lng" string
     address = Column(Text)
