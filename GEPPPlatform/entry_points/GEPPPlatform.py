@@ -15,6 +15,9 @@ import base64
 import json
 from decimal import Decimal
 
+from GEPPPlatform.libs.http_response import maybe_gzip
+
+
 class DateTimeEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, datetime):
@@ -22,6 +25,8 @@ class DateTimeEncoder(json.JSONEncoder):
         if isinstance(obj, Decimal):
             return float(obj)
         return super().default(obj)
+
+
 import os
 from glob import glob
 import math
@@ -1384,9 +1389,11 @@ def main(event, context):
         # If a handler already returned a full proxy response (e.g., PDF binary),
         # pass it through unmodified. Otherwise, wrap as JSON.
         if isinstance(results, dict) and "statusCode" in results and "body" in results:
-            return results
+            # Already-built responses (file downloads, redirects) pass through as-is;
+            # _maybe_gzip declines anything already base64-encoded.
+            return maybe_gzip(results, event)
         else:
-            return {
+            return maybe_gzip({
                 "statusCode": 200,
                 "headers": {
                     "Content-Type": "application/json",
@@ -1394,7 +1401,7 @@ def main(event, context):
                     **_VERSION_HEADERS,
                 },
                 "body": json.dumps(results, cls=DateTimeEncoder),
-            }
+            }, event)
 
     except UnauthorizedException as auth_error:
         return {
