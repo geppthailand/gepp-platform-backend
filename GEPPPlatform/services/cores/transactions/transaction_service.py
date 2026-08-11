@@ -426,6 +426,31 @@ class TransactionService:
         except Exception:
             return False
 
+    def _waste_room_for_location(self, location_id: int, organization_id: int) -> Optional[int]:
+        """The ห้องขยะ that collects material weighed in at this location, or None.
+
+        Read straight off the location row (migration 080) rather than inferred from
+        the org chart: the chart lives in organization_setup.root_nodes as JSON that
+        the setup importer rebuilds from scratch, so anything stored there would not
+        survive a re-import.
+
+        Deliberately not inherited from a parent location. Inheritance would have to
+        walk that same JSON, and a waste room guessed from an ancestor is exactly the
+        kind of silent wrong answer that moves material to the wrong building. An
+        admin sets it where it applies, or material stays put.
+        """
+        if not location_id or not organization_id:
+            return None
+        try:
+            row = self.db.query(UserLocation.waste_room_location_id).filter(
+                UserLocation.id == int(location_id),
+                UserLocation.organization_id == organization_id,
+                UserLocation.deleted_date.is_(None),
+            ).first()
+        except Exception:  # noqa: BLE001 — a missing column must never fail an approval
+            return None
+        return row[0] if row and row[0] else None
+
     def _create_first_hops_for_approved_transaction(self, transaction) -> None:
         """input_destination mode: when a transaction is APPROVED, auto-create the traceability
         FIRST HOP (origin → the destination chosen at data entry) as an in_transit
@@ -438,31 +463,57 @@ class TransactionService:
         materialization on read reuses this group and never double-creates.
         """
         try:
+            if not transaction:
+                return
+            org_id = transaction.organization_id
+            origin_id = transaction.origin_id
+            # See _upsert_traceability_groups_for_transaction — one pile per
+            # weigh-in for a scale, the monthly pile for everything else.
+            source_transaction_id = scale_pile_source_transaction_id(transaction)
+
+            # ห้องขยะ: for material a scale recorded, an admin can nominate the waste
+            # room this location feeds (migration 080). That standing instruction is
+            # what replaces someone dragging a card on the board every day, so it also
+            # stands in for the per-user "กรอกปลายทาง" opt-in below — an org that has
+            # set a waste room has already said where this material goes.
+            waste_room_id = None
+            if source_transaction_id is not None and origin_id is not None:
+                waste_room_id = self._waste_room_for_location(origin_id, org_id)
+
             # Per-user "กรอกปลายทาง": gate on the transaction CREATOR's setting (the person who
             # entered the destination at data-entry), not an org-wide flag.
-            if not transaction or not self._user_input_destination(getattr(transaction, 'created_by_id', None)):
+            if waste_room_id is None and not self._user_input_destination(
+                getattr(transaction, 'created_by_id', None)
+            ):
                 return
             from ....models.transactions.traceability_transaction_group import TraceabilityTransactionGroup
             from ....models.transactions.transport_transaction import TransportTransaction
             from ..traceability.traceability_service import TraceabilityService
 
-            records = self.db.query(TransactionRecord).filter(
+            record_filters = [
                 TransactionRecord.created_transaction_id == transaction.id,
                 TransactionRecord.is_active == True,
                 TransactionRecord.deleted_date.is_(None),
-                TransactionRecord.destination_id.isnot(None),
-            ).all()
+            ]
+            if waste_room_id is None:
+                # No standing instruction, so only records that name a destination
+                # themselves can be hopped — the original behaviour.
+                record_filters.append(TransactionRecord.destination_id.isnot(None))
+            records = self.db.query(TransactionRecord).filter(*record_filters).all()
             if not records:
                 return
 
-            org_id = transaction.organization_id
-            origin_id = transaction.origin_id
             tag_id = getattr(transaction, 'location_tag_id', None)
             tenant_id = getattr(transaction, 'tenant_id', None)
-            # See _upsert_traceability_groups_for_transaction — one pile per
-            # weigh-in for a scale, the monthly pile for everything else.
-            source_transaction_id = scale_pile_source_transaction_id(transaction)
             tsvc = TraceabilityService(self.db)
+
+            # One hop per (pile, destination), not per record. Creating one per record
+            # was already wrong: the dedupe below matches on
+            # (group, is_root, destination, material) and skips, so the second record
+            # of the same material silently got no hop and its weight never moved.
+            # Summing also keeps the pile's roots equal to the pile weight, which is
+            # what the whole-pile guard in create_transport_transactions requires.
+            hop_buckets: Dict[Tuple[int, int, int], float] = {}
 
             for rec in records:
                 date_for_ym = getattr(rec, 'transaction_date', None) or getattr(transaction, 'transaction_date', None)
@@ -499,12 +550,26 @@ class TransactionService:
                 if getattr(rec, 'traceability_group_id', None) != group.id:
                     rec.traceability_group_id = group.id
 
+                destination_id = rec.destination_id or waste_room_id
+                if destination_id is None or destination_id == origin_id:
+                    # Nowhere to go, or the standing instruction points at this very
+                    # location — a self-loop hop would be meaningless. This is also
+                    # what keeps the sorter's own weigh-out, whose origin IS the waste
+                    # room, from being sent straight back into it.
+                    continue
+
+                bucket = (group.id, int(destination_id), rec.material_id)
+                hop_buckets[bucket] = hop_buckets.get(bucket, 0.0) + float(
+                    getattr(rec, 'origin_weight_kg', 0) or 0
+                )
+
+            for (group_id, destination_id, material_id), weight in hop_buckets.items():
                 # Dedup: skip if a matching root hop already exists (e.g. transaction re-approved).
                 existing = self.db.query(TransportTransaction.id).filter(
-                    TransportTransaction.transaction_group_id == group.id,
+                    TransportTransaction.transaction_group_id == group_id,
                     TransportTransaction.is_root == True,
-                    TransportTransaction.destination_id == rec.destination_id,
-                    TransportTransaction.material_id == rec.material_id,
+                    TransportTransaction.destination_id == destination_id,
+                    TransportTransaction.material_id == material_id,
                     TransportTransaction.deleted_date.is_(None),
                 ).first()
                 if existing:
@@ -512,14 +577,23 @@ class TransactionService:
 
                 hop_res = tsvc.create_transport_transactions(
                     data=[{
-                        'weight': float(getattr(rec, 'origin_weight_kg', 0) or 0),
+                        'weight': weight,
                         'origin_id': origin_id,
-                        'destination_id': rec.destination_id,
-                        'material_id': rec.material_id,
+                        'destination_id': destination_id,
+                        'material_id': material_id,
                     }],
                     organization_id=org_id,
-                    transaction_group_id=group.id,
+                    transaction_group_id=group_id,
                 )
+                if not hop_res.get('success'):
+                    # The whole-pile guard can refuse this — e.g. an earlier hop
+                    # already moved part of the pile elsewhere. Log and leave the
+                    # rest of the transaction alone rather than aborting approval.
+                    logger.warning(
+                        "Auto first-hop refused for transaction %s group %s: %s",
+                        getattr(transaction, 'id', '?'), group_id, hop_res.get('message'),
+                    )
+                    continue
                 # Approving = the waste has ARRIVED at the midway destination. Confirm arrival so the
                 # hop moves from "อยู่ระหว่างขนส่ง" (in_transit) to "รอดำเนินการขนส่งต่อ"
                 # (status='arrived', no disposal_method → awaiting the next hop).
