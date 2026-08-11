@@ -2714,6 +2714,24 @@ class TraceabilityService:
                                 400,
                                 "INVALID_REQUEST",
                             )
+                    # A pile a scale created must go out whole — the same rule the
+                    # create/edit paths enforce, applied to the one path that builds
+                    # its TransportTransaction directly and so never reached them.
+                    # Taking part of such a pile leaves a remainder that the board
+                    # hides and the percentage maths cannot express; it also puts the
+                    # group's own guard permanently out of reach, because a group that
+                    # is a consolidation source is dropped from column 1.
+                    # NULL discriminator (every pre-existing pile) is unaffected.
+                    if g.source_transaction_id is not None:
+                        full = group_weights.get(g.id, Decimal("0"))
+                        if full > 0 and abs(float(contributed) - float(full)) > 0.01:
+                            raise APIException(
+                                f"Group {g.id} was recorded by a scale and must be "
+                                f"consolidated whole: {float(contributed):.2f} kg "
+                                f"requested of {float(full):.2f} kg.",
+                                400,
+                                "PARTIAL_SCALE_PILE",
+                            )
                     group_contribs.append((g, contributed))
 
             # 4a-iii) Fallback: if no explicit contributions, take everything matching material_id
