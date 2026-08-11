@@ -289,6 +289,13 @@ class TraceabilityService:
                     elif method in _DIRECTED:
                         disposal_w += w
 
+        # Piles a ผู้คัดแยก created by weighing material OUT of a waste room. Their
+        # kilograms were already counted when the tenant weighed them IN, so they must
+        # not be added to "how much waste is there" a second time — but their legs are
+        # exactly where the material ended up, so the treatment/disposal sums below
+        # still need them. Hence: skipped for origin weight only, never for leaves.
+        internal_group_ids = self._internal_transfer_group_ids(organization_id)
+
         for origin_node in hierarchy_data:
             if not isinstance(origin_node, dict):
                 continue
@@ -298,10 +305,11 @@ class TraceabilityService:
                 group_id = group_node.get("group_id") or group_node.get("id")
                 if group_id is not None:
                     hierarchy_group_ids.add(str(group_id))
-                raw_weight = float(group_node.get("weight") or group_node.get("total_weight_kg") or 0)
-                consolidated_weight = _collect_subtree_consolidated_weight(group_node)
-                origin_weight = consolidated_weight if consolidated_weight > 0 else raw_weight
-                total_origin_weight += origin_weight
+                if group_id is None or str(group_id) not in internal_group_ids:
+                    raw_weight = float(group_node.get("weight") or group_node.get("total_weight_kg") or 0)
+                    consolidated_weight = _collect_subtree_consolidated_weight(group_node)
+                    origin_weight = consolidated_weight if consolidated_weight > 0 else raw_weight
+                    total_origin_weight += origin_weight
                 _sum_leaves(group_node.get("children") or [])
 
         # Include original origin groups that are not in any flow yet. Arrived
@@ -314,6 +322,8 @@ class TraceabilityService:
                 continue
             group_id = item.get("group_id") or item.get("id")
             if group_id is not None and str(group_id) in hierarchy_group_ids:
+                continue
+            if group_id is not None and str(group_id) in internal_group_ids:
                 continue
             total_origin_weight += float(item.get("weight") or item.get("total_weight_kg") or 0)
 
@@ -1294,6 +1304,34 @@ class TraceabilityService:
     # complains. Record weight is DECIMAL(15,4) and the web app rounds what it sends
     # to 2dp, so an exact equality test would reject legitimate whole-pile dispatches.
     _PILE_WEIGHT_TOLERANCE_KG = 0.01
+
+    def _internal_transfer_group_ids(self, organization_id: Optional[int]) -> set:
+        """Piles whose weight was already reported at its origin, as a set of str ids.
+
+        A ผู้คัดแยก's weigh-out is stamped is_internal_transfer (migration 082) and,
+        being a scale reading, always owns its own pile (migration 081) — so the link
+        is exactly source_transaction_id, and no pile can be part internal and part
+        not. Returned as strings because the callers compare against ids that have
+        been through JSON.
+
+        Best-effort: a failure here must degrade to "nothing is internal", i.e. the
+        pre-migration numbers, rather than blanking the board.
+        """
+        if not organization_id:
+            return set()
+        try:
+            rows = (
+                self.db.query(TraceabilityTransactionGroup.id)
+                .join(Transaction, TraceabilityTransactionGroup.source_transaction_id == Transaction.id)
+                .filter(
+                    TraceabilityTransactionGroup.organization_id == organization_id,
+                    Transaction.is_internal_transfer.is_(True),
+                )
+                .all()
+            )
+        except Exception:  # noqa: BLE001 — see docstring
+            return set()
+        return {str(r[0]) for r in rows}
 
     def _pile_weight_kg(self, group: TraceabilityTransactionGroup) -> float:
         """Weight of everything sitting in a pile, using the board's own definition.
