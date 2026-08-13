@@ -20,6 +20,7 @@ TRACEABILITY_DATE_TZ = "Asia/Bangkok"
 # Decides whether a transaction's traceability piles are per weigh-in or per month.
 # auto_approve is a leaf module (logging + typing + sqlalchemy.text only), so this
 # import cannot cycle back into transactions.
+from ....libs.node_ids import to_node_id
 from ..iot_devices.auto_approve import scale_pile_source_transaction_id
 
 import boto3
@@ -437,22 +438,73 @@ class TransactionService:
         the setup importer rebuilds from scratch, so anything stored there would not
         survive a re-import.
 
-        Deliberately not inherited from a parent location. Inheritance would have to
-        walk that same JSON, and a waste room guessed from an ancestor is exactly the
-        kind of silent wrong answer that moves material to the wrong building. An
-        admin sets it where it applies, or material stays put.
+        Inherited from the nearest ancestor in the org chart when the location itself
+        has none. An admin sets it once on the building and every floor, room and
+        tenant underneath follows — which is both what the field's help text promises
+        and the only workable setup, since material is weighed at the leaf, not at the
+        building. The nearest binding wins, so a floor with its own waste room still
+        overrides the building's.
+
+        The chart lives in organization_setup.root_nodes as JSON — user_locations'
+        parent columns are never written for locations — so the ancestor walk has to
+        go through the setup.
         """
         if not location_id or not organization_id:
             return None
         try:
-            row = self.db.query(UserLocation.waste_room_location_id).filter(
-                UserLocation.id == int(location_id),
+            location_id = int(location_id)
+        except (TypeError, ValueError):
+            return None
+        try:
+            chain = [location_id] + self._location_ancestors(location_id, organization_id)
+            rows = self.db.query(
+                UserLocation.id, UserLocation.waste_room_location_id
+            ).filter(
+                UserLocation.id.in_(chain),
                 UserLocation.organization_id == organization_id,
                 UserLocation.deleted_date.is_(None),
-            ).first()
+            ).all()
         except Exception:  # noqa: BLE001 — a missing column must never fail an approval
             return None
-        return row[0] if row and row[0] else None
+        bound = {r[0]: r[1] for r in rows if r[1]}
+        for candidate in chain:          # nearest first
+            if candidate in bound:
+                return bound[candidate]
+        return None
+
+    def _location_ancestors(self, location_id: int, organization_id: int) -> List[int]:
+        """Ancestors of a location, nearest first, from the org-chart JSON."""
+        from ....models.subscriptions.organizations import OrganizationSetup
+        setup = self.db.query(OrganizationSetup).filter(
+            OrganizationSetup.organization_id == organization_id,
+            OrganizationSetup.is_active == True,
+        ).first()
+        if not setup or not setup.root_nodes:
+            return []
+
+        parent_of: Dict[int, int] = {}
+
+        def walk(nodes, parent_id):
+            for node in nodes if isinstance(nodes, list) else []:
+                if not isinstance(node, dict):
+                    continue
+                nid = to_node_id(node.get('nodeId'))
+                # An unsaved node has no id but its children may be real, so the
+                # walk carries the last known parent through rather than stopping.
+                if nid is not None and parent_id is not None:
+                    parent_of[nid] = parent_id
+                walk(node.get('children'), nid if nid is not None else parent_id)
+
+        walk(setup.root_nodes, None)
+
+        chain: List[int] = []
+        seen = {location_id}
+        cur = parent_of.get(location_id)
+        while cur is not None and cur not in seen:
+            chain.append(cur)
+            seen.add(cur)
+            cur = parent_of.get(cur)
+        return chain
 
     def _create_first_hops_for_approved_transaction(self, transaction) -> None:
         """input_destination mode: when a transaction is APPROVED, auto-create the traceability
@@ -485,8 +537,17 @@ class TransactionService:
 
             # Per-user "กรอกปลายทาง": gate on the transaction CREATOR's setting (the person who
             # entered the destination at data-entry), not an org-wide flag.
-            if waste_room_id is None and not self._user_input_destination(
-                getattr(transaction, 'created_by_id', None)
+            #
+            # A scale reading skips that gate. The setting exists so the web form knows
+            # whether to ask for a destination; a tablet that already posted one has
+            # answered the question, and a ผู้คัดแยก's weigh-out always posts one. Left
+            # in, the operator would have to find a per-user checkbox on the web before
+            # the tablet's own instruction counted — and the codebase notes nobody uses
+            # that mode today, so it would silently be off for every new site.
+            if (
+                waste_room_id is None
+                and source_transaction_id is None
+                and not self._user_input_destination(getattr(transaction, 'created_by_id', None))
             ):
                 return
             from ....models.transactions.traceability_transaction_group import TraceabilityTransactionGroup
