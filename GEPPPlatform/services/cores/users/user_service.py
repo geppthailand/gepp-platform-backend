@@ -16,6 +16,7 @@ from ....models.subscriptions.organizations import Organization
 from ....models.users.user_related import UserRoleEnum
 from ....models.users.user_location_materials import UserLocationMaterial
 from ....models.cores.references import Material
+from ....libs.node_ids import to_node_id
 
 
 def _normalize_identity(value: Any) -> str:
@@ -1611,8 +1612,14 @@ class UserService:
         def collect_all_descendants(nodes, ids_set):
             """Recursively collect all node IDs from the given nodes and their children."""
             for node in nodes:
-                nid = int(node.get('nodeId', 0))
-                ids_set.add(nid)
+                # A node the web app created but never finished saving still carries its
+                # temporary id ("2186_1768891622748_hub-child-1"). It has no location row
+                # behind it, so it has nothing to contribute — but converting it used to
+                # raise and take the whole locations list down with it. Skip the node,
+                # keep walking its children: nesting below an unsaved node is still real.
+                nid = to_node_id(node.get('nodeId'))
+                if nid is not None:
+                    ids_set.add(nid)
                 children = node.get('children', [])
                 if children:
                     collect_all_descendants(children, ids_set)
@@ -1620,8 +1627,14 @@ class UserService:
         def walk_tree(nodes, path_from_root):
             """Walk tree to find member nodes, collect their descendants and trace ancestors."""
             for node in nodes:
-                nid = int(node.get('nodeId', 0))
+                nid = to_node_id(node.get('nodeId'))
                 children = node.get('children', [])
+                if nid is None:
+                    # Cannot match a membership, but its subtree may still contain
+                    # real nodes — carry the path through unchanged.
+                    if children:
+                        walk_tree(children, path_from_root)
+                    continue
 
                 if nid in member_loc_ids:
                     # This node + all descendants → assigned (tier 1)
