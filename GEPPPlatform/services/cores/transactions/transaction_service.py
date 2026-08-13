@@ -627,6 +627,25 @@ class TransactionService:
                     getattr(rec, 'origin_weight_kg', 0) or 0
                 )
 
+            # What each destination does with what it receives. A leg only reads as
+            # finished — on the board and in the recycling rate — once it carries a
+            # method, and a scale can say where material went but not what happened to
+            # it there. Configured on the destination, so it costs one query for the
+            # whole batch rather than a decision per shipment.
+            disposal_by_destination: Dict[int, Optional[str]] = {}
+            if hop_buckets:
+                try:
+                    for _did, _method in self.db.query(
+                        UserLocation.id, UserLocation.default_disposal_method
+                    ).filter(
+                        UserLocation.id.in_({d for (_g, d, _m) in hop_buckets}),
+                        UserLocation.organization_id == org_id,
+                    ).all():
+                        if _method:
+                            disposal_by_destination[_did] = _method
+                except Exception:  # noqa: BLE001 — code may be ahead of migration 083
+                    disposal_by_destination = {}
+
             for (group_id, destination_id, material_id), weight in hop_buckets.items():
                 # Dedup: skip if a matching root hop already exists (e.g. transaction re-approved).
                 existing = self.db.query(TransportTransaction.id).filter(
@@ -639,13 +658,18 @@ class TransactionService:
                 if existing:
                     continue
 
+                hop_item: Dict[str, Any] = {
+                    'weight': weight,
+                    'origin_id': origin_id,
+                    'destination_id': destination_id,
+                    'material_id': material_id,
+                }
+                # Absent for a waste room or any other waypoint, which is what keeps a
+                # hop INTO the building from being reported as material disposed of.
+                if disposal_by_destination.get(destination_id):
+                    hop_item['disposal_method'] = disposal_by_destination[destination_id]
                 hop_res = tsvc.create_transport_transactions(
-                    data=[{
-                        'weight': weight,
-                        'origin_id': origin_id,
-                        'destination_id': destination_id,
-                        'material_id': material_id,
-                    }],
+                    data=[hop_item],
                     organization_id=org_id,
                     transaction_group_id=group_id,
                 )

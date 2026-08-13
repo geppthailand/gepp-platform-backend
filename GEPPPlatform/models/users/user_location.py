@@ -69,6 +69,14 @@ class UserLocation(Base, BaseModel):
     # NULL = no routing, today's behaviour. Migration 080.
     waste_room_location_id = Column(BigInteger, ForeignKey('user_locations.id'), nullable=True)
 
+    # What this destination DOES with material that arrives here (a GRI 306-1 method).
+    # Set on a destination, it ends the chain: a leg carrying a disposal_method is what
+    # the board shows as "จัดการสำเร็จ" and what the recycling rate classifies. A scale
+    # can say where material went but not what happened to it, so this supplies the
+    # answer once instead of per shipment. NULL = a waypoint that ships onward, which
+    # is every row until an admin sets it. Migration 083.
+    default_disposal_method = Column(String(100), nullable=True)
+
     # Location and address information
     coordinate = Column(Text)  # Stored as "lat,lng" string
     address = Column(Text)

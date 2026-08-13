@@ -1220,6 +1220,13 @@ def handle_update_location(
             location.waste_room_location_id = _validate_waste_room_location(
                 db_session, location.id, organization_id, data['waste_room_location_id']
             )
+        # What this destination does with what it receives. Empty string clears it,
+        # which is how the picker sends "this is a waypoint, not an ending".
+        if 'default_disposal_method' in data:
+            _method = data['default_disposal_method']
+            location.default_disposal_method = (
+                str(_method).strip() or None if _method is not None else None
+            )
 
         # Handle user assignments - store in members JSONB column
         if 'users' in data:
@@ -1373,6 +1380,7 @@ def handle_update_location(
                 'name': location.display_name or location.name_en,
                 'address': getattr(location, 'address', None),
                 'waste_room_location_id': getattr(location, 'waste_room_location_id', None),
+                'default_disposal_method': getattr(location, 'default_disposal_method', None),
                 'members': location.members or [],
                 'tags': [
                     {
