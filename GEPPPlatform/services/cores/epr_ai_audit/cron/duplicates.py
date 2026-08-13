@@ -82,10 +82,17 @@ def _exact_signals(target_imgs: List[dict], cand_imgs: List[dict]) -> dict:
 
 
 def _confidence(exact: dict, max_desc_sim: Optional[float]) -> Optional[str]:
-    """Translate raw signals into a confidence label, or None if nothing matched."""
-    if exact["matched_document_numbers"] or exact["matched_doc_triples"]:
+    """Translate raw signals into a confidence label, or None if nothing matched.
+
+    Only an exact document_number match is HIGH (= auto-flags the transaction).
+    The vendor/date/total triple used to be HIGH too, but recurring pickups from
+    the same vendor on the same day for the same amount are normal here, so it
+    fired constantly on legitimate transactions. Demoted to medium — still
+    surfaced for review, no longer auto-flags.
+    """
+    if exact["matched_document_numbers"]:
         return "high"
-    if exact["matched_identifiers"]:
+    if exact["matched_doc_triples"] or exact["matched_identifiers"]:
         return "medium"
     if max_desc_sim is not None:
         if max_desc_sim >= DESC_SIM_MEDIUM_FUZZY:
