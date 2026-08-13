@@ -42,7 +42,7 @@ from typing import Optional
 
 from psycopg2.extras import Json
 
-from GEPPPlatform.libs import image_processing, legacy_db, openrouter
+from GEPPPlatform.libs import image_processing, openrouter
 
 from . import duplicates
 
@@ -1423,42 +1423,6 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _project_has_ai_audit(legacy_conn, project_id: int) -> bool:
-    """Look up `epr_project_ai_audit_setting.enabled` in the legacy MySQL DB.
-    Returns True only when the flag is explicitly truthy. Missing setting row /
-    NULL flag default to False (safer — opt-in)."""
-    with legacy_conn.cursor() as cur:
-        cur.execute(
-            "SELECT enabled FROM epr_project_ai_audit_setting "
-            "WHERE epr_project_id = %s",
-            (project_id,),
-        )
-        row = cur.fetchone()
-    return bool(row[0]) if row and row[0] is not None else False
-
-
-def _mark_skipped(conn, tx_id: int, reason: str) -> dict:
-    """Stamp the parent tx + all its non-deleted records with status='skipped'
-    and a small flags block explaining why. Used when the worker bails out
-    before doing any LLM work (e.g. project's ai_audit flag is off)."""
-    flags_obj = {"reason": reason, "skipped_at": _now_iso()}
-    with conn.cursor() as cur:
-        cur.execute(
-            "UPDATE epr_transactions_embeded "
-            "SET status = %s, flags = %s, updated_date = NOW() "
-            "WHERE id = %s",
-            ("skipped", Json(flags_obj), tx_id),
-        )
-        cur.execute(
-            "UPDATE epr_transaction_records_embeded "
-            "SET status = %s, flags = %s, updated_date = NOW() "
-            "WHERE transaction_id = %s AND deleted_date IS NULL",
-            ("skipped", Json(flags_obj), tx_id),
-        )
-    conn.commit()
-    return flags_obj
-
-
 def _other_active_tx_exists(conn, project_id: int, tx_id: int) -> bool:
     """True if at least one OTHER transaction exists in this project (any
     is_active value, but not soft-deleted). Used to decide whether dedup
@@ -1476,13 +1440,14 @@ def _other_active_tx_exists(conn, project_id: int, tx_id: int) -> bool:
 
 def process_transaction(conn, tx_id: int) -> Optional[dict]:
     """Background-process one transaction end-to-end:
-       1. Project gate — skip entirely if the project has ai_audit disabled.
-       2. LLM-extract + description-embed every image with NULL extracted_data.
+       1. LLM-extract + description-embed every image with NULL extracted_data.
           Runs whether or not there's comparison data — extractions are
           needed for the per-transaction integrity check.
-       3. Integrity check: payload (raw_data) vs image extractions.
-       4. Dedup detection — only if other transactions exist in the project.
-       5. Write combined outcome (status + flags) to the parent row.
+       2. Integrity check: payload (raw_data) vs image extractions.
+       3. Dedup detection — only if other transactions exist in the project.
+       4. Write combined outcome (status + flags) to the parent row.
+
+    Every queued transaction is audited — there is no per-project on/off gate.
 
     Per-image commits keep partial progress durable.
     """
@@ -1499,27 +1464,7 @@ def process_transaction(conn, tx_id: int) -> Optional[dict]:
             return None
         project_id = row[0]
 
-    # Step 1: project gate. Check `epr_project_ai_audit_setting.enabled` in the
-    # legacy DB — if disabled, mark the tx + records as 'skipped' and return
-    # early. No LLM work runs.
-    if project_id is not None:
-        legacy_conn = legacy_db.get_legacy_connection()
-        try:
-            if not _project_has_ai_audit(legacy_conn, project_id):
-                _mark_skipped(conn, tx_id, "ai_audit_disabled")
-                logger.info(
-                    "process_transaction tx_id=%s: project %s has ai_audit=OFF, skipping",
-                    tx_id, project_id,
-                )
-                return {
-                    "skipped": True,
-                    "reason": "ai_audit_disabled",
-                    "project_id": project_id,
-                }
-        finally:
-            legacy_conn.close()
-
-    # Step 2: extract any pending images for this transaction. Runs even when
+    # Step 1: extract any pending images for this transaction. Runs even when
     # there's no comparison data — the integrity check needs these.
     tx_imgs = _pending_transaction_images(conn, tx_id)
     rec_imgs = _pending_record_images(conn, tx_id)
@@ -1536,7 +1481,7 @@ def process_transaction(conn, tx_id: int) -> Optional[dict]:
         if _update_image(conn, "epr_transaction_record_image", img_id, image_url):
             extracted_count += 1
 
-    # Step 3: integrity check — vision LLM looks at each image (documents,
+    # Step 2: integrity check — vision LLM looks at each image (documents,
     # scale readings, waste/cargo photos, anything) and judges whether the
     # content matches the user-submitted payload. The LLM decides per-image
     # which fields are verifiable. Image metadata (id, type, type_id, name)
@@ -1550,7 +1495,7 @@ def process_transaction(conn, tx_id: int) -> Optional[dict]:
     record_inputs = _load_record_integrity_inputs(conn, tx_id)
     integrity = _check_integrity(raw_data, images, record_inputs)
 
-    # Step 4: dedup — only when there's something to compare against.
+    # Step 3: dedup — only when there's something to compare against.
     has_comparison = (
         project_id is not None
         and _other_active_tx_exists(conn, project_id, tx_id)
@@ -1568,7 +1513,7 @@ def process_transaction(conn, tx_id: int) -> Optional[dict]:
             tx_id, project_id,
         )
 
-    # Step 5: write combined outcome (dedup + integrity) to the parent row.
+    # Step 4: write combined outcome (dedup + integrity) to the parent row.
     new_status, flags_obj = _write_dedup_outcome(
         conn, tx_id, candidates, integrity=integrity, reason=reason,
     )
