@@ -1,11 +1,15 @@
-"""Only an exact document_number auto-flags a transaction as a duplicate.
+"""Auto-flagging a duplicate takes an exact document_number AND the same day.
 
-The vendor/date/total triple used to return "high", which auto-flagged every
-recurring same-vendor/same-day/same-amount pickup. Guard against it creeping
-back up a tier.
+Two separate false-positive sources are pinned here:
+  - the vendor/date/total triple, which fires on ordinary recurring pickups
+  - a permit/licence number pre-printed on every form, which the extractor
+    reads as document_number and which then matches across months of
+    unrelated shipments
 """
 
-from GEPPPlatform.services.cores.epr_ai_audit.cron.duplicates import _confidence
+from GEPPPlatform.services.cores.epr_ai_audit.cron.duplicates import (
+    _confidence, _payload_date,
+)
 
 
 def _signals(doc_numbers=(), identifiers=(), triples=()):
@@ -16,8 +20,29 @@ def _signals(doc_numbers=(), identifiers=(), triples=()):
     }
 
 
-def test_document_number_is_high():
+def test_document_number_same_day_is_high():
     assert _confidence(_signals(doc_numbers=["INV-001"]), None) == "high"
+
+
+def test_document_number_different_day_does_not_auto_flag():
+    # The real case: one permit number (MY0220260617...) shared by four
+    # shipments on 06-09, 06-10, 06-11 and 05-06.
+    assert _confidence(
+        _signals(doc_numbers=["MY02202606170001281680"]), None, same_day=False,
+    ) == "medium"
+
+
+def test_unknown_day_still_auto_flags():
+    # A missing payload date must not silently downgrade a real duplicate —
+    # find_duplicates passes same_day=True when either side is unknown.
+    assert _confidence(_signals(doc_numbers=["INV-001"]), None, same_day=True) == "high"
+
+
+def test_payload_date_takes_the_calendar_day():
+    assert _payload_date("2026-06-11T00:00:00.000Z") == "2026-06-11"
+    assert _payload_date(None) is None
+    assert _payload_date("") is None
+    assert _payload_date("2026-06") is None
 
 
 def test_doc_triple_alone_does_not_auto_flag():
