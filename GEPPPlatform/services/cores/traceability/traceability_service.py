@@ -689,8 +689,17 @@ class TraceabilityService:
         out: List[Dict[str, Any]] = []
         for origin_id in sorted(by_origin.keys()):
             group_children = by_origin[origin_id]
+            # Only what LEFT this origin. In-tank piles are shown under the
+            # origin so the diagram can draw a tank with an inflow, but they have
+            # not gone anywhere — adding them here counted the same physical
+            # material twice, on the way in and again on the way out, and the
+            # detail table's origin row (7.85) stopped matching the rows beneath
+            # it (3.40). What is standing in the room is reported by the tank
+            # ledger, which is the one place it belongs.
             origin_weight = sum(
-                float(g.get("weight") or g.get("total_weight_kg") or 0) for g in group_children
+                float(g.get("weight") or g.get("total_weight_kg") or 0)
+                for g in group_children
+                if not g.get("in_collection")
             )
             loc = location_map.get(origin_id)
             loc_name = (getattr(loc, "display_name", None) or getattr(loc, "name_en", None) or getattr(loc, "name_th", None) or f"Location {origin_id}") if loc else f"Location {origin_id}"
