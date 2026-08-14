@@ -274,11 +274,7 @@ def handle_get_transaction(
         transaction = result['transaction']
         is_shared_view = False
         if transaction['organization_id'] != current_user_organization_id:
-<<<<<<< HEAD
-            if transaction_service.is_transaction_shared_to_org(transaction, current_user_organization_id):
-=======
             if transaction_service.is_transaction_shared_to_org(transaction, current_user_organization_id, current_user_id):
->>>>>>> 6880dee6baba2a9f8b7a5d65b27600b67f275450
                 is_shared_view = True
                 transaction['is_shared'] = True
                 transaction['read_only'] = True

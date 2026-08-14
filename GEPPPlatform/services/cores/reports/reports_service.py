@@ -33,11 +33,7 @@ class ReportsService:
 
     # ========== TRANSACTION RECORDS REPORTS ==========
 
-<<<<<<< HEAD
-    def _fetch_shared_report_records(self, organization_id, filters, report_type):
-=======
     def _fetch_shared_report_records(self, organization_id, filters, report_type, current_user_id=None):
->>>>>>> 6880dee6baba2a9f8b7a5d65b27600b67f275450
         """Fetch TransactionRecords shared TO this org for reports.
 
         Returns (records, shared_map, node_meta):
@@ -55,13 +51,9 @@ class ReportsService:
         if filters.get('location_ids'):
             own_selected = set(self._resolve_descendant_ids(organization_id, filters['location_ids']))
         txnsvc = TransactionService(self.db)
-<<<<<<< HEAD
-        branches, _meta = txnsvc._resolve_shared_branches(organization_id, own_selected)
-=======
         visible_parent_ids = self._shared_visible_parent_ids(organization_id, current_user_id)
         branches, _meta = txnsvc._resolve_shared_branches(
             organization_id, own_selected, visible_parent_ids=visible_parent_ids)
->>>>>>> 6880dee6baba2a9f8b7a5d65b27600b67f275450
         if not branches:
             return [], {}, {}
 
@@ -85,10 +77,7 @@ class ReportsService:
                 Transaction.organization_id == b['source_org_id'],
                 Transaction.origin_id.in_(b['src_ids']),
                 Transaction.deleted_date.is_(None),
-<<<<<<< HEAD
-=======
                 Transaction.is_internal_transfer.isnot(True),  # see migration 083
->>>>>>> 6880dee6baba2a9f8b7a5d65b27600b67f275450
                 TransactionRecord.deleted_date.is_(None),
                 or_(TransactionRecord.status != 'rejected', TransactionRecord.status.is_(None)),
             )
@@ -252,11 +241,7 @@ class ReportsService:
             # Merge cross-org shared records (read-only). Branches are disjoint (deepest share wins),
             # so a transaction is never pulled in twice and totals are not double-counted.
             shared_records, shared_map, _shared_node_meta = self._fetch_shared_report_records(
-<<<<<<< HEAD
-                organization_id, filters, report_type)
-=======
                 organization_id, filters, report_type, current_user_id=current_user_id)
->>>>>>> 6880dee6baba2a9f8b7a5d65b27600b67f275450
             if shared_records:
                 transaction_records = list(transaction_records) + shared_records
 
@@ -455,11 +440,7 @@ class ReportsService:
             logger.error(f"Unexpected error in get_transaction_records_by_organization: {str(e)}")
             raise
 
-<<<<<<< HEAD
-    def _fetch_shared_overview_rows(self, organization_id, filters, report_type):
-=======
     def _fetch_shared_overview_rows(self, organization_id, filters, report_type, current_user_id=None):
->>>>>>> 6880dee6baba2a9f8b7a5d65b27600b67f275450
         """Shared (cross-org) rows for get_overview_data, as the SAME 20-column tuples but with
         origin_id replaced by the virtual shared-node id (so a shared location acts as a node at its
         placement level). Branches are disjoint (deepest share wins) → never double-counted.
@@ -467,12 +448,6 @@ class ReportsService:
         from ..transactions.transaction_service import TransactionService, shared_node_id_for
         from sqlalchemy import literal
         filters = filters or {}
-<<<<<<< HEAD
-        own_selected = None
-        if filters.get('location_ids'):
-            own_selected = set(self._resolve_descendant_ids(organization_id, filters['location_ids']))
-        branches, _m = TransactionService(self.db)._resolve_shared_branches(organization_id, own_selected)
-=======
         # A destination filter ("สถานที่รับขยะ") selects destinations in THIS org.
         # Cross-org shared data is received at the SOURCE org's destinations, so it can
         # never match a this-org destination id — exclude shared rows entirely.
@@ -484,7 +459,6 @@ class ReportsService:
         visible_parent_ids = self._shared_visible_parent_ids(organization_id, current_user_id)
         branches, _m = TransactionService(self.db)._resolve_shared_branches(
             organization_id, own_selected, visible_parent_ids=visible_parent_ids)
->>>>>>> 6880dee6baba2a9f8b7a5d65b27600b67f275450
         if not branches:
             return [], {}
         report_from = filters.get('date_from')
@@ -528,10 +502,7 @@ class ReportsService:
                 Transaction.organization_id == b['source_org_id'],
                 Transaction.origin_id.in_(b['src_ids']),
                 Transaction.deleted_date.is_(None),
-<<<<<<< HEAD
-=======
                 Transaction.is_internal_transfer.isnot(True),  # see migration 083
->>>>>>> 6880dee6baba2a9f8b7a5d65b27600b67f275450
                 TransactionRecord.deleted_date.is_(None),
                 or_(TransactionRecord.status != 'rejected', TransactionRecord.status.is_(None)),
             )
@@ -674,11 +645,7 @@ class ReportsService:
             # so shared data flows into overview / performance / comparison / materials / waste alike.
             # Branches are disjoint (deepest share wins) → no transaction is double-counted.
             shared_rows, _shared_node_meta = self._fetch_shared_overview_rows(
-<<<<<<< HEAD
-                organization_id, filters, report_type)
-=======
                 organization_id, filters, report_type, current_user_id=current_user_id)
->>>>>>> 6880dee6baba2a9f8b7a5d65b27600b67f275450
             if shared_rows:
                 rows = list(rows) + shared_rows
 
@@ -1077,16 +1044,11 @@ class ReportsService:
                 # Cross-org shared nodes appear as filterable entries at their placement level. Pull
                 # in each placed share and ensure its placement-parent chain is present in the tree.
                 from ..transactions.transaction_service import TransactionService, shared_node_id_for
-<<<<<<< HEAD
-                shared_branches_for_filter, _sb_meta = TransactionService(self.db)._resolve_shared_branches(
-                    organization_id, None)
-=======
                 # Same 3-tier gate as the data path: a non-owner only sees a shared node in the
                 # filter tree when its placement parent is in their assigned set.
                 _shared_visible = self._shared_visible_parent_ids(organization_id, current_user_id)
                 shared_branches_for_filter, _sb_meta = TransactionService(self.db)._resolve_shared_branches(
                     organization_id, None, visible_parent_ids=_shared_visible)
->>>>>>> 6880dee6baba2a9f8b7a5d65b27600b67f275450
                 shared_filter_nodes = []  # {vid, label, parent_id, source_org_name}
                 for b in shared_branches_for_filter:
                     pid = b.get('placed_parent_node_id')

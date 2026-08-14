@@ -322,10 +322,6 @@ class SharedLocationService:
         return {'id': share_id, 'deleted': True}
 
     # ── incoming (target owner) ───────────────────────────────────────────────
-<<<<<<< HEAD
-    def list_incoming(self, target_organization_id: int, actor_user_id: int) -> List[Dict[str, Any]]:
-        """Effective shares granted TO this org — feeds B's canvas Share tray."""
-=======
     def _incoming_payload(self, s: SharedUserLocation) -> Dict[str, Any]:
         """Recipient-facing wrapper identity for a share. Never leaks descendant detail."""
         src_org = self._get_org(s.source_organization_id)
@@ -349,7 +345,6 @@ class SharedLocationService:
 
     def list_incoming(self, target_organization_id: int, actor_user_id: int) -> List[Dict[str, Any]]:
         """Effective shares granted TO this org — feeds B's canvas Share tray (OWNER only)."""
->>>>>>> 6880dee6baba2a9f8b7a5d65b27600b67f275450
         self._require_owner(target_organization_id, actor_user_id)
         now = datetime.now(timezone.utc)
         shares = self.db.query(SharedUserLocation).filter(
@@ -361,32 +356,6 @@ class SharedLocationService:
             or_(SharedUserLocation.expired_date.is_(None),
                 SharedUserLocation.expired_date > now),
         ).order_by(SharedUserLocation.created_date.desc()).all()
-<<<<<<< HEAD
-
-        result: List[Dict[str, Any]] = []
-        for s in shares:
-            src_org = self._get_org(s.source_organization_id)
-            loc = self.db.query(UserLocation).filter(
-                UserLocation.id == s.source_user_location_id
-            ).first()
-            loc_name = None
-            if loc:
-                loc_name = loc.display_name or loc.name_th or loc.name_en
-            # Do NOT leak descendant detail — only the wrapper node's identity.
-            result.append({
-                'share_id': s.id,
-                'name': s.name,
-                'description': s.description,
-                'source_organization_id': s.source_organization_id,
-                'source_organization_name': src_org.name if src_org else None,
-                'source_location_name': loc_name,
-                'placed_parent_node_id': s.placed_parent_node_id,
-                'start_date': self._iso(s.start_date),
-                'end_date': self._iso(s.end_date),
-            })
-        return result
-
-=======
         return [self._incoming_payload(s) for s in shares]
 
     def list_visible_placed(self, target_organization_id: int, actor_user_id: int) -> List[Dict[str, Any]]:
@@ -432,7 +401,6 @@ class SharedLocationService:
             return None
         return tiers['assigned_ids'] or set()
 
->>>>>>> 6880dee6baba2a9f8b7a5d65b27600b67f275450
     # ── place (target owner drags the shared node into their chart) ───────────
     def place_share(self, share_id: int, target_organization_id: int,
                     actor_user_id: int, parent_node_id: int) -> Dict[str, Any]:

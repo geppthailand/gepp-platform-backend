@@ -6,11 +6,7 @@ Handles CRUD operations, validation, and transaction record linking
 from typing import List, Optional, Dict, Any, Tuple
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.exc import SQLAlchemyError
-<<<<<<< HEAD
-from sqlalchemy import cast, String, exists, and_, func, or_, true
-=======
 from sqlalchemy import cast, String, exists, and_, func, or_, true, false
->>>>>>> 6880dee6baba2a9f8b7a5d65b27600b67f275450
 from sqlalchemy.dialects.postgresql import JSONB
 import json
 import logging
@@ -1906,11 +1902,6 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
             send_email_fn=self._send_txn_rejected_emails,
         )
 
-<<<<<<< HEAD
-    def is_transaction_shared_to_org(self, transaction: Dict[str, Any], target_org_id: int) -> bool:
-        """True if a cross-org transaction is visible to target_org_id via an effective placed share
-        (within the share's date window). Used to allow READ-ONLY detail viewing of shared rows."""
-=======
     def is_transaction_shared_to_org(self, transaction: Dict[str, Any], target_org_id: int,
                                      current_user_id: Any = None) -> bool:
         """True if a cross-org transaction is visible to target_org_id via an effective placed share
@@ -1918,32 +1909,25 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
 
         When current_user_id is given, the same 3-tier gate as the list applies: a non-owner may
         view the shared row only if the share's placement parent is in their assigned set."""
->>>>>>> 6880dee6baba2a9f8b7a5d65b27600b67f275450
         try:
             origin_id = transaction.get('origin_id')
             src_org = transaction.get('organization_id')
             if origin_id is None or src_org is None or src_org == target_org_id:
                 return False
 
-<<<<<<< HEAD
-=======
             # 3-tier ACCESS gate on the placement parent (owner / no user → no restriction).
             visible_parent_ids: Optional[set] = None
             if current_user_id is not None:
                 from ..users.user_service import UserService
-                user_service = UserService(self.db)
-                locations = user_service.crud.get_user_locations(organization_id=target_org_id)
                 tiers = user_service._resolve_location_tiers(locations, int(target_org_id), int(current_user_id))
                 if not tiers['is_owner']:
                     visible_parent_ids = tiers['assigned_ids'] or set()
 
->>>>>>> 6880dee6baba2a9f8b7a5d65b27600b67f275450
             def _aware(dt):
                 return dt.replace(tzinfo=timezone.utc) if dt is not None and dt.tzinfo is None else dt
 
             tdt = None
             raw = transaction.get('transaction_date')
-            if raw:
                 try:
                     s = str(raw)
                     if s.endswith('Z'):
@@ -1965,12 +1949,9 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                     SharedUserLocation.expired_date > now),
             ).all()
             for share in shares:
-<<<<<<< HEAD
-=======
                 if visible_parent_ids is not None \
                    and share.placed_parent_node_id not in visible_parent_ids:
                     continue
->>>>>>> 6880dee6baba2a9f8b7a5d65b27600b67f275450
                 src_ids = self._collect_source_subtree_ids(
                     share.source_organization_id, share.source_user_location_id)
                 if origin_id not in src_ids:
@@ -2147,8 +2128,6 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
             return []
         return setup.root_nodes if isinstance(setup.root_nodes, list) else []
 
-<<<<<<< HEAD
-=======
     def _active_setup_node_ids(self, organization_id: int) -> Optional[set]:
         """
         All nodeIds currently in the active org-setup tree (root_nodes + hub_node children).
@@ -2185,7 +2164,6 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
         _collect(hub.get('children') or [])
         return ids
 
->>>>>>> 6880dee6baba2a9f8b7a5d65b27600b67f275450
     def _collect_source_subtree_ids(self, source_org_id: int, source_location_id: int) -> set:
         """Real (positive) location ids for source_location_id + its descendants, from the
         SOURCE org's tree. Excludes any nested shared/virtual nodes (defensive vs. re-share)."""
@@ -2220,12 +2198,8 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
 
         return _find(root_nodes) or {source_location_id}
 
-<<<<<<< HEAD
-    def _resolve_shared_branches(self, organization_id: int, own_selected_ids: Optional[set]):
-=======
     def _resolve_shared_branches(self, organization_id: int, own_selected_ids: Optional[set],
                                  visible_parent_ids: Optional[set] = None):
->>>>>>> 6880dee6baba2a9f8b7a5d65b27600b67f275450
         """Resolve placed cross-org shares granted to this org into per-share query specs.
 
         Placement lives on the share record (placed_parent_node_id), NOT in root_nodes, so this
@@ -2238,14 +2212,11 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
         own_selected_ids is None when there is no location filter (ALL placed shares in scope);
         when a location filter is applied it is the expanded selected id set, and a share is in
         scope only if its placed_parent_node_id is within it.
-<<<<<<< HEAD
-=======
 
         visible_parent_ids is the 3-tier ACCESS gate: a shared node inherits the visibility of the
         real location it is placed under (placed_parent_node_id). None => no restriction (owner, or
         member-filtering disabled). When a set is given, a share is included only if its placement
         parent is in it — so a non-owner assigned to an unrelated branch never sees the shared data.
->>>>>>> 6880dee6baba2a9f8b7a5d65b27600b67f275450
         """
         now = datetime.now(timezone.utc)
         shares = self.db.query(SharedUserLocation).filter(
@@ -2264,15 +2235,12 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
         # Resolve each in-scope share to its source subtree ids.
         resolved = []  # (share, src_ids)
         for share in shares:
-<<<<<<< HEAD
-=======
             # 3-tier ACCESS gate: the shared node inherits its placement parent's visibility, so a
             # non-owner only sees it when that parent is in their assigned set (Tier 1). Owners /
             # unfiltered callers pass None. Skip before the location-filter check.
             if visible_parent_ids is not None \
                and share.placed_parent_node_id not in visible_parent_ids:
                 continue
->>>>>>> 6880dee6baba2a9f8b7a5d65b27600b67f275450
             # In scope when: no location filter; the placement parent (or an ancestor) is selected;
             # or the shared node itself was selected (its virtual id).
             if own_selected_ids is not None \
@@ -2328,10 +2296,7 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                     'share_id': share.id,
                     'label': label,
                     'source_org_name': src_org_name,
-<<<<<<< HEAD
-=======
                     'placed_parent_node_id': share.placed_parent_node_id,
->>>>>>> 6880dee6baba2a9f8b7a5d65b27600b67f275450
                 }
         return branches, share_meta_by_origin
 
@@ -2425,8 +2390,6 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                 joinedload(Transaction.created_by)
             ).filter(Transaction.deleted_date.is_(None))
 
-<<<<<<< HEAD
-=======
             # Traceability hops (transaction_method='transport') are NOT data-entry transactions —
             # they're the movement records shown on the Traceability page, not this audit list.
             # Exclude them so the auto first-hop (input_destination mode) and manual hops don't
@@ -2434,7 +2397,6 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
             query = query.filter(or_(Transaction.transaction_method != 'transport',
                                      Transaction.transaction_method.is_(None)))
 
->>>>>>> 6880dee6baba2a9f8b7a5d65b27600b67f275450
             # Global filters (apply to own AND shared rows alike)
             if status:
                 query = query.filter(Transaction.status == status)
@@ -2447,29 +2409,15 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
             if organization_id:
                 own_conditions.append(Transaction.organization_id == organization_id)
 
-<<<<<<< HEAD
-            # 3-tier location access: owners see all, members see assigned locations only
-=======
             # 3-tier location access: owners see all, members see assigned locations only.
             # shared_visible_parent_ids gates cross-org shared nodes below: a shared node inherits
             # the visibility of the real location it is placed under, so a non-owner only sees it
             # when that parent is in their assigned set. None => no restriction (owner / no user).
             shared_visible_parent_ids: Optional[set] = None
->>>>>>> 6880dee6baba2a9f8b7a5d65b27600b67f275450
             if current_user_id is not None and organization_id:
                 from ..users.user_service import UserService
                 from ....libs.locationAccess import build_visibility_clause
                 user_service = UserService(self.db)
-<<<<<<< HEAD
-                locations = user_service.crud.get_user_locations(organization_id=organization_id)
-                tiers = user_service._resolve_location_tiers(locations, organization_id, int(current_user_id))
-                if not tiers['is_owner']:
-                    assigned_ids = tiers['assigned_ids']
-                    if not assigned_ids:
-                        own_conditions.append(Transaction.origin_id.is_(None))
-                    else:
-                        own_conditions.append(Transaction.origin_id.in_(list(assigned_ids)))
-=======
                 scope = user_service.resolve_access_scope(organization_id, int(current_user_id))
                 if not scope['is_owner']:
                     # Cross-org shares stay gated on assigned_ids only: a tag/tenant grant
@@ -2494,7 +2442,6 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                     Transaction.origin_id.in_(list(active_node_ids)) if active_node_ids else false(),
                     Transaction.origin_id.is_(None),
                 ))
->>>>>>> 6880dee6baba2a9f8b7a5d65b27600b67f275450
 
             # New multi-select location filter: location_ids + descendants (union)
             own_selected_ids = None  # None => no location filter (all placed shares in scope)
@@ -2550,11 +2497,7 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
             # root_nodes. When a location filter is active, a share is included only if its
             # placement parent is within the selected set.
             shared_branches, share_meta_by_origin = self._resolve_shared_branches(
-<<<<<<< HEAD
-                organization_id, own_selected_ids)
-=======
                 organization_id, own_selected_ids, visible_parent_ids=shared_visible_parent_ids)
->>>>>>> 6880dee6baba2a9f8b7a5d65b27600b67f275450
             if shared_branches:
                 shared_clauses = []
                 for b in shared_branches:
@@ -2570,8 +2513,6 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                 query = query.filter(or_(own_clause, *shared_clauses))
             else:
                 query = query.filter(own_clause)
-<<<<<<< HEAD
-=======
 
             # ── Provenance filters (mirror the badges in the list) ──────────────
             # source: only rows created AFTER this shipped carry the marker — older scale
@@ -2613,7 +2554,6 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                     query = query.filter(
                         Transaction.is_user_audit == False, ~ai_decided, auto_scale_exists
                     )
->>>>>>> 6880dee6baba2a9f8b7a5d65b27600b67f275450
 
             # New multi-select tag/tenant filters (intersect with location results)
             if filter_tag_ids:
