@@ -338,6 +338,44 @@ class UserService:
         'viewer': 'viewer',
     }
 
+    def _validate_sorter_location(self, user_id: str, raw_value: Any) -> Optional[int]:
+        """Check a ผู้คัดแยก binding before it is written. Returns the id, or None to clear it.
+
+        Rules, all of which exist because the scale tablet trusts this column to
+        decide where a weighing came from:
+          • the location must be in the SAME organisation as the user
+          • it must be a real location (is_location), active and not deleted
+          • it may not be the user's own row
+        """
+        from ....exceptions import ValidationException
+
+        if raw_value in (None, '', 0, '0'):
+            return None
+        try:
+            location_id = int(raw_value)
+        except (TypeError, ValueError):
+            raise ValidationException('sorter_location_id must be a location id')
+
+        user = self.crud.get_user_by_id(user_id)
+        if not user:
+            from ....exceptions import NotFoundException
+            raise NotFoundException('User not found')
+        if location_id == int(user.id):
+            raise ValidationException('A user cannot be assigned to sort at their own record')
+
+        location = self.db.query(UserLocation).filter(
+            UserLocation.id == location_id,
+            UserLocation.organization_id == user.organization_id,
+            UserLocation.is_location == True,
+            UserLocation.is_active == True,
+            UserLocation.deleted_date.is_(None),
+        ).first()
+        if not location:
+            raise ValidationException(
+                'Sorting location not found in this organization, or it has been deleted'
+            )
+        return location_id
+
     def _sync_member_role_in_locations(self, user_id: int, organization_id: int, new_org_role_id: int) -> None:
         """
         When a user's organization_role changes, update their role in all
@@ -687,6 +725,17 @@ class UserService:
                         from ....exceptions import ValidationException
                         raise ValidationException(f'Destination name "{new_name}" already exists in this organization')
 
+            # ── ผู้คัดแยก binding ────────────────────────────────────────────
+            # crud.update_user setattr's any key that happens to be a model
+            # attribute, so without this the caller could bind a user to any
+            # location id in the database — including another organisation's.
+            # Everything the scale tablet does for a sorter keys off this column,
+            # so it is validated here, once, before the write.
+            if 'sorter_location_id' in updates:
+                updates['sorter_location_id'] = self._validate_sorter_location(
+                    user_id=user_id, raw_value=updates['sorter_location_id']
+                )
+
             # Check if organization_role_id is changing (need to sync member roles)
             old_role_key = None
             if 'organization_role_id' in updates:
@@ -1035,6 +1084,9 @@ class UserService:
             'parent_user_id': user.parent_user_id,
             'organization_level': user.organization_level,
             'qr_name': user.qr_name if include_sensitive else None,
+            # ผู้คัดแยก: the location this user sorts at (None = normal weigher).
+            # The member screen reads it back to render the current binding.
+            'sorter_location_id': getattr(user, 'sorter_location_id', None),
         }
 
         # Add organization role information if available
