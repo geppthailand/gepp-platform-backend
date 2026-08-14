@@ -270,13 +270,18 @@ def _wrap_text_lines(pdf, text: str, max_width: float, font_name: str, font_size
     lines.append(current)
     return lines
 
-def _stat_chip(pdf, x, y, w, h, title, value, variant="gray"):
+def _stat_chip(pdf, x, y, w, h, title, value, variant="gray", subtitle=None):
     fill_color = WHITE if variant == "white" else CARD
     _rounded_card(pdf, x, y, w, h, radius=8, fill=fill_color)
     pad_x = 12 if variant == "white" else 20
     pdf.setFillColor(TEXT)
     pdf.setFont("IBMPlexSansThai-Regular", 8)
-    pdf.drawString(x + pad_x, y + h - 18, title)
+    # Chips share the column width, so adding a 4th narrows every title. Truncate rather
+    # than let a long label run over the neighbouring chip.
+    pdf.drawString(
+        x + pad_x, y + h - 18,
+        _fit_text_to_width(title, "IBMPlexSansThai-Regular", 8, w - pad_x * 2),
+    )
     pdf.setFont("IBMPlexSansThai-Regular", 12)
     # Allow callers to pass pre-formatted strings; otherwise format numerics
     try:
@@ -287,6 +292,16 @@ def _stat_chip(pdf, x, y, w, h, title, value, variant="gray"):
     except Exception:
         value_text = str(value)
     pdf.drawString(x + pad_x, y + h - 32, value_text)
+    # Optional third line, e.g. the denominator behind a per-capita figure. Appending it to
+    # the title instead would not fit an English label in a 4-across row.
+    if subtitle:
+        pdf.setFont("IBMPlexSansThai-Regular", 7)
+        pdf.setFillColor(BAR3)  # muted grey — supporting detail, not a headline number
+        pdf.drawString(
+            x + pad_x, y + h - 43,
+            _fit_text_to_width(str(subtitle), "IBMPlexSansThai-Regular", 7, w - pad_x * 2),
+        )
+        pdf.setFillColor(TEXT)
 
 def _progress_bar(pdf, x, y, w, h, ratio, bar_color=PRIMARY, back_color=STROKE):
     ratio = max(0.0, min(1.0, float(ratio or 0)))
@@ -715,12 +730,29 @@ def draw_overview(pdf, page_width_points: float, page_height_points: float, data
     pdf.setFont("IBMPlexSansThai-Medium", 12)
     pdf.drawString(overall_x + 16, overall_y + overall_h - 30, _t('overall', data))
     stats = data["overview_data"]["overall_charts"]["chart_stat_data"]
-    sw = 1.78 * inch
-    sh = 0.60 * inch
+    # Width derived from the count instead of a fixed 1.78in with a [:3] slice — that cap
+    # silently dropped the 4th card (Waste per Head) from the PDF while it showed on screen.
+    gap = 8
+    n_stats = max(1, len(stats))
+    sw = (right_col_w - 32 - gap * (n_stats - 1)) / n_stats
+    # Taller only when a chip carries a denominator sub-line, so orgs with no headcount data
+    # keep exactly the previous layout.
+    has_subtitle = any(st.get("headcount") for st in stats)
+    sh = (0.72 if has_subtitle else 0.60) * inch
     sy = overall_y + overall_h - 26 - 16 - sh
-    for i, st in enumerate(stats[:3]):
-        sx = overall_x + 16 + i * (sw + 8)
-        _stat_chip(pdf, sx, sy, sw, sh, st["title"], st["value"], "white")
+    for i, st in enumerate(stats):
+        sx = overall_x + 16 + i * (sw + gap)
+        value = st.get("value")
+        # Waste per Head is None when no location in scope has a headcount — print the em
+        # dash the screen shows rather than a misleading 0.
+        if value is None:
+            value = "—"
+        # The denominator goes on its own line, not appended to the title: at 4-across an
+        # English label plus "· 235" overflows the chip, and truncating it would leave a
+        # believable but wrong number on the page.
+        headcount = st.get("headcount")
+        subtitle = _t('based_on_people', data).replace('{count}', _format_number(headcount)) if headcount else None
+        _stat_chip(pdf, sx, sy, sw, sh, st.get("title", ""), value, "white", subtitle=subtitle)
     chart_data = data["overview_data"]["overall_charts"]["chart_data"]
     cy = overall_y + 16
     ch = (sy - cy - 16) * 0.9

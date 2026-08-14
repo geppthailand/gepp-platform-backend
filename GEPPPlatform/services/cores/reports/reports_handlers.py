@@ -2481,6 +2481,7 @@ def _handle_export_pdf_report(
             'Total Recyclables': 'วัสดุรีไซเคิลทั้งหมด',
             'Number of Trees': 'จำนวนต้นไม้',
             'Plastic Saved': 'พลาสติกที่ประหยัดได้',
+            'Waste per Head': 'ขยะต่อคน (กก.)',
         }
         for stat in (overview.get('overall_charts', {}) or {}).get('chart_stat_data', []):
             stat['title'] = _stat_title_map.get(stat.get('title'), stat.get('title'))
