@@ -3384,29 +3384,13 @@ class AdminService:
         }
 
     def _presentable_image_url(self, url: Optional[str], s3=None) -> Optional[str]:
-        """Turn a stored image_url into something the browser can actually load.
+        """Presign private-bucket image URLs so the browser can load them.
 
-        New material images live in the PRIVATE `prod-gepp-platform-assets` bucket (same bucket
-        the org-setup import uses), so a raw S3 URL 403s. Presign a short-lived GET for those.
-        Legacy images (public `gepp-prod` bucket) are returned as-is. Never raises — falls back
-        to the stored URL so display degrades gracefully rather than breaking the whole list."""
-        if not url or not isinstance(url, str):
-            return url
-        marker = ".amazonaws.com/"
-        if "prod-gepp-platform-assets" in url and marker in url:
-            key = url.split(marker, 1)[1]
-            try:
-                if s3 is None:
-                    from ..file_upload_service import S3FileUploadService
-                    s3 = S3FileUploadService()
-                return s3.s3_client.generate_presigned_url(
-                    "get_object",
-                    Params={"Bucket": s3.bucket_name, "Key": key},
-                    ExpiresIn=3600,
-                )
-            except Exception:
-                return url
-        return url
+        Delegates to the shared implementation — the business platform's material picker needs
+        the identical treatment, and when this logic lived only here, images uploaded through
+        admin rendered in the backoffice and 403'd in the app."""
+        from ..file_upload_service import presentable_image_url
+        return presentable_image_url(url, s3)
 
     def _material_images_map(self, material_ids: List[int]) -> Dict[int, List[dict]]:
         """{material_id: [{id, imageUrl}]} for the given ids (live images only). Private-bucket

@@ -5,20 +5,104 @@ Handles file uploads to AWS S3 with proper naming and organization
 
 import boto3
 import os
+import re
 import uuid
 from datetime import datetime
 from typing import Dict, Any, List, Optional
+from urllib.parse import quote
+from botocore.config import Config as BotoConfig
 from botocore.exceptions import ClientError, BotoCoreError
 import mimetypes
 import hashlib
+
+
+def safe_ascii_filename(filename: Optional[str], fallback_stem: str = 'file', default_ext: str = '') -> str:
+    """Auto-rename a user-supplied filename to a readable ASCII one.
+
+    Thai (or any non-ASCII) filenames cannot be sent as S3 metadata, so rename rather than
+    encode: slugify whatever ASCII the name has and keep the extension. When the stem has no
+    usable ASCII at all — the normal case for a Thai filename — fall back to
+    `{fallback_stem}-{hash}`, where the hash is derived from the original name so re-uploading
+    the same file yields the same label.
+
+    Note the stored S3 *key* is already generated independently (id + timestamp + uuid); this
+    only names the human-readable copy kept in metadata.
+    """
+    name = (filename or '').strip()
+    stem, ext = os.path.splitext(name)
+    ext = (ext or default_ext).lower()
+    # Reject a bogus "extension" (e.g. a dot inside a Thai word) rather than propagate it.
+    if not re.match(r'^\.[a-z0-9]{1,8}$', ext):
+        ext = default_ext
+    slug = re.sub(r'[^A-Za-z0-9._-]+', '-', stem).strip('-._')
+    if not slug:
+        digest = hashlib.sha1(stem.encode('utf-8')).hexdigest()[:8] if stem else ''
+        slug = f"{fallback_stem}-{digest}" if digest else fallback_stem
+    return f"{slug[:80]}{ext}"
+
+
+def ascii_metadata(value: Optional[str], fallback: str = 'unknown') -> str:
+    """Make a value safe to send as S3 object metadata.
+
+    S3 metadata travels in HTTP headers, so it must be ASCII. botocore enforces this
+    *client-side* and raises ParamValidationError before the request is sent, which means a
+    Thai filename silently kills the whole upload — see `upload_material_image`, where the
+    resulting `None` used to be logged as "S3 unavailable?" and the image quietly dropped.
+
+    Percent-encode rather than strip, so the original stays recoverable with
+    `urllib.parse.unquote`. Thai text is ~3 bytes/char before encoding and ~9 after, well
+    within S3's 2KB user-metadata budget for filename-length values.
+    """
+    if not value:
+        return fallback
+    try:
+        value.encode('ascii')
+        return value
+    except UnicodeEncodeError:
+        return quote(value, safe='')
+
+
+def presentable_image_url(url: Optional[str], s3=None) -> Optional[str]:
+    """Turn a stored image_url into something a browser can actually load.
+
+    Images uploaded by the platform live in the PRIVATE `prod-gepp-platform-assets` bucket, so a
+    raw S3 URL 403s — presign a short-lived GET for those. Legacy images in the public `gepp-prod`
+    bucket are returned untouched. Never raises: on any failure it falls back to the stored URL so
+    one bad row degrades to a broken thumbnail instead of failing the whole list.
+
+    Pass `s3` when resolving a batch so the client is built once per request, not per image.
+    """
+    if not url or not isinstance(url, str):
+        return url
+    marker = ".amazonaws.com/"
+    if "prod-gepp-platform-assets" not in url or marker not in url:
+        return url
+    key = url.split(marker, 1)[1]
+    try:
+        if s3 is None:
+            s3 = S3FileUploadService()
+        return s3.s3_client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": s3.bucket_name, "Key": key},
+            ExpiresIn=3600,
+        )
+    except Exception:
+        return url
 
 
 class S3FileUploadService:
     """Service to handle file uploads to S3"""
 
     def __init__(self):
-        """Initialize S3 client"""
-        self.s3_client = boto3.client('s3')
+        """Initialize S3 client.
+
+        Pinned to SigV4: boto3 still defaults to SigV2 for plain `client('s3')`, which produces
+        presigned URLs of the `?AWSAccessKeyId=...&Signature=...` form. S3 no longer accepts
+        those in regions launched after 2014 and is retiring them elsewhere, so a presigned
+        thumbnail would start 403-ing with no code change on our side. `pdf_export_hub` already
+        pins s3v4 for the same reason.
+        """
+        self.s3_client = boto3.client('s3', config=BotoConfig(signature_version='s3v4'))
         self.bucket_name = 'prod-gepp-platform-assets'
 
     def upload_transaction_files(
@@ -135,7 +219,8 @@ class S3FileUploadService:
                 Body=file_data,
                 ContentType=content_type,
                 Metadata={
-                    'original_filename': filename or 'unknown',
+                    'original_filename': safe_ascii_filename(filename, f'import-{organization_id}', '.xlsx'),
+                    'original_filename_encoded': ascii_metadata(filename),
                     'import_type': import_type,
                     'organization_id': str(organization_id),
                     'upload_timestamp': timestamp,
@@ -180,7 +265,10 @@ class S3FileUploadService:
                 ContentType=content_type,
                 Metadata={
                     'material_id': str(material_id),
-                    'original_filename': filename or 'unknown',
+                    # Renamed for readability; the exact original is kept percent-encoded so
+                    # nothing is lost (urllib.parse.unquote round-trips it).
+                    'original_filename': safe_ascii_filename(filename, f'material-{material_id}', '.png'),
+                    'original_filename_encoded': ascii_metadata(filename),
                     'upload_timestamp': timestamp,
                 },
             )

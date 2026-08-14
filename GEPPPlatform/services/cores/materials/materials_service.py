@@ -291,10 +291,23 @@ class MaterialsService:
     # ========== HELPER METHODS ==========
 
     def _fetch_material_images(self, material_ids: List[int]) -> Dict[int, list]:
-        """Fetch material images grouped by material_id"""
+        """Fetch material images grouped by material_id.
+
+        Platform-uploaded images sit in a private bucket, so the stored URL has to be presigned
+        or the browser gets a 403 and falls back to the placeholder — which is exactly how newly
+        uploaded material photos went missing in the picker while legacy public-bucket ones
+        still worked. Shared with the admin list via presentable_image_url().
+        """
         images_map = {}
         if not material_ids:
             return images_map
+        # One S3 client for the whole batch; presigning itself is local (no network call).
+        s3 = None
+        try:
+            from ...file_upload_service import S3FileUploadService
+            s3 = S3FileUploadService()
+        except Exception:
+            s3 = None
         image_rows = self.db.execute(
             text("""
                 SELECT id, image_url, material_id, created_date
@@ -305,10 +318,11 @@ class MaterialsService:
             """),
             {'material_ids': material_ids}
         ).fetchall()
+        from ...file_upload_service import presentable_image_url
         for row in image_rows:
             images_map.setdefault(row[2], []).append({
                 'id': row[0],
-                'image_url': row[1],
+                'image_url': presentable_image_url(row[1], s3),
                 'material_id': row[2],
             })
         return images_map
