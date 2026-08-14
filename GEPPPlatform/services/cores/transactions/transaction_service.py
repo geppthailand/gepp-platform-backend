@@ -21,7 +21,7 @@ TRACEABILITY_DATE_TZ = "Asia/Bangkok"
 # auto_approve is a leaf module (logging + typing + sqlalchemy.text only), so this
 # import cannot cycle back into transactions.
 from ....libs.node_ids import to_node_id
-from ..iot_devices.auto_approve import scale_pile_source_transaction_id
+from ..iot_devices.auto_approve import SCALE_TRANSACTION_METHOD, scale_pile_source_transaction_id
 
 import boto3
 
@@ -480,12 +480,19 @@ class TransactionService:
         return None
 
     def _location_ancestors(self, location_id: int, organization_id: int) -> List[int]:
-        """Ancestors of a location, nearest first, from the org-chart JSON."""
+        """Ancestors of a location, nearest first, from the org-chart JSON.
+
+        Row selection matches the tablet picker's exactly (active, not deleted,
+        newest first) — resolving against a different setup row than the one
+        the picker's descendant-expansion used would route material to a tank
+        from another version of the chart.
+        """
         from ....models.subscriptions.organizations import OrganizationSetup
         setup = self.db.query(OrganizationSetup).filter(
             OrganizationSetup.organization_id == organization_id,
             OrganizationSetup.is_active == True,
-        ).first()
+            OrganizationSetup.deleted_date.is_(None),
+        ).order_by(OrganizationSetup.created_date.desc()).first()
         if not setup or not setup.root_nodes:
             return []
 
@@ -513,6 +520,35 @@ class TransactionService:
             cur = parent_of.get(cur)
         return chain
 
+    def _sorter_station_tank(self, origin_id: int, organization_id: int) -> Optional[int]:
+        """Default tank: the nearest sorter station on the origin's ancestor chain.
+
+        A tank must be a place that can weigh material OUT, or its inflow and
+        outflow never meet — so the default is defined by where a ผู้คัดแยก is
+        bound, not by where the weigher happens to be a member (a membership
+        node and the sorter's station can be different nodes, and the mismatch
+        is silent). No station on the chain → None → the legacy waiting card,
+        which fails visibly instead of wrongly.
+        """
+        if not origin_id or not organization_id:
+            return None
+        try:
+            chain = [int(origin_id)] + self._location_ancestors(int(origin_id), organization_id)
+            from sqlalchemy import text as _text
+            rows = self.db.execute(_text(
+                "SELECT DISTINCT sorter_location_id FROM user_locations "
+                "WHERE organization_id = :org_id "
+                "  AND sorter_location_id IS NOT NULL "
+                "  AND is_active = TRUE AND deleted_date IS NULL"
+            ), {'org_id': organization_id}).fetchall()
+        except Exception:  # noqa: BLE001 — column added by migration 079; never fail an approval
+            return None
+        stations = {int(r[0]) for r in rows if r[0] is not None}
+        for candidate in chain:                       # nearest first
+            if candidate in stations:
+                return candidate
+        return None
+
     def _create_first_hops_for_approved_transaction(self, transaction) -> None:
         """input_destination mode: when a transaction is APPROVED, auto-create the traceability
         FIRST HOP (origin → the destination chosen at data entry) as an in_transit
@@ -533,14 +569,31 @@ class TransactionService:
             # weigh-in for a scale, the monthly pile for everything else.
             source_transaction_id = scale_pile_source_transaction_id(transaction)
 
-            # ห้องขยะ: for material a scale recorded, an admin can nominate the waste
-            # room this location feeds (migration 081). That standing instruction is
-            # what replaces someone dragging a card on the board every day, so it also
-            # stands in for the per-user "กรอกปลายทาง" opt-in below — an org that has
-            # set a waste room has already said where this material goes.
+            # ถัง (tank / collection point) this weigh-in feeds. Resolution order:
+            #   1. explicit ห้องขยะ binding, nearest ancestor wins (migration 081)
+            #   2. nearest sorter station on the ancestor chain — the default that
+            #      needs zero configuration beyond binding the ผู้คัดแยก
+            #   3. none → legacy behaviour (visible waiting card)
+            # Weigh-OUTS (ผู้คัดแยก, is_internal_transfer) are never tank-resolved:
+            # their origin IS the tank and their records carry real destinations —
+            # stamping them would inflate the tank's own inflow with material that
+            # is on its way out.
             waste_room_id = None
-            if source_transaction_id is not None and origin_id is not None:
+            is_weigh_out = bool(getattr(transaction, 'is_internal_transfer', False))
+            if source_transaction_id is not None and origin_id is not None and not is_weigh_out:
                 waste_room_id = self._waste_room_for_location(origin_id, org_id)
+                if waste_room_id is None:
+                    waste_room_id = self._sorter_station_tank(origin_id, org_id)
+                # The stamp is a ROUTING fact (which tank this weigh-in resolved
+                # to), not proof of arrival — balance terms combine it with the
+                # actual transport rows. Set even when tank == origin: that is
+                # the hopless "material is already sitting in the tank" case.
+                if waste_room_id is not None:
+                    try:
+                        if getattr(transaction, 'collection_location_id', None) != waste_room_id:
+                            transaction.collection_location_id = waste_room_id
+                    except Exception:  # noqa: BLE001 — never fail an approval over the stamp
+                        pass
 
             # Per-user "กรอกปลายทาง": gate on the transaction CREATOR's setting (the person who
             # entered the destination at data-entry), not an org-wide flag.
@@ -652,6 +705,18 @@ class TransactionService:
                             disposal_by_destination[_did] = _method
                 except Exception:  # noqa: BLE001 — code may be ahead of migration 084
                     disposal_by_destination = {}
+                # Collection point beats configured method: a hop INTO a tank is a
+                # hand-over, never an outcome — a method here would report material
+                # as disposed of while it is still inside the building, and the
+                # tank's own weigh-out would then count it a second time.
+                try:
+                    from ..traceability.collection_points import collection_point_ids
+                    for _cid in collection_point_ids(
+                        self.db, org_id, {d for (_g, d, _m) in hop_buckets}
+                    ):
+                        disposal_by_destination.pop(_cid, None)
+                except Exception:  # noqa: BLE001
+                    pass
 
             for (group_id, destination_id, material_id), weight in hop_buckets.items():
                 # Dedup: skip if a matching root hop already exists (e.g. transaction re-approved).
@@ -679,6 +744,9 @@ class TransactionService:
                     data=[hop_item],
                     organization_id=org_id,
                     transaction_group_id=group_id,
+                    # The approve-time auto-hop is the one sanctioned root-creator
+                    # on a stamped pile (records that named explicit destinations).
+                    _internal_scale_hop=True,
                 )
                 if not hop_res.get('success'):
                     # The whole-pile guard can refuse this — e.g. an earlier hop
@@ -699,6 +767,116 @@ class TransactionService:
         except Exception as e:  # noqa: BLE001 — best-effort, must not fail the approval
             self.db.rollback()
             logger.error(f"Auto first-hop (on approve) failed for transaction "
+                         f"{getattr(transaction, 'id', '?')}: {str(e)}")
+
+    def revert_scale_traceability(self, transaction) -> None:
+        """Withdraw the traceability footprint of a scale transaction that is no
+        longer approved (rejected, or reset to pending by an edit).
+
+        Soft-deletes the per-weigh-in piles' transports, deactivates the groups,
+        clears the collection stamp — so the tank balance and the board stop
+        counting a weighing that officially never happened. Idempotent: calling
+        it on a transaction with no live footprint is a cheap no-op, so every
+        off-approved transition site may call it without knowing history.
+
+        Skip-and-log-loudly when any transport has children or a consolidation
+        reference: material already moved on, and silently unpicking that would
+        corrupt more than it fixes — flag for manual repair instead.
+
+        Best-effort, MUST be invoked after the calling site's own commit (the
+        repo's post-commit pattern): this commits on success and rolls the
+        session back on internal failure.
+        """
+        try:
+            if not transaction:
+                return
+            if getattr(transaction, 'transaction_method', None) != SCALE_TRANSACTION_METHOD:
+                return
+            tx_id = getattr(transaction, 'id', None)
+            if not tx_id:
+                return
+            from ....models.transactions.traceability_transaction_group import TraceabilityTransactionGroup
+            from ....models.transactions.transport_transaction import TransportTransaction
+
+            groups = self.db.query(TraceabilityTransactionGroup).filter(
+                TraceabilityTransactionGroup.source_transaction_id == tx_id,
+                TraceabilityTransactionGroup.is_active == True,
+                TraceabilityTransactionGroup.deleted_date.is_(None),
+            ).all()
+            gids = [g.id for g in groups]
+            transports = []
+            if gids:
+                transports = self.db.query(TransportTransaction).filter(
+                    TransportTransaction.transaction_group_id.in_(gids),
+                    TransportTransaction.is_active == True,
+                    TransportTransaction.deleted_date.is_(None),
+                ).all()
+            tids = {t.id for t in transports}
+
+            if tids:
+                # Children outside the pile (should not exist — children share
+                # the parent's group — but a cross-group child means material
+                # moved on; leave everything for manual repair).
+                stray_children = self.db.query(TransportTransaction.id).filter(
+                    TransportTransaction.parent_id.in_(tids),
+                    ~TransportTransaction.id.in_(tids),
+                    TransportTransaction.is_active == True,
+                    TransportTransaction.deleted_date.is_(None),
+                ).first()
+                if stray_children:
+                    logger.error(
+                        "[revert_scale_traceability] tx %s: transports have external children; "
+                        "manual repair required, nothing reverted", tx_id,
+                    )
+                    return
+            if gids or tids:
+                from ....models.transactions.traceability_consolidation import (
+                    TraceabilityConsolidation,
+                    TraceabilityConsolidationSource,
+                )
+                consol_ref = self.db.query(TraceabilityConsolidationSource.id).join(
+                    TraceabilityConsolidation,
+                    TraceabilityConsolidation.id == TraceabilityConsolidationSource.consolidation_id,
+                ).filter(
+                    TraceabilityConsolidationSource.is_active == True,
+                    TraceabilityConsolidationSource.deleted_date.is_(None),
+                    TraceabilityConsolidation.is_active == True,
+                    TraceabilityConsolidation.deleted_date.is_(None),
+                    or_(
+                        TraceabilityConsolidationSource.source_group_id.in_(gids or [0]),
+                        TraceabilityConsolidationSource.source_transport_id.in_(list(tids) or [0]),
+                    ),
+                ).first()
+                if consol_ref:
+                    logger.error(
+                        "[revert_scale_traceability] tx %s: pile was consumed by a consolidation; "
+                        "manual repair required, nothing reverted", tx_id,
+                    )
+                    return
+
+            now = datetime.now(timezone.utc)
+            for t in transports:
+                t.is_active = False
+                t.deleted_date = now
+                t.updated_date = now
+            for g in groups:
+                g.is_active = False
+                g.deleted_date = now
+                g.updated_date = now
+            try:
+                if getattr(transaction, 'collection_location_id', None) is not None:
+                    transaction.collection_location_id = None
+            except Exception:  # noqa: BLE001 — pre-085 session
+                pass
+            self.db.commit()
+            if gids:
+                logger.info(
+                    "[revert_scale_traceability] tx %s: reverted %d group(s), %d transport(s)",
+                    tx_id, len(gids), len(tids),
+                )
+        except Exception as e:  # noqa: BLE001 — best-effort, never fail the caller
+            self.db.rollback()
+            logger.error(f"revert_scale_traceability failed for transaction "
                          f"{getattr(transaction, 'id', '?')}: {str(e)}")
 
     def _send_email_via_lambda(
@@ -2400,6 +2578,15 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
             query = query.filter(or_(Transaction.transaction_method != 'transport',
                                      Transaction.transaction_method.is_(None)))
 
+            # ใบชั่งออกของผู้คัดแยก (is_internal_transfer, migration 083) is likewise
+            # a traceability record, not a waste intake: the same kilograms already
+            # appear here as the weigh-in that brought them into the building. It is
+            # always stored approved (the IoT route forces it — there is nothing left
+            # to review), lives on the Traceability board as the tank's own outbound
+            # legs, and reports already exclude it from tonnage. Shown here it reads
+            # as the same material twice. isnot(True) keeps NULL (pre-083) rows.
+            query = query.filter(Transaction.is_internal_transfer.isnot(True))
+
             # Global filters (apply to own AND shared rows alike)
             if status:
                 query = query.filter(Transaction.status == status)
@@ -2872,6 +3059,17 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                     'errors': validation_errors
                 }
 
+            # Channel markers are decided once, at creation, by the channel that
+            # can verify them. Letting an update turn an ordinary web entry into
+            # a scale weighing (or an internal transfer) would retro-fit it with
+            # per-weighing piles, tank routing and rate superseding it was never
+            # created under — and there is no legitimate flow that needs it.
+            if update_data.get('transaction_method') == SCALE_TRANSACTION_METHOD \
+                    and getattr(transaction, 'transaction_method', None) != SCALE_TRANSACTION_METHOD:
+                update_data = dict(update_data)
+                update_data.pop('transaction_method', None)
+            update_data.pop('is_internal_transfer', None)
+
             # Update allowed fields (tag_id maps to location_tag_id)
             updatable_fields = [
                 'transaction_method', 'status', 'destination_ids', 'arrival_date',
@@ -2922,6 +3120,11 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                         self.db, 'transaction_rejected', transaction,
                         properties={'transaction_id': transaction_id, 'updated_by_id': updated_by_id},
                     )
+                # Off-approved: withdraw the scale traceability footprint so the
+                # tank balance and the board stop counting a weighing that
+                # officially never happened. Post-commit, best-effort.
+                if _status_val in ('rejected', 'pending'):
+                    self.revert_scale_traceability(transaction)
 
             return {
                 'success': True,
@@ -3128,6 +3331,13 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
 
             self.db.commit()
 
+            # The edit reset an (possibly approved) transaction to pending: its
+            # old piles now describe pre-edit weights. Withdraw them so the
+            # re-approval rebuilds from the edited records — the dedupe in
+            # _create_first_hops would otherwise keep the stale hop forever.
+            # Post-commit, best-effort, no-op for non-scale transactions.
+            self.revert_scale_traceability(transaction)
+
             # Get updated transaction with records
             result = self.get_transaction(transaction_id, include_records=True)
 
@@ -3218,6 +3428,16 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                 self._cleanup_traceability_groups(record_ids, soft_delete)
 
             self.db.commit()
+
+            # The record-level cleanup above empties the piles, but only the
+            # revert hook knows about the tank stamp (collection_location_id,
+            # migration 085). A deleted weighing officially never happened, so
+            # its stamp must not survive it — every balance query does exclude
+            # deleted rows on its own, but a stale stamp misleads anyone
+            # reading the row. Post-commit, best-effort, no-op for non-scale
+            # and hard-deleted transactions.
+            if soft_delete:
+                self.revert_scale_traceability(transaction)
 
             return {
                 'success': True,

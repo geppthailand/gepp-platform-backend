@@ -3,6 +3,7 @@ Traceability Service
 Business logic for traceability.
 """
 
+import logging
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional, Tuple
@@ -24,6 +25,8 @@ from ....models.transactions.traceability_consolidation import TraceabilityConso
 from ....models.transactions.transport_transaction_file import TransportTransactionFile
 from ....models.users.user_location import UserLocation
 from ....exceptions import APIException
+
+logger = logging.getLogger(__name__)
 
 
 def _emit_traceability_event(db: Session, event_type: str, organization_id=None, user_id=None, properties: dict = None):
@@ -329,6 +332,12 @@ class TraceabilityService:
                     status = t.get("status") or ""
                     method = t.get("disposal_method") or ""
                     w = float(t.get("weight") or 0)
+                    # Delivered to a collection point: accounted for by that
+                    # point's ledger (in_collection below), not "in progress".
+                    # Leaving it in in_progress_w would double-count against the
+                    # point's own weigh-out legs, which ARE counted here.
+                    if t.get("delivered_to_collection"):
+                        continue
                     if status != "arrived" or not method:
                         in_progress_w += w
                         continue
@@ -380,13 +389,24 @@ class TraceabilityService:
         total_disposal = round(disposal_w, 2)
         total_managed_waste = round(in_progress_w, 2)
 
+        # Tank ledgers. in_collection is the SUM OF BALANCES, deliberately not a
+        # bucket of delivered legs: a leg bucket never shrinks when the point
+        # weighs material out, so it would keep counting kilograms that are
+        # already sitting in treatment/disposal above.
+        collection_points = self._collection_point_balances(organization_id, year, month)
+        total_in_collection = round(
+            sum(float(cp.get("balance_kg") or 0) for cp in collection_points), 2
+        )
+
         return {
             "data": [arr0, arr1, arr2],
+            "collection_points": collection_points,
             "summary": {
                 "total_waste_weight": round(total_waste_weight, 2),
                 "total_disposal": total_disposal,
                 "total_treatment": total_treatment,
                 "total_managed_waste": total_managed_waste,
+                "total_in_collection": total_in_collection,
             },
         }
 
@@ -558,6 +578,10 @@ class TraceabilityService:
                 "meta_data": r.meta_data or {},
                 "is_root": r.is_root,
                 "absolute_percentage": float(r.absolute_percentage) if r.absolute_percentage is not None else None,
+                # Finished for the SENDER's scope, not an outcome: the frontend
+                # renders a neutral "ส่งถึงจุดรวมแล้ว" badge rather than a
+                # disposal colour, because nothing has been disposed of yet.
+                "delivered_to_collection": bool(getattr(r, "delivered_to_collection", False)),
                 "origin": origin,
                 "destination": destination,
                 "material": material,
@@ -803,6 +827,10 @@ class TraceabilityService:
                 "meta_data": r.meta_data or {},
                 "is_root": r.is_root,
                 "absolute_percentage": float(r.absolute_percentage) if r.absolute_percentage is not None else None,
+                # Finished for the SENDER's scope, not an outcome: the frontend
+                # renders a neutral "ส่งถึงจุดรวมแล้ว" badge rather than a
+                # disposal colour, because nothing has been disposed of yet.
+                "delivered_to_collection": bool(getattr(r, "delivered_to_collection", False)),
                 "origin": origin,
                 "destination": destination,
                 "material": material,
@@ -1432,6 +1460,33 @@ class TraceabilityService:
             total += sum(float(r[0] or 0) for r in rows)
         return total
 
+    def _group_is_in_tank(self, group: TraceabilityTransactionGroup) -> bool:
+        """True when this pile is material sitting INSIDE a collection point.
+
+        A scale weigh-in whose resolved tank IS its origin creates no hop — the
+        material is already in the room. Such a pile leaves only via the tank's
+        own weigh-outs (or a revert of the weigh-in), never via web dispatch or
+        consolidation; letting either move it would take kilograms out of the
+        tank balance without any OUT entry.
+
+        Reads via the group's source transaction stamp (migration 085). Best
+        effort: any read failure means "not locked" — the pre-085 behaviour.
+        """
+        source_tx_id = getattr(group, 'source_transaction_id', None)
+        if source_tx_id is None or group.origin_id is None:
+            return False
+        try:
+            from sqlalchemy import text as _text
+            row = self.db.execute(_text(
+                "SELECT collection_location_id FROM transactions "
+                "WHERE id = :tx_id AND deleted_date IS NULL"
+            ), {'tx_id': int(source_tx_id)}).fetchone()
+        except Exception:  # noqa: BLE001 — column added by migration 085
+            return False
+        if not row or row[0] is None:
+            return False
+        return int(row[0]) == int(group.origin_id)
+
     def _reject_partial_dispatch(
         self,
         group: TraceabilityTransactionGroup,
@@ -1479,6 +1534,164 @@ class TraceabilityService:
             f"This pile was recorded by a scale and must be dispatched whole: "
             f"{dispatched:.2f} kg entered against a pile of {pile_weight:.2f} kg."
         )
+
+    def _collection_point_balances(
+        self, organization_id: int, year: int, month: int
+    ) -> List[Dict[str, Any]]:
+        """Per-tank ledger: what came in, what went out, what is still there.
+
+        The tank balance is what JOINS the two halves of a scale-run site. A
+        tenant's chain ENDS when material reaches the collection point (their
+        job is done); the point's own weigh-outs start a new chain to the real
+        destinations. Nothing links them per-kilogram — and nothing can, because
+        sorting legitimately changes material types (0.37 kg of bags in, 0.52 kg
+        of bags out, after HDPE was picked out of them). Only the total weight
+        balances, which is exactly what a ledger models.
+
+        IN  = legs delivered here (any channel: scale hop, web drag,
+              consolidation result) + the remainder of piles weighed in AT this
+              point that never left it.
+        OUT = everything a ผู้คัดแยก weighed out of here.
+
+        Cumulative to the END of the viewed month, bucketed by the pile's
+        transaction_year/month — the same field the board and the reports use,
+        so a 23:50-UTC weighing lands in one month everywhere. Rows require the
+        source transaction to be approved; piles with NO source transaction
+        (legacy monthly grain, including consolidation results whose primary
+        source is legacy) pass vacuously, or an admin-dragged legacy pile would
+        vanish from the ledger it is physically part of.
+
+        Tanks are enumerated from STAMPED DATA, not from the live config: a
+        station whose ผู้คัดแยก was deactivated still has kilograms in it, and
+        hiding the card would strand them invisibly. Such a tank is returned
+        with no_active_sorter=True so the UI can say so.
+        """
+        if not organization_id or year is None or month is None:
+            return []
+        params = {'org_id': organization_id, 'y': int(year), 'm': int(month)}
+        window = (
+            "(g.transaction_year < :y OR "
+            " (g.transaction_year = :y AND g.transaction_month <= :m))"
+        )
+        # Source transaction must be approved; NULL source passes vacuously.
+        src_ok = (
+            "(g.source_transaction_id IS NULL OR "
+            " (st.status = 'approved' AND st.deleted_date IS NULL))"
+        )
+        pile_expr = (
+            "COALESCE((SELECT SUM(r.origin_weight_kg) FROM transaction_records r "
+            "          WHERE r.id = ANY(g.transaction_record_id) "
+            "            AND r.status = 'approved' AND r.deleted_date IS NULL), 0)"
+        )
+        in_by_loc: Dict[int, float] = {}
+        out_by_loc: Dict[int, float] = {}
+        try:
+            from sqlalchemy import text as _text
+
+            # IN (a): legs delivered into a collection point.
+            for loc_id, w in self.db.execute(_text(
+                "SELECT ttt.destination_id, SUM(ttt.weight) "
+                "FROM traceability_transport_transactions ttt "
+                "JOIN traceability_transaction_group g ON g.id = ttt.transaction_group_id "
+                "LEFT JOIN transactions st ON st.id = g.source_transaction_id "
+                "WHERE ttt.delivered_to_collection = TRUE "
+                "  AND ttt.status = 'arrived' "
+                "  AND ttt.is_active = TRUE AND ttt.deleted_date IS NULL "
+                "  AND ttt.destination_id IS NOT NULL "
+                "  AND g.organization_id = :org_id "
+                "  AND g.is_active = TRUE AND g.deleted_date IS NULL "
+                f"  AND {window} AND {src_ok} "
+                "GROUP BY ttt.destination_id"
+            ), params).fetchall():
+                if loc_id is not None:
+                    in_by_loc[int(loc_id)] = in_by_loc.get(int(loc_id), 0.0) + float(w or 0)
+
+            # IN (b): remainder of piles weighed in AT the tank that never left.
+            # Not "piles with no transports": a weigh-in can name explicit
+            # destinations for SOME of its records, and the rest still sits here.
+            # Only roots that actually LEFT are subtracted: an idle root has no
+            # destination — it is the board's "waiting to ship" placeholder, so
+            # its kilograms are still standing in this very room. Subtracting it
+            # would empty a tank that nobody has shipped anything out of, and it
+            # is credited nowhere else (the IN(a) term needs arrived + a
+            # destination). Legacy/backfilled piles are where these turn up;
+            # live in-tank piles are guarded against root creation entirely.
+            for loc_id, w in self.db.execute(_text(
+                "SELECT st.collection_location_id, SUM(GREATEST(0, "
+                f"  {pile_expr} - COALESCE((SELECT SUM(x.weight) "
+                "     FROM traceability_transport_transactions x "
+                "     WHERE x.transaction_group_id = g.id AND x.parent_id IS NULL "
+                "       AND x.status <> 'idle' "
+                "       AND x.is_active = TRUE AND x.deleted_date IS NULL), 0))) "
+                "FROM traceability_transaction_group g "
+                "JOIN transactions st ON st.id = g.source_transaction_id "
+                "WHERE st.collection_location_id IS NOT NULL "
+                "  AND st.collection_location_id = g.origin_id "
+                "  AND st.status = 'approved' AND st.deleted_date IS NULL "
+                "  AND g.organization_id = :org_id "
+                "  AND g.is_active = TRUE AND g.deleted_date IS NULL "
+                f"  AND {window} "
+                "GROUP BY st.collection_location_id"
+            ), params).fetchall():
+                if loc_id is not None:
+                    in_by_loc[int(loc_id)] = in_by_loc.get(int(loc_id), 0.0) + float(w or 0)
+
+            # OUT: everything a ผู้คัดแยก weighed out of the point.
+            for loc_id, w in self.db.execute(_text(
+                f"SELECT g.origin_id, SUM({pile_expr}) "
+                "FROM traceability_transaction_group g "
+                "JOIN transactions st ON st.id = g.source_transaction_id "
+                "WHERE st.is_internal_transfer = TRUE "
+                "  AND st.status = 'approved' AND st.deleted_date IS NULL "
+                "  AND g.organization_id = :org_id AND g.origin_id IS NOT NULL "
+                "  AND g.is_active = TRUE AND g.deleted_date IS NULL "
+                f"  AND {window} "
+                "GROUP BY g.origin_id"
+            ), params).fetchall():
+                if loc_id is not None:
+                    out_by_loc[int(loc_id)] = out_by_loc.get(int(loc_id), 0.0) + float(w or 0)
+        except Exception as exc:  # noqa: BLE001 — pre-085 session: no tanks yet
+            logger.warning("[collection_points] balance read failed for org %s: %s", organization_id, exc)
+            return []
+
+        loc_ids = set(in_by_loc) | set(out_by_loc)
+        if not loc_ids:
+            return []
+        try:
+            from .collection_points import collection_point_ids
+            live = collection_point_ids(self.db, organization_id, loc_ids)
+        except Exception:  # noqa: BLE001
+            live = set()
+        name_by_id: Dict[int, str] = {}
+        try:
+            for loc in self.db.query(UserLocation).filter(UserLocation.id.in_(loc_ids)).all():
+                name_by_id[loc.id] = (
+                    getattr(loc, 'display_name', None)
+                    or getattr(loc, 'name_th', None)
+                    or getattr(loc, 'name_en', None)
+                    or f"Location {loc.id}"
+                )
+        except Exception:  # noqa: BLE001
+            pass
+
+        out: List[Dict[str, Any]] = []
+        for loc_id in sorted(loc_ids):
+            in_kg = round(in_by_loc.get(loc_id, 0.0), 2)
+            out_kg = round(out_by_loc.get(loc_id, 0.0), 2)
+            balance = round(in_kg - out_kg, 2)
+            out.append({
+                "location_id": loc_id,
+                "name": name_by_id.get(loc_id, f"Location {loc_id}"),
+                "in_kg": in_kg,
+                "out_kg": out_kg,
+                "balance_kg": balance,
+                # Shown, never hidden: more left than was ever weighed in means
+                # material reaches this room without passing the scale.
+                "negative": balance < -self._PILE_WEIGHT_TOLERANCE_KG,
+                # Has stock but nobody bound to weigh it out any more.
+                "no_active_sorter": loc_id not in live,
+            })
+        return out
 
     def _groups_to_dict_list(
         self, groups: List[TraceabilityTransactionGroup], organization_id: int
@@ -1529,6 +1742,31 @@ class TraceabilityService:
                 TransportTransaction.deleted_date.is_(None),
             ).all()
             weight_by_carried_over = {r[0]: float(r[1] or 0) for r in transport_rows}
+        # Piles that ARE the tank's contents: a scale weigh-in whose resolved
+        # collection point is its own origin creates no hop — the material is
+        # already in the room. One batched lookup instead of a query per group.
+        in_collection_gids: set = set()
+        source_tx_ids = [
+            int(g.source_transaction_id) for g in groups
+            if getattr(g, 'source_transaction_id', None) is not None
+        ]
+        if source_tx_ids:
+            try:
+                from sqlalchemy import text as _text
+                stamp_rows = self.db.execute(_text(
+                    "SELECT id, collection_location_id FROM transactions "
+                    "WHERE id = ANY(:ids) AND collection_location_id IS NOT NULL "
+                    "  AND deleted_date IS NULL"
+                ), {'ids': list(set(source_tx_ids))}).fetchall()
+                stamp_by_tx = {int(r[0]): int(r[1]) for r in stamp_rows if r[1] is not None}
+                for g in groups:
+                    stx = getattr(g, 'source_transaction_id', None)
+                    if stx is None or g.origin_id is None:
+                        continue
+                    if stamp_by_tx.get(int(stx)) == int(g.origin_id):
+                        in_collection_gids.add(g.id)
+            except Exception:  # noqa: BLE001 — pre-085 session: no in-tank piles
+                in_collection_gids = set()
         out = []
         for g in groups:
             record_ids_g = list(g.transaction_record_id or [])
@@ -1562,13 +1800,25 @@ class TraceabilityService:
                 "origin": origin,
                 "material": material,
                 "source": "group",
+                # Material physically inside a collection point. It leaves only
+                # via that point's own scale weigh-outs (backend guards enforce
+                # this), so the UI must not offer pickup/consolidation for it —
+                # it belongs under the tank card, not in "waiting to ship".
+                "in_collection": g.id in in_collection_gids,
             })
         return out
 
     def _arrived_transport_as_first_array(
         self, group_ids: List[int], organization_id: int
     ) -> List[Dict[str, Any]]:
-        """Return arrived TransportTransactions (status='arrived') that do NOT have disposal_method, as first-array items. Only include the latest (leaf) in each chain: if A->B->C and all are arrived-no-method, only C."""
+        """Return arrived TransportTransactions (status='arrived') that do NOT have disposal_method, as first-array items. Only include the latest (leaf) in each chain: if A->B->C and all are arrived-no-method, only C.
+
+        Legs delivered to a collection point are excluded: they are terminal for
+        the sender's scope. Material sitting in a ห้องขยะ continues via that
+        room's OWN weigh-outs, so offering the leg as "next origin waiting to
+        ship" would invite someone to dispatch kilograms the tank is still
+        counting — and the card would never clear.
+        """
         rows = (
             self.db.query(TransportTransaction)
             .filter(
@@ -1578,6 +1828,7 @@ class TraceabilityService:
                     TransportTransaction.disposal_method.is_(None),
                     TransportTransaction.disposal_method == "",
                 ),
+                TransportTransaction.delivered_to_collection.isnot(True),
                 TransportTransaction.is_active == True,
                 TransportTransaction.deleted_date.is_(None),
             )
@@ -1742,6 +1993,10 @@ class TraceabilityService:
                 "status": r.status,
                 "is_root": r.is_root,
                 "absolute_percentage": float(r.absolute_percentage) if r.absolute_percentage is not None else None,
+                # Finished for the SENDER's scope, not an outcome: the frontend
+                # renders a neutral "ส่งถึงจุดรวมแล้ว" badge rather than a
+                # disposal colour, because nothing has been disposed of yet.
+                "delivered_to_collection": bool(getattr(r, "delivered_to_collection", False)),
                 "parent_id": r.parent_id,
                 "created_date": r.created_date.isoformat() if r.created_date else None,
                 "updated_date": r.updated_date.isoformat() if r.updated_date else None,
@@ -1754,15 +2009,28 @@ class TraceabilityService:
     def _transport_transactions_with_arrival_for_groups(
         self, group_ids: List[int], organization_id: int
     ) -> List[Dict[str, Any]]:
-        """Return traceability_transport_transactions where transaction_group_id in group_ids, arrival_date set, status='arrived', and disposal_method present (have the method)."""
+        """Return finished legs: arrived with a disposal_method (an outcome), OR
+        delivered to a collection point (finished for the SENDER's scope — the
+        ห้องขยะ continues the story through its own weigh-outs).
+
+        Both are "done" from the origin's point of view, which is what this
+        column means; the frontend tells them apart via delivered_to_collection
+        and renders a neutral "ส่งถึงจุดรวมแล้ว" badge instead of a disposal
+        colour, because no disposal has happened yet.
+        """
         rows = (
             self.db.query(TransportTransaction)
             .filter(
                 TransportTransaction.transaction_group_id.in_(group_ids),
                 TransportTransaction.arrival_date.isnot(None),
                 TransportTransaction.status == "arrived",
-                TransportTransaction.disposal_method.isnot(None),
-                TransportTransaction.disposal_method != "",
+                or_(
+                    and_(
+                        TransportTransaction.disposal_method.isnot(None),
+                        TransportTransaction.disposal_method != "",
+                    ),
+                    TransportTransaction.delivered_to_collection.is_(True),
+                ),
                 TransportTransaction.is_active == True,
                 TransportTransaction.deleted_date.is_(None),
             )
@@ -1816,6 +2084,10 @@ class TraceabilityService:
                 "status": r.status,
                 "is_root": r.is_root,
                 "absolute_percentage": float(r.absolute_percentage) if r.absolute_percentage is not None else None,
+                # Finished for the SENDER's scope, not an outcome: the frontend
+                # renders a neutral "ส่งถึงจุดรวมแล้ว" badge rather than a
+                # disposal colour, because nothing has been disposed of yet.
+                "delivered_to_collection": bool(getattr(r, "delivered_to_collection", False)),
                 "parent_id": r.parent_id,
                 "created_date": r.created_date.isoformat() if r.created_date else None,
                 "updated_date": r.updated_date.isoformat() if r.updated_date else None,
@@ -2105,6 +2377,7 @@ class TraceabilityService:
         transaction_group_id: Optional[int] = None,
         transport_transaction_id: Optional[int] = None,
         current_user_id: Optional[int] = None,
+        _internal_scale_hop: bool = False,
     ) -> Dict[str, Any]:
         """
         Create rows in traceability_transport_transactions (no Transaction created).
@@ -2118,6 +2391,20 @@ class TraceabilityService:
         each file id is linked to the new TransportTransaction via the
         traceability_transport_files join table (idempotent — duplicates skipped).
         ``current_user_id`` is recorded on each attachment as ``uploaded_by``.
+
+        Collection points (the tank model, migration 085):
+        - Every hop whose destination is a collection point gets
+          ``delivered_to_collection=True`` — channel-independent, so a web drag
+          into the ห้องขยะ counts as tank inflow exactly like a scale hop.
+        - A ``disposal_method`` aimed at a collection point is rejected: a hop
+          into a tank is a hand-over, not an outcome.
+        - Delivered legs are terminal for the sender's scope: extending one
+          (as parent) is rejected with LOCKED_IN_COLLECTION.
+        - Material sitting IN a tank (a stamped tank==origin pile) exits only
+          via a scale weigh-out: new roots on such a group are rejected unless
+          ``_internal_scale_hop`` marks the approve-time auto-hop itself.
+        All rejections run BEFORE any row is written — the dispatcher commits
+        the session even when a handler converts this to an APIException.
         """
         if not data:
             return {"success": False, "message": "data array is required and must not be empty", "ids": []}
@@ -2171,6 +2458,64 @@ class TraceabilityService:
         denied = self._check_group_write_access(group, organization_id, current_user_id)
         if denied:
             return {"success": False, "message": denied, "ids": []}
+
+        # ── Collection-point validation, all of it BEFORE any write ─────────
+        # (1) A delivered leg is terminal for its sender: no children ever.
+        if parent_id_override is not None and getattr(parent, 'delivered_to_collection', False):
+            return {"success": False, "message": "LOCKED_IN_COLLECTION: parent leg was delivered to a collection point; material continues via that point's own weigh-outs", "ids": []}
+        _item_parent_ids = set()
+        for _item in data:
+            if parent_id_override is None and _item.get("parent_id") is not None:
+                try:
+                    _item_parent_ids.add(int(_item["parent_id"]))
+                except (TypeError, ValueError):
+                    return {"success": False, "message": "parent_id must be an integer", "ids": []}
+        if _item_parent_ids:
+            _parents = self.db.query(TransportTransaction).filter(
+                TransportTransaction.id.in_(_item_parent_ids),
+                TransportTransaction.organization_id == organization_id,
+                TransportTransaction.is_active == True,
+                TransportTransaction.deleted_date.is_(None),
+            ).all()
+            if len(_parents) != len(_item_parent_ids):
+                return {"success": False, "message": "Parent transport transaction not found or access denied", "ids": []}
+            if any(getattr(_p, 'delivered_to_collection', False) for _p in _parents):
+                return {"success": False, "message": "LOCKED_IN_COLLECTION: parent leg was delivered to a collection point; material continues via that point's own weigh-outs", "ids": []}
+
+        # (2) Destinations that are collection points: no method allowed there,
+        # and remember them so creation can stamp the delivered flag.
+        _dest_ids = set()
+        for _item in data:
+            if _item.get("destination_id") is not None:
+                try:
+                    _dest_ids.add(int(_item["destination_id"]))
+                except (TypeError, ValueError):
+                    pass
+        _collection_dests: set = set()
+        if _dest_ids:
+            try:
+                from .collection_points import collection_point_ids
+                _collection_dests = collection_point_ids(self.db, organization_id, _dest_ids)
+            except Exception:  # noqa: BLE001 — degrade to "no collection points"
+                _collection_dests = set()
+        if _collection_dests:
+            for _item in data:
+                try:
+                    _did = int(_item.get("destination_id")) if _item.get("destination_id") is not None else None
+                except (TypeError, ValueError):
+                    _did = None
+                if _did in _collection_dests and (_item.get("disposal_method") or "").strip():
+                    return {"success": False, "message": "จุดนี้เป็นจุดรวม (collection point) ไม่ใช่ปลายทางกำจัด — ห้ามระบุวิธีกำจัดที่ขานี้", "ids": []}
+
+        # (3) Material sitting IN a tank exits only via a scale weigh-out.
+        _creates_root = any(
+            (parent_id_override if parent_id_override is not None else _item.get("parent_id")) is None
+            for _item in data
+        )
+        if _creates_root and not _internal_scale_hop:
+            _locked = self._group_is_in_tank(group)
+            if _locked:
+                return {"success": False, "message": "LOCKED_IN_COLLECTION: this pile is inside a collection point; it can only leave via a scale weigh-out (or by reverting the weigh-in)", "ids": []}
 
         # A batch may mix roots and children; only roots consume the pile.
         _new_root_weights: List[Decimal] = []
@@ -2243,6 +2588,7 @@ class TraceabilityService:
                 status=status,
                 is_root=is_root,
                 parent_id=parent_id_val,
+                delivered_to_collection=(destination_id_val in _collection_dests),
             )
             self.db.add(row)
             self.db.flush()
@@ -2573,6 +2919,46 @@ class TraceabilityService:
                     "SOURCE_ALREADY_CONSOLIDATED",
                 )
 
+        # ── Collection-point guards (the tank model, migration 085) ────────
+        # A leg delivered to a collection point is terminal for its sender:
+        # consuming it here would take kilograms out of the tank balance with
+        # no OUT entry ever written.
+        _delivered_sources = [
+            s.id for s in sources if getattr(s, 'delivered_to_collection', False)
+        ]
+        if _delivered_sources:
+            raise APIException(
+                f"LOCKED_IN_COLLECTION: sources already delivered to a collection point: {_delivered_sources}",
+                400,
+                "LOCKED_IN_COLLECTION",
+            )
+        # Group sources must be transport-free piles (codifies the board's own
+        # column-1 contract at the API layer) and must not be material sitting
+        # inside a tank. A group whose pile already has an active transport has
+        # its weight in motion — consuming the group as well double-spends it.
+        if groups:
+            _gids_with_transports = {
+                r[0] for r in self.db.query(TransportTransaction.transaction_group_id)
+                .filter(
+                    TransportTransaction.transaction_group_id.in_([g.id for g in groups]),
+                    TransportTransaction.is_active == True,
+                    TransportTransaction.deleted_date.is_(None),
+                ).distinct().all()
+            }
+            if _gids_with_transports:
+                raise APIException(
+                    f"Source groups already have transports and cannot be consolidated: {sorted(_gids_with_transports)}",
+                    400,
+                    "SOURCE_HAS_TRANSPORTS",
+                )
+            _in_tank = [g.id for g in groups if self._group_is_in_tank(g)]
+            if _in_tank:
+                raise APIException(
+                    f"LOCKED_IN_COLLECTION: groups are inside a collection point and leave only via a scale weigh-out: {_in_tank}",
+                    400,
+                    "LOCKED_IN_COLLECTION",
+                )
+
         # Pre-compute weights for groups: sum of approved transaction_records
         # in each group (record_ids stored in the group row).
         group_weights: Dict[int, Decimal] = {}
@@ -2697,6 +3083,39 @@ class TraceabilityService:
                 existing["attachments"] = merged_attachments
 
         requests = list(merged_requests_by_line.values())
+
+        # Consolidating INTO a collection point is an ENTRY into the tank, never
+        # an outcome: the result leg gets the delivered flag and may not carry a
+        # method. Validated for the WHOLE batch before any row is written — the
+        # dispatcher commits the session even when this becomes an APIException.
+        _req_dest_ids = set()
+        for _req in requests:
+            if isinstance(_req, dict) and _req.get("destination_id") is not None:
+                try:
+                    _req_dest_ids.add(int(_req["destination_id"]))
+                except (TypeError, ValueError):
+                    pass
+        _collection_dests_cons: set = set()
+        if _req_dest_ids:
+            try:
+                from .collection_points import collection_point_ids
+                _collection_dests_cons = collection_point_ids(self.db, organization_id, _req_dest_ids)
+            except Exception:  # noqa: BLE001
+                _collection_dests_cons = set()
+        if _collection_dests_cons:
+            for _req in requests:
+                if not isinstance(_req, dict):
+                    continue
+                try:
+                    _rdid = int(_req.get("destination_id")) if _req.get("destination_id") is not None else None
+                except (TypeError, ValueError):
+                    _rdid = None
+                if _rdid in _collection_dests_cons and (_req.get("disposal_method") or "").strip():
+                    raise APIException(
+                        "จุดนี้เป็นจุดรวม (collection point) ไม่ใช่ปลายทางกำจัด — ห้ามระบุวิธีกำจัดที่ขานี้",
+                        400,
+                        "METHOD_AT_COLLECTION_POINT",
+                    )
 
         for req in requests:
             if not isinstance(req, dict):
@@ -2900,6 +3319,7 @@ class TraceabilityService:
                 status=status,
                 is_root=is_root_val,
                 parent_id=parent_id_val,
+                delivered_to_collection=(destination_id_val in _collection_dests_cons),
             )
             self.db.add(new_transport)
             self.db.flush()
@@ -3023,27 +3443,73 @@ class TraceabilityService:
         updated_ids: List[int] = []
         affected_group_ids: set = set()
 
+        # ── Collection-point validation for the WHOLE batch, BEFORE any
+        # mutation. The per-item loop below soft-deletes descendants before it
+        # touches fields, and the dispatcher commits the session even when a
+        # rejection becomes an APIException — so a mid-loop rejection would
+        # persist the wipes of a rejected edit. Everything that can say "no"
+        # must say it here.
+        _prevalidated_rows: Dict[int, TransportTransaction] = {}
+        _pending_dest_by_id: Dict[int, Optional[int]] = {}
         for item in data:
-            tt_id = item.get("transport_transaction_id")
-            if tt_id is None:
-                return {"success": False, "message": "Each item must have transport_transaction_id", "ids": updated_ids}
+            _raw_id = item.get("transport_transaction_id")
+            if _raw_id is None:
+                return {"success": False, "message": "Each item must have transport_transaction_id", "ids": []}
             try:
-                tt_id = int(tt_id)
+                _iid = int(_raw_id)
             except (TypeError, ValueError):
-                return {"success": False, "message": "transport_transaction_id must be an integer", "ids": updated_ids}
-
-            row = (
+                return {"success": False, "message": "transport_transaction_id must be an integer", "ids": []}
+            _row = (
                 self.db.query(TransportTransaction)
                 .filter(
-                    TransportTransaction.id == tt_id,
+                    TransportTransaction.id == _iid,
                     TransportTransaction.organization_id == organization_id,
                     TransportTransaction.is_active == True,
                     TransportTransaction.deleted_date.is_(None),
                 )
                 .first()
             )
-            if not row:
-                return {"success": False, "message": f"Transport transaction {tt_id} not found or access denied", "ids": updated_ids}
+            if not _row:
+                return {"success": False, "message": f"Transport transaction {_iid} not found or access denied", "ids": []}
+            # Guard 6: a delivered leg is immutable — its weight is a tank's
+            # inflow; editing it would corrupt the balance silently. Revert the
+            # weigh-in instead.
+            if getattr(_row, 'delivered_to_collection', False):
+                return {"success": False, "message": "LOCKED_IN_COLLECTION: this leg was delivered to a collection point and cannot be edited — revert the source transaction instead", "ids": []}
+            _prevalidated_rows[_iid] = _row
+            # Effective destination after this edit (key present = intent).
+            if "destination_id" in item:
+                try:
+                    _pending_dest_by_id[_iid] = int(item["destination_id"]) if item["destination_id"] is not None else None
+                except (TypeError, ValueError):
+                    return {"success": False, "message": "destination_id must be an integer", "ids": []}
+            else:
+                _pending_dest_by_id[_iid] = _row.destination_id
+        _update_collection_dests: set = set()
+        _pending_dests = {d for d in _pending_dest_by_id.values() if d is not None}
+        if _pending_dests:
+            try:
+                from .collection_points import collection_point_ids
+                _update_collection_dests = collection_point_ids(self.db, organization_id, _pending_dests)
+            except Exception:  # noqa: BLE001
+                _update_collection_dests = set()
+        if _update_collection_dests:
+            for item in data:
+                _iid = int(item["transport_transaction_id"])
+                if _pending_dest_by_id.get(_iid) not in _update_collection_dests:
+                    continue
+                # Effective method after this edit: a repoint INTO a tank must
+                # not carry one, whether newly supplied or already on the row.
+                if "disposal_method" in item:
+                    _eff_method = (item["disposal_method"] or "").strip()
+                else:
+                    _eff_method = (_prevalidated_rows[_iid].disposal_method or "").strip()
+                if _eff_method:
+                    return {"success": False, "message": "จุดนี้เป็นจุดรวม (collection point) ไม่ใช่ปลายทางกำจัด — ห้ามมีวิธีกำจัดที่ขานี้", "ids": []}
+
+        for item in data:
+            tt_id = int(item["transport_transaction_id"])
+            row = _prevalidated_rows[tt_id]
 
             if row.transaction_group_id:
                 affected_group_ids.add(row.transaction_group_id)
@@ -3136,6 +3602,13 @@ class TraceabilityService:
             has_destination = row.destination_id is not None
             row.status = "in_transit" if has_destination else "idle"
             row.arrival_date = None
+            # Repoint recomputes the delivered flag (F2). The leg is back
+            # in_transit here; it only enters the tank balance once
+            # confirm_arrival marks it arrived.
+            try:
+                row.delivered_to_collection = row.destination_id in _update_collection_dests
+            except Exception:  # noqa: BLE001 — pre-085 session
+                pass
 
             self.db.flush()
             updated_ids.append(tt_id)

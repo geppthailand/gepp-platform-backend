@@ -419,6 +419,15 @@ class ManualAuditService:
             # Commit changes
             db.commit()
 
+            # Rejected: withdraw the scale traceability footprint so the tank
+            # balance and the board stop counting a weighing that officially
+            # never happened. Post-commit, best-effort, no-op for non-scale.
+            try:
+                from ..transactions.transaction_service import TransactionService
+                TransactionService(db).revert_scale_traceability(transaction)
+            except Exception as _revert_err:  # noqa: BLE001
+                logger.warning(f"traceability revert on audit-reject failed for {transaction_id}: {_revert_err}")
+
             logger.info(f"Transaction {transaction_id} rejected successfully")
 
             return {
@@ -659,6 +668,15 @@ class ManualAuditService:
             db.commit()
             db.refresh(record)
 
+            # If rejecting this record pushed the whole transaction to rejected,
+            # withdraw its scale traceability footprint. Post-commit, best-effort.
+            if transaction is not None and transaction.status == TransactionStatus.rejected:
+                try:
+                    from ..transactions.transaction_service import TransactionService
+                    TransactionService(db).revert_scale_traceability(transaction)
+                except Exception as _revert_err:  # noqa: BLE001
+                    logger.warning(f"traceability revert on record-reject failed for tx {transaction.id}: {_revert_err}")
+
             logger.info(f"Transaction record {record_id} rejected successfully with status: {record.status}")
 
             transaction_id = transaction.id if transaction else record.created_transaction_id
@@ -797,6 +815,23 @@ class ManualAuditService:
             # Single commit for all changes
             db.commit()
             successful_count = len(approved_ids)
+
+            # Rebuild traceability for each approved transaction. Idempotent
+            # (existing groups found, existing hops deduped) so an untouched
+            # transaction is a cheap no-op — but after an edit reset this is the
+            # ONLY thing that rebuilds the pile, without which the material
+            # disappears from the board and from its tank's inflow. Post-commit
+            # on purpose: the helper manages its own commit/rollback and must
+            # not entangle the single-transaction bulk batch above.
+            if approved_ids:
+                try:
+                    from ..transactions.transaction_service import TransactionService
+                    _txn_svc = TransactionService(db)
+                    for _tx in db.query(Transaction).filter(Transaction.id.in_(approved_ids)).all():
+                        _txn_svc._create_first_hops_for_approved_transaction(_tx)
+                except Exception as _hop_err:  # noqa: BLE001
+                    logger.warning(f"first-hop on bulk-approve failed: {_hop_err}")
+
             print(f"[DEBUG] Bulk approved {successful_count} transactions, {unchanged_count} unchanged, {len(errors)} failed")
 
             return {
@@ -934,6 +969,18 @@ class ManualAuditService:
             # Single commit for all changes
             db.commit()
             successful_count = len(rejected_ids)
+
+            # Withdraw the scale traceability footprint of every rejected
+            # transaction. Post-commit, best-effort, no-op for non-scale rows.
+            if rejected_ids:
+                try:
+                    from ..transactions.transaction_service import TransactionService
+                    _txn_svc = TransactionService(db)
+                    for _tx in db.query(Transaction).filter(Transaction.id.in_(rejected_ids)).all():
+                        _txn_svc.revert_scale_traceability(_tx)
+                except Exception as _revert_err:  # noqa: BLE001
+                    logger.warning(f"traceability revert on bulk-reject failed: {_revert_err}")
+
             print(f"[DEBUG] Bulk rejected {successful_count} transactions, {unchanged_count} unchanged, {len(errors)} failed")
 
             return {
