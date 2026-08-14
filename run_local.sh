@@ -309,7 +309,7 @@ export PORT="$PORT"
 export LAN_IP="$LAN_IP"
 
 exec "$VENV_DIR/bin/python" -c "
-import json, sys, os, traceback
+import json, sys, os, traceback, base64
 
 sys.path.insert(0, os.environ.get('PYTHONPATH', '.'))
 
@@ -414,6 +414,12 @@ def catch_all(path):
             print(result.get('body', ''), file=sys.stderr)
     resp_headers = result.get('headers', {})
     body = result.get('body', '')
+
+    # API Gateway decodes base64 bodies to binary when isBase64Encoded is set;
+    # the real gateway does this for us in dev/prod. Do the same here so binary
+    # responses (PDF export, etc.) arrive as bytes, not base64 text.
+    if result.get('isBase64Encoded') and isinstance(body, str):
+        body = base64.b64decode(body)
 
     return Response(body, status=status, headers=resp_headers)
 

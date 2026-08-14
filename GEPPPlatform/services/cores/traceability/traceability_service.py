@@ -53,18 +53,64 @@ class TraceabilityService:
     def __init__(self, db: Session):
         self.db = db
 
-    def _get_assigned_location_ids(self, organization_id: int, current_user_id: int) -> Optional[set]:
-        """
-        Get the set of location IDs that the user has assigned access to (member + descendants).
-        Returns None if user is owner/admin (no filtering needed).
-        """
+    def _get_access_scope(self, organization_id: int, current_user_id: int) -> Dict[str, Any]:
+        """Full access verdict (location membership + tag/tenant grants) for this user."""
         from ..users.user_service import UserService
         user_service = UserService(self.db)
-        locations = user_service.crud.get_user_locations(organization_id=organization_id)
-        tiers = user_service._resolve_location_tiers(locations, organization_id, current_user_id)
-        if tiers['is_owner']:
+        return user_service.resolve_access_scope(int(organization_id), int(current_user_id))
+
+    def _get_assigned_location_ids(self, organization_id: int, current_user_id: int) -> Optional[set]:
+        """
+        Every location the user can reach — member-assigned plus tag/tenant-scoped.
+        Returns None if the user is the organization owner (no filtering needed).
+
+        For pickers and location lists only. To filter traceability *rows*, use
+        `_group_visibility_clause()`: this set drops the tag/tenant dimension, so a
+        scoped location would otherwise expose every group on it.
+        """
+        from ....libs.locationAccess import accessible_location_ids
+        scope = self._get_access_scope(organization_id, current_user_id)
+        if scope['is_owner']:
             return None  # No filtering needed
-        return tiers['assigned_ids']
+        return accessible_location_ids(scope)
+
+    def _check_group_write_access(self, group: Any, organization_id: Optional[int],
+                                  current_user_id: Optional[int]) -> Optional[str]:
+        """
+        May this user add to / edit this traceability group? Returns None when allowed,
+        otherwise a message for the caller's error envelope.
+
+        Mirrors the transaction write rule: full access at the group's origin, or a
+        tag/tenant grant that matches the group's own tag/tenant. Skipped when there is
+        no authenticated user (background/system callers resolve their own permissions).
+        """
+        if current_user_id is None or organization_id is None or group is None:
+            return None
+        from ....libs.locationAccess import grant_for_write
+        scope = self._get_access_scope(int(organization_id), int(current_user_id))
+        reason = grant_for_write(scope, group.origin_id, group.location_tag_id, group.tenant_id)
+        return f"Access denied for this transaction group: {reason}" if reason else None
+
+    def _group_visibility_clause(self, organization_id: int, current_user_id: int,
+                                 year: Any = None, month: Any = None):
+        """
+        Row-level visibility for traceability groups. Returns None when unrestricted.
+
+        Groups carry `location_tag_id` / `tenant_id`, so a tag/tenant-scoped user sees
+        only their own groups at a shared location. Windowing is month-granular — the
+        group has no row-level date.
+        """
+        from ....libs.locationAccess import build_visibility_clause, scope_for_month
+        scope = self._get_access_scope(organization_id, current_user_id)
+        if year is not None and month is not None:
+            scope = scope_for_month(scope, year, month)
+        return build_visibility_clause(
+            scope,
+            origin_col=TraceabilityTransactionGroup.origin_id,
+            tag_col=TraceabilityTransactionGroup.location_tag_id,
+            tenant_col=TraceabilityTransactionGroup.tenant_id,
+            date_col=None,
+        )
 
     def get_traceability(self, organization_id: Optional[int] = None, **kwargs: Any) -> Dict[str, Any]:
         """
@@ -127,12 +173,14 @@ class TraceabilityService:
             except (ValueError, TypeError):
                 pass
 
-        # Apply member-based filtering: restrict to user's assigned locations
+        # Apply access filtering: assigned locations, plus tag/tenant-scoped groups
         current_user_id = kwargs.get("current_user_id")
         if current_user_id and organization_id:
-            assigned_ids = self._get_assigned_location_ids(organization_id, int(current_user_id))
-            if assigned_ids is not None:
-                group_filters.append(TraceabilityTransactionGroup.origin_id.in_(list(assigned_ids)))
+            clause = self._group_visibility_clause(
+                organization_id, int(current_user_id), year=year, month=month
+            )
+            if clause is not None:
+                group_filters.append(clause)
 
         raw_groups = self.db.query(TraceabilityTransactionGroup).filter(and_(*group_filters)).all()
 
@@ -428,12 +476,14 @@ class TraceabilityService:
             ]
             group_filters.append(TraceabilityTransactionGroup.id.in_(matching_group_ids or [-1]))
 
-        # Apply member-based filtering: restrict to user's assigned locations
+        # Apply access filtering: assigned locations, plus tag/tenant-scoped groups
         current_user_id = kwargs.get("current_user_id")
         if current_user_id and organization_id:
-            assigned_ids = self._get_assigned_location_ids(organization_id, int(current_user_id))
-            if assigned_ids is not None:
-                group_filters.append(TraceabilityTransactionGroup.origin_id.in_(list(assigned_ids)))
+            clause = self._group_visibility_clause(
+                organization_id, int(current_user_id), year=year, month=month
+            )
+            if clause is not None:
+                group_filters.append(clause)
 
         groups = self.db.query(TraceabilityTransactionGroup).filter(and_(*group_filters)).all()
         if not groups:
@@ -2118,6 +2168,10 @@ class TraceabilityService:
             if not group:
                 return {"success": False, "message": "Transaction group not found or access denied", "ids": []}
 
+        denied = self._check_group_write_access(group, organization_id, current_user_id)
+        if denied:
+            return {"success": False, "message": denied, "ids": []}
+
         # A batch may mix roots and children; only roots consume the pile.
         _new_root_weights: List[Decimal] = []
         for _item in data:
@@ -2422,17 +2476,23 @@ class TraceabilityService:
         # ── 3) Access control ─────────────────────────────────────────────
         # Transport sources: user needs access to the destination (where material sits).
         # Group sources: user needs access to the origin (where the records belong).
-        assigned_ids = self._get_assigned_location_ids(organization_id, int(current_user_id))
-        if assigned_ids is not None:
+        from ....libs.locationAccess import accessible_location_ids, grant_for_write
+        scope = self._get_access_scope(organization_id, int(current_user_id))
+        if not scope['is_owner']:
+            # Transports carry no tag/tenant of their own, so they are gated at location
+            # level — reachable either by membership or through a tag/tenant grant.
+            reachable = accessible_location_ids(scope)
             for s in sources:
-                if s.destination_id is None or s.destination_id not in assigned_ids:
+                if s.destination_id is None or s.destination_id not in reachable:
                     raise APIException(
                         f"User does not have access to source {s.id}'s current location",
                         403,
                         "FORBIDDEN_SOURCE_LOCATION",
                     )
+            # Groups do carry tag/tenant, so a scoped user is held to their own groups
+            # rather than everything sitting at a location they can merely reach.
             for g in groups:
-                if g.origin_id is None or g.origin_id not in assigned_ids:
+                if grant_for_write(scope, g.origin_id, g.location_tag_id, g.tenant_id):
                     raise APIException(
                         f"User does not have access to source group {g.id}'s origin",
                         403,
@@ -2987,6 +3047,14 @@ class TraceabilityService:
 
             if row.transaction_group_id:
                 affected_group_ids.add(row.transaction_group_id)
+                group = (
+                    self.db.query(TraceabilityTransactionGroup)
+                    .filter(TraceabilityTransactionGroup.id == row.transaction_group_id)
+                    .first()
+                )
+                denied = self._check_group_write_access(group, organization_id, current_user_id)
+                if denied:
+                    return {"success": False, "message": denied, "ids": updated_ids}
 
             # Recursively soft-delete all descendants
             self._soft_delete_descendants(tt_id, now)
