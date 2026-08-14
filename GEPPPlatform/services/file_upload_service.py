@@ -10,6 +10,7 @@ import uuid
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 from urllib.parse import quote
+from botocore.config import Config as BotoConfig
 from botocore.exceptions import ClientError, BotoCoreError
 import mimetypes
 import hashlib
@@ -61,12 +62,47 @@ def ascii_metadata(value: Optional[str], fallback: str = 'unknown') -> str:
         return quote(value, safe='')
 
 
+def presentable_image_url(url: Optional[str], s3=None) -> Optional[str]:
+    """Turn a stored image_url into something a browser can actually load.
+
+    Images uploaded by the platform live in the PRIVATE `prod-gepp-platform-assets` bucket, so a
+    raw S3 URL 403s — presign a short-lived GET for those. Legacy images in the public `gepp-prod`
+    bucket are returned untouched. Never raises: on any failure it falls back to the stored URL so
+    one bad row degrades to a broken thumbnail instead of failing the whole list.
+
+    Pass `s3` when resolving a batch so the client is built once per request, not per image.
+    """
+    if not url or not isinstance(url, str):
+        return url
+    marker = ".amazonaws.com/"
+    if "prod-gepp-platform-assets" not in url or marker not in url:
+        return url
+    key = url.split(marker, 1)[1]
+    try:
+        if s3 is None:
+            s3 = S3FileUploadService()
+        return s3.s3_client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": s3.bucket_name, "Key": key},
+            ExpiresIn=3600,
+        )
+    except Exception:
+        return url
+
+
 class S3FileUploadService:
     """Service to handle file uploads to S3"""
 
     def __init__(self):
-        """Initialize S3 client"""
-        self.s3_client = boto3.client('s3')
+        """Initialize S3 client.
+
+        Pinned to SigV4: boto3 still defaults to SigV2 for plain `client('s3')`, which produces
+        presigned URLs of the `?AWSAccessKeyId=...&Signature=...` form. S3 no longer accepts
+        those in regions launched after 2014 and is retiring them elsewhere, so a presigned
+        thumbnail would start 403-ing with no code change on our side. `pdf_export_hub` already
+        pins s3v4 for the same reason.
+        """
+        self.s3_client = boto3.client('s3', config=BotoConfig(signature_version='s3v4'))
         self.bucket_name = 'prod-gepp-platform-assets'
 
     def upload_transaction_files(

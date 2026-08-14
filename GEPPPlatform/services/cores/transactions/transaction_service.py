@@ -1919,22 +1919,25 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
             visible_parent_ids: Optional[set] = None
             if current_user_id is not None:
                 from ..users.user_service import UserService
-                tiers = user_service._resolve_location_tiers(locations, int(target_org_id), int(current_user_id))
-                if not tiers['is_owner']:
-                    visible_parent_ids = tiers['assigned_ids'] or set()
+                # resolve_access_scope loads the org's locations and setup itself; the merge left
+                # a call to _resolve_location_tiers here with an undefined `locations` and a
+                # lowercase `user_service` that was never constructed in this scope.
+                scope = UserService(self.db).resolve_access_scope(int(target_org_id), int(current_user_id))
+                if not scope['is_owner']:
+                    visible_parent_ids = scope['assigned_ids'] or set()
 
             def _aware(dt):
                 return dt.replace(tzinfo=timezone.utc) if dt is not None and dt.tzinfo is None else dt
 
             tdt = None
             raw = transaction.get('transaction_date')
-                try:
-                    s = str(raw)
-                    if s.endswith('Z'):
-                        s = s[:-1] + '+00:00'
-                    tdt = _aware(datetime.fromisoformat(s))
-                except (ValueError, TypeError):
-                    tdt = None
+            try:
+                s = str(raw)
+                if s.endswith('Z'):
+                    s = s[:-1] + '+00:00'
+                tdt = _aware(datetime.fromisoformat(s))
+            except (ValueError, TypeError):
+                tdt = None
 
             now = datetime.now(timezone.utc)
             shares = self.db.query(SharedUserLocation).filter(
