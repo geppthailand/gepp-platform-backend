@@ -403,20 +403,25 @@ def _check_transaction_completion(transaction_map: Dict[int, Dict]) -> Tuple[int
 
 # ========== ROUTE HANDLERS ==========
 
-def _resolve_filtered_headcount(
+def _resolve_per_capita_scope(
     reports_service: ReportsService,
     organization_id: int,
     filters: Dict[str, Any],
-) -> Optional[int]:
+) -> Dict[str, Any]:
     """
-    Rolled-up headcount for the locations currently in scope, or None when nothing in
-    that subtree has a value (→ the card shows N/A rather than dividing by zero).
+    Headcount denominator and the origins whose waste may enter the numerator.
+
+    Waste and people have to be paired per subtree — see `resolve_headcount_scope`. A plain
+    "sum all headcounts, divide all waste" would drag in waste from branches that have no
+    headcount at all, with nothing on the other side of the division to match it.
+
+    Returns {'total': int|None, 'covered_ids': set[int]}; `total` is None when nothing in
+    scope has a headcount, and the card then shows N/A instead of dividing.
 
     With no location filter the scope is the whole org tree. The dashboard sends
-    `location_ids`, legacy callers `origin_ids`; both arrive already expanded to
-    descendants, which is harmless — `rollup_headcount` accumulates a set.
+    `location_ids`, legacy callers `origin_ids`, composite selections `origin_combos`.
     """
-    from ..users.user_service import rollup_headcount
+    from ..users.user_service import resolve_headcount_scope
     from ....models.subscriptions.organizations import OrganizationSetup
     from ....models.users.user_location import UserLocation
 
@@ -463,7 +468,7 @@ def _resolve_filtered_headcount(
         if not selected:
             selected = {rid for rid in headcount_by_id}
 
-    return rollup_headcount(root_nodes, selected, headcount_by_id)
+    return resolve_headcount_scope(root_nodes, selected, headcount_by_id)
 
 
 def _handle_overview_report(
@@ -765,12 +770,19 @@ def _handle_overview_report(
     ]
     waste_type_proportions.sort(key=lambda x: x['total_waste'], reverse=True)
 
-    # Waste per head — total waste (not just recyclables) over the rolled-up headcount of
-    # the filtered locations. `value` is None when no location in scope has a headcount:
-    # the card renders N/A with a CTA instead of a misleading 0 or a divide-by-zero.
-    headcount = _resolve_filtered_headcount(reports_service, organization_id, filters or {})
+    # Waste per head — total waste over the headcount, paired per subtree so only the
+    # locations that actually have a headcount contribute to BOTH sides of the division.
+    # Note the numerator is NOT `total_waste`: waste recorded under a branch nobody gave a
+    # headcount for is excluded, otherwise it would be divided by people who don't cover it.
+    # None when nothing in scope has a headcount → the card shows N/A plus a CTA.
+    per_capita = _resolve_per_capita_scope(reports_service, organization_id, filters or {})
+    headcount = per_capita['total']
+    covered_origin_ids = per_capita['covered_ids']
+    per_capita_waste = sum(
+        w for (oid, w, _ghg, _cat, _group) in record_origins if oid in covered_origin_ids
+    )
     waste_per_head = (
-        round(total_waste / headcount * 100) / 100
+        round(per_capita_waste / headcount * 100) / 100
         if headcount and headcount > 0 else None
     )
 
@@ -842,13 +854,18 @@ def _handle_overview_report(
         },
         'top_recyclables': top_recyclables,
         'overall_charts': {
+            # `unit` is a language-independent key, not a label: the title is already
+            # translated by the time the PDF sees it, so keying the unit off the title
+            # would break the moment the language changes.
             'chart_stat_data': [
-                {'title': 'Total Recyclables', 'value': round(recyclable_waste * 100) / 100},
-                {'title': 'Number of Trees', 'value': int(round(kg_co2_to_trees(recyclable_ghg_reduction) * 100 / 100))},
+                {'title': 'Total Recyclables', 'value': round(recyclable_waste * 100) / 100, 'unit': 'kg'},
+                {'title': 'Number of Trees', 'value': int(round(kg_co2_to_trees(recyclable_ghg_reduction) * 100 / 100)), 'unit': 'trees'},
                 # {'title': 'Forest (rai)', 'value': round(kg_co2_to_forest_rai(recyclable_ghg_reduction) * 100) / 100},
-                {'title': 'Plastic Saved', 'value': round(plastic_saved * 100) / 100},
+                {'title': 'Plastic Saved', 'value': round(plastic_saved * 100) / 100, 'unit': 'kg'},
                 # headcount travels with the card so the UI can print the denominator —
                 # a bare kg/head number is unreadable without knowing what it divided by.
+                # Its unit lives in the title ("(kg)"), so the sub-line carries the
+                # denominator instead of repeating it.
                 {'title': 'Waste per Head', 'value': waste_per_head, 'headcount': headcount},
             ],
             'chart_data': chart_data
@@ -2633,6 +2650,7 @@ def _handle_export_pdf_report(
             'Total Recyclables': 'วัสดุรีไซเคิลทั้งหมด',
             'Number of Trees': 'จำนวนต้นไม้',
             'Plastic Saved': 'พลาสติกที่ประหยัดได้',
+            'Waste per Head': 'ขยะต่อคน (กก.)',
         }
         for stat in (overview.get('overall_charts', {}) or {}).get('chart_stat_data', []):
             stat['title'] = _stat_title_map.get(stat.get('title'), stat.get('title'))

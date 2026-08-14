@@ -2097,25 +2097,25 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
             visible_parent_ids: Optional[set] = None
             if current_user_id is not None:
                 from ..users.user_service import UserService
-                user_service = UserService(self.db)
-                locations = user_service.crud.get_user_locations(organization_id=target_org_id)
-                tiers = user_service._resolve_location_tiers(locations, int(target_org_id), int(current_user_id))
-                if not tiers['is_owner']:
-                    visible_parent_ids = tiers['assigned_ids'] or set()
+                # resolve_access_scope loads the org's locations and setup itself; the merge left
+                # a call to _resolve_location_tiers here with an undefined `locations` and a
+                # lowercase `user_service` that was never constructed in this scope.
+                scope = UserService(self.db).resolve_access_scope(int(target_org_id), int(current_user_id))
+                if not scope['is_owner']:
+                    visible_parent_ids = scope['assigned_ids'] or set()
 
             def _aware(dt):
                 return dt.replace(tzinfo=timezone.utc) if dt is not None and dt.tzinfo is None else dt
 
             tdt = None
             raw = transaction.get('transaction_date')
-            if raw:
-                try:
-                    s = str(raw)
-                    if s.endswith('Z'):
-                        s = s[:-1] + '+00:00'
-                    tdt = _aware(datetime.fromisoformat(s))
-                except (ValueError, TypeError):
-                    tdt = None
+            try:
+                s = str(raw)
+                if s.endswith('Z'):
+                    s = s[:-1] + '+00:00'
+                tdt = _aware(datetime.fromisoformat(s))
+            except (ValueError, TypeError):
+                tdt = None
 
             now = datetime.now(timezone.utc)
             shares = self.db.query(SharedUserLocation).filter(
@@ -2971,6 +2971,21 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                             if transaction.origin_id is not None else []
                         )
 
+                    # Roll up cross-org shared rows under the shared location's name.
+                    meta = share_meta_by_origin.get(transaction.origin_id)
+                    if meta:
+                        transaction_dict['is_shared'] = True
+                        transaction_dict['shared_share_id'] = meta['share_id']
+                        transaction_dict['shared_from_org'] = meta['source_org_name']
+                        transaction_dict['origin_location'] = {
+                            'id': None,
+                            'name_en': meta['label'],
+                            'name_th': meta['label'],
+                            'display_name': meta['label'],
+                        }
+                    else:
+                        transaction_dict['is_shared'] = False
+
                     if include_records:
                         logger.info(f"Including records for transaction {transaction.id}")
                         # Get transaction records with eager loading of destination
@@ -3266,6 +3281,12 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                             record.origin_price_per_unit = _round_decimal(record_data['origin_price_per_unit'])
                         if 'total_amount' in record_data:
                             record.total_amount = _round_decimal(record_data['total_amount'])
+                        # ปลายทาง — editable in input_destination mode. Omitted from this list
+                        # originally, so the UI sent a new destination and the save silently
+                        # discarded it. `in` rather than truthiness: None is a real value here,
+                        # meaning "cleared", and must overwrite an existing destination.
+                        if 'destination_id' in record_data:
+                            record.destination_id = record_data['destination_id']
 
                         record.updated_date = datetime.now()
                         records_updated += 1
@@ -3292,6 +3313,20 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
             ).all()
             active_record_ids = [r.id for r in active_records]
             transaction.transaction_records = active_record_ids
+
+            # Keep the transaction-level destination array in step with the records. Create
+            # builds it from the records; without rebuilding it here it keeps the destinations
+            # from the original save forever, so anything reading the transaction (rather than
+            # its records) reports the old destination even after a successful edit.
+            # Flush first: the record edits above are still pending in the session, and a
+            # column-only query reads straight past them — without this the array is rebuilt
+            # from the pre-edit rows and lands one edit behind.
+            self.db.flush()
+            dest_rows = self.db.query(TransactionRecord.destination_id).filter(
+                TransactionRecord.created_transaction_id == transaction_id,
+                TransactionRecord.is_active == True
+            ).order_by(TransactionRecord.id).all()
+            transaction.destination_ids = [r.destination_id for r in dest_rows]
 
             # Recalculate totals and reset all record statuses to pending
             total_weight = Decimal('0')

@@ -92,6 +92,78 @@ def rollup_headcount(
     return sum(present)
 
 
+def resolve_headcount_scope(
+    root_nodes: Any,
+    target_ids: Set[int],
+    headcount_by_id: Dict[int, Optional[int]],
+) -> Dict[str, Any]:
+    """
+    Pair waste with people per location, for the per-capita metric.
+
+    Summing every headcount and dividing the whole org's waste by it is wrong: waste from
+    branches nobody entered a headcount for lands in the numerator with no matching people
+    in the denominator, which deflates kg/head.
+
+    So only the subtrees that actually have a headcount count on BOTH sides:
+
+        branch A: 10          → root; its whole subtree's waste counts
+          building 1: 5       → inside A, so its 5 people add to the total, but its waste
+                                is NOT added again — A's subtree already includes it
+          building 2: unset   → waste counts (inside A), no people to add
+        branch B: 7           → root
+          building 3: unset   → waste counts (inside B)
+        branch C: unset       → NOT a root: its own waste is excluded
+          building 4: 6       → root in its own right (no ancestor has a headcount)
+
+        denominator = 10+5+7+6 = 28
+        numerator   = waste(A subtree) + waste(B subtree) + waste(building 4 subtree)
+
+    Returns:
+        {'total': int|None, 'covered_ids': set[int]}
+        `total` is None when nothing in scope has a headcount (→ report N/A, don't divide).
+        `covered_ids` are the origins whose waste may enter the numerator.
+    """
+    scope_ids = expand_with_descendants(root_nodes, set(target_ids))
+    covered_ids: Set[int] = set()
+    present = False
+    total = 0
+
+    def walk(nodes, inside_root: bool):
+        nonlocal present, total
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            try:
+                nid = int(node.get('nodeId', 0))
+            except (TypeError, ValueError):
+                nid = None
+            children = node.get('children') or []
+
+            next_inside = inside_root
+            if nid is not None and nid in scope_ids:
+                hc = headcount_by_id.get(nid)
+                if inside_root:
+                    # Already under a counted subtree: contribute people, waste is implied.
+                    covered_ids.add(nid)
+                    if hc is not None:
+                        present = True
+                        total += hc
+                elif hc is not None:
+                    # Topmost node with a headcount — this subtree is what we divide.
+                    next_inside = True
+                    covered_ids.add(nid)
+                    present = True
+                    total += hc
+
+            if children:
+                walk(children, next_inside)
+
+    if isinstance(root_nodes, list):
+        walk(root_nodes, False)
+
+    return {'total': total if present else None, 'covered_ids': covered_ids}
+
+
 def collect_path_ancestors(root_nodes: Any, target_ids: Set[int]) -> Set[int]:
     """
     Every node on the path from a root down to any node in `target_ids`.
