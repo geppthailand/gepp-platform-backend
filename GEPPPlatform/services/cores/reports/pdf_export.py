@@ -735,9 +735,24 @@ def draw_overview(pdf, page_width_points: float, page_height_points: float, data
     gap = 8
     n_stats = max(1, len(stats))
     sw = (right_col_w - 32 - gap * (n_stats - 1)) / n_stats
-    # Taller only when a chip carries a denominator sub-line, so orgs with no headcount data
-    # keep exactly the previous layout.
-    has_subtitle = any(st.get("headcount") for st in stats)
+    # Sub-line per chip: the unit for most, the denominator for the per-capita one (its unit
+    # is already in its title). Matches what the screen shows under each value.
+    def _sub_for(st):
+        if st.get("headcount"):
+            # People are whole — _format_number would render "235.00".
+            try:
+                count = f"{int(st['headcount']):,}"
+            except (TypeError, ValueError):
+                count = str(st["headcount"])
+            return _t('based_on_people', data).replace('{count}', count)
+        unit = st.get("unit")
+        if unit == 'kg':
+            return _t('unit_kg', data)
+        if unit == 'trees':
+            return _t('unit_trees', data)
+        return None
+
+    has_subtitle = any(_sub_for(st) for st in stats)
     sh = (0.72 if has_subtitle else 0.60) * inch
     sy = overall_y + overall_h - 26 - 16 - sh
     for i, st in enumerate(stats):
@@ -747,12 +762,10 @@ def draw_overview(pdf, page_width_points: float, page_height_points: float, data
         # dash the screen shows rather than a misleading 0.
         if value is None:
             value = "—"
-        # The denominator goes on its own line, not appended to the title: at 4-across an
-        # English label plus "· 235" overflows the chip, and truncating it would leave a
-        # believable but wrong number on the page.
-        headcount = st.get("headcount")
-        subtitle = _t('based_on_people', data).replace('{count}', _format_number(headcount)) if headcount else None
-        _stat_chip(pdf, sx, sy, sw, sh, st.get("title", ""), value, "white", subtitle=subtitle)
+        # On its own line, not appended to the title: at 4-across an English label plus
+        # "· 235" overflows the chip, and truncating it would leave a believable but wrong
+        # number on the page.
+        _stat_chip(pdf, sx, sy, sw, sh, st.get("title", ""), value, "white", subtitle=_sub_for(st))
     chart_data = data["overview_data"]["overall_charts"]["chart_data"]
     cy = overall_y + 16
     ch = (sy - cy - 16) * 0.9

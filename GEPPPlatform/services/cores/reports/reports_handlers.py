@@ -694,13 +694,18 @@ def _handle_overview_report(
         },
         'top_recyclables': top_recyclables,
         'overall_charts': {
+            # `unit` is a language-independent key, not a label: the title is already
+            # translated by the time the PDF sees it, so keying the unit off the title
+            # would break the moment the language changes.
             'chart_stat_data': [
-                {'title': 'Total Recyclables', 'value': round(recyclable_waste * 100) / 100},
-                {'title': 'Number of Trees', 'value': int(round(kg_co2_to_trees(recyclable_ghg_reduction) * 100 / 100))},
+                {'title': 'Total Recyclables', 'value': round(recyclable_waste * 100) / 100, 'unit': 'kg'},
+                {'title': 'Number of Trees', 'value': int(round(kg_co2_to_trees(recyclable_ghg_reduction) * 100 / 100)), 'unit': 'trees'},
                 # {'title': 'Forest (rai)', 'value': round(kg_co2_to_forest_rai(recyclable_ghg_reduction) * 100) / 100},
-                {'title': 'Plastic Saved', 'value': round(plastic_saved * 100) / 100},
+                {'title': 'Plastic Saved', 'value': round(plastic_saved * 100) / 100, 'unit': 'kg'},
                 # headcount travels with the card so the UI can print the denominator —
                 # a bare kg/head number is unreadable without knowing what it divided by.
+                # Its unit lives in the title ("(kg)"), so the sub-line carries the
+                # denominator instead of repeating it.
                 {'title': 'Waste per Head', 'value': waste_per_head, 'headcount': headcount},
             ],
             'chart_data': chart_data
