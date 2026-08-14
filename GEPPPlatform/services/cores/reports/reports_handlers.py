@@ -755,7 +755,7 @@ def _handle_overview_report(
     # jobs: the primary rate wherever the scope never meets a tank, and the
     # "ประมาณการ" side of the org-scope toggle so the UI can flip views without
     # a second request. Same in-memory data, no extra query.
-    _est_recyclable, _, _, _, _est_total = compute_recycling_rate(
+    _est_recyclable, _est_ghg, _, _, _est_total = compute_recycling_rate(
         record_weights, group_leaf_data, group_completion,
     )
     recycle_rate_estimate = ((_est_recyclable / _est_total) * 100) if _est_total > 0 else 0.0
@@ -916,6 +916,13 @@ def _handle_overview_report(
             'recycle_rate': recycle_rate_out,
             'recycle_rate_basis': recycle_rate_basis,
             'recycle_rate_estimate': recycle_rate_toggle,
+            # GHG saved is derived from what counts as recycled, so it belongs to
+            # the SAME basis as the rate. Without this the view toggle moved the
+            # rate while the GHG figure sat still, quietly mixing a measured
+            # number with an estimated one on the same card.
+            'ghg_reduction_estimate': (
+                round(_est_ghg * 100) / 100 if recycle_rate_toggle is not None else None
+            ),
             'separation_rate': separation_rate,
             'in_collection_kg': in_collection_kg,
             'ghg_reduction': round(recyclable_ghg_reduction * 100) / 100,
