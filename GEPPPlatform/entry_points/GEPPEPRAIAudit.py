@@ -33,9 +33,6 @@ Tuning knobs (env vars, all optional):
 Required env vars (same as the API Lambda):
   DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASS
   OPENROUTER_API_KEY
-  LEGACY_DB_HOST, LEGACY_DB_PORT, LEGACY_DB_NAME, LEGACY_DB_USER, LEGACY_DB_PASS
-    (still needed — the worker reads each project's ai_audit on/off flag from
-     epr_project_ai_audit_setting in the legacy DB)
 
 IAM role needs the same DB access (VPC + Secrets Manager if applicable) plus
 CloudWatch Logs write. No extra permissions beyond the API Lambda.
