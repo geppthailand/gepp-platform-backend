@@ -13,6 +13,22 @@ from GEPPPlatform.services.auth.auth_handlers import AuthHandlers
 from GEPPPlatform.services.cores.transactions.transaction_service import TransactionService
 from GEPPPlatform.services.cores.users.user_service import UserService
 from GEPPPlatform.services.cores.users.user_handlers import handle_get_location_allowed_materials
+from GEPPPlatform.services.cores.scale_reports.bkk_time import parse_day
+from GEPPPlatform.services.cores.scale_reports.scale_report_service import get_daily_summary
+from GEPPPlatform.services.cores.scale_reports.scale_report_token import (
+    build_report_url,
+    make_report_token,
+)
+from GEPPPlatform.services.cores.iot_devices.auto_approve import (
+    apply_auto_approve_to_payload,
+    resolve_auto_approve,
+    stamp_scale_origin,
+)
+from GEPPPlatform.services.cores.iot_devices.sorter import (
+    get_sorter_location_id,
+    is_allowed_destination,
+    list_destinations,
+)
 from GEPPPlatform.models.users.user_location import UserLocation
 from GEPPPlatform.models.users.user_related import UserLocationTag, UserTenant
 from GEPPPlatform.models.subscriptions.organizations import OrganizationSetup
@@ -253,6 +269,82 @@ def _emit_iot_event(db_session, event_type: str, organization_id=None, user_id=N
         _iot_logger.warning("CRM emit_event non-fatal (iot): %s", _exc)
 
 
+def member_origin_ids(db_session, user_id: Any, organization_id: Any) -> Set[int]:
+    """Every `origin_id` this user may act on, including setup-tree descendants.
+
+    Membership is stored per-node, but a user assigned to a parent node is
+    implicitly a member of everything under it, so the direct list has to be
+    expanded through `OrganizationSetup.root_nodes` before it can be used as
+    an authorisation set.
+
+    Extracted from the `/allowed-materials` route so the daily-summary route
+    can apply the identical rule. Two copies of an access-control check drift
+    apart eventually, and the drift is silent — one endpoint keeps letting
+    people through after the other is tightened.
+    """
+    user_service = UserService(db_session)
+    member_locations = user_service.get_locations_by_member(
+        member_user_id=user_id,
+        organization_id=organization_id
+    )
+    origin_ids: Set[int] = {
+        int(loc.get('origin_id'))
+        for loc in member_locations
+        if loc.get('origin_id') is not None
+    }
+
+    setup = (
+        db_session.query(OrganizationSetup)
+        .filter(
+            OrganizationSetup.organization_id == organization_id,
+            OrganizationSetup.is_active == True,
+            OrganizationSetup.deleted_date.is_(None),
+        )
+        .order_by(OrganizationSetup.created_date.desc())
+        .first()
+    )
+    if not setup or not setup.root_nodes:
+        return origin_ids
+
+    roots = setup.root_nodes
+    if isinstance(roots, dict):
+        roots = [roots]
+    if not isinstance(roots, list):
+        return origin_ids
+
+    def _to_int(v) -> Optional[int]:
+        if v is None:
+            return None
+        if isinstance(v, int):
+            return v
+        if isinstance(v, str) and v.isdigit():
+            return int(v)
+        return None
+
+    def _collect_all(node: Dict[str, Any], ids: Set[int]) -> None:
+        nid = _to_int(node.get('nodeId'))
+        if nid is not None:
+            ids.add(nid)
+        for ch in (node.get('children') or []):
+            if isinstance(ch, dict):
+                _collect_all(ch, ids)
+
+    def _walk(nodes: List[Dict[str, Any]], seed: Set[int], out: Set[int]) -> None:
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            nid = _to_int(node.get('nodeId'))
+            children = node.get('children') or []
+            if nid is not None and nid in seed:
+                _collect_all(node, out)
+            elif isinstance(children, list) and children:
+                _walk([ch for ch in children if isinstance(ch, dict)], seed, out)
+
+    expanded: Set[int] = set(origin_ids)
+    _walk([n for n in roots if isinstance(n, dict)], origin_ids, expanded)
+    return expanded
+
+
 def handle_get_locations_by_membership(user_service: UserService, query_params: Dict[str, Any], current_user: Dict[str, Any], db_session) -> Dict[str, Any]:
     """Handle POST /api/iot-devices/my-memberships - Get locations where current user is in members list (default role=dataInput)"""
     try:
@@ -268,6 +360,48 @@ def handle_get_locations_by_membership(user_service: UserService, query_params: 
 
         if not organization_id:
             raise NotFoundException('User is not part of any organization')
+
+        # ── ผู้คัดแยก: the same request, a different list ────────────────
+        # A sorter records what LEAVES their waste room, so the picker has to
+        # offer destinations. The tablet is unchanged — it renders whatever
+        # comes back and posts the chosen id in the same field — so the swap
+        # happens entirely here, and `list_destinations` returns rows in the
+        # exact five-key shape below. Materials stay the global list.
+        #
+        # Failing soft is deliberate: if the destination branch cannot produce a
+        # list, fall through to the normal membership list rather than 500 the
+        # tablet's login and strand the station.
+        sorter_location_id = get_sorter_location_id(
+            db_session, current_user['user_id'], organization_id
+        )
+        if sorter_location_id:
+            try:
+                destinations = list_destinations(db_session, organization_id)
+            except Exception as exc:  # noqa: BLE001
+                _iot_logger.warning(
+                    "[sorter] destination list failed for user %s (org %s), falling back to origins: %s",
+                    current_user['user_id'], organization_id, exc,
+                )
+                destinations = None
+            if destinations:
+                return {
+                    'success': True,
+                    'data': {
+                        'locations': destinations,
+                        'materials': _get_cached_materials(db_session),
+                    },
+                }
+            if destinations is not None:
+                # An empty picker is a setup problem, not a tablet problem: say so
+                # instead of showing a blank list the operator cannot act on.
+                _iot_logger.warning(
+                    "[sorter] org %s has no destinations configured; user %s cannot record outbound",
+                    organization_id, current_user['user_id'],
+                )
+                raise NotFoundException(
+                    'No destinations are configured for this organization yet. '
+                    'Ask an admin to add a destination before sorting.'
+                )
 
         member_locations = user_service.get_locations_by_member(
             member_user_id=current_user['user_id'],
@@ -1293,12 +1427,114 @@ def handle_iot_devices_routes(event: Dict[str, Any], data: Dict[str, Any], **com
             transaction_service = TransactionService(db_session)
             current_user_id = current_user.get('user_id')
             current_user_organization_id = current_user.get('organization_id')
+            device_id = current_device.get('device_id')
+
+            # Stamp the channel before anything else: this runs whether or not
+            # auto-approval is on, so "came from a scale" stays visible in the
+            # transaction list even when the org keeps the review step.
+            stamp_scale_origin(data)
+
+            # ── ผู้คัดแยก: read the payload the other way round ──────────────
+            # The tablet posted the location it was offered, and a sorter was
+            # offered destinations. So the id in `origin` is where the material is
+            # GOING; where it is coming FROM is the sorter's own waste room, which
+            # only the server knows.
+            #
+            # The destination is validated against the same list the picker was
+            # built from — nothing downstream checks destination_id at all, so if
+            # it is wrong here it is wrong forever.
+            sorter_location_id = get_sorter_location_id(
+                db_session, current_user_id, current_user_organization_id
+            )
+            if sorter_location_id:
+                posted_location_id = data.get('origin_id')
+                if posted_location_id in (None, ''):
+                    raise ValidationException('Destination is required')
+                if not is_allowed_destination(
+                    db_session, current_user_organization_id, posted_location_id
+                ):
+                    raise ValidationException(
+                        'That destination is not available for this organization'
+                    )
+                data['origin_id'] = sorter_location_id
+                # These kilograms were already weighed in from the tenant that
+                # produced them, so counting them again as waste generated would
+                # report 100 kg of real material as 200. The records still exist —
+                # the traceability pile's weight comes from them — they are just
+                # left out of tonnage. See migration 083.
+                data['is_internal_transfer'] = True
+                # Carried on every record so the traceability leg knows where the
+                # material went; the record path stores it verbatim.
+                for _rec in (data.get('records') or []):
+                    if isinstance(_rec, dict):
+                        _rec['destination_id'] = int(posted_location_id)
+                # Provenance: this row's origin was substituted by the server based
+                # on mutable state (the binding). Without a marker there is no way
+                # to tell a swapped row from one the tablet addressed itself, and
+                # no way to reconcile if a binding is later changed.
+                data['notes'] = (
+                    f"{data.get('notes')}\n" if data.get('notes') else ''
+                ) + (
+                    f"Sorted at #{sorter_location_id} by user #{current_user_id} "
+                    f"→ destination #{int(posted_location_id)}"
+                )
+
+            # ── Auto-approval (org switch + per-device override) ──────────
+            # When enabled the weighing is stored as `approved` instead of
+            # `pending`: the operator on the tablet confirmed the reading, so
+            # there is nothing for a human to add. The approver we stamp is that
+            # operator — is_user_audit stays FALSE, since nobody reviewed it.
+            # ai_audit_status is deliberately left at 'null' so AI audit can
+            # still pick the transaction up later.
+            auto_approve, flag_source = resolve_auto_approve(
+                db_session, device_id, current_user_organization_id
+            )
+            try:
+                operator_id = int(current_user_id)
+            except (TypeError, ValueError):
+                operator_id = None
+            if auto_approve:
+                apply_auto_approve_to_payload(data)
+                if operator_id is not None:
+                    data['approved_by_id'] = operator_id
+
+                # Smoke alarm, not a fire extinguisher. In "กรอกปลายทาง" mode an approval
+                # auto-creates the traceability first hop — so under auto-approval that hop
+                # is created on every weighing with nobody reviewing, and if the AI later
+                # rejects the transaction nothing removes the hop (no revert path exists).
+                # Nobody uses that mode today, which is why this is a warning rather than a
+                # fix: the day someone turns it on we find out from the logs instead of from
+                # months of wrong traceability data.
+                try:
+                    if transaction_service._user_input_destination(operator_id):
+                        _iot_logger.warning(
+                            "[auto_approve] device %s: operator %s has input_destination ON — "
+                            "traceability first hop is being auto-created without review and "
+                            "cannot be reverted if the AI rejects it later (org %s)",
+                            device_id, operator_id, current_user_organization_id,
+                        )
+                except Exception:  # noqa: BLE001 — a warning must never break a weighing
+                    pass
+
             result = handle_create_transaction(
                 transaction_service,
                 data,
                 current_user_id,
                 current_user_organization_id
             )
+
+            transaction_id = None
+            if isinstance(result, dict):
+                transaction_id = (result.get('transaction') or {}).get('id')
+
+            if auto_approve and transaction_id:
+                transaction_service.record_auto_approval(
+                    transaction_id=transaction_id,
+                    actor_user_location_id=operator_id,
+                    flag_source=flag_source,
+                    device_id=device_id,
+                )
+
             # ── CRM: emit scale_reading_received ──
             _emit_iot_event(
                 db_session,
@@ -1306,12 +1542,66 @@ def handle_iot_devices_routes(event: Dict[str, Any], data: Dict[str, Any], **com
                 organization_id=current_user_organization_id,
                 user_id=current_user_id,
                 properties={
-                    'device_id': current_device.get('device_id'),
-                    'transaction_id': result.get('transaction_id') if isinstance(result, dict) else None,
+                    'device_id': device_id,
+                    # handle_create_transaction returns the row under 'transaction';
+                    # the old result.get('transaction_id') was always None here.
+                    'transaction_id': transaction_id,
                     'origin_id': data.get('origin_id') if isinstance(data, dict) else None,
+                    'auto_approved': auto_approve,
                 },
             )
             return result
+        # ── Daily weighing summary for one station, shown on the tablet ──
+        # Same auth bar as /records (device token AND user token): the figure
+        # is the station's daily intake by material, which is commercial
+        # information — it must not be readable by whoever walks up to an
+        # idle tablet.
+        if path == '/api/iot-devices/daily-summary':
+            if method != 'POST':
+                raise APIException('Method not allowed', status_code=405, error_code='INVALID_METHOD')
+            if not current_user or not current_user.get('user_id'):
+                raise UnauthorizedException('Valid user_token is required')
+            organization_id = current_user.get('organization_id')
+            if not organization_id:
+                raise ValidationException('User is not associated with an organization')
+
+            body = data or {}
+            try:
+                origin_id = int(body.get('origin_id'))
+            except (TypeError, ValueError):
+                raise ValidationException('origin_id is required')
+            try:
+                day = parse_day(body.get('date'))
+            except ValueError:
+                raise ValidationException('date must be YYYY-MM-DD')
+
+            # Same substitution as allowed-materials: a sorter's tablet is holding
+            # a destination id. The summary they care about is their own station's
+            # intake, and it is the only one they are entitled to.
+            sorter_location_id = get_sorter_location_id(
+                db_session, current_user['user_id'], organization_id
+            )
+            if sorter_location_id:
+                origin_id = sorter_location_id
+            # Scoped to the logged-in operator's memberships, not merely the
+            # device's organisation — a borrowed tablet must not be able to
+            # read the intake of every site in the org.
+            elif origin_id not in member_origin_ids(
+                db_session, current_user['user_id'], organization_id
+            ):
+                raise UnauthorizedException('User is not a member of this location')
+
+            summary = get_daily_summary(db_session, origin_id, organization_id, day)
+            token, expires_at = make_report_token(origin_id, organization_id, day)
+            summary['report_url'] = build_report_url(token)
+            summary['report_expires_at'] = expires_at.isoformat()
+            # คืน payload ตรง ๆ ห้ามห่อ {'success':..., 'data':...} เอง —
+            # entry point ห่อให้แล้วที่ GEPPPlatform.py (`results = {"success":
+            # True, "data": iot_devices_result}`) ถ้าห่อซ้ำ client จะได้
+            # data.data ซ้อนกันแล้ว parse ไม่ออก
+            # route อื่นในไฟล์นี้ก็คืนตรง ๆ เหมือนกัน
+            return summary
+
         if path == '/api/iot-devices/qr-login':
             auth_handler = AuthHandlers(db_session)
             return auth_handler.login_iot_user(data, **common_params)
@@ -1367,66 +1657,26 @@ def handle_iot_devices_routes(event: Dict[str, Any], data: Dict[str, Any], **com
             organization_id = current_user.get('organization_id')
             if not organization_id:
                 raise ValidationException('User is not associated with an organization')
-            # Verify user is a member of the requested location (including descendants)
-            user_service = UserService(db_session)
-            member_locations = user_service.get_locations_by_member(
-                member_user_id=current_user['user_id'],
-                organization_id=organization_id
+
+            # A sorter's tablet holds a DESTINATION id, which they are not a member
+            # of — the membership gate below would 401 them out of their own screen.
+            # Resolve against their waste room instead: the materials they may
+            # record are the ones allowed where the pile physically is, not the
+            # ones allowed at the scrap dealer. (Destinations live under hub_node,
+            # which the allowed-materials tree walk never visits, so asking about a
+            # destination would also silently return "every material".)
+            sorter_location_id = get_sorter_location_id(
+                db_session, current_user['user_id'], organization_id
             )
-            member_origin_ids: Set[int] = {
-                int(loc.get('origin_id'))
-                for loc in member_locations
-                if loc.get('origin_id') is not None
-            }
-            # Expand to include descendants via org setup tree
-            setup = (
-                db_session.query(OrganizationSetup)
-                .filter(
-                    OrganizationSetup.organization_id == organization_id,
-                    OrganizationSetup.is_active == True,
-                    OrganizationSetup.deleted_date.is_(None),
+            if sorter_location_id:
+                return handle_get_location_allowed_materials(
+                    db_session, str(sorter_location_id), organization_id
                 )
-                .order_by(OrganizationSetup.created_date.desc())
-                .first()
-            )
-            if setup and setup.root_nodes:
-                roots = setup.root_nodes
-                if isinstance(roots, dict):
-                    roots = [roots]
-                if isinstance(roots, list):
-                    def _to_int(v) -> Optional[int]:
-                        if v is None:
-                            return None
-                        if isinstance(v, int):
-                            return v
-                        if isinstance(v, str) and v.isdigit():
-                            return int(v)
-                        return None
 
-                    def _collect_all(node: Dict[str, Any], ids: Set[int]) -> None:
-                        nid = _to_int(node.get('nodeId'))
-                        if nid is not None:
-                            ids.add(nid)
-                        for ch in (node.get('children') or []):
-                            if isinstance(ch, dict):
-                                _collect_all(ch, ids)
-
-                    def _walk(nodes: List[Dict[str, Any]], seed: Set[int], out: Set[int]) -> None:
-                        for node in nodes:
-                            if not isinstance(node, dict):
-                                continue
-                            nid = _to_int(node.get('nodeId'))
-                            children = node.get('children') or []
-                            if nid is not None and nid in seed:
-                                _collect_all(node, out)
-                            elif isinstance(children, list) and children:
-                                _walk([ch for ch in children if isinstance(ch, dict)], seed, out)
-
-                    expanded: Set[int] = set(member_origin_ids)
-                    _walk([n for n in roots if isinstance(n, dict)], member_origin_ids, expanded)
-                    member_origin_ids = expanded
-
-            if int(location_id) not in member_origin_ids:
+            # Verify user is a member of the requested location (including descendants)
+            if int(location_id) not in member_origin_ids(
+                db_session, current_user['user_id'], organization_id
+            ):
                 raise UnauthorizedException('User is not a member of this location')
             return handle_get_location_allowed_materials(db_session, location_id, organization_id)
 

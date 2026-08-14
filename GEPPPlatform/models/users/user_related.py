@@ -65,8 +65,11 @@ class UserInputChannel(Base, BaseModel):
     subuser_names = Column(JSON, default=list)  # List of sub-user names for login (legacy)
     subuser_material_preferences = Column(JSON, default=dict)  # Per-subuser material preferences
 
-    # Feature flags
+    # Feature flags — image upload is split into two independent toggles:
+    #   enable_upload_image             → transaction-level photo upload (the upload step)
+    #   enable_upload_image_per_material → per-material (transaction_record) photo upload (camera icon)
     enable_upload_image = Column(Boolean, default=False)
+    enable_upload_image_per_material = Column(Boolean, default=False)
     required_tag = Column(Boolean, default=False)
     is_drop_off_point = Column(Boolean, default=False)
 

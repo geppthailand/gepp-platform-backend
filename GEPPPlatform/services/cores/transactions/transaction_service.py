@@ -6,7 +6,11 @@ Handles CRUD operations, validation, and transaction record linking
 from typing import List, Optional, Dict, Any, Tuple
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.exc import SQLAlchemyError
+<<<<<<< HEAD
 from sqlalchemy import cast, String, exists, and_, func, or_, true
+=======
+from sqlalchemy import cast, String, exists, and_, func, or_, true, false
+>>>>>>> 6880dee6baba2a9f8b7a5d65b27600b67f275450
 from sqlalchemy.dialects.postgresql import JSONB
 import json
 import logging
@@ -16,6 +20,12 @@ from decimal import Decimal
 
 # Timezone for traceability group year/month (record date interpreted in this zone)
 TRACEABILITY_DATE_TZ = "Asia/Bangkok"
+
+# Decides whether a transaction's traceability piles are per weigh-in or per month.
+# auto_approve is a leaf module (logging + typing + sqlalchemy.text only), so this
+# import cannot cycle back into transactions.
+from ....libs.node_ids import to_node_id
+from ..iot_devices.auto_approve import scale_pile_source_transaction_id
 
 import boto3
 
@@ -100,7 +110,8 @@ class TransactionService:
     def create_transaction(
         self,
         transaction_data: Dict[str, Any],
-        transaction_records_data: List[Dict[str, Any]] = None
+        transaction_records_data: List[Dict[str, Any]] = None,
+        enforce_access: bool = False
     ) -> Dict[str, Any]:
         """
         Create a new transaction with optional transaction records
@@ -108,13 +119,19 @@ class TransactionService:
         Args:
             transaction_data: Dict containing transaction information
             transaction_records_data: List of dicts containing transaction record data
+            enforce_access: check that `created_by_id` may actually write at `origin_id`
+                with the given tag/tenant. Only the authenticated web path passes True —
+                bulk import, QR and scale channels create rows on behalf of non-user
+                actors and resolve their own permissions upstream.
 
         Returns:
             Dict with success status and transaction data
         """
         try:
             # Validate transaction data
-            validation_errors = self._validate_transaction_data(transaction_data)
+            validation_errors = self._validate_transaction_data(
+                transaction_data, enforce_access=enforce_access
+            )
             if validation_errors:
                 return {
                     'success': False,
@@ -146,6 +163,14 @@ class TransactionService:
                 treatment_method=transaction_data.get('treatment_method'),
                 disposal_method=transaction_data.get('disposal_method'),
                 created_by_id=transaction_data.get('created_by_id'),
+                # Set only by callers that create an already-approved transaction
+                # (IoT scale auto-approval). Normal creates leave it NULL and the
+                # approver is stamped when someone actually approves.
+                approved_by_id=transaction_data.get('approved_by_id'),
+                import_file_id=transaction_data.get('import_file_id'),  # bulk-import batch tag (revert unit)
+                # Set by the sorter path only: material already reported at its
+                # origin, so its weight is excluded from waste-generated totals.
+                is_internal_transfer=bool(transaction_data.get('is_internal_transfer', False)),
                 weight_kg=Decimal('0'),  # Will be calculated from transaction records
                 total_amount=Decimal('0')  # Will be calculated from transaction records
             )
@@ -163,8 +188,12 @@ class TransactionService:
                         transaction.id
                     )
                     if record_result['success']:
-                        transaction_record_ids.append(record_result['transaction_record'].id)
-                        # Collect destination_id from each record (in same order as records)
+                        _rec = record_result['transaction_record']
+                        transaction_record_ids.append(_rec.id)
+                        # Collect destination_id from each record (in same order as records).
+                        # NOTE: in input_destination mode the traceability first hop is created on
+                        # APPROVE (see _create_first_hops_for_approved_transaction), not here —
+                        # groups are approved-centric, so a pending transaction gets no hop yet.
                         destination_ids.append(record_data.get('destination_id'))
                     else:
                         # Rollback transaction if any record fails
@@ -222,6 +251,10 @@ class TransactionService:
                     properties={'transaction_id': transaction.id},
                 )
 
+            # If the transaction is created already-approved (rare), generate the first hop now.
+            if getattr(transaction, 'status', None) == TransactionStatus.approved:
+                self._create_first_hops_for_approved_transaction(transaction)
+
             return {
                 'success': True,
                 'message': 'Transaction created successfully',
@@ -245,6 +278,432 @@ class TransactionService:
                 'message': 'An unexpected error occurred',
                 'errors': [str(e)]
             }
+
+    # ── Provenance shown in the transaction list ─────────────────────────
+    # Two INDEPENDENT axes, deliberately not collapsed into one badge:
+    #   source          — the channel the data arrived through (true forever)
+    #   approval_source — who decided the current status (only once decided)
+    # Merging them would make scale rows lose their marking the day an org turns
+    # auto-approval off, which is exactly when tracing them matters again.
+
+    @staticmethod
+    def _transaction_source(transaction) -> str:
+        """'iot' | 'qr_input' | 'import' | 'manual' — derived from the row itself, no joins."""
+        method = getattr(transaction, 'transaction_method', None)
+        if method == 'scale_input':
+            return 'iot'
+        if method == 'qr_input':
+            return 'qr_input'
+        if getattr(transaction, 'import_file_id', None):
+            return 'import'
+        return 'manual'
+
+    @staticmethod
+    def _approval_source(transaction, is_auto_scale: bool) -> Optional[str]:
+        """'human' | 'ai' | 'auto_scale', or None while the transaction is undecided.
+
+        Precedence human > ai > auto_scale: a later human or AI verdict overrides the
+        machine approval that created the row, so the badge always names whoever the
+        CURRENT status belongs to.
+        """
+        status = getattr(transaction, 'status', None)
+        status_val = getattr(status, 'value', status)
+        if status_val not in ('approved', 'rejected'):
+            return None
+        if getattr(transaction, 'is_user_audit', False):
+            return 'human'
+        ai_status = getattr(transaction, 'ai_audit_status', None)
+        if getattr(ai_status, 'value', ai_status) in ('approved', 'rejected'):
+            return 'ai'
+        if is_auto_scale:
+            return 'auto_scale'
+        # Decided through the plain status-update endpoint — a person, just not via audit.
+        return 'human'
+
+    def _auto_approved_ids(self, transaction_ids: List[int]) -> set:
+        """Which of these transactions carry a machine-approval audit row.
+
+        One query for the whole page — never per row: this runs on the main transaction
+        list, which is already the heaviest query in the app.
+        """
+        if not transaction_ids:
+            return set()
+        try:
+            from ....models.transactions.transaction_audits import TransactionAudit
+            rows = self.db.query(TransactionAudit.transaction_id).filter(
+                TransactionAudit.transaction_id.in_(transaction_ids),
+                TransactionAudit.audit_type == 'auto_scale',
+                TransactionAudit.deleted_date.is_(None),
+            ).distinct().all()
+            return {r[0] for r in rows}
+        except Exception as exc:  # noqa: BLE001 — a missing badge must not break the list
+            logger.warning("[auto_approve] approval-source lookup failed: %s", exc)
+            return set()
+
+    def record_auto_approval(
+        self,
+        transaction_id: int,
+        actor_user_location_id: Optional[int],
+        flag_source: str,
+        device_id: Optional[int] = None,
+        channel: str = 'iot_auto_approve',
+    ) -> None:
+        """Write the audit trail for a transaction that was created already-approved
+        by a machine (IoT scale auto-approval).
+
+        `create_transaction` sets the statuses and the traceability first hop; this
+        records WHY, so an auto-approval is as traceable afterwards as a human one.
+        Mirrors ManualAuditService.approve_transaction, minus the two fields that
+        would misrepresent a machine decision as a human review:
+
+          • is_user_audit stays FALSE  — nobody reviewed this
+          • audit_date    stays NULL   — reserved for a real audit
+          • ai_audit_status stays 'null' — keeps the row eligible for AI audit later
+
+        Best-effort: a failure here must never fail the weighing that the operator
+        already saved on the tablet.
+        """
+        try:
+            from ....models.transactions.transaction_audits import TransactionAudit
+
+            transaction = self.db.query(Transaction).filter(
+                Transaction.id == transaction_id
+            ).first()
+            if not transaction:
+                logger.warning("[auto_approve] transaction %s vanished before audit log", transaction_id)
+                return
+
+            note_line = (
+                f"Auto-approved on save by {channel} "
+                f"(flag source: {flag_source}"
+                + (f", device #{device_id}" if device_id else "")
+                + ")"
+            )
+            transaction.notes = (
+                f"{transaction.notes}\n\n{note_line}" if transaction.notes else note_line
+            )
+
+            audit_notes = {
+                's': 'approved',
+                'v': [],  # no violations — nothing was checked
+                'src': channel,
+                'flag_source': flag_source,
+            }
+            if device_id:
+                audit_notes['device_id'] = device_id
+
+            self.db.add(TransactionAudit(
+                transaction_id=transaction_id,
+                audit_notes=audit_notes,
+                by_human=False,  # machine decision — do not claim a human reviewed it
+                auditor_id=actor_user_location_id,
+                organization_id=transaction.organization_id,
+                audit_type='auto_scale',
+                audit_status=TransactionStatus.approved.value,
+                ai_audit_status=(
+                    transaction.ai_audit_status.value
+                    if getattr(transaction.ai_audit_status, 'value', None)
+                    else AIAuditStatus.null.value
+                ),
+                created_by_id=actor_user_location_id,
+            ))
+            self.db.commit()
+
+            # The normal approve path emits this from update_transaction; a
+            # create-as-approved never passes through there, so CRM segments and
+            # automations keyed on approval would miss every scale reading.
+            _emit_transaction_event(
+                self.db, 'transaction_approved', transaction,
+                properties={
+                    'transaction_id': transaction_id,
+                    'auto': True,
+                    'flag_source': flag_source,
+                    'device_id': device_id,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.db.rollback()
+            logger.warning("[auto_approve] audit trail failed for transaction %s: %s", transaction_id, exc)
+
+    def _user_input_destination(self, user_location_id: Optional[int]) -> bool:
+        """True when THIS user has input_destination enabled ("กรอกปลายทาง" mode). The toggle is
+        per-user (user_locations_settings); default False when the user has no row. Used at
+        approval time keyed on the transaction's creator."""
+        if not user_location_id:
+            return False
+        try:
+            from ....models.users.user_locations_settings import UserLocationSettings
+            row = self.db.query(UserLocationSettings).filter(
+                UserLocationSettings.user_location_id == user_location_id,
+                UserLocationSettings.deleted_date.is_(None),
+            ).first()
+            return bool(row.input_destination) if row else False
+        except Exception:
+            return False
+
+    def _waste_room_for_location(self, location_id: int, organization_id: int) -> Optional[int]:
+        """The ห้องขยะ that collects material weighed in at this location, or None.
+
+        Read straight off the location row (migration 081) rather than inferred from
+        the org chart: the chart lives in organization_setup.root_nodes as JSON that
+        the setup importer rebuilds from scratch, so anything stored there would not
+        survive a re-import.
+
+        Inherited from the nearest ancestor in the org chart when the location itself
+        has none. An admin sets it once on the building and every floor, room and
+        tenant underneath follows — which is both what the field's help text promises
+        and the only workable setup, since material is weighed at the leaf, not at the
+        building. The nearest binding wins, so a floor with its own waste room still
+        overrides the building's.
+
+        The chart lives in organization_setup.root_nodes as JSON — user_locations'
+        parent columns are never written for locations — so the ancestor walk has to
+        go through the setup.
+        """
+        if not location_id or not organization_id:
+            return None
+        try:
+            location_id = int(location_id)
+        except (TypeError, ValueError):
+            return None
+        try:
+            chain = [location_id] + self._location_ancestors(location_id, organization_id)
+            rows = self.db.query(
+                UserLocation.id, UserLocation.waste_room_location_id
+            ).filter(
+                UserLocation.id.in_(chain),
+                UserLocation.organization_id == organization_id,
+                UserLocation.deleted_date.is_(None),
+            ).all()
+        except Exception:  # noqa: BLE001 — a missing column must never fail an approval
+            return None
+        bound = {r[0]: r[1] for r in rows if r[1]}
+        for candidate in chain:          # nearest first
+            if candidate in bound:
+                return bound[candidate]
+        return None
+
+    def _location_ancestors(self, location_id: int, organization_id: int) -> List[int]:
+        """Ancestors of a location, nearest first, from the org-chart JSON."""
+        from ....models.subscriptions.organizations import OrganizationSetup
+        setup = self.db.query(OrganizationSetup).filter(
+            OrganizationSetup.organization_id == organization_id,
+            OrganizationSetup.is_active == True,
+        ).first()
+        if not setup or not setup.root_nodes:
+            return []
+
+        parent_of: Dict[int, int] = {}
+
+        def walk(nodes, parent_id):
+            for node in nodes if isinstance(nodes, list) else []:
+                if not isinstance(node, dict):
+                    continue
+                nid = to_node_id(node.get('nodeId'))
+                # An unsaved node has no id but its children may be real, so the
+                # walk carries the last known parent through rather than stopping.
+                if nid is not None and parent_id is not None:
+                    parent_of[nid] = parent_id
+                walk(node.get('children'), nid if nid is not None else parent_id)
+
+        walk(setup.root_nodes, None)
+
+        chain: List[int] = []
+        seen = {location_id}
+        cur = parent_of.get(location_id)
+        while cur is not None and cur not in seen:
+            chain.append(cur)
+            seen.add(cur)
+            cur = parent_of.get(cur)
+        return chain
+
+    def _create_first_hops_for_approved_transaction(self, transaction) -> None:
+        """input_destination mode: when a transaction is APPROVED, auto-create the traceability
+        FIRST HOP (origin → the destination chosen at data entry) as an in_transit
+        TransportTransaction, so it lands in the midway "อยู่ระหว่างขนส่ง" bucket on the
+        Traceability board. Idempotent (dedupes on re-approval) and best-effort — a failure here
+        must never fail the approval itself.
+
+        Groups are found/created here at approve-time (the board keys groups by
+        origin+material+tag+tenant+month); the record's reverse pointer is set so the lazy
+        materialization on read reuses this group and never double-creates.
+        """
+        try:
+            if not transaction:
+                return
+            org_id = transaction.organization_id
+            origin_id = transaction.origin_id
+            # See _upsert_traceability_groups_for_transaction — one pile per
+            # weigh-in for a scale, the monthly pile for everything else.
+            source_transaction_id = scale_pile_source_transaction_id(transaction)
+
+            # ห้องขยะ: for material a scale recorded, an admin can nominate the waste
+            # room this location feeds (migration 081). That standing instruction is
+            # what replaces someone dragging a card on the board every day, so it also
+            # stands in for the per-user "กรอกปลายทาง" opt-in below — an org that has
+            # set a waste room has already said where this material goes.
+            waste_room_id = None
+            if source_transaction_id is not None and origin_id is not None:
+                waste_room_id = self._waste_room_for_location(origin_id, org_id)
+
+            # Per-user "กรอกปลายทาง": gate on the transaction CREATOR's setting (the person who
+            # entered the destination at data-entry), not an org-wide flag.
+            #
+            # A scale reading skips that gate. The setting exists so the web form knows
+            # whether to ask for a destination; a tablet that already posted one has
+            # answered the question, and a ผู้คัดแยก's weigh-out always posts one. Left
+            # in, the operator would have to find a per-user checkbox on the web before
+            # the tablet's own instruction counted — and the codebase notes nobody uses
+            # that mode today, so it would silently be off for every new site.
+            if (
+                waste_room_id is None
+                and source_transaction_id is None
+                and not self._user_input_destination(getattr(transaction, 'created_by_id', None))
+            ):
+                return
+            from ....models.transactions.traceability_transaction_group import TraceabilityTransactionGroup
+            from ....models.transactions.transport_transaction import TransportTransaction
+            from ..traceability.traceability_service import TraceabilityService
+
+            record_filters = [
+                TransactionRecord.created_transaction_id == transaction.id,
+                TransactionRecord.is_active == True,
+                TransactionRecord.deleted_date.is_(None),
+            ]
+            if waste_room_id is None:
+                # No standing instruction, so only records that name a destination
+                # themselves can be hopped — the original behaviour.
+                record_filters.append(TransactionRecord.destination_id.isnot(None))
+            records = self.db.query(TransactionRecord).filter(*record_filters).all()
+            if not records:
+                return
+
+            tag_id = getattr(transaction, 'location_tag_id', None)
+            tenant_id = getattr(transaction, 'tenant_id', None)
+            tsvc = TraceabilityService(self.db)
+
+            # One hop per (pile, destination), not per record. Creating one per record
+            # was already wrong: the dedupe below matches on
+            # (group, is_root, destination, material) and skips, so the second record
+            # of the same material silently got no hop and its weight never moved.
+            # Summing also keeps the pile's roots equal to the pile weight, which is
+            # what the whole-pile guard in create_transport_transactions requires.
+            hop_buckets: Dict[Tuple[int, int, int], float] = {}
+
+            for rec in records:
+                date_for_ym = getattr(rec, 'transaction_date', None) or getattr(transaction, 'transaction_date', None)
+                year, month = self._transaction_date_year_month(date_for_ym)
+                if year is None or month is None:
+                    continue
+
+                group = self.db.query(TraceabilityTransactionGroup).filter(
+                    TraceabilityTransactionGroup.origin_id == origin_id,
+                    TraceabilityTransactionGroup.material_id == rec.material_id,
+                    TraceabilityTransactionGroup.organization_id == org_id,
+                    TraceabilityTransactionGroup.location_tag_id == tag_id,
+                    TraceabilityTransactionGroup.tenant_id == tenant_id,
+                    TraceabilityTransactionGroup.transaction_year == year,
+                    TraceabilityTransactionGroup.transaction_month == month,
+                    TraceabilityTransactionGroup.source_transaction_id == source_transaction_id,
+                    TraceabilityTransactionGroup.is_active == True,
+                    TraceabilityTransactionGroup.deleted_date.is_(None),
+                ).first()
+                if not group:
+                    group = TraceabilityTransactionGroup(
+                        origin_id=origin_id, material_id=rec.material_id, organization_id=org_id,
+                        transaction_record_id=[rec.id], transaction_carried_over=[],
+                        transaction_year=year, transaction_month=month,
+                        location_tag_id=tag_id, tenant_id=tenant_id, is_active=True,
+                        source_transaction_id=source_transaction_id,
+                    )
+                    self.db.add(group)
+                    self.db.flush()
+                else:
+                    ids = list(group.transaction_record_id or [])
+                    if rec.id not in ids:
+                        group.transaction_record_id = ids + [rec.id]
+                if getattr(rec, 'traceability_group_id', None) != group.id:
+                    rec.traceability_group_id = group.id
+
+                destination_id = rec.destination_id or waste_room_id
+                if destination_id is None or destination_id == origin_id:
+                    # Nowhere to go, or the standing instruction points at this very
+                    # location — a self-loop hop would be meaningless. This is also
+                    # what keeps the sorter's own weigh-out, whose origin IS the waste
+                    # room, from being sent straight back into it.
+                    continue
+
+                bucket = (group.id, int(destination_id), rec.material_id)
+                hop_buckets[bucket] = hop_buckets.get(bucket, 0.0) + float(
+                    getattr(rec, 'origin_weight_kg', 0) or 0
+                )
+
+            # What each destination does with what it receives. A leg only reads as
+            # finished — on the board and in the recycling rate — once it carries a
+            # method, and a scale can say where material went but not what happened to
+            # it there. Configured on the destination, so it costs one query for the
+            # whole batch rather than a decision per shipment.
+            disposal_by_destination: Dict[int, Optional[str]] = {}
+            if hop_buckets:
+                try:
+                    for _did, _method in self.db.query(
+                        UserLocation.id, UserLocation.default_disposal_method
+                    ).filter(
+                        UserLocation.id.in_({d for (_g, d, _m) in hop_buckets}),
+                        UserLocation.organization_id == org_id,
+                    ).all():
+                        if _method:
+                            disposal_by_destination[_did] = _method
+                except Exception:  # noqa: BLE001 — code may be ahead of migration 084
+                    disposal_by_destination = {}
+
+            for (group_id, destination_id, material_id), weight in hop_buckets.items():
+                # Dedup: skip if a matching root hop already exists (e.g. transaction re-approved).
+                existing = self.db.query(TransportTransaction.id).filter(
+                    TransportTransaction.transaction_group_id == group_id,
+                    TransportTransaction.is_root == True,
+                    TransportTransaction.destination_id == destination_id,
+                    TransportTransaction.material_id == material_id,
+                    TransportTransaction.deleted_date.is_(None),
+                ).first()
+                if existing:
+                    continue
+
+                hop_item: Dict[str, Any] = {
+                    'weight': weight,
+                    'origin_id': origin_id,
+                    'destination_id': destination_id,
+                    'material_id': material_id,
+                }
+                # Absent for a waste room or any other waypoint, which is what keeps a
+                # hop INTO the building from being reported as material disposed of.
+                if disposal_by_destination.get(destination_id):
+                    hop_item['disposal_method'] = disposal_by_destination[destination_id]
+                hop_res = tsvc.create_transport_transactions(
+                    data=[hop_item],
+                    organization_id=org_id,
+                    transaction_group_id=group_id,
+                )
+                if not hop_res.get('success'):
+                    # The whole-pile guard can refuse this — e.g. an earlier hop
+                    # already moved part of the pile elsewhere. Log and leave the
+                    # rest of the transaction alone rather than aborting approval.
+                    logger.warning(
+                        "Auto first-hop refused for transaction %s group %s: %s",
+                        getattr(transaction, 'id', '?'), group_id, hop_res.get('message'),
+                    )
+                    continue
+                # Approving = the waste has ARRIVED at the midway destination. Confirm arrival so the
+                # hop moves from "อยู่ระหว่างขนส่ง" (in_transit) to "รอดำเนินการขนส่งต่อ"
+                # (status='arrived', no disposal_method → awaiting the next hop).
+                for _tid in (hop_res.get('ids') or []):
+                    tsvc.confirm_arrival(_tid, org_id)
+
+            self.db.commit()
+        except Exception as e:  # noqa: BLE001 — best-effort, must not fail the approval
+            self.db.rollback()
+            logger.error(f"Auto first-hop (on approve) failed for transaction "
+                         f"{getattr(transaction, 'id', '?')}: {str(e)}")
 
     def _send_email_via_lambda(
         self,
@@ -1447,15 +1906,38 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
             send_email_fn=self._send_txn_rejected_emails,
         )
 
+<<<<<<< HEAD
     def is_transaction_shared_to_org(self, transaction: Dict[str, Any], target_org_id: int) -> bool:
         """True if a cross-org transaction is visible to target_org_id via an effective placed share
         (within the share's date window). Used to allow READ-ONLY detail viewing of shared rows."""
+=======
+    def is_transaction_shared_to_org(self, transaction: Dict[str, Any], target_org_id: int,
+                                     current_user_id: Any = None) -> bool:
+        """True if a cross-org transaction is visible to target_org_id via an effective placed share
+        (within the share's date window). Used to allow READ-ONLY detail viewing of shared rows.
+
+        When current_user_id is given, the same 3-tier gate as the list applies: a non-owner may
+        view the shared row only if the share's placement parent is in their assigned set."""
+>>>>>>> 6880dee6baba2a9f8b7a5d65b27600b67f275450
         try:
             origin_id = transaction.get('origin_id')
             src_org = transaction.get('organization_id')
             if origin_id is None or src_org is None or src_org == target_org_id:
                 return False
 
+<<<<<<< HEAD
+=======
+            # 3-tier ACCESS gate on the placement parent (owner / no user → no restriction).
+            visible_parent_ids: Optional[set] = None
+            if current_user_id is not None:
+                from ..users.user_service import UserService
+                user_service = UserService(self.db)
+                locations = user_service.crud.get_user_locations(organization_id=target_org_id)
+                tiers = user_service._resolve_location_tiers(locations, int(target_org_id), int(current_user_id))
+                if not tiers['is_owner']:
+                    visible_parent_ids = tiers['assigned_ids'] or set()
+
+>>>>>>> 6880dee6baba2a9f8b7a5d65b27600b67f275450
             def _aware(dt):
                 return dt.replace(tzinfo=timezone.utc) if dt is not None and dt.tzinfo is None else dt
 
@@ -1483,6 +1965,12 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                     SharedUserLocation.expired_date > now),
             ).all()
             for share in shares:
+<<<<<<< HEAD
+=======
+                if visible_parent_ids is not None \
+                   and share.placed_parent_node_id not in visible_parent_ids:
+                    continue
+>>>>>>> 6880dee6baba2a9f8b7a5d65b27600b67f275450
                 src_ids = self._collect_source_subtree_ids(
                     share.source_organization_id, share.source_user_location_id)
                 if origin_id not in src_ids:
@@ -1659,6 +2147,45 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
             return []
         return setup.root_nodes if isinstance(setup.root_nodes, list) else []
 
+<<<<<<< HEAD
+=======
+    def _active_setup_node_ids(self, organization_id: int) -> Optional[set]:
+        """
+        All nodeIds currently in the active org-setup tree (root_nodes + hub_node children).
+        Returns None when the org has NO setup row at all (→ caller should not filter, "no tree =
+        no filtering"); an empty set when a setup exists but its tree is empty (→ everything is
+        orphaned, so the caller hides all). Used to hide transactions whose origin was dropped
+        from the chart (e.g. a setup-import replaced it → recycle bin); restoring the location
+        puts it back in the tree and the transactions reappear.
+        """
+        setup = self.db.query(OrganizationSetup).filter(
+            OrganizationSetup.organization_id == organization_id,
+            OrganizationSetup.is_active == True,  # noqa: E712
+        ).first()
+        if not setup:
+            setup = self.db.query(OrganizationSetup).filter(
+                OrganizationSetup.organization_id == organization_id
+            ).order_by(OrganizationSetup.created_date.desc()).first()
+        if not setup:
+            return None
+        ids: set = set()
+
+        def _collect(nodes):
+            for n in nodes if isinstance(nodes, list) else []:
+                nid = n.get('nodeId')
+                if nid is not None:
+                    try:
+                        ids.add(int(nid))
+                    except (TypeError, ValueError):
+                        pass  # virtual/shared string id — not a real origin
+                _collect(n.get('children') or [])
+
+        _collect(setup.root_nodes or [])
+        hub = setup.hub_node if isinstance(setup.hub_node, dict) else {}
+        _collect(hub.get('children') or [])
+        return ids
+
+>>>>>>> 6880dee6baba2a9f8b7a5d65b27600b67f275450
     def _collect_source_subtree_ids(self, source_org_id: int, source_location_id: int) -> set:
         """Real (positive) location ids for source_location_id + its descendants, from the
         SOURCE org's tree. Excludes any nested shared/virtual nodes (defensive vs. re-share)."""
@@ -1693,7 +2220,12 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
 
         return _find(root_nodes) or {source_location_id}
 
+<<<<<<< HEAD
     def _resolve_shared_branches(self, organization_id: int, own_selected_ids: Optional[set]):
+=======
+    def _resolve_shared_branches(self, organization_id: int, own_selected_ids: Optional[set],
+                                 visible_parent_ids: Optional[set] = None):
+>>>>>>> 6880dee6baba2a9f8b7a5d65b27600b67f275450
         """Resolve placed cross-org shares granted to this org into per-share query specs.
 
         Placement lives on the share record (placed_parent_node_id), NOT in root_nodes, so this
@@ -1706,6 +2238,14 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
         own_selected_ids is None when there is no location filter (ALL placed shares in scope);
         when a location filter is applied it is the expanded selected id set, and a share is in
         scope only if its placed_parent_node_id is within it.
+<<<<<<< HEAD
+=======
+
+        visible_parent_ids is the 3-tier ACCESS gate: a shared node inherits the visibility of the
+        real location it is placed under (placed_parent_node_id). None => no restriction (owner, or
+        member-filtering disabled). When a set is given, a share is included only if its placement
+        parent is in it — so a non-owner assigned to an unrelated branch never sees the shared data.
+>>>>>>> 6880dee6baba2a9f8b7a5d65b27600b67f275450
         """
         now = datetime.now(timezone.utc)
         shares = self.db.query(SharedUserLocation).filter(
@@ -1724,6 +2264,15 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
         # Resolve each in-scope share to its source subtree ids.
         resolved = []  # (share, src_ids)
         for share in shares:
+<<<<<<< HEAD
+=======
+            # 3-tier ACCESS gate: the shared node inherits its placement parent's visibility, so a
+            # non-owner only sees it when that parent is in their assigned set (Tier 1). Owners /
+            # unfiltered callers pass None. Skip before the location-filter check.
+            if visible_parent_ids is not None \
+               and share.placed_parent_node_id not in visible_parent_ids:
+                continue
+>>>>>>> 6880dee6baba2a9f8b7a5d65b27600b67f275450
             # In scope when: no location filter; the placement parent (or an ancestor) is selected;
             # or the shared node itself was selected (its virtual id).
             if own_selected_ids is not None \
@@ -1779,6 +2328,10 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                     'share_id': share.id,
                     'label': label,
                     'source_org_name': src_org_name,
+<<<<<<< HEAD
+=======
+                    'placed_parent_node_id': share.placed_parent_node_id,
+>>>>>>> 6880dee6baba2a9f8b7a5d65b27600b67f275450
                 }
         return branches, share_meta_by_origin
 
@@ -1823,7 +2376,9 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
         location_ids: Optional[list] = None,
         filter_tag_ids: Optional[list] = None,
         filter_tenant_ids: Optional[list] = None,
-        material_ids: Optional[list] = None
+        material_ids: Optional[list] = None,
+        source: Optional[str] = None,
+        approval_source: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         List transactions with filtering and pagination
@@ -1870,6 +2425,16 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                 joinedload(Transaction.created_by)
             ).filter(Transaction.deleted_date.is_(None))
 
+<<<<<<< HEAD
+=======
+            # Traceability hops (transaction_method='transport') are NOT data-entry transactions —
+            # they're the movement records shown on the Traceability page, not this audit list.
+            # Exclude them so the auto first-hop (input_destination mode) and manual hops don't
+            # appear here as empty "extra" rows. Origin/QR/scale data-entry transactions stay.
+            query = query.filter(or_(Transaction.transaction_method != 'transport',
+                                     Transaction.transaction_method.is_(None)))
+
+>>>>>>> 6880dee6baba2a9f8b7a5d65b27600b67f275450
             # Global filters (apply to own AND shared rows alike)
             if status:
                 query = query.filter(Transaction.status == status)
@@ -1882,10 +2447,20 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
             if organization_id:
                 own_conditions.append(Transaction.organization_id == organization_id)
 
+<<<<<<< HEAD
             # 3-tier location access: owners see all, members see assigned locations only
+=======
+            # 3-tier location access: owners see all, members see assigned locations only.
+            # shared_visible_parent_ids gates cross-org shared nodes below: a shared node inherits
+            # the visibility of the real location it is placed under, so a non-owner only sees it
+            # when that parent is in their assigned set. None => no restriction (owner / no user).
+            shared_visible_parent_ids: Optional[set] = None
+>>>>>>> 6880dee6baba2a9f8b7a5d65b27600b67f275450
             if current_user_id is not None and organization_id:
                 from ..users.user_service import UserService
+                from ....libs.locationAccess import build_visibility_clause
                 user_service = UserService(self.db)
+<<<<<<< HEAD
                 locations = user_service.crud.get_user_locations(organization_id=organization_id)
                 tiers = user_service._resolve_location_tiers(locations, organization_id, int(current_user_id))
                 if not tiers['is_owner']:
@@ -1894,6 +2469,32 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                         own_conditions.append(Transaction.origin_id.is_(None))
                     else:
                         own_conditions.append(Transaction.origin_id.in_(list(assigned_ids)))
+=======
+                scope = user_service.resolve_access_scope(organization_id, int(current_user_id))
+                if not scope['is_owner']:
+                    # Cross-org shares stay gated on assigned_ids only: a tag/tenant grant
+                    # is scoped to this org's locations and must not pull in another org's
+                    # shared branch, which carries no tag/tenant of ours to match on.
+                    shared_visible_parent_ids = scope['assigned_ids'] or set()
+                    own_conditions.append(build_visibility_clause(
+                        scope,
+                        origin_col=Transaction.origin_id,
+                        tag_col=Transaction.location_tag_id,
+                        tenant_col=Transaction.tenant_id,
+                        date_col=Transaction.transaction_date,
+                    ))
+
+            # Hide transactions whose origin is no longer in the active org chart — e.g. a location
+            # a setup-import replaced (moved to the recycle bin) or a reverted import stripped out.
+            # They come back automatically if the location is restored to the tree. Applies to
+            # everyone incl. owners. `None` = the org has no setup at all → don't filter.
+            active_node_ids = self._active_setup_node_ids(organization_id)
+            if active_node_ids is not None:
+                own_conditions.append(or_(
+                    Transaction.origin_id.in_(list(active_node_ids)) if active_node_ids else false(),
+                    Transaction.origin_id.is_(None),
+                ))
+>>>>>>> 6880dee6baba2a9f8b7a5d65b27600b67f275450
 
             # New multi-select location filter: location_ids + descendants (union)
             own_selected_ids = None  # None => no location filter (all placed shares in scope)
@@ -1949,7 +2550,11 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
             # root_nodes. When a location filter is active, a share is included only if its
             # placement parent is within the selected set.
             shared_branches, share_meta_by_origin = self._resolve_shared_branches(
+<<<<<<< HEAD
                 organization_id, own_selected_ids)
+=======
+                organization_id, own_selected_ids, visible_parent_ids=shared_visible_parent_ids)
+>>>>>>> 6880dee6baba2a9f8b7a5d65b27600b67f275450
             if shared_branches:
                 shared_clauses = []
                 for b in shared_branches:
@@ -1965,6 +2570,50 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                 query = query.filter(or_(own_clause, *shared_clauses))
             else:
                 query = query.filter(own_clause)
+<<<<<<< HEAD
+=======
+
+            # ── Provenance filters (mirror the badges in the list) ──────────────
+            # source: only rows created AFTER this shipped carry the marker — older scale
+            # rows are indistinguishable from web entries and cannot be back-filled.
+            if source == 'iot':
+                query = query.filter(Transaction.transaction_method == 'scale_input')
+            elif source == 'qr_input':
+                query = query.filter(Transaction.transaction_method == 'qr_input')
+            elif source == 'import':
+                query = query.filter(Transaction.import_file_id.isnot(None))
+            elif source == 'manual':
+                query = query.filter(
+                    or_(Transaction.transaction_method.is_(None),
+                        Transaction.transaction_method.notin_(['scale_input', 'qr_input'])),
+                    Transaction.import_file_id.is_(None),
+                )
+
+            # approval_source: same precedence as _approval_source() so the filter and the
+            # badge can never disagree.
+            if approval_source:
+                from ....models.transactions.transaction_audits import TransactionAudit
+                auto_scale_exists = exists().where(
+                    and_(
+                        TransactionAudit.transaction_id == Transaction.id,
+                        TransactionAudit.audit_type == 'auto_scale',
+                        TransactionAudit.deleted_date.is_(None),
+                    )
+                )
+                ai_decided = Transaction.ai_audit_status.in_([AIAuditStatus.approved, AIAuditStatus.rejected])
+                if approval_source == 'human':
+                    query = query.filter(
+                        or_(Transaction.is_user_audit == True,
+                            and_(Transaction.is_user_audit == False, ~ai_decided, ~auto_scale_exists,
+                                 Transaction.status.in_([TransactionStatus.approved, TransactionStatus.rejected])))
+                    )
+                elif approval_source == 'ai':
+                    query = query.filter(Transaction.is_user_audit == False, ai_decided)
+                elif approval_source == 'auto_scale':
+                    query = query.filter(
+                        Transaction.is_user_audit == False, ~ai_decided, auto_scale_exists
+                    )
+>>>>>>> 6880dee6baba2a9f8b7a5d65b27600b67f275450
 
             # New multi-select tag/tenant filters (intersect with location results)
             if filter_tag_ids:
@@ -2109,13 +2758,88 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                               .all()
             logger.info(f"Retrieved {len(transactions)} transactions")
 
+            # Ancestor breadcrumb per origin (e.g. ["Bangkok Branch", "UOB Phetkasem"]), built ONCE
+            # from the org tree and bundled INTO each row below — so the location column shows the
+            # full path in the SAME payload as the name, instead of waiting on the separate
+            # filter-options request. Same source/order as the create-transaction location picker.
+            loc_parent_map: Dict[int, int] = {}
+            loc_names: Dict[int, str] = {}
+            try:
+                _rn = self._active_root_nodes(organization_id)
+                if _rn:
+                    def _walk_paths(nodes, parent=None):
+                        for node in nodes if isinstance(nodes, list) else []:
+                            nid = node.get('nodeId')
+                            if nid is None:
+                                continue
+                            nid = int(nid) if isinstance(nid, str) else nid
+                            if parent is not None:
+                                loc_parent_map[nid] = parent
+                            kids = node.get('children') or []
+                            if kids:
+                                _walk_paths(kids, nid)
+                    _walk_paths(_rn)
+                    for row in self.db.query(
+                        UserLocation.id, UserLocation.display_name,
+                        UserLocation.name_th, UserLocation.name_en,
+                    ).filter(
+                        UserLocation.organization_id == organization_id,
+                        UserLocation.is_active == True,
+                        UserLocation.deleted_date.is_(None),
+                    ).all():
+                        loc_names[row.id] = (row.display_name or row.name_th
+                                             or row.name_en or f"Location {row.id}")
+            except Exception as e:  # noqa: BLE001 — path is decorative; never fail the list
+                logger.warning("Failed to build location path map: %s", str(e))
+
+            def _ancestor_names(loc_id):
+                """Ancestor names root→parent (excludes the location itself)."""
+                out, seen = [], set()
+                cur = loc_parent_map.get(loc_id)
+                while cur is not None and cur not in seen:
+                    seen.add(cur)
+                    out.append(loc_names.get(cur, f"Location {cur}"))
+                    cur = loc_parent_map.get(cur)
+                out.reverse()
+                return out
+
             # Convert to dict format
             logger.info("Converting transactions to dict format...")
+            # Machine approvals for this page, resolved in one query up front.
+            auto_approved_ids = self._auto_approved_ids([t.id for t in transactions])
             transactions_list = []
             for i, transaction in enumerate(transactions):
                 try:
                     logger.info(f"Processing transaction {i+1}/{len(transactions)}: ID={transaction.id}")
                     transaction_dict = self._transaction_to_dict(transaction)
+                    transaction_dict['approval_source'] = self._approval_source(
+                        transaction, transaction.id in auto_approved_ids
+                    )
+
+                    # Roll up cross-org shared rows under the shared location's name.
+                    meta = share_meta_by_origin.get(transaction.origin_id)
+                    if meta:
+                        transaction_dict['is_shared'] = True
+                        transaction_dict['shared_share_id'] = meta['share_id']
+                        transaction_dict['shared_from_org'] = meta['source_org_name']
+                        transaction_dict['origin_location'] = {
+                            'id': None,
+                            'name_en': meta['label'],
+                            'name_th': meta['label'],
+                            'display_name': meta['label'],
+                        }
+                        # Path = the placement location's breadcrumb in THIS org's chart.
+                        _pid = meta.get('placed_parent_node_id')
+                        transaction_dict['origin_path'] = (
+                            _ancestor_names(_pid) + [loc_names.get(_pid, f"Location {_pid}")]
+                            if _pid is not None else []
+                        )
+                    else:
+                        transaction_dict['is_shared'] = False
+                        transaction_dict['origin_path'] = (
+                            _ancestor_names(transaction.origin_id)
+                            if transaction.origin_id is not None else []
+                        )
 
                     # Roll up cross-org shared rows under the shared location's name.
                     meta = share_meta_by_origin.get(transaction.origin_id)
@@ -2262,6 +2986,9 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                         self.db, 'transaction_approved', transaction,
                         properties={'transaction_id': transaction_id, 'updated_by_id': updated_by_id},
                     )
+                    # input_destination mode: approving sends the first traceability hop
+                    # (origin → chosen destination) to the midway "อยู่ระหว่างขนส่ง" bucket.
+                    self._create_first_hops_for_approved_transaction(transaction)
                 elif _status_val == 'rejected':
                     _emit_transaction_event(
                         self.db, 'transaction_rejected', transaction,
@@ -2408,6 +3135,12 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                             record.origin_price_per_unit = _round_decimal(record_data['origin_price_per_unit'])
                         if 'total_amount' in record_data:
                             record.total_amount = _round_decimal(record_data['total_amount'])
+                        # ปลายทาง — editable in input_destination mode. Omitted from this list
+                        # originally, so the UI sent a new destination and the save silently
+                        # discarded it. `in` rather than truthiness: None is a real value here,
+                        # meaning "cleared", and must overwrite an existing destination.
+                        if 'destination_id' in record_data:
+                            record.destination_id = record_data['destination_id']
 
                         record.updated_date = datetime.now()
                         records_updated += 1
@@ -2434,6 +3167,20 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
             ).all()
             active_record_ids = [r.id for r in active_records]
             transaction.transaction_records = active_record_ids
+
+            # Keep the transaction-level destination array in step with the records. Create
+            # builds it from the records; without rebuilding it here it keeps the destinations
+            # from the original save forever, so anything reading the transaction (rather than
+            # its records) reports the old destination even after a successful edit.
+            # Flush first: the record edits above are still pending in the session, and a
+            # column-only query reads straight past them — without this the array is rebuilt
+            # from the pre-edit rows and lands one edit behind.
+            self.db.flush()
+            dest_rows = self.db.query(TransactionRecord.destination_id).filter(
+                TransactionRecord.created_transaction_id == transaction_id,
+                TransactionRecord.is_active == True
+            ).order_by(TransactionRecord.id).all()
+            transaction.destination_ids = [r.destination_id for r in dest_rows]
 
             # Recalculate totals and reset all record statuses to pending
             total_weight = Decimal('0')
@@ -2737,8 +3484,8 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
 
     # ========== PRIVATE HELPER METHODS ==========
 
-    def _validate_transaction_data(self, data: Dict[str, Any]) -> List[str]:
-        """Validate transaction data"""
+    def _validate_transaction_data(self, data: Dict[str, Any], enforce_access: bool = False) -> List[str]:
+        """Validate transaction data. See `create_transaction` for `enforce_access`."""
         errors = []
 
         # Required fields
@@ -2777,18 +3524,70 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
             if not org:
                 errors.append('Organization not found or inactive')
 
-        # Validate origin location exists
+        # Validate origin location exists, belongs to the SAME organization, and is
+        # not soft-deleted. The org check matters because this is the last line of
+        # defence on the IoT records route, which has no membership gate of its own:
+        # without it any authenticated tablet can post weighings onto another
+        # organisation's location. The deleted_date check keeps rows off locations
+        # that reports and the traceability board no longer see — they would be
+        # written, then silently counted nowhere.
         if data.get('origin_id'):
-            origin = self.db.query(UserLocation).filter(
+            origin_filters = [
                 UserLocation.id == data['origin_id'],
-                UserLocation.is_active == True
-            ).first()
+                UserLocation.is_active == True,
+                UserLocation.deleted_date.is_(None),
+            ]
+            if data.get('organization_id'):
+#             if enforce_access and data.get('organization_id'):
+                origin_filters.append(UserLocation.organization_id == data['organization_id'])
+            origin = self.db.query(UserLocation).filter(*origin_filters).first()
             if not origin:
-                errors.append('Origin location not found or inactive')
+                errors.append('Origin location not found, deleted, or not in this organization')
+
+        # Access check: may this user write at this origin with this tag/tenant?
+        if enforce_access and data.get('origin_id') and data.get('organization_id') \
+                and data.get('created_by_id'):
+            errors.extend(self._validate_origin_access(data))
 
         # Note: destination_ids is populated from transaction records, no validation needed here
 
         return errors
+
+    def _validate_origin_access(self, data: Dict[str, Any]) -> List[str]:
+        """
+        Gate writes on the same rules that gate reads.
+
+        A user who only reaches a location through a tag/tenant must stamp that tag/tenant
+        on the transaction — otherwise they would create a record that immediately vanishes
+        from their own list, since the read filter has nothing to match on.
+        """
+        from ....libs.locationAccess import grant_for_write
+        from ..users.user_service import UserService
+
+        try:
+            scope = UserService(self.db).resolve_access_scope(
+                int(data['organization_id']), int(data['created_by_id'])
+            )
+        except (TypeError, ValueError):
+            return ['Invalid organization or user for access check']
+
+        # Match the read filter on the record's own date, not "now" — a back-dated entry
+        # inside a closed tenancy window is exactly what the window is for.
+        when = data.get('transaction_date')
+        if isinstance(when, str):
+            try:
+                when = datetime.fromisoformat(when.replace('Z', '+00:00'))
+            except ValueError:
+                when = None
+
+        reason = grant_for_write(
+            scope,
+            data.get('origin_id'),
+            data.get('tag_id') or data.get('location_tag_id'),
+            data.get('tenant_id'),
+            when=when,
+        )
+        return [reason] if reason else []
 
     def _validate_transaction_record_data(self, data: Dict[str, Any]) -> List[str]:
         """Validate transaction record data"""
@@ -2902,6 +3701,10 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
             organization_id = transaction.organization_id
             location_tag_id = getattr(transaction, 'location_tag_id', None)
             tenant_id = getattr(transaction, 'tenant_id', None)
+            # A scale weigh-in gets its own pile rather than joining the month's;
+            # None for every other flow, which compares as IS NULL and therefore
+            # still matches the monthly piles it always matched.
+            source_transaction_id = scale_pile_source_transaction_id(transaction)
 
             for (material_id, year, month), record_ids in by_material_year_month.items():
                 if year is None or month is None:
@@ -2914,6 +3717,7 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                     TraceabilityTransactionGroup.tenant_id == tenant_id,
                     TraceabilityTransactionGroup.transaction_year == year,
                     TraceabilityTransactionGroup.transaction_month == month,
+                    TraceabilityTransactionGroup.source_transaction_id == source_transaction_id,
                     TraceabilityTransactionGroup.deleted_date.is_(None),
                     TraceabilityTransactionGroup.is_active == True,
                 ).first()
@@ -2985,6 +3789,9 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
             'id': transaction.id,
             'transaction_records': transaction.transaction_records,
             'transaction_method': transaction.transaction_method,
+            # Channel the row came in through — the list shows this next to the creator,
+            # since the creator of a scale reading is just whoever was logged in.
+            'source': self._transaction_source(transaction),
             'status': transaction.status.value if transaction.status else None,
             'organization_id': transaction.organization_id,
             'origin_id': transaction.origin_id,

@@ -2,7 +2,7 @@
 Main user-location model with organizational tree structure
 """
 
-from sqlalchemy import Column, String, Text, Boolean, DateTime, ForeignKey, Enum, Integer, Table
+from sqlalchemy import Column, String, Text, Boolean, DateTime, ForeignKey, Enum, Integer, BigInteger, Table
 from sqlalchemy.orm import relationship
 from sqlalchemy.dialects.postgresql import JSON, JSONB
 from sqlalchemy.types import DECIMAL
@@ -53,7 +53,30 @@ class UserLocation(Base, BaseModel):
     platform = Column(Enum(PlatformEnum), nullable=False, default=PlatformEnum.NA)
     platform_role = Column(String(50))  # 'super-admin', 'gepp-admin', or None (maps to UserRoleEnum)
     organization_role_id = Column(ForeignKey('organization_roles.id'))
-    
+
+    # ผู้คัดแยก: the location this user sorts at. Set on the USER row (is_user=True);
+    # points at a location row (is_location=True) in the same organization.
+    # NULL = not a sorter. Deliberately NOT a members[].role — that array is
+    # rewritten wholesale by the org-chart save and by the org-role cascade, which
+    # would destroy the binding. One column per user also makes "one user sorts at
+    # one place" true by construction. Migration 079.
+    sorter_location_id = Column(BigInteger, ForeignKey('user_locations.id'), nullable=True)
+
+    # ห้องขยะ: where material weighed in AT this location physically ends up. Set on
+    # a LOCATION row (is_location=True) and points at another location in the same
+    # organization. Lets the server route the first traceability hop on its own
+    # instead of waiting for someone to drag a card on the web board.
+    # NULL = no routing, today's behaviour. Migration 081.
+    waste_room_location_id = Column(BigInteger, ForeignKey('user_locations.id'), nullable=True)
+
+    # What this destination DOES with material that arrives here (a GRI 306-1 method).
+    # Set on a destination, it ends the chain: a leg carrying a disposal_method is what
+    # the board shows as "จัดการสำเร็จ" and what the recycling rate classifies. A scale
+    # can say where material went but not what happened to it, so this supplies the
+    # answer once instead of per shipment. NULL = a waypoint that ships onward, which
+    # is every row until an admin sets it. Migration 084.
+    default_disposal_method = Column(String(100), nullable=True)
+
     # Location and address information
     coordinate = Column(Text)  # Stored as "lat,lng" string
     address = Column(Text)
@@ -77,6 +100,9 @@ class UserLocation(Base, BaseModel):
     type = Column(Text)  # Business unit type details
     hub_type = Column(Text)  # Hub type for waste management locations (from hubData.type)
     population = Column(Text)
+    # People at this node ONLY, excluding sub-levels — the rollup adds descendants,
+    # so storing a subtree total here double-counts. NULL = not set (distinct from 0).
+    headcount = Column(Integer)
     material = Column(Text)  # Materials handled
     
     # Profile and documents

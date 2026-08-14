@@ -53,7 +53,10 @@ def handle_traceability_routes(event: Dict[str, Any], data: Dict[str, Any], **pa
         return {"message": result["message"], "data": result}
 
     if path == "/api/traceability/destinations" and method == "GET":
-        result = traceability_service.get_destination_locations(organization_id=current_user_organization_id)
+        result = traceability_service.get_destination_locations(
+            organization_id=current_user_organization_id,
+            current_user_id=current_user_id,
+        )
         return {"message": "Destination locations (for input options)", "data": result}
 
     if path == "/api/traceability/hierarchy" and method == "GET":

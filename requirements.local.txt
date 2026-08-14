@@ -31,6 +31,7 @@ scipy
 python-dateutil
 boto3
 reportlab
+openpyxl
 
 # ── Local server ──────────────────────────────────────
 flask

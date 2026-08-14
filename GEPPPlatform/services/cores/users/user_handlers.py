@@ -3,7 +3,7 @@ User management API handlers
 """
 
 import json
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 from datetime import datetime
 
 from .user_service import UserService
@@ -254,7 +254,7 @@ def handle_user_routes(event: Dict[str, Any], data: Dict[str, Any], **params) ->
 
     elif '/api/locations/tags' == path and method == 'GET':
         # List tags: /api/locations/tags?user_location_id=X or all for organization
-        return handle_list_location_tags(db_session, query_params, current_user_organization_id)
+        return handle_list_location_tags(db_session, query_params, current_user_organization_id, current_user_id)
 
     elif '/api/locations/tags' == path and method == 'POST':
         # Create tag: /api/locations/tags
@@ -287,7 +287,7 @@ def handle_user_routes(event: Dict[str, Any], data: Dict[str, Any], **params) ->
         return handle_delete_tenant(db_session, tenant_id, current_user_organization_id)
 
     elif '/api/locations/tenants' == path and method == 'GET':
-        return handle_list_tenants(db_session, query_params, current_user_organization_id)
+        return handle_list_tenants(db_session, query_params, current_user_organization_id, current_user_id)
 
     elif '/api/locations/tenants' == path and method == 'POST':
         return handle_create_tenant(db_session, data, current_user_organization_id, current_user_id)
@@ -1023,30 +1023,71 @@ def handle_get_locations(db_session, user_service: UserService, query_params: Di
         # source of pagination truth now.
         locations_page = locations
 
-        # Enrich each assigned location with tag and tenant info (id, name, start_date, end_date, members)
-        def _trim_tag_or_tenant(item: Dict[str, Any]) -> Dict[str, Any]:
-            return {
-                'id': item.get('id'),
-                'name': item.get('name'),
-                'start_date': item.get('start_date'),
-                'end_date': item.get('end_date'),
-                'members': item.get('members') or [],
-            }
+        # Enrich each location with tag/tenant info (id, name, start_date, end_date, members).
+        # One query per entity for the whole page, bucketed by location. Previously this
+        # ran two org-wide scans *per location per page*.
+        from ....models.users.user_related import UserLocationTag, UserTenant
 
-        tag_service = LocationTagService(db_session)
-        tenant_service = TenantService(db_session)
+        def _bucket_by_location(model) -> tuple:
+            rows = db_session.query(model).filter(
+                model.organization_id == organization_id,
+                model.is_active == True,
+                model.deleted_date.is_(None),
+            ).order_by(model.created_date.desc()).all()
+            buckets: Dict[int, List[Dict[str, Any]]] = {}
+            by_id: Dict[int, Dict[str, Any]] = {}
+            for row in rows:
+                # The JSONB array is the source of truth; `user_location_id` is the legacy
+                # single-FK column still set on older rows. A row can carry both, so the
+                # per-row set keeps it from being bucketed twice for the same location.
+                attached = set()
+                for raw_id in list(row.user_locations or []) + [row.user_location_id]:
+                    if raw_id is None:
+                        continue
+                    try:
+                        attached.add(int(raw_id))
+                    except (TypeError, ValueError):
+                        continue
+                trimmed = {
+                    'id': row.id,
+                    'name': row.name,
+                    'start_date': row.start_date.isoformat() if row.start_date else None,
+                    'end_date': row.end_date.isoformat() if row.end_date else None,
+                    'members': row.members or [],
+                }
+                by_id[row.id] = trimmed
+                for loc_key in attached:
+                    buckets.setdefault(loc_key, []).append(trimmed)
+            return buckets, by_id
+
+        tags_by_location, tag_by_id = _bucket_by_location(UserLocationTag)
+        tenants_by_location, tenant_by_id = _bucket_by_location(UserTenant)
+
+        # For a location the user only reaches through a tag/tenant, replace the attached
+        # list with the grants that actually reach it. Two reasons this is a replacement
+        # and not an intersection:
+        #   - it hides other tenants' names, which the user has no data for;
+        #   - a grant cascades to descendants, so a tag attached to Building 1 also covers
+        #     Floor 3. Intersecting with Floor 3's own (empty) list would leave the picker
+        #     with no options there while the write path happily accepts the combination.
+        scoped_by_location = result.get('scoped_by_location') or {}
+
         for loc in locations_page:
             loc_id = loc.get('id')
             # Ensure location members (user assignments) are always included
             loc['members'] = loc.get('members') or []
-            if loc_id is not None:
-                tags_full = tag_service.get_tags_by_location(loc_id, organization_id)
-                tenants_full = tenant_service.get_tenants_by_location(loc_id, organization_id)
-                loc['tags'] = [_trim_tag_or_tenant(t) for t in tags_full]
-                loc['tenants'] = [_trim_tag_or_tenant(t) for t in tenants_full]
-            else:
+            if loc_id is None:
                 loc['tags'] = []
                 loc['tenants'] = []
+                continue
+
+            allowed = scoped_by_location.get(loc_id)
+            if allowed is not None and loc.get('access') == 'scoped':
+                loc['tags'] = [tag_by_id[i] for i in sorted(allowed['tag_ids']) if i in tag_by_id]
+                loc['tenants'] = [tenant_by_id[i] for i in sorted(allowed['tenant_ids']) if i in tenant_by_id]
+            else:
+                loc['tags'] = tags_by_location.get(loc_id, [])
+                loc['tenants'] = tenants_by_location.get(loc_id, [])
 
         has_more = paginate and (page * page_size) < full_total
 
@@ -1135,6 +1176,52 @@ def _normalize_members_payload(members: Any) -> Any:
     return normalized
 
 
+def _validate_waste_room_location(
+    db_session,
+    location_id: int,
+    organization_id: int,
+    raw_value: Any,
+) -> Optional[int]:
+    """Check a ห้องขยะ binding before it is written. Returns the id, or None to clear it.
+
+    Every rule here exists because the server will later route material into this
+    location without a human confirming it, so a bad row silently moves waste to
+    the wrong place:
+      • the waste room must be in the SAME organization as the location
+      • it must be a real location (is_location), active and not deleted
+      • it may not be the location itself — that would be a self-loop hop
+
+    Deliberately NOT checked: whether the waste room is a descendant of this
+    location in the org tree. The tree lives in organization_setup.root_nodes as
+    JSON and is rebuilt by the setup importer, so a structural rule enforced here
+    would start rejecting rows the next time someone re-imports their setup.
+    Same-organization is the boundary we can actually hold.
+    """
+    if raw_value in (None, '', 0, '0'):
+        return None
+    try:
+        waste_room_id = int(raw_value)
+    except (TypeError, ValueError):
+        raise ValidationException('waste_room_location_id must be a location id')
+
+    if waste_room_id == int(location_id):
+        raise ValidationException('A location cannot be its own waste room')
+
+    from GEPPPlatform.models.users.user_location import UserLocation as _UserLocation
+    waste_room = db_session.query(_UserLocation).filter(
+        _UserLocation.id == waste_room_id,
+        _UserLocation.organization_id == organization_id,
+        _UserLocation.is_location == True,
+        _UserLocation.is_active == True,
+        _UserLocation.deleted_date.is_(None),
+    ).first()
+    if not waste_room:
+        raise ValidationException(
+            'Waste room not found in this organization, or it has been deleted'
+        )
+    return waste_room_id
+
+
 def handle_update_location(
     db_session,
     location_id: str,
@@ -1168,6 +1255,34 @@ def handle_update_location(
             location.display_name = data['name']
         if 'address' in data:
             location.address = data['address']
+        # ห้องขยะ. Guarded by `in data` so a caller that never sends the key — the
+        # org-chart save, the setup importer — cannot clear an existing binding.
+        if 'waste_room_location_id' in data:
+            location.waste_room_location_id = _validate_waste_room_location(
+                db_session, location.id, organization_id, data['waste_room_location_id']
+            )
+        # What this destination does with what it receives. Empty string clears it,
+        # which is how the picker sends "this is a waypoint, not an ending".
+        if 'default_disposal_method' in data:
+            _method = data['default_disposal_method']
+            location.default_disposal_method = (
+                str(_method).strip() or None if _method is not None else None
+            )
+
+        # People at this node only. Empty string / null clears it back to "not set",
+        # which is what drives the N/A rule in reports — distinct from an entered 0.
+        if 'headcount' in data:
+            raw_headcount = data['headcount']
+            if raw_headcount is None or raw_headcount == '':
+                location.headcount = None
+            else:
+                try:
+                    parsed = int(raw_headcount)
+                except (TypeError, ValueError):
+                    raise BadRequestException('headcount must be a whole number')
+                if parsed < 0:
+                    raise BadRequestException('headcount cannot be negative')
+                location.headcount = parsed
 
         # Handle user assignments - store in members JSONB column
         if 'users' in data:
@@ -1320,6 +1435,8 @@ def handle_update_location(
                 'id': location.id,
                 'name': location.display_name or location.name_en,
                 'address': getattr(location, 'address', None),
+                'waste_room_location_id': getattr(location, 'waste_room_location_id', None),
+                'default_disposal_method': getattr(location, 'default_disposal_method', None),
                 'members': location.members or [],
                 'tags': [
                     {
@@ -2190,10 +2307,53 @@ def handle_delete_organization_channel(
 
 # ==================== Location Tags Handlers ====================
 
+def _filter_visible_tags_or_tenants(
+    db_session,
+    items: List[Dict[str, Any]],
+    organization_id: int,
+    current_user_id: Any
+) -> List[Dict[str, Any]]:
+    """
+    Narrow an org-wide tag/tenant list to what this user may see.
+
+    Owners see everything. Everyone else sees a tag/tenant when they are one of its
+    members, OR when it is attached to a location they are a member of — a location
+    member keeps access to every tag/tenant on their own locations.
+    """
+    if current_user_id is None:
+        return items
+    try:
+        from .user_service import UserService, is_member_of
+        scope = UserService(db_session).resolve_access_scope(
+            int(organization_id), int(current_user_id)
+        )
+    except (TypeError, ValueError):
+        return items
+
+    if scope['is_owner']:
+        return items
+
+    assigned_ids = scope['assigned_ids']
+
+    def visible(item: Dict[str, Any]) -> bool:
+        if is_member_of(item.get('members') or [], int(current_user_id)):
+            return True
+        for raw_id in (item.get('user_locations') or []):
+            try:
+                if int(raw_id) in assigned_ids:
+                    return True
+            except (TypeError, ValueError):
+                continue
+        return False
+
+    return [item for item in items if visible(item)]
+
+
 def handle_list_location_tags(
     db_session,
     query_params: Dict[str, Any],
-    organization_id: int
+    organization_id: int,
+    current_user_id: Any = None
 ) -> Dict[str, Any]:
     """Handle GET /api/locations/tags - List tags"""
     try:
@@ -2216,6 +2376,10 @@ def handle_list_location_tags(
                 organization_id=organization_id,
                 include_inactive=include_inactive
             )
+
+        tags = _filter_visible_tags_or_tenants(
+            db_session, tags, organization_id, current_user_id
+        )
 
         return {
             'tags': tags,
@@ -2414,7 +2578,8 @@ def handle_update_tag_members(
 def handle_list_tenants(
     db_session,
     query_params: Dict[str, Any],
-    organization_id: int
+    organization_id: int,
+    current_user_id: Any = None
 ) -> Dict[str, Any]:
     """Handle GET /api/locations/tenants - List tenants"""
     try:
@@ -2435,6 +2600,10 @@ def handle_list_tenants(
                 organization_id=organization_id,
                 include_inactive=include_inactive
             )
+
+        tenants = _filter_visible_tags_or_tenants(
+            db_session, tenants, organization_id, current_user_id
+        )
 
         return {
             'tenants': tenants,

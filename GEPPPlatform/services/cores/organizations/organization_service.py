@@ -2,6 +2,7 @@
 Organization service for managing organization data and roles
 """
 
+import logging
 from typing import List, Optional, Dict, Any
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import and_, text
@@ -9,8 +10,16 @@ from sqlalchemy import and_, text
 from ....models.subscriptions.organizations import Organization, OrganizationInfo, OrganizationSetup
 from ....models.subscriptions.subscription_models import OrganizationRole
 from ....models.users.user_location import UserLocation
+from ....models.users.user_locations_settings import UserLocationSettings
 from ....exceptions import ValidationException
 from .organization_role_presets import OrganizationRolePresets
+from ....libs.node_ids import to_node_id
+
+logger = logging.getLogger(__name__)
+
+# System defaults for the per-user data-entry settings when a user has no row yet.
+DEFAULT_INPUT_DESTINATION = False
+DEFAULT_SHOW_ALL_LOCATION_OPTIONS = True
 
 
 class OrganizationService:
@@ -163,6 +172,83 @@ class OrganizationService:
         return self.role_presets.delete_role(organization_id, role_id)
 
     # Organization Setup CRUD operations
+    # ── Per-user data-entry settings (input_destination / show_all_location_options) ──────
+    def get_user_location_settings(self, user_location_id: Optional[int]) -> Dict[str, Any]:
+        """The user's effective data-entry settings. Falls back to system defaults when the
+        user has no row yet — these toggles are PER USER, not per org."""
+        row = None
+        if user_location_id:
+            row = self.db.query(UserLocationSettings).filter(
+                UserLocationSettings.user_location_id == user_location_id,
+                UserLocationSettings.deleted_date.is_(None),
+            ).first()
+        return {
+            'input_destination': bool(row.input_destination) if row else DEFAULT_INPUT_DESTINATION,
+            'show_all_location_options': (
+                bool(row.show_all_location_options) if row else DEFAULT_SHOW_ALL_LOCATION_OPTIONS
+            ),
+        }
+
+    def upsert_user_location_settings(self, user_location_id: int, organization_id: Optional[int],
+                                      patch: Dict[str, Any]) -> Dict[str, Any]:
+        """Create/update the acting user's settings row (one live row per user). Only the keys
+        present in `patch` are changed; the rest keep their stored/default value."""
+        row = self.db.query(UserLocationSettings).filter(
+            UserLocationSettings.user_location_id == user_location_id,
+            UserLocationSettings.deleted_date.is_(None),
+        ).first()
+        if not row:
+            row = UserLocationSettings(
+                user_location_id=user_location_id, organization_id=organization_id,
+                input_destination=DEFAULT_INPUT_DESTINATION,
+                show_all_location_options=DEFAULT_SHOW_ALL_LOCATION_OPTIONS,
+            )
+            self.db.add(row)
+        if organization_id and not row.organization_id:
+            row.organization_id = organization_id
+        if 'input_destination' in patch and patch['input_destination'] is not None:
+            row.input_destination = bool(patch['input_destination'])
+        if 'show_all_location_options' in patch and patch['show_all_location_options'] is not None:
+            row.show_all_location_options = bool(patch['show_all_location_options'])
+        self.db.commit()
+        self.db.refresh(row)
+        return {
+            'input_destination': bool(row.input_destination),
+            'show_all_location_options': bool(row.show_all_location_options),
+        }
+
+    def set_auto_approve_scale_transactions(
+        self,
+        organization_id: int,
+        enabled: bool,
+        acting_user_id: Optional[int] = None,
+    ) -> bool:
+        """Flip the org-wide "auto-approve scale readings" switch.
+
+        Org-WIDE on purpose (not per user like the two data-entry toggles): a scale is
+        shared hardware and attributes each weighing to whoever is logged in, so a
+        per-user flag would make the same device auto-approve for one operator and not
+        the next.
+
+        Caller is responsible for the owner check — see handle_update_organization_setup.
+        The change is logged because it changes the organisation's audit rules: turning
+        it on means scale readings stop waiting for review.
+        """
+        org = self.db.query(Organization).filter(Organization.id == organization_id).first()
+        if not org:
+            raise ValidationException('Organization not found')
+
+        previous = bool(getattr(org, 'auto_approve_scale_transactions', False))
+        org.auto_approve_scale_transactions = bool(enabled)
+        self.db.commit()
+
+        if previous != bool(enabled):
+            logger.info(
+                "[auto_approve] organization %s scale auto-approval %s -> %s by user %s",
+                organization_id, previous, bool(enabled), acting_user_id,
+            )
+        return bool(enabled)
+
     def get_organization_setup(self, organization_id: int) -> Optional[Dict[str, Any]]:
         """
         Get the current organization setup structure.
@@ -185,9 +271,19 @@ class OrganizationService:
         if not setup:
             return None
 
+        # Org-WIDE settings that live on `organizations`, surfaced through the setup
+        # payload so the settings screen can read everything in one call. Unlike
+        # input_destination / show_all_location_options (which are per user), these
+        # apply to everyone in the org — the UI must say so.
+        org_row = self.db.query(
+            Organization.auto_approve_scale_transactions, Organization.owner_id
+        ).filter(Organization.id == organization_id).first()
+
         return {
             'id': setup.id,
             'organization_id': setup.organization_id,
+            'auto_approve_scale_transactions': bool(org_row[0]) if org_row else False,
+            'organization_owner_id': org_row[1] if org_row else None,
             'version': setup.version,
             'is_active': setup.is_active,
             'root_nodes': setup.root_nodes,
@@ -197,6 +293,8 @@ class OrganizationService:
             'building_level_name': setup.building_level_name,
             'floor_level_name': setup.floor_level_name,
             'room_level_name': setup.room_level_name,
+            'input_destination': bool(setup.input_destination),
+            'show_all_location_options': bool(setup.show_all_location_options) if setup.show_all_location_options is not None else True,
             'created_date': setup.created_date.isoformat() if setup.created_date else None,
             'updated_date': setup.updated_date.isoformat() if setup.updated_date else None
         }
@@ -217,6 +315,22 @@ class OrganizationService:
         if not setup:
             return setup
 
+        # These two toggles are PER USER — override the org-setup values with the acting user's
+        # effective settings (defaults when unset) so every setup-GET consumer is per-user.
+        eff = self.get_user_location_settings(current_user_id)
+        setup['input_destination'] = eff['input_destination']
+        setup['show_all_location_options'] = eff['show_all_location_options']
+
+        # Whether THIS user may flip the org-wide auto-approve switch. Only the owner
+        # can: it decides whether scale readings skip review entirely, so a data-entry
+        # user must not be able to switch off the review of their own numbers. The UI
+        # renders the toggle disabled for everyone else.
+        setup['auto_approve_scale_transactions_editable'] = bool(
+            setup.get('organization_owner_id')
+            and current_user_id
+            and int(setup['organization_owner_id']) == int(current_user_id)
+        )
+
         # Get tiers from user_service
         from ..users.user_service import UserService
         from types import SimpleNamespace
@@ -234,27 +348,40 @@ class OrganizationService:
         ).all()
         light_locs = [SimpleNamespace(id=r.id, members=r.members) for r in light_rows]
 
-        tiers = user_service._resolve_location_tiers(light_locs, organization_id, current_user_id)
+        # Full scope, not just location membership: a user who reaches a location only
+        # through a tag/tenant they belong to still needs that node in the tree, or the
+        # org chart renders nothing at all for them and every downstream picker is empty.
+        scope = user_service.resolve_access_scope(
+            organization_id, current_user_id, locations=light_locs
+        )
 
-        if tiers['is_owner']:
+        if scope['is_owner']:
             return setup
 
-        visible_ids = tiers['assigned_ids'] | tiers['ancestor_ids']
-        ancestor_ids = tiers['ancestor_ids']
+        scoped_ids = scope['scoped_ids']
+        visible_ids = scope['assigned_ids'] | scope['ancestor_ids'] | scoped_ids
+        ancestor_ids = scope['ancestor_ids']
 
         def prune_tree(nodes):
             if not nodes:
                 return []
             result = []
             for node in nodes:
-                nid = int(node.get('nodeId', 0))
-                if nid not in visible_ids:
+                # An unsaved node carries a temporary client-side id and has no location
+                # row, so it can never be in visible_ids — same outcome as the old default
+                # of 0, without raising on the way there.
+                nid = to_node_id(node.get('nodeId'))
+                if nid is None or nid not in visible_ids:
                     continue
                 pruned = dict(node)
                 if 'children' in pruned:
                     pruned['children'] = prune_tree(pruned['children'])
                 if nid in ancestor_ids:
                     pruned['is_ancestor'] = True
+                # Reachable via tag/tenant only: visible, but this user does not manage
+                # the place, so the chart must not offer edit/drag/delete on it.
+                if nid in scoped_ids:
+                    pruned['is_scoped'] = True
                 result.append(pruned)
             return result
 
@@ -676,7 +803,13 @@ class OrganizationService:
             if key in level_names:
                 setattr(setup, key, level_names[key])
 
-        self.db.flush()
+        # NOTE: input_destination / show_all_location_options are now PER USER
+        # (user_locations_settings) — the handler routes them there, not to this org row.
+
+        # Persist — flush alone left the change uncommitted (rolled back at request end), so the
+        # toggle reverted on refresh. Mirror update_ai_audit_permission which commits directly.
+        self.db.commit()
+        self.db.refresh(setup)
 
         return {
             'id': setup.id,
@@ -690,6 +823,8 @@ class OrganizationService:
             'building_level_name': setup.building_level_name,
             'floor_level_name': setup.floor_level_name,
             'room_level_name': setup.room_level_name,
+            'input_destination': bool(setup.input_destination),
+            'show_all_location_options': bool(setup.show_all_location_options) if setup.show_all_location_options is not None else True,
             'created_date': setup.created_date.isoformat() if setup.created_date else None,
             'updated_date': setup.updated_date.isoformat() if setup.updated_date else None
         }
@@ -884,6 +1019,14 @@ class OrganizationService:
                         updated = True
                         print(f"  Updated existing location {node_id} with members: {users}")
 
+                    # Update materials only if the field was explicitly provided (a list).
+                    # The tree carries each node's materials from load, so this is idempotent
+                    # for untouched nodes and applies the new selection for edited ones.
+                    if 'materials' in location_data and isinstance(location_data.get('materials'), list):
+                        existing_location.materials = location_data['materials']
+                        updated = True
+                        print(f"  Updated existing location {node_id} with materials: {location_data['materials']}")
+
                     # Update display_name and name_en if provided
                     if display_name:
                         # Check for duplicate destination names if this is a hub/destination
@@ -965,6 +1108,7 @@ class OrganizationService:
                     hub_type=location_data.get('hub_type'),  # Hub type from hubData.type
                     members=location_data.get('users', []),  # Store user assignments in members column
                     address=location_data.get('address'),  # Address of the location
+                    materials=location_data.get('materials') or [],  # Material IDs assigned to this location
                 )
 
                 print(f"  Creating new location: {display_name}")

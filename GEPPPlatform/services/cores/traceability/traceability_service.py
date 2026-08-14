@@ -4,13 +4,17 @@ Business logic for traceability.
 """
 
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional, Tuple
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import and_, func, or_
+from sqlalchemy import and_, func, or_, true
 
 # Timezone for traceability group year/month (same as transaction_service)
 TRACEABILITY_DATE_TZ = "Asia/Bangkok"
+
+# Same grain rule the transaction service writes with; the backfill must agree with
+# it or it would merge a scale weigh-in back into the monthly pile.
+from ..iot_devices.auto_approve import scale_pile_source_transaction_id
 
 from ....models.transactions.transactions import Transaction, TransactionStatus
 from ....models.transactions.transaction_records import TransactionRecord
@@ -49,18 +53,64 @@ class TraceabilityService:
     def __init__(self, db: Session):
         self.db = db
 
-    def _get_assigned_location_ids(self, organization_id: int, current_user_id: int) -> Optional[set]:
-        """
-        Get the set of location IDs that the user has assigned access to (member + descendants).
-        Returns None if user is owner/admin (no filtering needed).
-        """
+    def _get_access_scope(self, organization_id: int, current_user_id: int) -> Dict[str, Any]:
+        """Full access verdict (location membership + tag/tenant grants) for this user."""
         from ..users.user_service import UserService
         user_service = UserService(self.db)
-        locations = user_service.crud.get_user_locations(organization_id=organization_id)
-        tiers = user_service._resolve_location_tiers(locations, organization_id, current_user_id)
-        if tiers['is_owner']:
+        return user_service.resolve_access_scope(int(organization_id), int(current_user_id))
+
+    def _get_assigned_location_ids(self, organization_id: int, current_user_id: int) -> Optional[set]:
+        """
+        Every location the user can reach — member-assigned plus tag/tenant-scoped.
+        Returns None if the user is the organization owner (no filtering needed).
+
+        For pickers and location lists only. To filter traceability *rows*, use
+        `_group_visibility_clause()`: this set drops the tag/tenant dimension, so a
+        scoped location would otherwise expose every group on it.
+        """
+        from ....libs.locationAccess import accessible_location_ids
+        scope = self._get_access_scope(organization_id, current_user_id)
+        if scope['is_owner']:
             return None  # No filtering needed
-        return tiers['assigned_ids']
+        return accessible_location_ids(scope)
+
+    def _check_group_write_access(self, group: Any, organization_id: Optional[int],
+                                  current_user_id: Optional[int]) -> Optional[str]:
+        """
+        May this user add to / edit this traceability group? Returns None when allowed,
+        otherwise a message for the caller's error envelope.
+
+        Mirrors the transaction write rule: full access at the group's origin, or a
+        tag/tenant grant that matches the group's own tag/tenant. Skipped when there is
+        no authenticated user (background/system callers resolve their own permissions).
+        """
+        if current_user_id is None or organization_id is None or group is None:
+            return None
+        from ....libs.locationAccess import grant_for_write
+        scope = self._get_access_scope(int(organization_id), int(current_user_id))
+        reason = grant_for_write(scope, group.origin_id, group.location_tag_id, group.tenant_id)
+        return f"Access denied for this transaction group: {reason}" if reason else None
+
+    def _group_visibility_clause(self, organization_id: int, current_user_id: int,
+                                 year: Any = None, month: Any = None):
+        """
+        Row-level visibility for traceability groups. Returns None when unrestricted.
+
+        Groups carry `location_tag_id` / `tenant_id`, so a tag/tenant-scoped user sees
+        only their own groups at a shared location. Windowing is month-granular — the
+        group has no row-level date.
+        """
+        from ....libs.locationAccess import build_visibility_clause, scope_for_month
+        scope = self._get_access_scope(organization_id, current_user_id)
+        if year is not None and month is not None:
+            scope = scope_for_month(scope, year, month)
+        return build_visibility_clause(
+            scope,
+            origin_col=TraceabilityTransactionGroup.origin_id,
+            tag_col=TraceabilityTransactionGroup.location_tag_id,
+            tenant_col=TraceabilityTransactionGroup.tenant_id,
+            date_col=None,
+        )
 
     def get_traceability(self, organization_id: Optional[int] = None, **kwargs: Any) -> Dict[str, Any]:
         """
@@ -123,12 +173,14 @@ class TraceabilityService:
             except (ValueError, TypeError):
                 pass
 
-        # Apply member-based filtering: restrict to user's assigned locations
+        # Apply access filtering: assigned locations, plus tag/tenant-scoped groups
         current_user_id = kwargs.get("current_user_id")
         if current_user_id and organization_id:
-            assigned_ids = self._get_assigned_location_ids(organization_id, int(current_user_id))
-            if assigned_ids is not None:
-                group_filters.append(TraceabilityTransactionGroup.origin_id.in_(list(assigned_ids)))
+            clause = self._group_visibility_clause(
+                organization_id, int(current_user_id), year=year, month=month
+            )
+            if clause is not None:
+                group_filters.append(clause)
 
         raw_groups = self.db.query(TraceabilityTransactionGroup).filter(and_(*group_filters)).all()
 
@@ -149,10 +201,16 @@ class TraceabilityService:
             )
             _dedup_transport_ids = {r[0] for r in _dt_rows if r[0] is not None}
 
+        # This collapses duplicate piles that share a key, which exists because the
+        # key has never been enforced by a constraint. source_transaction_id must be
+        # part of the key: without it two legitimate weigh-ins from the same tenant
+        # on the same day would look like duplicates and one would be dropped from
+        # the board — the exact weight-loss this per-weigh-in grain exists to stop.
+        # It is NULL on every monthly pile, so pre-scale data dedups as before.
         _seen_keys: dict = {}
         groups = []
         for g in raw_groups:
-            key = (g.origin_id, g.material_id, g.location_tag_id, g.tenant_id)
+            key = (g.origin_id, g.material_id, g.location_tag_id, g.tenant_id, g.source_transaction_id)
             if key not in _seen_keys:
                 _seen_keys[key] = g
                 groups.append(g)
@@ -279,6 +337,13 @@ class TraceabilityService:
                     elif method in _DIRECTED:
                         disposal_w += w
 
+        # Piles a ผู้คัดแยก created by weighing material OUT of a waste room. Their
+        # kilograms were already counted when the tenant weighed them IN, so they must
+        # not be added to "how much waste is there" a second time — but their legs are
+        # exactly where the material ended up, so the treatment/disposal sums below
+        # still need them. Hence: skipped for origin weight only, never for leaves.
+        internal_group_ids = self._internal_transfer_group_ids(organization_id)
+
         for origin_node in hierarchy_data:
             if not isinstance(origin_node, dict):
                 continue
@@ -288,10 +353,11 @@ class TraceabilityService:
                 group_id = group_node.get("group_id") or group_node.get("id")
                 if group_id is not None:
                     hierarchy_group_ids.add(str(group_id))
-                raw_weight = float(group_node.get("weight") or group_node.get("total_weight_kg") or 0)
-                consolidated_weight = _collect_subtree_consolidated_weight(group_node)
-                origin_weight = consolidated_weight if consolidated_weight > 0 else raw_weight
-                total_origin_weight += origin_weight
+                if group_id is None or str(group_id) not in internal_group_ids:
+                    raw_weight = float(group_node.get("weight") or group_node.get("total_weight_kg") or 0)
+                    consolidated_weight = _collect_subtree_consolidated_weight(group_node)
+                    origin_weight = consolidated_weight if consolidated_weight > 0 else raw_weight
+                    total_origin_weight += origin_weight
                 _sum_leaves(group_node.get("children") or [])
 
         # Include original origin groups that are not in any flow yet. Arrived
@@ -304,6 +370,8 @@ class TraceabilityService:
                 continue
             group_id = item.get("group_id") or item.get("id")
             if group_id is not None and str(group_id) in hierarchy_group_ids:
+                continue
+            if group_id is not None and str(group_id) in internal_group_ids:
                 continue
             total_origin_weight += float(item.get("weight") or item.get("total_weight_kg") or 0)
 
@@ -368,12 +436,54 @@ class TraceabilityService:
             except (ValueError, TypeError):
                 pass
 
-        # Apply member-based filtering: restrict to user's assigned locations
+        # New-style multi-select report filters (reports diversion tab). Combine as AND
+        # with each other and with the composite origin_id above. Origin ids arrive already
+        # expanded to descendants by the caller. This is what makes the reports filter bar
+        # actually apply on the diversion tab (previously only a single origin was honored).
+        def _int_list(raw):
+            try:
+                return [int(x.strip()) for x in str(raw).split(",") if x.strip()]
+            except (ValueError, TypeError):
+                return []
+
+        origin_ids_list = _int_list(kwargs.get("origin_ids"))
+        if origin_ids_list:
+            group_filters.append(TraceabilityTransactionGroup.origin_id.in_(origin_ids_list))
+        tag_ids_list = _int_list(kwargs.get("tag_ids"))
+        if tag_ids_list:
+            group_filters.append(TraceabilityTransactionGroup.location_tag_id.in_(tag_ids_list))
+        tenant_ids_list = _int_list(kwargs.get("tenant_ids"))
+        if tenant_ids_list:
+            group_filters.append(TraceabilityTransactionGroup.tenant_id.in_(tenant_ids_list))
+
+        # Destination filter ("สถานที่รับขยะ"): keep only groups that have at least one
+        # transport landing at a selected destination. Filtered at GROUP granularity (not
+        # per-transport) so the group→transport tree the diversion walk relies on stays
+        # intact — a transport-level filter would orphan child legs and break the percentages.
+        destination_ids_list = _int_list(kwargs.get("destination_ids"))
+        if destination_ids_list:
+            matching_group_ids = [
+                gid for (gid,) in self.db.query(TransportTransaction.transaction_group_id)
+                .filter(
+                    TransportTransaction.organization_id == organization_id,
+                    TransportTransaction.destination_id.in_(destination_ids_list),
+                    TransportTransaction.is_active == True,
+                    TransportTransaction.deleted_date.is_(None),
+                    TransportTransaction.transaction_group_id.isnot(None),
+                )
+                .distinct()
+                .all()
+            ]
+            group_filters.append(TraceabilityTransactionGroup.id.in_(matching_group_ids or [-1]))
+
+        # Apply access filtering: assigned locations, plus tag/tenant-scoped groups
         current_user_id = kwargs.get("current_user_id")
         if current_user_id and organization_id:
-            assigned_ids = self._get_assigned_location_ids(organization_id, int(current_user_id))
-            if assigned_ids is not None:
-                group_filters.append(TraceabilityTransactionGroup.origin_id.in_(list(assigned_ids)))
+            clause = self._group_visibility_clause(
+                organization_id, int(current_user_id), year=year, month=month
+            )
+            if clause is not None:
+                group_filters.append(clause)
 
         groups = self.db.query(TraceabilityTransactionGroup).filter(and_(*group_filters)).all()
         if not groups:
@@ -776,57 +886,86 @@ class TraceabilityService:
         Idle carry-over: find idle TransportTransactions whose group is in *last* month (relative to requested).
         For each such idle, find a group in the *requested* month with the same (origin_id, material_id, location_tag_id, tenant_id).
         Append the idle's id to that group's transaction_carried_over. If no such group exists, create one with no records and only this carried_over.
+
+        Idempotent within one request: loading the board calls this once directly and
+        once more via get_traceability_hierarchy, and the second pass can only repeat
+        work the first already did.
         """
+        already = getattr(self, '_carry_over_done', None)
+        if already is None:
+            already = set()
+            self._carry_over_done = already
+        request_key = (organization_id, requested_year, requested_month)
+        if request_key in already:
+            return
+        already.add(request_key)
+
         last_year, last_month = self._last_month(requested_year, requested_month)
-        idles = (
-            self.db.query(TransportTransaction)
+        # Runs on every board load, so it is bounded to the month it can actually act
+        # on. It used to load EVERY idle transport the organization has ever had and
+        # discard all but last month's in Python — with one pile per weigh-in that is
+        # an unbounded scan that grows for the life of the account. The join returns
+        # exactly the rows the loop below kept, so behaviour is unchanged.
+        idle_rows = (
+            self.db.query(TransportTransaction, TraceabilityTransactionGroup)
+            .join(
+                TraceabilityTransactionGroup,
+                TransportTransaction.transaction_group_id == TraceabilityTransactionGroup.id,
+            )
             .filter(
                 TransportTransaction.status == "idle",
                 TransportTransaction.is_active == True,
                 TransportTransaction.deleted_date.is_(None),
-                TransportTransaction.transaction_group_id.isnot(None),
                 TransportTransaction.organization_id == organization_id,
-            )
-            .all()
-        )
-        group_ids = list({t.transaction_group_id for t in idles if t.transaction_group_id is not None})
-        if not group_ids:
-            return
-        groups_last_month = (
-            self.db.query(TraceabilityTransactionGroup)
-            .filter(
-                TraceabilityTransactionGroup.id.in_(group_ids),
                 TraceabilityTransactionGroup.transaction_year == last_year,
                 TraceabilityTransactionGroup.transaction_month == last_month,
             )
             .all()
         )
-        group_by_id = {g.id: g for g in groups_last_month}
-        for t in idles:
-            if t.transaction_group_id is None:
-                continue
-            orig_group = group_by_id.get(t.transaction_group_id)
+        if not idle_rows:
+            return
+
+        # Index this month's piles once instead of querying per idle transport. The
+        # per-iteration lookup was one round trip per carried-over pile — fine at a few
+        # piles a month, up to hundreds of sequential queries inside a single board GET
+        # once every weigh-in has its own pile. Bounded by the month, same as above.
+        # Lowest id wins, matching the previous ORDER BY: the key has no unique
+        # constraint so duplicates exist, and a repeated board load must land on the
+        # same row rather than an arbitrary one.
+        def _target_key(g):
+            return (g.origin_id, g.material_id, g.location_tag_id, g.tenant_id,
+                    g.source_transaction_id)
+
+        targets_by_key: Dict[Tuple[Any, ...], TraceabilityTransactionGroup] = {}
+        this_month = (
+            self.db.query(TraceabilityTransactionGroup)
+            .filter(
+                TraceabilityTransactionGroup.organization_id == organization_id,
+                TraceabilityTransactionGroup.transaction_year == requested_year,
+                TraceabilityTransactionGroup.transaction_month == requested_month,
+                TraceabilityTransactionGroup.deleted_date.is_(None),
+                TraceabilityTransactionGroup.is_active == True,
+            )
+            .order_by(TraceabilityTransactionGroup.id.asc())
+            .all()
+        )
+        for g in this_month:
+            targets_by_key.setdefault(_target_key(g), g)
+
+        for t, orig_group in idle_rows:
             if orig_group is None:
                 continue
             origin_id = orig_group.origin_id
             material_id = orig_group.material_id
             location_tag_id = orig_group.location_tag_id
             tenant_id = orig_group.tenant_id
-            target = (
-                self.db.query(TraceabilityTransactionGroup)
-                .filter(
-                    TraceabilityTransactionGroup.organization_id == organization_id,
-                    TraceabilityTransactionGroup.origin_id == origin_id,
-                    TraceabilityTransactionGroup.material_id == material_id,
-                    TraceabilityTransactionGroup.location_tag_id == location_tag_id,
-                    TraceabilityTransactionGroup.tenant_id == tenant_id,
-                    TraceabilityTransactionGroup.transaction_year == requested_year,
-                    TraceabilityTransactionGroup.transaction_month == requested_month,
-                    TraceabilityTransactionGroup.deleted_date.is_(None),
-                    TraceabilityTransactionGroup.is_active == True,
-                )
-                .first()
-            )
+            # Carry the grain across the month boundary too. Without this a scale
+            # pile's idle weight lands in whichever monthly group came back first,
+            # and the group minted below would be NULL-keyed (monthly) while holding
+            # scale material — a silent cross-grain merge every 1st of the month.
+            source_transaction_id = orig_group.source_transaction_id
+            key = (origin_id, material_id, location_tag_id, tenant_id, source_transaction_id)
+            target = targets_by_key.get(key)
             if target:
                 carried = list(target.transaction_carried_over or [])
                 if t.id not in carried:
@@ -845,8 +984,13 @@ class TraceabilityService:
                     transaction_year=requested_year,
                     transaction_month=requested_month,
                     is_active=True,
+                    source_transaction_id=source_transaction_id,
                 )
                 self.db.add(new_group)
+                # Two idle transports can share a key. The per-iteration query used to
+                # find the row the previous iteration had just added; the index has to
+                # be kept current or the second one mints a duplicate pile.
+                targets_by_key[key] = new_group
         self.db.flush()
 
     def _records_for_org_month_year(
@@ -935,7 +1079,8 @@ class TraceabilityService:
         for g in existing_groups:
             for rid in g.transaction_record_id or []:
                 record_ids_in_groups.add(rid)
-            key = (g.origin_id, g.material_id, g.location_tag_id, g.tenant_id, year, month)
+            key = (g.origin_id, g.material_id, g.location_tag_id, g.tenant_id, year, month,
+                   g.source_transaction_id)
             key_to_existing_group[key] = g
         remaining = [r for r in records if r.id not in record_ids_in_groups]
         if not remaining:
@@ -947,11 +1092,17 @@ class TraceabilityService:
             origin_id = txn.origin_id if txn else None
             location_tag_id = getattr(txn, "location_tag_id", None) if txn else None
             tenant_id = getattr(txn, "tenant_id", None) if txn else None
-            key = (origin_id, r.material_id, location_tag_id, tenant_id, year, month)
+            # Same grain rule as the two write paths in transaction_service: a scale
+            # weigh-in backfills into its own pile, everything else into the month's.
+            source_transaction_id = scale_pile_source_transaction_id(txn)
+            key = (origin_id, r.material_id, location_tag_id, tenant_id, year, month,
+                   source_transaction_id)
             key_to_records[key].append(r)
-        for (origin_id, material_id, location_tag_id, tenant_id, _, _), group_records in key_to_records.items():
+        for (origin_id, material_id, location_tag_id, tenant_id, _, _,
+             source_transaction_id), group_records in key_to_records.items():
             record_ids = list(dict.fromkeys(r.id for r in group_records))
-            key = (origin_id, material_id, location_tag_id, tenant_id, year, month)
+            key = (origin_id, material_id, location_tag_id, tenant_id, year, month,
+                   source_transaction_id)
             existing = key_to_existing_group.get(key)
             if existing and existing.id not in group_ids_already_processed:
                 existing_record_ids = list(dict.fromkeys(existing.transaction_record_id or []))
@@ -974,6 +1125,7 @@ class TraceabilityService:
                     location_tag_id=location_tag_id,
                     tenant_id=tenant_id,
                     is_active=True,
+                    source_transaction_id=source_transaction_id,
                 )
                 self.db.add(group)
         self.db.flush()
@@ -1009,7 +1161,10 @@ class TraceabilityService:
         if not orphaned:
             return []
 
-        # Group by (origin_id, material_id, location_tag_id, tenant_id)
+        # Group by (origin_id, material_id, location_tag_id, tenant_id, source_transaction_id).
+        # The last component keeps two scale weigh-ins from the same tenant on the
+        # same material apart, so they stay two cards and materialize into two piles
+        # — matching the grain the real groups use. It is None for everything else.
         from collections import defaultdict
         key_to_records: Dict[Tuple[Any, ...], List[TransactionRecord]] = defaultdict(list)
         for r in orphaned:
@@ -1017,13 +1172,14 @@ class TraceabilityService:
             origin_id = txn.origin_id if txn else None
             location_tag_id = getattr(txn, "location_tag_id", None) if txn else None
             tenant_id = getattr(txn, "tenant_id", None) if txn else None
-            key = (origin_id, r.material_id, location_tag_id, tenant_id)
+            source_transaction_id = scale_pile_source_transaction_id(txn)
+            key = (origin_id, r.material_id, location_tag_id, tenant_id, source_transaction_id)
             key_to_records[key].append(r)
 
         # Enrich: collect location/material IDs
         location_ids = set()
         material_ids = set()
-        for (origin_id, material_id, _, _) in key_to_records:
+        for (origin_id, material_id, _, _, _) in key_to_records:
             if origin_id is not None:
                 location_ids.add(origin_id)
             if material_id is not None:
@@ -1046,10 +1202,14 @@ class TraceabilityService:
 
         # Build tentative group dicts
         out = []
-        for (origin_id, material_id, location_tag_id, tenant_id), recs in key_to_records.items():
+        for (origin_id, material_id, location_tag_id, tenant_id, source_transaction_id), recs in key_to_records.items():
             record_ids = list(dict.fromkeys(r.id for r in recs))
             total_weight = sum(float(r.origin_weight_kg or 0) for r in recs)
+            # An 8th segment is appended only for a scale pile, so keys already held
+            # by an open browser tab stay 7 parts and keep working.
             tentative_id = f"tentative:{origin_id}:{material_id}:{location_tag_id}:{tenant_id}:{year}:{month}"
+            if source_transaction_id is not None:
+                tentative_id = f"{tentative_id}:{source_transaction_id}"
 
             origin = None
             if origin_id and origin_id in location_map:
@@ -1089,7 +1249,10 @@ class TraceabilityService:
         """Parse tentative key, create real TraceabilityTransactionGroup, link approved records."""
         try:
             parts = tentative_group_key.split(":")
-            if len(parts) != 7 or parts[0] != "tentative":
+            # 7 parts = a monthly pile, the only shape that existed before scales.
+            # 8 = a per-weigh-in scale pile, whose 8th part is the source transaction.
+            # Both are accepted so a key held by an already-open page keeps working.
+            if len(parts) not in (7, 8) or parts[0] != "tentative":
                 return {"success": False, "message": "Invalid tentative group key"}
 
             def _parse(val: str):
@@ -1101,6 +1264,7 @@ class TraceabilityService:
             tenant_id = _parse(parts[4])
             year = int(parts[5])
             month = int(parts[6])
+            source_transaction_id = _parse(parts[7]) if len(parts) == 8 else None
 
             # Check if a real group already exists for this key
             existing = self.db.query(TraceabilityTransactionGroup).filter(
@@ -1115,6 +1279,9 @@ class TraceabilityService:
                     else TraceabilityTransactionGroup.tenant_id.is_(None),
                 TraceabilityTransactionGroup.transaction_year == year,
                 TraceabilityTransactionGroup.transaction_month == month,
+                TraceabilityTransactionGroup.source_transaction_id == source_transaction_id
+                    if source_transaction_id is not None
+                    else TraceabilityTransactionGroup.source_transaction_id.is_(None),
                 TraceabilityTransactionGroup.is_active == True,
                 TraceabilityTransactionGroup.deleted_date.is_(None),
             ).first()
@@ -1140,6 +1307,10 @@ class TraceabilityService:
                         else Transaction.location_tag_id.is_(None),
                     Transaction.tenant_id == tenant_id if tenant_id is not None
                         else Transaction.tenant_id.is_(None),
+                    # A scale pile covers exactly one weigh-in, so it must not sweep
+                    # up that tenant's other orphaned records for the month.
+                    Transaction.id == source_transaction_id if source_transaction_id is not None
+                        else true(),
                     or_(
                         TransactionRecord.traceability_group_id.is_(None),
                         ~TransactionRecord.traceability_group_id.in_(
@@ -1182,6 +1353,7 @@ class TraceabilityService:
                 location_tag_id=location_tag_id,
                 tenant_id=tenant_id,
                 is_active=True,
+                source_transaction_id=source_transaction_id,
             )
             self.db.add(group)
             self.db.flush()
@@ -1200,6 +1372,113 @@ class TraceabilityService:
             import logging
             logging.getLogger(__name__).error(f"materialize_tentative_group failed: {e}", exc_info=True)
             return {"success": False, "message": str(e)}
+
+    # Two root weights may differ from the pile by this much before the guard below
+    # complains. Record weight is DECIMAL(15,4) and the web app rounds what it sends
+    # to 2dp, so an exact equality test would reject legitimate whole-pile dispatches.
+    _PILE_WEIGHT_TOLERANCE_KG = 0.01
+
+    def _internal_transfer_group_ids(self, organization_id: Optional[int]) -> set:
+        """Piles whose weight was already reported at its origin, as a set of str ids.
+
+        A ผู้คัดแยก's weigh-out is stamped is_internal_transfer (migration 083) and,
+        being a scale reading, always owns its own pile (migration 082) — so the link
+        is exactly source_transaction_id, and no pile can be part internal and part
+        not. Returned as strings because the callers compare against ids that have
+        been through JSON.
+
+        Best-effort: a failure here must degrade to "nothing is internal", i.e. the
+        pre-migration numbers, rather than blanking the board.
+        """
+        if not organization_id:
+            return set()
+        try:
+            rows = (
+                self.db.query(TraceabilityTransactionGroup.id)
+                .join(Transaction, TraceabilityTransactionGroup.source_transaction_id == Transaction.id)
+                .filter(
+                    TraceabilityTransactionGroup.organization_id == organization_id,
+                    Transaction.is_internal_transfer.is_(True),
+                )
+                .all()
+            )
+        except Exception:  # noqa: BLE001 — see docstring
+            return set()
+        return {str(r[0]) for r in rows}
+
+    def _pile_weight_kg(self, group: TraceabilityTransactionGroup) -> float:
+        """Weight of everything sitting in a pile, using the board's own definition.
+
+        Deliberately the same expression as `_groups_to_dict_list` below — approved
+        records plus carried-over transports — because that is the number the user is
+        looking at when they decide what to dispatch. Other definitions exist in this
+        file for other purposes; the guard must use the visible one.
+        """
+        record_ids = list(group.transaction_record_id or [])
+        carried_ids = list(group.transaction_carried_over or [])
+        total = 0.0
+        if record_ids:
+            rows = self.db.query(TransactionRecord.origin_weight_kg).filter(
+                TransactionRecord.id.in_(record_ids),
+                TransactionRecord.status == 'approved',
+            ).all()
+            total += sum(float(r[0] or 0) for r in rows)
+        if carried_ids:
+            rows = self.db.query(TransportTransaction.weight).filter(
+                TransportTransaction.id.in_(carried_ids),
+                TransportTransaction.is_active == True,
+                TransportTransaction.deleted_date.is_(None),
+            ).all()
+            total += sum(float(r[0] or 0) for r in rows)
+        return total
+
+    def _reject_partial_dispatch(
+        self,
+        group: TraceabilityTransactionGroup,
+        new_root_weights: List[Decimal],
+        ignore_transport_ids: Optional[List[int]] = None,
+    ) -> Optional[str]:
+        """Refuse to leave part of a per-weigh-in pile undispatched. None = allowed.
+
+        A pile created by one scale reading (migration 082) is only arithmetically
+        honest while its root transports sum to the whole pile, because
+        `_recalculate_absolute_percentage` divides by the sum of the roots, not by the
+        pile weight — dispatch 40 of 100 and the leg is stamped 100%, and the other
+        60 kg becomes unreachable because a pile that has a transport is dropped from
+        the "waiting to ship" column.
+
+        Scoped to piles that carry a source_transaction_id, which is NULL on every row
+        that existed before this and on every non-scale flow, so no current behaviour
+        changes. Material that will not fit on the truck stays in the waste room as its
+        own arriving pile rather than as a remainder inside this one.
+        """
+        if getattr(group, 'source_transaction_id', None) is None:
+            return None
+
+        pile_weight = self._pile_weight_kg(group)
+        if pile_weight <= 0:
+            return None
+
+        existing_q = self.db.query(TransportTransaction.weight).filter(
+            TransportTransaction.transaction_group_id == group.id,
+            TransportTransaction.parent_id.is_(None),
+            TransportTransaction.is_active == True,
+            TransportTransaction.deleted_date.is_(None),
+        )
+        if ignore_transport_ids:
+            existing_q = existing_q.filter(~TransportTransaction.id.in_(ignore_transport_ids))
+        dispatched = sum(float(r[0] or 0) for r in existing_q.all())
+        dispatched += sum(float(w or 0) for w in new_root_weights)
+
+        # Round before comparing: the subtraction alone puts 100.01 - 100.0 slightly
+        # over 0.01 in binary floating point, which would reject a dispatch that is
+        # exactly at the tolerance the frontend's own 2dp rounding can produce.
+        if round(abs(dispatched - pile_weight), 2) <= self._PILE_WEIGHT_TOLERANCE_KG:
+            return None
+        return (
+            f"This pile was recorded by a scale and must be dispatched whole: "
+            f"{dispatched:.2f} kg entered against a pile of {pile_weight:.2f} kg."
+        )
 
     def _groups_to_dict_list(
         self, groups: List[TraceabilityTransactionGroup], organization_id: int
@@ -1597,7 +1876,11 @@ class TraceabilityService:
             })
         return out
 
-    def get_destination_locations(self, organization_id: Optional[int] = None) -> List[Dict[str, Any]]:
+    def get_destination_locations(
+        self,
+        organization_id: Optional[int] = None,
+        current_user_id: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
         """
         Get locations that may be selected as a destination.
 
@@ -1611,6 +1894,13 @@ class TraceabilityService:
              too so consolidations can land on any of those origins.
 
         Each entry includes ``path``. The list is deduplicated by location id.
+
+        Member-based visibility: when ``current_user_id`` is a non-owner, the
+        merged list is intersected with that user's assigned locations (same
+        3-tier rule as origins — hub memberships now feed ``assigned_ids`` via
+        ``_resolve_location_tiers``). Owners (and callers that omit the user)
+        see every destination. Mirrors origins exactly: a hub with no members is
+        unseen for non-owners.
         """
         if organization_id is None:
             return []
@@ -1680,6 +1970,15 @@ class TraceabilityService:
             by_id[loc.id] = loc
         for loc in flagged_locations:
             by_id.setdefault(loc.id, loc)
+
+        # Member-based visibility: non-owners only see destinations they are
+        # assigned to (hub membership or a visible is_destination origin). Owner
+        # → assigned_ids is None → no filtering.
+        if current_user_id is not None:
+            assigned_ids = self._get_assigned_location_ids(organization_id, int(current_user_id))
+            if assigned_ids is not None:
+                by_id = {lid: loc for lid, loc in by_id.items() if lid in assigned_ids}
+
         merged = list(by_id.values())
         if not merged:
             return []
@@ -1868,6 +2167,24 @@ class TraceabilityService:
             )
             if not group:
                 return {"success": False, "message": "Transaction group not found or access denied", "ids": []}
+
+        denied = self._check_group_write_access(group, organization_id, current_user_id)
+        if denied:
+            return {"success": False, "message": denied, "ids": []}
+
+        # A batch may mix roots and children; only roots consume the pile.
+        _new_root_weights: List[Decimal] = []
+        for _item in data:
+            _parent_raw = parent_id_override if parent_id_override is not None else _item.get("parent_id")
+            if _parent_raw is not None:
+                continue
+            try:
+                _new_root_weights.append(Decimal(str(_item.get("weight"))))
+            except (TypeError, ValueError, InvalidOperation):
+                continue
+        _partial = self._reject_partial_dispatch(group, _new_root_weights)
+        if _partial:
+            return {"success": False, "message": _partial, "ids": []}
 
         created_ids: List[int] = []
         for item in data:
@@ -2159,17 +2476,23 @@ class TraceabilityService:
         # ── 3) Access control ─────────────────────────────────────────────
         # Transport sources: user needs access to the destination (where material sits).
         # Group sources: user needs access to the origin (where the records belong).
-        assigned_ids = self._get_assigned_location_ids(organization_id, int(current_user_id))
-        if assigned_ids is not None:
+        from ....libs.locationAccess import accessible_location_ids, grant_for_write
+        scope = self._get_access_scope(organization_id, int(current_user_id))
+        if not scope['is_owner']:
+            # Transports carry no tag/tenant of their own, so they are gated at location
+            # level — reachable either by membership or through a tag/tenant grant.
+            reachable = accessible_location_ids(scope)
             for s in sources:
-                if s.destination_id is None or s.destination_id not in assigned_ids:
+                if s.destination_id is None or s.destination_id not in reachable:
                     raise APIException(
                         f"User does not have access to source {s.id}'s current location",
                         403,
                         "FORBIDDEN_SOURCE_LOCATION",
                     )
+            # Groups do carry tag/tenant, so a scoped user is held to their own groups
+            # rather than everything sitting at a location they can merely reach.
             for g in groups:
-                if g.origin_id is None or g.origin_id not in assigned_ids:
+                if grant_for_write(scope, g.origin_id, g.location_tag_id, g.tenant_id):
                     raise APIException(
                         f"User does not have access to source group {g.id}'s origin",
                         403,
@@ -2451,6 +2774,24 @@ class TraceabilityService:
                                 400,
                                 "INVALID_REQUEST",
                             )
+                    # A pile a scale created must go out whole — the same rule the
+                    # create/edit paths enforce, applied to the one path that builds
+                    # its TransportTransaction directly and so never reached them.
+                    # Taking part of such a pile leaves a remainder that the board
+                    # hides and the percentage maths cannot express; it also puts the
+                    # group's own guard permanently out of reach, because a group that
+                    # is a consolidation source is dropped from column 1.
+                    # NULL discriminator (every pre-existing pile) is unaffected.
+                    if g.source_transaction_id is not None:
+                        full = group_weights.get(g.id, Decimal("0"))
+                        if full > 0 and abs(float(contributed) - float(full)) > 0.01:
+                            raise APIException(
+                                f"Group {g.id} was recorded by a scale and must be "
+                                f"consolidated whole: {float(contributed):.2f} kg "
+                                f"requested of {float(full):.2f} kg.",
+                                400,
+                                "PARTIAL_SCALE_PILE",
+                            )
                     group_contribs.append((g, contributed))
 
             # 4a-iii) Fallback: if no explicit contributions, take everything matching material_id
@@ -2706,6 +3047,14 @@ class TraceabilityService:
 
             if row.transaction_group_id:
                 affected_group_ids.add(row.transaction_group_id)
+                group = (
+                    self.db.query(TraceabilityTransactionGroup)
+                    .filter(TraceabilityTransactionGroup.id == row.transaction_group_id)
+                    .first()
+                )
+                denied = self._check_group_write_access(group, organization_id, current_user_id)
+                if denied:
+                    return {"success": False, "message": denied, "ids": updated_ids}
 
             # Recursively soft-delete all descendants
             self._soft_delete_descendants(tt_id, now)
@@ -2713,9 +3062,25 @@ class TraceabilityService:
             # Update fields
             if "weight" in item and item["weight"] is not None:
                 try:
-                    row.weight = Decimal(str(item["weight"]))
+                    new_weight = Decimal(str(item["weight"]))
                 except (TypeError, ValueError):
                     return {"success": False, "message": "weight must be a number", "ids": updated_ids}
+                # Editing a root afterwards can re-open the same hole the create-time
+                # guard closes, so re-check the pile against the edited value. Only
+                # roots consume the pile; children are bounded by their parent.
+                if row.parent_id is None and row.transaction_group_id:
+                    group = (
+                        self.db.query(TraceabilityTransactionGroup)
+                        .filter(TraceabilityTransactionGroup.id == row.transaction_group_id)
+                        .first()
+                    )
+                    if group is not None:
+                        partial = self._reject_partial_dispatch(
+                            group, [new_weight], ignore_transport_ids=[row.id]
+                        )
+                        if partial:
+                            return {"success": False, "message": partial, "ids": updated_ids}
+                row.weight = new_weight
 
             if "origin_id" in item and item["origin_id"] is not None:
                 try:

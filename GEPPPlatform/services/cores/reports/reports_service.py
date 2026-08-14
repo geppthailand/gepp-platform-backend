@@ -33,7 +33,11 @@ class ReportsService:
 
     # ========== TRANSACTION RECORDS REPORTS ==========
 
+<<<<<<< HEAD
     def _fetch_shared_report_records(self, organization_id, filters, report_type):
+=======
+    def _fetch_shared_report_records(self, organization_id, filters, report_type, current_user_id=None):
+>>>>>>> 6880dee6baba2a9f8b7a5d65b27600b67f275450
         """Fetch TransactionRecords shared TO this org for reports.
 
         Returns (records, shared_map, node_meta):
@@ -51,7 +55,13 @@ class ReportsService:
         if filters.get('location_ids'):
             own_selected = set(self._resolve_descendant_ids(organization_id, filters['location_ids']))
         txnsvc = TransactionService(self.db)
+<<<<<<< HEAD
         branches, _meta = txnsvc._resolve_shared_branches(organization_id, own_selected)
+=======
+        visible_parent_ids = self._shared_visible_parent_ids(organization_id, current_user_id)
+        branches, _meta = txnsvc._resolve_shared_branches(
+            organization_id, own_selected, visible_parent_ids=visible_parent_ids)
+>>>>>>> 6880dee6baba2a9f8b7a5d65b27600b67f275450
         if not branches:
             return [], {}, {}
 
@@ -75,6 +85,10 @@ class ReportsService:
                 Transaction.organization_id == b['source_org_id'],
                 Transaction.origin_id.in_(b['src_ids']),
                 Transaction.deleted_date.is_(None),
+<<<<<<< HEAD
+=======
+                Transaction.is_internal_transfer.isnot(True),  # see migration 083
+>>>>>>> 6880dee6baba2a9f8b7a5d65b27600b67f275450
                 TransactionRecord.deleted_date.is_(None),
                 or_(TransactionRecord.status != 'rejected', TransactionRecord.status.is_(None)),
             )
@@ -238,7 +252,11 @@ class ReportsService:
             # Merge cross-org shared records (read-only). Branches are disjoint (deepest share wins),
             # so a transaction is never pulled in twice and totals are not double-counted.
             shared_records, shared_map, _shared_node_meta = self._fetch_shared_report_records(
+<<<<<<< HEAD
                 organization_id, filters, report_type)
+=======
+                organization_id, filters, report_type, current_user_id=current_user_id)
+>>>>>>> 6880dee6baba2a9f8b7a5d65b27600b67f275450
             if shared_records:
                 transaction_records = list(transaction_records) + shared_records
 
@@ -437,7 +455,11 @@ class ReportsService:
             logger.error(f"Unexpected error in get_transaction_records_by_organization: {str(e)}")
             raise
 
+<<<<<<< HEAD
     def _fetch_shared_overview_rows(self, organization_id, filters, report_type):
+=======
+    def _fetch_shared_overview_rows(self, organization_id, filters, report_type, current_user_id=None):
+>>>>>>> 6880dee6baba2a9f8b7a5d65b27600b67f275450
         """Shared (cross-org) rows for get_overview_data, as the SAME 20-column tuples but with
         origin_id replaced by the virtual shared-node id (so a shared location acts as a node at its
         placement level). Branches are disjoint (deepest share wins) → never double-counted.
@@ -445,10 +467,24 @@ class ReportsService:
         from ..transactions.transaction_service import TransactionService, shared_node_id_for
         from sqlalchemy import literal
         filters = filters or {}
+<<<<<<< HEAD
         own_selected = None
         if filters.get('location_ids'):
             own_selected = set(self._resolve_descendant_ids(organization_id, filters['location_ids']))
         branches, _m = TransactionService(self.db)._resolve_shared_branches(organization_id, own_selected)
+=======
+        # A destination filter ("สถานที่รับขยะ") selects destinations in THIS org.
+        # Cross-org shared data is received at the SOURCE org's destinations, so it can
+        # never match a this-org destination id — exclude shared rows entirely.
+        if filters.get('destination_ids'):
+            return [], {}
+        own_selected = None
+        if filters.get('location_ids'):
+            own_selected = set(self._resolve_descendant_ids(organization_id, filters['location_ids']))
+        visible_parent_ids = self._shared_visible_parent_ids(organization_id, current_user_id)
+        branches, _m = TransactionService(self.db)._resolve_shared_branches(
+            organization_id, own_selected, visible_parent_ids=visible_parent_ids)
+>>>>>>> 6880dee6baba2a9f8b7a5d65b27600b67f275450
         if not branches:
             return [], {}
         report_from = filters.get('date_from')
@@ -492,6 +528,10 @@ class ReportsService:
                 Transaction.organization_id == b['source_org_id'],
                 Transaction.origin_id.in_(b['src_ids']),
                 Transaction.deleted_date.is_(None),
+<<<<<<< HEAD
+=======
+                Transaction.is_internal_transfer.isnot(True),  # see migration 083
+>>>>>>> 6880dee6baba2a9f8b7a5d65b27600b67f275450
                 TransactionRecord.deleted_date.is_(None),
                 or_(TransactionRecord.status != 'rejected', TransactionRecord.status.is_(None)),
             )
@@ -556,6 +596,13 @@ class ReportsService:
             ).filter(
                 Transaction.organization_id == organization_id,
                 Transaction.deleted_date.is_(None),
+                # A ผู้คัดแยก weighing material OUT of a waste room measures kilograms
+                # the tenant already reported on the way in. Both weighings are real
+                # and both matter for traceability, but summing both reports the same
+                # material twice. This query answers "how much waste did this
+                # organization produce", so the movement leg is left out. isnot(True)
+                # also covers rows written before the column existed. Migration 083.
+                Transaction.is_internal_transfer.isnot(True),
                 TransactionRecord.deleted_date.is_(None),
                 or_(
                     TransactionRecord.status != 'rejected',
@@ -627,7 +674,11 @@ class ReportsService:
             # so shared data flows into overview / performance / comparison / materials / waste alike.
             # Branches are disjoint (deepest share wins) → no transaction is double-counted.
             shared_rows, _shared_node_meta = self._fetch_shared_overview_rows(
+<<<<<<< HEAD
                 organization_id, filters, report_type)
+=======
+                organization_id, filters, report_type, current_user_id=current_user_id)
+>>>>>>> 6880dee6baba2a9f8b7a5d65b27600b67f275450
             if shared_rows:
                 rows = list(rows) + shared_rows
 
@@ -787,29 +838,66 @@ class ReportsService:
         if filters.get('filter_tenant_ids'):
             query = query.filter(Transaction.tenant_id.in_(filters['filter_tenant_ids']))
             applied = True
+        # Destination filter ("สถานที่รับขยะ") — orthogonal to origin, so it ANDs with
+        # whichever origin path runs (new location_ids OR the legacy origin_combos fallback).
+        # Do NOT flip `applied`: that flag only governs the legacy origin fallback; a
+        # destination-only selection must still let the origin fallback run (as a no-op).
+        if filters.get('destination_ids'):
+            query = query.filter(TransactionRecord.destination_id.in_(filters['destination_ids']))
         return query, applied
 
     def _apply_member_filter_to_transaction_query(self, query, current_user_id: Any, organization_id: Optional[int] = None):
         """
-        Filter transactions to those from the user's assigned locations (3-tier model).
-        Owners see all transactions; members see only assigned locations + descendants.
+        Filter transactions to what this user may see.
+
+        Owners see everything. Location members see their assigned locations + descendants.
+        Tag/tenant members additionally see transactions at the tag/tenant's locations that
+        carry that tag/tenant (and only those) — so report aggregates never include rows the
+        user cannot see in the transaction list.
         """
         if current_user_id is None or organization_id is None:
             return query
 
         from ..users.user_service import UserService
+        from ....libs.locationAccess import build_visibility_clause
+
+        user_service = UserService(self.db)
+        scope = user_service.resolve_access_scope(int(organization_id), int(current_user_id))
+
+        clause = build_visibility_clause(
+            scope,
+            origin_col=Transaction.origin_id,
+            tag_col=Transaction.location_tag_id,
+            tenant_col=Transaction.tenant_id,
+            date_col=Transaction.transaction_date,
+        )
+        if clause is None:
+            return query
+        return query.filter(clause)
+
+    def _shared_visible_parent_ids(self, organization_id, current_user_id) -> Optional[set]:
+        """3-tier ACCESS gate for cross-org shared nodes (passed to _resolve_shared_branches).
+
+        A shared node inherits the visibility of the real location it is placed under, so a
+        non-owner may see it only when that placement parent is in their assigned set.
+
+        This MUST mirror `_apply_member_filter_to_transaction_query` (own-data gate) exactly:
+        that gate restricts EVERY non-owner to `assigned_ids` purely by the 3-tier model — it
+        does NOT consult role (`_should_filter_reports_by_member`). Using the role check here was
+        the leak: a non-owner the role-check exempts (no role, or admin) had own-data tier-limited
+        but saw ALL shared data. Gate by tier only:
+          - owner (or no org / no user) → None (unrestricted)
+          - any other user → their assigned_ids (possibly empty → sees no shared data)
+        """
+        if organization_id is None or current_user_id is None:
+            return None
+        from ..users.user_service import UserService
         user_service = UserService(self.db)
         locations = user_service.crud.get_user_locations(organization_id=organization_id)
         tiers = user_service._resolve_location_tiers(locations, int(organization_id), int(current_user_id))
-
         if tiers['is_owner']:
-            return query
-
-        assigned_ids = tiers['assigned_ids']
-        if not assigned_ids:
-            return query.filter(Transaction.origin_id.is_(None))
-
-        return query.filter(Transaction.origin_id.in_(list(assigned_ids)))
+            return None
+        return tiers['assigned_ids'] or set()
 
     def get_origin_by_organization(self, organization_id: int, filters: Optional[Dict[str, Any]] = None, current_user_id: Any = None) -> Dict[str, Any]:
         """
@@ -869,13 +957,19 @@ class ReportsService:
                     expanded_ids = self._resolve_descendant_ids(organization_id, member_origin_ids)
                     new_ids = set(expanded_ids) - set(member_origin_ids)
                     if new_ids:
-                        extra_combos = self.db.query(
+                        extra_query = self.db.query(
                             Transaction.origin_id,
                             Transaction.location_tag_id,
                             Transaction.tenant_id
                         ).filter(
                             *base_filter,
                             Transaction.origin_id.in_(list(new_ids))
+                        )
+                        # Re-apply the visibility gate. Without it this expansion hands back
+                        # combos the user cannot actually read — for a tag/tenant-scoped user
+                        # that means other tenants' names appearing in their filter dropdown.
+                        extra_combos = self._apply_member_filter_to_transaction_query(
+                            extra_query, current_user_id, organization_id
                         ).distinct().all()
                         combos_result = list(combos_result) + list(extra_combos)
 
@@ -983,8 +1077,16 @@ class ReportsService:
                 # Cross-org shared nodes appear as filterable entries at their placement level. Pull
                 # in each placed share and ensure its placement-parent chain is present in the tree.
                 from ..transactions.transaction_service import TransactionService, shared_node_id_for
+<<<<<<< HEAD
                 shared_branches_for_filter, _sb_meta = TransactionService(self.db)._resolve_shared_branches(
                     organization_id, None)
+=======
+                # Same 3-tier gate as the data path: a non-owner only sees a shared node in the
+                # filter tree when its placement parent is in their assigned set.
+                _shared_visible = self._shared_visible_parent_ids(organization_id, current_user_id)
+                shared_branches_for_filter, _sb_meta = TransactionService(self.db)._resolve_shared_branches(
+                    organization_id, None, visible_parent_ids=_shared_visible)
+>>>>>>> 6880dee6baba2a9f8b7a5d65b27600b67f275450
                 shared_filter_nodes = []  # {vid, label, parent_id, source_org_name}
                 for b in shared_branches_for_filter:
                     pid = b.get('placed_parent_node_id')
@@ -1141,6 +1243,13 @@ class ReportsService:
             ).filter(
                 Transaction.organization_id == organization_id,
                 Transaction.deleted_date.is_(None),
+                # A ผู้คัดแยก weighing material OUT of a waste room measures kilograms
+                # the tenant already reported on the way in. Both weighings are real
+                # and both matter for traceability, but summing both reports the same
+                # material twice. This query answers "how much waste did this
+                # organization produce", so the movement leg is left out. isnot(True)
+                # also covers rows written before the column existed. Migration 083.
+                Transaction.is_internal_transfer.isnot(True),
                 TransactionRecord.deleted_date.is_(None),
                 or_(
                     TransactionRecord.status != 'rejected',

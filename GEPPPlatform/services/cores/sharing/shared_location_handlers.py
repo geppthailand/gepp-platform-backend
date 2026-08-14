@@ -73,10 +73,21 @@ def shared_location_routes(event: Dict[str, Any], context: Any, **params) -> Any
             return service.create_share(organization_id, src_loc_id, user_id, body)
         raise NotFoundException('Shared-location endpoint not found')
 
+<<<<<<< HEAD
     # ── /incoming ─────────────────────────────────────────────────────────────
     if segments[0] == 'incoming' and method == 'GET':
         return service.list_incoming(organization_id, user_id)
 
+=======
+    # ── /incoming (owner-only tray: placed + unplaced offers) ──────────────────
+    if segments[0] == 'incoming' and method == 'GET':
+        return service.list_incoming(organization_id, user_id)
+
+    # ── /placed (read-only chart overlay, visible to any user per 3-tier) ──────
+    if segments[0] == 'placed' and method == 'GET':
+        return service.list_visible_placed(organization_id, user_id)
+
+>>>>>>> 6880dee6baba2a9f8b7a5d65b27600b67f275450
     # ── /source-ids (locations that have outgoing shares) ──────────────────────
     if segments[0] == 'source-ids' and method == 'GET':
         return service.list_source_location_ids(organization_id)

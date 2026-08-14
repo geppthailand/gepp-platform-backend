@@ -68,7 +68,8 @@ def handle_transaction_routes(event: Dict[str, Any], data: Dict[str, Any], **par
                 user_service,
                 transaction_id,
                 include_records,
-                current_user_organization_id
+                current_user_organization_id,
+                current_user_id
             )
 
         elif '/api/transactions/' in path and '/with-records' in path and method == 'PUT':
@@ -210,11 +211,13 @@ def handle_create_transaction(
         for record_data in transaction_records_data:
             record_data['created_by_id'] = int(current_user_id)
 
-        print(transaction_data)
-        # Create transaction
+        # Create transaction. enforce_access: this is the authenticated web path, so the
+        # caller must actually have access to the origin (and to the tag/tenant, when the
+        # location is only reachable through one).
         result = transaction_service.create_transaction(
             transaction_data,
-            transaction_records_data if transaction_records_data else None
+            transaction_records_data if transaction_records_data else None,
+            enforce_access=True
         )
 
         if result['success']:
@@ -251,7 +254,8 @@ def handle_get_transaction(
     user_service: UserService,
     transaction_id: int,
     include_records: bool,
-    current_user_organization_id: int
+    current_user_organization_id: int,
+    current_user_id: Any = None
 ) -> Dict[str, Any]:
     """
     Handle GET /api/transactions/{id} - Get transaction by ID
@@ -270,7 +274,11 @@ def handle_get_transaction(
         transaction = result['transaction']
         is_shared_view = False
         if transaction['organization_id'] != current_user_organization_id:
+<<<<<<< HEAD
             if transaction_service.is_transaction_shared_to_org(transaction, current_user_organization_id):
+=======
+            if transaction_service.is_transaction_shared_to_org(transaction, current_user_organization_id, current_user_id):
+>>>>>>> 6880dee6baba2a9f8b7a5d65b27600b67f275450
                 is_shared_view = True
                 transaction['is_shared'] = True
                 transaction['read_only'] = True
@@ -377,6 +385,15 @@ def handle_list_transactions(
                 district = int(district_raw)
         sub_district = int(query_params['sub_district']) if query_params.get('sub_district') else None
 
+        # Provenance filters: where the row came from, and who approved it. Unknown values
+        # are dropped rather than erroring — a stale bookmark shouldn't break the list.
+        source = query_params.get('source')
+        if source not in ('iot', 'qr_input', 'import', 'manual'):
+            source = None
+        approval_source = query_params.get('approval_source')
+        if approval_source not in ('human', 'ai', 'auto_scale'):
+            approval_source = None
+
         # Always filter by user's organization and only transactions where user is in origin members
         result = transaction_service.list_transactions(
             organization_id=current_user_organization_id,
@@ -398,7 +415,9 @@ def handle_list_transactions(
             location_ids=location_ids,
             filter_tag_ids=filter_tag_ids,
             filter_tenant_ids=filter_tenant_ids,
-            material_ids=material_ids
+            material_ids=material_ids,
+            source=source,
+            approval_source=approval_source
         )
 
         if result['success']:

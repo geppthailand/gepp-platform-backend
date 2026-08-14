@@ -25,184 +25,83 @@ from reportlab.graphics.charts.piecharts import Pie
 from reportlab.graphics import renderPDF
 from urllib.request import urlopen
 from reportlab.lib.utils import ImageReader
+from GEPPPlatform.services.cores.thai_canvas import ThaiCanvas
 
 # --- Colors and constants (vendored from scripts/generate_pdf_report.py) ---
 BuildingColors = [
-    "#eafff1",
-    "#c9f1e4",
-    "#a7e3d7",
-    "#85d5ca",
-    "#6cc5c0",
-    "#58b4b9",
-    "#44a2b1",
-    "#3091aa",
-    "#2880a0",
-    "#215d8b",
-    "#1d4c81",
-    "#1c3b77",
-    "#1b296d",
-    "#1a1662",
-    "#180055"
+    "#0f4a34",
+    "#166b48",
+    "#1d8a5e",
+    "#28a074",
+    "#43b58c",
+    "#66c6a3",
+    "#8fd6bd",
+    "#b6e4d3",
+    "#d5f0e6",
+    "#e9f7f1",
 ]
 
+# Keyed by ENGLISH category name — must match the dashboard palette (OverviewTab MATERIAL_COLORS)
+# so the PDF pie matches what users see on screen.
 MATERIAL_COLORS = {
-    "Recyclable Waste": colors.HexColor("#fff8c8"),
-    "Organic Waste": colors.HexColor("#b0dad6"),
-    "Electronic Waste": colors.HexColor("#e8e5ef"),
-    "Bio-Hazardous Waste": colors.HexColor("#e6b8af"),
-    "Hazardous Waste": colors.HexColor("#f4cccc"),
-    "Waste To Energy": colors.HexColor("#fce5cd"),
-    "General Waste": colors.HexColor("#cfe2f3"),
-    "Construction Waste": colors.HexColor("#e8e5ef"),
-    "Electronic Waste": colors.HexColor("#d9d9d9"),
+    "General Waste": colors.HexColor("#2a78d6"),        # blue (was #cfe2f3)
+    "Recyclable Waste": colors.HexColor("#eda100"),     # yellow/amber (was #fff8c8)
+    "Organic Waste": colors.HexColor("#1baf7a"),        # teal-green (was #b0dad6)
+    "Hazardous Waste": colors.HexColor("#e34948"),      # red (was #f4cccc)
+    "Bio-Hazardous Waste": colors.HexColor("#c8553d"),  # terracotta (was #e6b8af)
+    "Waste To Energy": colors.HexColor("#eb6834"),      # orange (was #fce5cd)
+    "Electronic Waste": colors.HexColor("#64748b"),     # slate/grey (was #d9d9d9)
+    "Construction Waste": colors.HexColor("#4a3aa7"),   # violet (was #e8e5ef)
 }
 main_material_colorPalette = [
-  "#305b4a","#3b6f5a","#417b64","#4b8970","#50987c","#56a586","#5fb593",
-  "#68c7a2","#70d5ae","#75deb5","#7be9be","#7ff0c4","#8df5cd","#95ffd6",
-  "#b1ffe1","#ceffec","#ddfff2","#eafff7","#f3fffa","#fafffd"
+  "#065F46", "#0F766E",
+  "#059669", "#0D9488",
+  "#10B981", "#14B8A6",
+  "#34D399", "#2DD4BF",
+  "#064E3B", "#134E4A",
+  "#047857", "#115E59",
+  "#022C22", "#042F2E",
 ]
 sub_material_colorPalette = [
-    "#007648","#008350","#009359","#00a463","#00b36c","#00c476","#00d580",
-    "#00e388","#00f492","#10ff9f","#43feb3","#7ff0c4","#8df5cd","#95ffd6",
-    "#b1ffe1","#ceffec","#ddfff2","#eafff7","#f3fffa","#fafffd"
+    "#166534", "#4D7C0F", "#854D0E",
+    "#16A34A", "#65A30D", "#CA8A04",
+    "#22C55E", "#84CC16", "#EAB308",
+    "#15803D", "#3F6212", "#A16207",
+    "#4ADE80", "#A3E635", "#FACC15",
 ]
+
+
+def _fit_text_to_width(text: str, font_name: str, font_size: float, max_w: float) -> str:
+    """Truncate `text` with an ellipsis so it fits within `max_w` at the given font.
+    Prevents long org/branch/building names from overlapping adjacent content in the PDF."""
+    from reportlab.pdfbase.pdfmetrics import stringWidth as _sw
+    t = str(text or "")
+    if max_w <= 0:
+        return ""
+    if _sw(t, font_name, font_size) <= max_w:
+        return t
+    ell = "…"
+    while t and _sw(t + ell, font_name, font_size) > max_w:
+        t = t[:-1]
+    return (t + ell) if t else ell
 
 PAGE_WIDTH_IN = 11.69
 PAGE_HEIGHT_IN = 8.27
 
-# --- i18n translation dictionary ---
-_TRANSLATIONS = {
-    'en': {
-        'location': 'Location',
-        'date': 'Date',
-        'kg': 'kg',
-        'copyright': 'Copyright © 2018–2023 GEPP Sa-Ard Co., Ltd. ALL RIGHTS RESERVED',
-        'gepp_report': 'GEPP REPORT',
-        'subtitle': 'Data-Driven Transformation',
-        'overview': 'Overview',
-        'total_transactions': 'Total Transactions',
-        'total_approved': 'Total Approved',
-        'key_indicators': 'Key Indicators',
-        'total_waste_kg': 'Total Waste (kg)',
-        'recycling_rate_pct': 'Recycling rate (%)',
-        'ghg_reduction_kgco2e': 'GHG Reduction (kgCO2e)',
-        'top_recyclables': 'Top Recycling Sources',
-        'overall': 'Overall',
-        'category_proportion': 'Category proportion',
-        'general_waste': 'General Waste',
-        'materials_summary': 'Materials Summary',
-        'category': 'Category',
-        'weight_kg': 'Weight (kg.)',
-        'proportion_pct': 'Proportion (%)',
-        'performance': 'Performance',
-        'recycling_rate': 'Recycling Rate',
-        'total_waste': 'Total Waste',
-        'all_building': 'All Building',
-        'no_data': 'No data',
-        'total_buildings': 'Total Buildings',
-        'all_types_of_waste': 'All Types of Waste',
-        'detailed_performance_metrics': 'Detailed Performance Metrics',
-        'building_name': 'Building Name',
-        'general_kg': 'General (kg)',
-        'total_recyclable_incl': 'Total Recyclable incl. Recycled Organic Waste (kg)',
-        'recycling_rate_pct_header': 'Recycling Rate (%)',
-        'status': 'Status',
-        'status_normal': 'Normal',
-        'status_need_imprv': 'Need Imprv',
-        'comparison': 'Comparison',
-        'risks': 'Risks',
-        'opportunities': 'Opportunities',
-        'quick_wins': 'Quick Wins',
-        'last_year': 'Last Year',
-        'current_year': 'Current Year',
-        'waste_to_energy': 'Waste To Energy',
-        'quantity_comparison': 'Quantity Comparison',
-        'total': 'Total',
-        'main_materials': 'Main Materials',
-        'top_materials_by_qty': 'Top Materials by Quantity (Kg.)',
-        'materials_proportion': 'Materials Proportion',
-        'main_material': 'Main Material',
-        'percentage_pct': 'Percentage (%)',
-        'sub_materials': 'Sub Materials',
-        'sub_material': 'Sub Material',
-        'waste_diversion': 'Waste Diversion',
-        'total_origins': 'Total Origins',
-        'complete_transfers': 'Complete Transfers',
-        'processing_transfers': 'Processing Transfers',
-        'completed_rate': 'Completed Rate',
-        'materials': 'Materials',
-        'destination': 'Destination',
-        'period_details': 'Period Details',
-        'period': 'Period',
-        'months_short': ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
-        'months_long': ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'],
-    },
-    'th': {
-        'location': 'สถานที่',
-        'date': 'วันที่',
-        'kg': 'กก.',
-        'copyright': 'ลิขสิทธิ์ © 2018–2023 บริษัท เก็บ สะอาด จำกัด สงวนลิขสิทธิ์',
-        'gepp_report': 'รายงาน GEPP',
-        'subtitle': 'การเปลี่ยนแปลงที่ขับเคลื่อนด้วยข้อมูล',
-        'overview': 'ภาพรวม',
-        'total_transactions': 'รายการทั้งหมด',
-        'total_approved': 'รายการที่อนุมัติ',
-        'key_indicators': 'ตัวชี้วัดสำคัญ',
-        'total_waste_kg': 'ขยะทั้งหมด (กก.)',
-        'recycling_rate_pct': 'อัตราการรีไซเคิล (%)',
-        'ghg_reduction_kgco2e': 'ลดก๊าซเรือนกระจก (กก.)',
-        'top_recyclables': 'อันดับสถานที่รีไซเคิลสูงสุด',
-        'overall': 'ภาพรวม',
-        'category_proportion': 'สัดส่วนตามประเภท',
-        'general_waste': 'ขยะทั่วไป',
-        'materials_summary': 'สรุปวัสดุ',
-        'category': 'ประเภท',
-        'weight_kg': 'น้ำหนัก (กก.)',
-        'proportion_pct': 'สัดส่วน (%)',
-        'performance': 'ประสิทธิภาพ',
-        'recycling_rate': 'อัตราการรีไซเคิล',
-        'total_waste': 'ขยะทั้งหมด',
-        'all_building': 'ทุกอาคาร',
-        'no_data': 'ไม่มีข้อมูล',
-        'total_buildings': 'จำนวนอาคารทั้งหมด',
-        'all_types_of_waste': 'ขยะทุกประเภท',
-        'detailed_performance_metrics': 'ตัวชี้วัดประสิทธิภาพโดยละเอียด',
-        'building_name': 'ชื่ออาคาร',
-        'general_kg': 'ขยะทั่วไป (กก.)',
-        'total_recyclable_incl': 'วัสดุรีไซเคิลทั้งหมด รวมขยะอินทรีย์ (กก.)',
-        'recycling_rate_pct_header': 'อัตราการรีไซเคิล (%)',
-        'status': 'สถานะ',
-        'status_normal': 'ปกติ',
-        'status_need_imprv': 'ต้องปรับปรุง',
-        'comparison': 'การเปรียบเทียบ',
-        'risks': 'ความเสี่ยง',
-        'opportunities': 'โอกาส',
-        'quick_wins': 'ผลลัพธ์เร็ว',
-        'last_year': 'ปีที่แล้ว',
-        'current_year': 'ปีปัจจุบัน',
-        'waste_to_energy': 'ขยะเพื่อพลังงาน',
-        'quantity_comparison': 'การเปรียบเทียบปริมาณ',
-        'total': 'รวม',
-        'main_materials': 'วัสดุหลัก',
-        'top_materials_by_qty': 'วัสดุยอดนิยมตามปริมาณ (กก.)',
-        'materials_proportion': 'สัดส่วนวัสดุ',
-        'main_material': 'วัสดุหลัก',
-        'percentage_pct': 'เปอร์เซ็นต์ (%)',
-        'sub_materials': 'วัสดุย่อย',
-        'sub_material': 'วัสดุย่อย',
-        'waste_diversion': 'การจัดการของเสีย',
-        'total_origins': 'จำนวนต้นทาง',
-        'complete_transfers': 'การโอนที่เสร็จสิ้น',
-        'processing_transfers': 'การโอนที่กำลังดำเนินการ',
-        'completed_rate': 'อัตราเสร็จสิ้น',
-        'materials': 'วัสดุ',
-        'destination': 'ปลายทาง',
-        'period_details': 'รายละเอียดช่วงเวลา',
-        'period': 'ช่วงเวลา',
-        'months_short': ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'],
-        'months_long': ['มกราคม', 'กุมภาพันธ์', 'มีนาคม', 'เมษายน', 'พฤษภาคม', 'มิถุนายน', 'กรกฎาคม', 'สิงหาคม', 'กันยายน', 'ตุลาคม', 'พฤศจิกายน', 'ธันวาคม'],
-    },
-}
+# --- i18n labels ---
+# SINGLE SOURCE lives in report_i18n.py (shared with reports_handlers.py). Import it
+# normally when available; fall back to a by-path load because this module is often
+# exec'd directly by the render lambda (spec_from_file_location), where package
+# imports would drag in reports/__init__.py (SQLAlchemy) and fail.
+try:
+    from GEPPPlatform.services.cores.reports.report_i18n import LABELS as _TRANSLATIONS
+except Exception:
+    import importlib.util as _ilu
+    _i18n_path = os.path.join(os.path.dirname(__file__), "report_i18n.py")
+    _spec = _ilu.spec_from_file_location("report_i18n", _i18n_path)
+    _mod = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_mod)
+    _TRANSLATIONS = _mod.LABELS
 
 def _t(key: str, data: dict) -> str:
     """Translate a key. Checks data['labels'] first (pre-computed by handler), then falls back to built-in translations."""
@@ -287,8 +186,12 @@ def _header(pdf, page_width_points: float, page_height_points: float, data: dict
             profile_src = profile_src[0] if profile_src else None
         profile_src = (str(profile_src or "")).strip()
         if profile_src:
-            max_h = 14  # limit height to avoid overlapping sub header
-            img_y = y - 4  # align roughly to text baseline
+            # Fixed logo box; the image is scaled to fit inside it (contain), so
+            # wide and tall logos all occupy the same slot instead of sprawling.
+            LOGO_BOX_W = 2.2 * inch
+            LOGO_BOX_H = 40  # main knob: squarish logos are height-limited, so this sets size
+            box_x = page_width_points - padding - LOGO_BOX_W
+            box_y = y - 20  # lowered so the taller box stays clear of the page top edge
             img_obj = None
             if profile_src.startswith("http://") or profile_src.startswith("https://"):
                 try:
@@ -303,27 +206,16 @@ def _header(pdf, page_width_points: float, page_height_points: float, data: dict
             if img_obj is not None:
                 try:
                     reader = ImageReader(img_obj)
-                    # Maintain aspect ratio by scaling height to max_h and width proportionally
-                    try:
-                        iw, ih = reader.getSize()
-                    except Exception:
-                        iw, ih = (max_h, max_h)
-                    scale = max_h / float(ih) if ih else 1.0
-                    img_h = max_h
-                    img_w = float(iw) * scale if iw else max_h
-                    # Place image at the same right-aligned position as the name
-                    img_x = page_width_points - padding - img_w
-                    pdf.drawImage(reader, img_x, img_y, width=img_w, height=img_h, mask='auto', preserveAspectRatio=True)
+                    # preserveAspectRatio fits (letterboxes) the image inside the
+                    # box; anchor='e' right-aligns it to the box's right edge.
+                    pdf.drawImage(reader, box_x, box_y, width=LOGO_BOX_W, height=LOGO_BOX_H,
+                                  preserveAspectRatio=True, anchor='e', mask='auto')
                     image_drawn = True
                 except Exception:
-                    # Fallback without ImageReader (may not preserve ratio)
+                    # Fallback without ImageReader (still confined to the box)
                     try:
-                        iw, ih = (max_h, max_h)
-                        img_h = max_h
-                        img_w = max_h
-                        # Place fallback image at the same right-aligned position as the name
-                        img_x = page_width_points - padding - img_w
-                        pdf.drawImage(img_obj, img_x, img_y, width=img_w, height=img_h, mask='auto', preserveAspectRatio=True)
+                        pdf.drawImage(img_obj, box_x, box_y, width=LOGO_BOX_W, height=LOGO_BOX_H,
+                                      preserveAspectRatio=True, anchor='e', mask='auto')
                         image_drawn = True
                     except Exception:
                         pass
@@ -378,13 +270,18 @@ def _wrap_text_lines(pdf, text: str, max_width: float, font_name: str, font_size
     lines.append(current)
     return lines
 
-def _stat_chip(pdf, x, y, w, h, title, value, variant="gray"):
+def _stat_chip(pdf, x, y, w, h, title, value, variant="gray", subtitle=None):
     fill_color = WHITE if variant == "white" else CARD
     _rounded_card(pdf, x, y, w, h, radius=8, fill=fill_color)
     pad_x = 12 if variant == "white" else 20
     pdf.setFillColor(TEXT)
     pdf.setFont("IBMPlexSansThai-Regular", 8)
-    pdf.drawString(x + pad_x, y + h - 18, title)
+    # Chips share the column width, so adding a 4th narrows every title. Truncate rather
+    # than let a long label run over the neighbouring chip.
+    pdf.drawString(
+        x + pad_x, y + h - 18,
+        _fit_text_to_width(title, "IBMPlexSansThai-Regular", 8, w - pad_x * 2),
+    )
     pdf.setFont("IBMPlexSansThai-Regular", 12)
     # Allow callers to pass pre-formatted strings; otherwise format numerics
     try:
@@ -395,6 +292,16 @@ def _stat_chip(pdf, x, y, w, h, title, value, variant="gray"):
     except Exception:
         value_text = str(value)
     pdf.drawString(x + pad_x, y + h - 32, value_text)
+    # Optional third line, e.g. the denominator behind a per-capita figure. Appending it to
+    # the title instead would not fit an English label in a 4-across row.
+    if subtitle:
+        pdf.setFont("IBMPlexSansThai-Regular", 7)
+        pdf.setFillColor(BAR3)  # muted grey — supporting detail, not a headline number
+        pdf.drawString(
+            x + pad_x, y + h - 43,
+            _fit_text_to_width(str(subtitle), "IBMPlexSansThai-Regular", 7, w - pad_x * 2),
+        )
+        pdf.setFillColor(TEXT)
 
 def _progress_bar(pdf, x, y, w, h, ratio, bar_color=PRIMARY, back_color=STROKE):
     ratio = max(0.0, min(1.0, float(ratio or 0)))
@@ -823,12 +730,42 @@ def draw_overview(pdf, page_width_points: float, page_height_points: float, data
     pdf.setFont("IBMPlexSansThai-Medium", 12)
     pdf.drawString(overall_x + 16, overall_y + overall_h - 30, _t('overall', data))
     stats = data["overview_data"]["overall_charts"]["chart_stat_data"]
-    sw = 1.78 * inch
-    sh = 0.60 * inch
+    # Width derived from the count instead of a fixed 1.78in with a [:3] slice — that cap
+    # silently dropped the 4th card (Waste per Head) from the PDF while it showed on screen.
+    gap = 8
+    n_stats = max(1, len(stats))
+    sw = (right_col_w - 32 - gap * (n_stats - 1)) / n_stats
+    # Sub-line per chip: the unit for most, the denominator for the per-capita one (its unit
+    # is already in its title). Matches what the screen shows under each value.
+    def _sub_for(st):
+        if st.get("headcount"):
+            # People are whole — _format_number would render "235.00".
+            try:
+                count = f"{int(st['headcount']):,}"
+            except (TypeError, ValueError):
+                count = str(st["headcount"])
+            return _t('based_on_people', data).replace('{count}', count)
+        unit = st.get("unit")
+        if unit == 'kg':
+            return _t('unit_kg', data)
+        if unit == 'trees':
+            return _t('unit_trees', data)
+        return None
+
+    has_subtitle = any(_sub_for(st) for st in stats)
+    sh = (0.72 if has_subtitle else 0.60) * inch
     sy = overall_y + overall_h - 26 - 16 - sh
-    for i, st in enumerate(stats[:3]):
-        sx = overall_x + 16 + i * (sw + 8)
-        _stat_chip(pdf, sx, sy, sw, sh, st["title"], st["value"], "white")
+    for i, st in enumerate(stats):
+        sx = overall_x + 16 + i * (sw + gap)
+        value = st.get("value")
+        # Waste per Head is None when no location in scope has a headcount — print the em
+        # dash the screen shows rather than a misleading 0.
+        if value is None:
+            value = "—"
+        # On its own line, not appended to the title: at 4-across an English label plus
+        # "· 235" overflows the chip, and truncating it would leave a believable but wrong
+        # number on the page.
+        _stat_chip(pdf, sx, sy, sw, sh, st.get("title", ""), value, "white", subtitle=_sub_for(st))
     chart_data = data["overview_data"]["overall_charts"]["chart_data"]
     cy = overall_y + 16
     ch = (sy - cy - 16) * 0.9
@@ -890,15 +827,17 @@ def draw_overview_breakdown(pdf, page_width_points: float, page_height_points: f
     for it in (wt_props or []):
         try:
             name = str(it.get("category_name") or it.get("name") or it.get("category") or "")
+            # Color is keyed by the ENGLISH category name; category_name may be translated for display.
+            color_key = str(it.get("category_name_en") or it.get("name_en") or name)
             total = float(it.get("total_waste", it.get("value", 0)) or 0)
             perc = it.get("proportion_percent")
             perc = float(perc) if perc is not None else None
-            items.append({"name": name, "total": total, "perc": perc})
+            items.append({"name": name, "color_key": color_key, "total": total, "perc": perc})
         except Exception:
             continue
     # Fallback example if empty
     if not items:
-        items = [{"name": _t('general_waste', data), "total": 1.0, "perc": 100.0}]
+        items = [{"name": _t('general_waste', data), "color_key": "General Waste", "total": 1.0, "perc": 100.0}]
     # Values for pie: prefer totals; if all totals are zero, use percents or 1
     totals_sum = sum(max(0.0, it["total"]) for it in items)
     if totals_sum <= 0:
@@ -907,7 +846,7 @@ def draw_overview_breakdown(pdf, page_width_points: float, page_height_points: f
         values = [max(0.0, it["total"]) for it in items]
     colors_list = []
     for it in items:
-        c = MATERIAL_COLORS.get(it["name"], None)
+        c = MATERIAL_COLORS.get(it.get("color_key") or it["name"], None)
         if c is None:
             c = colors.HexColor("#cfe2f3")
         colors_list.append(c)
@@ -993,84 +932,21 @@ def draw_overview_breakdown(pdf, page_width_points: float, page_height_points: f
         pdf.drawString(hx + 3 * col_w - 10 - p_w, y_text, p_text)
     _footer(pdf, page_width_points, data)
 def draw_performance(pdf, page_width_points: float, page_height_points: float, data: dict, performance_data: dict) -> None:
-    pdf.showPage()
-    _header(pdf, page_width_points, page_height_points, data)
-    _sub_header(pdf, page_width_points, page_height_points, data, _t('performance', data))
-    margin = 0.78 * inch
-    # Sub header ends at page_height_points - (1.96 * inch), content starts 24 points below
-    content_top = page_height_points - (1.96 * inch) - 24
-    left_card_w = 3.22 * inch
-    left_card_h = 5.0 * inch
-    left_card_y = content_top - left_card_h
-    _rounded_card(pdf, margin, left_card_y, left_card_w, left_card_h, radius=8, fill=WHITE)
-    pdf.setFillColor(TEXT)
-    pdf.setFont("IBMPlexSansThai-Medium", 12)
-    # Position text relative to card top (content_top)
-    pdf.drawString(1 * inch, content_top - 0.4 * inch - 4, f"{performance_data['branchName']}")
-    pdf.setFont("IBMPlexSansThai-Regular", 8)
-    label_text = _t('recycling_rate', data)
-    label_width = stringWidth(label_text, "IBMPlexSansThai-Medium", 8)
-    pdf.drawString(3.82 * inch - label_width, content_top - 0.27 * inch - 4, label_text)
-    pdf.setFont("IBMPlexSansThai-Bold", 13)
-    value_text = f"{_format_number(performance_data['recyclingRatePercent'])} %"
-    value_width = stringWidth(value_text, "IBMPlexSansThai-Medium", 13)
-    pdf.drawString(3.82 * inch - value_width, content_top - 0.52 * inch - 4, value_text)
-    # Progress bars section (first: Total Waste at 100%)
-    start_y = content_top - 1.2 * inch
-    bar_h = 0.08 * inch
-    gap = 0.36 * inch
-    # Draw Total Waste as a full bar
-    total_waste_val = float(performance_data.get("totalWasteKg", 0) or 0)
-    y_total = start_y
-    pdf.setFillColor(TEXT)
-    pdf.setFont("IBMPlexSansThai-Regular", 10)
-    pdf.drawString(1 * inch, y_total + bar_h + 0.12 * inch, _t('total_waste', data))
-    total_text = f"{_format_number(total_waste_val)} {_t('kg', data)}"
-    total_text_w = stringWidth(total_text, "IBMPlexSansThai-Regular", 10)
-    pdf.drawString(1 * inch + 2.8 * inch - total_text_w, y_total + bar_h + 0.12 * inch, total_text)
-    _progress_bar(pdf, 1 * inch, y_total, 2.8 * inch, bar_h, 1.0, colors.HexColor("#c5d2da"))
-    # Subsequent bars for individual waste types
-    for idx, (label, amount) in enumerate(performance_data["metrics"].items()):
-        y = start_y - (idx + 1) * (bar_h + gap)
-        pdf.setFillColor(TEXT)
-        pdf.setFont("IBMPlexSansThai-Regular", 10)
-        _cat_map = (data or {}).get('labels', {}).get('_category_map', {})
-        display_label = _cat_map.get(label, label)
-        pdf.drawString(1 * inch, y + bar_h + 0.12 * inch, display_label)
-        value_text = f"{_format_number(amount)} {_t('kg', data)}"
-        value_width = stringWidth(value_text, "IBMPlexSansThai-Regular", 10)
-        pdf.drawString(1 * inch + 2.8 * inch - value_width, y + bar_h + 0.12 * inch, value_text)
-        _progress_bar(pdf, 1 * inch, y, 2.8 * inch, bar_h, amount / performance_data["totalWasteKg"], MATERIAL_COLORS.get(label, colors.HexColor("#cfe2f3")))
-    gap = 1 * inch
-    outer_x = gap + 3.22 * inch
-    outer_y = left_card_y
-    outer_w = 6.8 * inch
-    outer_h = 5.0 * inch
-    _rounded_card(pdf, outer_x, outer_y, outer_w, outer_h, radius=8, fill=WHITE)
-    pad = 16
-    inner_x = outer_x + pad
-    inner_y = outer_y + pad
-    inner_w = outer_w - 2 * pad
-    inner_h = outer_h - 2 * pad
-    # _rounded_card(pdf, inner_x, inner_y, inner_w, inner_h, radius=8, fill=WHITE)
-    pdf.setFillColor(TEXT)
-    pdf.setFont("IBMPlexSansThai-Medium", 12)
-    pdf.drawString(inner_x + 16, inner_y + inner_h - 16 - 12, _t('all_building', data))
-    pdf.setFont("IBMPlexSansThai-Regular", 10)
-    
-    # Check if buildings data exists
+    # The building list ("ทุกอาคาร") can hold more rows than fit on one page. When it overflows we
+    # paginate the list across multiple pages; each page REPEATS the left card (recycle rate +
+    # per-type bars) and BOTH pie charts (full-data, unchanged) and shows only its slice of buildings.
     buildings = performance_data.get("buildings", [])
-    has_buildings = buildings and isinstance(buildings, list) and len(buildings) > 0
-    _assigned_colors = []  # Initialize to avoid undefined variable errors
-    
-    if not has_buildings:
-        # Display "No data" message
-        no_data_y = inner_y + inner_h - 0.85 * inch
-        pdf.setFillColor(colors.HexColor("#666666"))
-        pdf.setFont("IBMPlexSansThai-Regular", 10)
-        pdf.drawString(inner_x + 16, no_data_y, _t('no_data', data))
-    else:
-        # Assign per-building colors from BuildingColors randomly, reuse for list and pie
+    has_buildings = bool(buildings and isinstance(buildings, list) and len(buildings) > 0)
+    _max_waste = 0.0
+    if has_buildings:
+        buildings = sorted(buildings, key=lambda b: float(b.get("totalWasteKg", 0) or 0), reverse=True)
+        # Bars are scaled against the biggest building, not the origin total, so the top row is full.
+        _max_waste = float(buildings[0].get("totalWasteKg", 0) or 0)
+
+    # Assign per-building colors ONCE for the whole dataset so the list rows and the (full-data)
+    # pie chart agree across every page. Computed up front, before the page loop.
+    _assigned_colors = []
+    if has_buildings:
         try:
             import random as _rand
             _palette = [colors.HexColor(c) for c in (BuildingColors or [])]
@@ -1078,51 +954,164 @@ def draw_performance(pdf, page_width_points: float, page_height_points: float, d
                 _shuffled = _palette[:]
                 _rand.shuffle(_shuffled)
                 _assigned_colors = [_shuffled[i % len(_shuffled)] for i in range(len(buildings))]
-            else:
-                _assigned_colors = []
         except Exception:
             _assigned_colors = []
-        
-        for idx, building in enumerate(buildings):
-            y = inner_y + inner_h - 0.85 * inch - idx * (0.55 * inch)
-            pdf.setFillColor(TEXT)
-            pdf.drawString(inner_x + 16, y, building.get("buildingName", ""))
-            value_text = f"{_format_number(building.get('totalWasteKg', 0))} kg"
-            value_width = stringWidth(value_text, "IBMPlexSansThai-Regular", 8)
-            pdf.drawString(inner_x + 4 * inch - value_width, y, value_text)
-            _color = _assigned_colors[idx] if idx < len(_assigned_colors) else colors.HexColor("#b7cbd6")
-            total_waste = float(performance_data.get("totalWasteKg", 0) or 0)
-            if total_waste > 0:
-                _progress_bar(pdf, inner_x + 16, y - 0.2 * inch, inner_x - 0.5 * inch, 0.08 * inch, building.get('totalWasteKg', 0) / total_waste, _color)
-    
-    pdf.setFillColor(TEXT)
-    pdf.setFont("IBMPlexSansThai-Regular", 10)
-    pie_size = 1.20 * inch
-    pie_x = inner_x + inner_w - pie_size - 16
-    title1_y = inner_y + inner_h - 48
-    pdf.drawString(pie_x, title1_y, _t('total_buildings', data))
-    
+
+    # Rows per page: the list area runs from ~0.85in below the card top down to the card bottom,
+    # at 0.55in per row. 7 rows fit comfortably while leaving room for the last row's progress bar.
+    BUILDINGS_PER_PAGE = 7
     if has_buildings:
-        buildings_values = [float(b.get("totalWasteKg", 0) or 0) for b in buildings]
-        if _assigned_colors:
-            building_colors_for_pie = [_assigned_colors[i % len(_assigned_colors)] for i in range(len(buildings_values))]
-        else:
-            mono_color = colors.HexColor("#b7cbd6")
-            building_colors_for_pie = [mono_color for _ in buildings_values] or [mono_color]
-        _simple_pie_chart(pdf, pie_x, title1_y - 8 - pie_size, pie_size, buildings_values, building_colors_for_pie, gap_width=1, gap_color=colors.white)
+        _chunks = [buildings[i:i + BUILDINGS_PER_PAGE] for i in range(0, len(buildings), BUILDINGS_PER_PAGE)]
     else:
-        # Show placeholder pie chart with single value
-        placeholder_color = colors.HexColor("#e0e0e0")
-        _simple_pie_chart(pdf, pie_x, title1_y - 8 - pie_size, pie_size, [1.0], [placeholder_color], gap_width=1, gap_color=colors.white)
-    title2_y = title1_y - pie_size - 52
-    pdf.drawString(pie_x, title2_y, _t('all_types_of_waste', data))
-    metrics_items = list(performance_data.get("metrics", {}).items())
-    waste_values = [float(v or 0) for _, v in metrics_items]
-    waste_colors = [MATERIAL_COLORS.get(lbl, BAR3) for lbl, _ in metrics_items]
-    if not waste_colors:
-        waste_colors = SERIES_COLORS
-    _simple_pie_chart(pdf, pie_x, title2_y - 8 - pie_size, pie_size, waste_values, waste_colors, gap_width=1, gap_color=colors.white)
-    _footer(pdf, page_width_points, data)
+        _chunks = [[]]
+
+    for _page_idx, _chunk in enumerate(_chunks):
+        _chunk_start = _page_idx * BUILDINGS_PER_PAGE
+        pdf.showPage()
+        _header(pdf, page_width_points, page_height_points, data)
+        _sub_header(pdf, page_width_points, page_height_points, data, _t('performance', data))
+        margin = 0.78 * inch
+        # Sub header ends at page_height_points - (1.96 * inch), content starts 24 points below
+        content_top = page_height_points - (1.96 * inch) - 24
+        left_card_w = 3.22 * inch
+        left_card_h = 5.0 * inch
+        left_card_y = content_top - left_card_h
+        _rounded_card(pdf, margin, left_card_y, left_card_w, left_card_h, radius=8, fill=WHITE)
+        pdf.setFillColor(TEXT)
+        # Recycle-rate block (right-aligned, ends at 3.82in). Compute its widths FIRST so the org name
+        # on the left can be truncated to the free space before it — long names used to overlap it.
+        label_text = _t('recycling_rate', data)
+        label_width = stringWidth(label_text, "IBMPlexSansThai-Medium", 8)
+        value_text = f"{_format_number(performance_data['recyclingRatePercent'])} %"
+        value_width = stringWidth(value_text, "IBMPlexSansThai-Medium", 13)
+        rate_block_left = 3.82 * inch - max(label_width, value_width)
+
+        # Org / branch name (left) — bounded to the space before the recycle-rate block (6pt gap).
+        pdf.setFont("IBMPlexSansThai-Medium", 12)
+        name_max_w = rate_block_left - (1 * inch) - 6
+        branch_name = _fit_text_to_width(str(performance_data.get('branchName', '')), "IBMPlexSansThai-Medium", 12, name_max_w)
+        pdf.drawString(1 * inch, content_top - 0.4 * inch - 4, branch_name)
+
+        pdf.setFont("IBMPlexSansThai-Regular", 8)
+        pdf.drawString(3.82 * inch - label_width, content_top - 0.27 * inch - 4, label_text)
+        pdf.setFont("IBMPlexSansThai-Bold", 13)
+        pdf.drawString(3.82 * inch - value_width, content_top - 0.52 * inch - 4, value_text)
+        # Progress bars section (first: Total Waste at 100%)
+        start_y = content_top - 1.2 * inch
+        bar_h = 0.08 * inch
+        gap = 0.36 * inch
+        # Draw Total Waste as a full bar
+        total_waste_val = float(performance_data.get("totalWasteKg", 0) or 0)
+        y_total = start_y
+        pdf.setFillColor(TEXT)
+        pdf.setFont("IBMPlexSansThai-Regular", 10)
+        pdf.drawString(1 * inch, y_total + bar_h + 0.12 * inch, _t('total_waste', data))
+        total_text = f"{_format_number(total_waste_val)} {_t('kg', data)}"
+        total_text_w = stringWidth(total_text, "IBMPlexSansThai-Regular", 10)
+        pdf.drawString(1 * inch + 2.8 * inch - total_text_w, y_total + bar_h + 0.12 * inch, total_text)
+        _progress_bar(pdf, 1 * inch, y_total, 2.8 * inch, bar_h, 1.0, colors.HexColor("#c5d2da"))
+        # Subsequent bars for individual waste types
+        for idx, (label, amount) in enumerate(performance_data["metrics"].items()):
+            y = start_y - (idx + 1) * (bar_h + gap)
+            pdf.setFillColor(TEXT)
+            pdf.setFont("IBMPlexSansThai-Regular", 10)
+            _cat_map = (data or {}).get('labels', {}).get('_category_map', {})
+            display_label = _cat_map.get(label, label)
+            pdf.drawString(1 * inch, y + bar_h + 0.12 * inch, display_label)
+            value_text = f"{_format_number(amount)} {_t('kg', data)}"
+            value_width = stringWidth(value_text, "IBMPlexSansThai-Regular", 10)
+            pdf.drawString(1 * inch + 2.8 * inch - value_width, y + bar_h + 0.12 * inch, value_text)
+            _progress_bar(pdf, 1 * inch, y, 2.8 * inch, bar_h, amount / performance_data["totalWasteKg"], MATERIAL_COLORS.get(label, colors.HexColor("#cfe2f3")))
+        gap = 1 * inch
+        outer_x = gap + 3.22 * inch
+        outer_y = left_card_y
+        outer_w = 6.8 * inch
+        outer_h = 5.0 * inch
+        _rounded_card(pdf, outer_x, outer_y, outer_w, outer_h, radius=8, fill=WHITE)
+        pad = 16
+        inner_x = outer_x + pad
+        inner_y = outer_y + pad
+        inner_w = outer_w - 2 * pad
+        inner_h = outer_h - 2 * pad
+        pdf.setFillColor(TEXT)
+        pdf.setFont("IBMPlexSansThai-Medium", 12)
+        _all_building_title = _t('all_building', data)
+        # When paginated, tag the section title with the page number so it's clear more follows.
+        if len(_chunks) > 1:
+            _lang = data.get('language', 'en') or 'en'
+            if _lang == 'th':
+                _pg = f"หน้าที่ {_page_idx + 1} จาก {len(_chunks)}"
+            else:
+                _pg = f"Page {_page_idx + 1} of {len(_chunks)}"
+            _all_building_title = f"{_all_building_title} ({_pg})"
+        pdf.drawString(inner_x + 16, inner_y + inner_h - 16 - 12, _all_building_title)
+        pdf.setFont("IBMPlexSansThai-Regular", 10)
+
+        pie_size = 1.20 * inch
+        pie_x = inner_x + inner_w - pie_size - 16
+        title1_y = inner_y + inner_h - 48
+
+        if not has_buildings:
+            # No sub-origins under this origin: explain where the building list would be,
+            # and skip the (empty) building pie so the material pie moves up into its slot.
+            _lang = data.get('language', 'en') or 'en'
+            _origin_name = str(performance_data.get('branchName', '')).strip()
+            if _lang == 'th':
+                _msg = f"ไม่มีแหล่งกำเนิดของเสียอยู่ภายใต้แหล่งกำเนิด ({_origin_name})"
+            else:
+                _msg = f"No waste sources under origin ({_origin_name})"
+            no_data_y = inner_y + inner_h - 0.85 * inch
+            pdf.setFillColor(colors.HexColor("#666666"))
+            pdf.setFont("IBMPlexSansThai-Regular", 10)
+            # Keep the message clear of the pie column on the right.
+            _msg_max_w = pie_x - (inner_x + 16) - 6
+            _msg = _fit_text_to_width(_msg, "IBMPlexSansThai-Regular", 10, _msg_max_w)
+            pdf.drawString(inner_x + 16, no_data_y, _msg)
+        else:
+            for local_idx, building in enumerate(_chunk):
+                abs_idx = _chunk_start + local_idx
+                y = inner_y + inner_h - 0.85 * inch - local_idx * (0.55 * inch)
+                pdf.setFillColor(TEXT)
+                value_text = f"{_format_number(building.get('totalWasteKg', 0))} kg"
+                value_width = stringWidth(value_text, "IBMPlexSansThai-Regular", 8)
+                _val_x = inner_x + 4 * inch - value_width
+                _name_left = inner_x + 16
+                # Bound the building name to the space before the right-aligned kg value (6pt gap).
+                _bname = _fit_text_to_width(building.get("buildingName", ""), "IBMPlexSansThai-Regular", 10, _val_x - _name_left - 6)
+                pdf.drawString(_name_left, y, _bname)
+                pdf.drawString(_val_x, y, value_text)
+                _color = _assigned_colors[abs_idx] if abs_idx < len(_assigned_colors) else colors.HexColor("#b7cbd6")
+                if _max_waste > 0:
+                    _progress_bar(pdf, inner_x + 16, y - 0.2 * inch, inner_x - 0.5 * inch, 0.08 * inch, float(building.get('totalWasteKg', 0) or 0) / _max_waste, _color)
+
+        pdf.setFillColor(TEXT)
+        pdf.setFont("IBMPlexSansThai-Regular", 10)
+
+        if has_buildings:
+            # Building pie (only meaningful when there are sub-origins to break down).
+            pdf.drawString(pie_x, title1_y, _t('total_buildings', data))
+            buildings_values = [float(b.get("totalWasteKg", 0) or 0) for b in buildings]
+            if _assigned_colors:
+                building_colors_for_pie = [_assigned_colors[i % len(_assigned_colors)] for i in range(len(buildings_values))]
+            else:
+                mono_color = colors.HexColor("#b7cbd6")
+                building_colors_for_pie = [mono_color for _ in buildings_values] or [mono_color]
+            _simple_pie_chart(pdf, pie_x, title1_y - 8 - pie_size, pie_size, buildings_values, building_colors_for_pie, gap_width=1, gap_color=colors.white)
+            # Material pie sits below the building pie.
+            title2_y = title1_y - pie_size - 52
+        else:
+            # No building pie — the material pie takes the top slot.
+            title2_y = title1_y
+        pdf.setFillColor(TEXT)
+        pdf.setFont("IBMPlexSansThai-Regular", 10)
+        pdf.drawString(pie_x, title2_y, _t('all_types_of_waste', data))
+        metrics_items = list(performance_data.get("metrics", {}).items())
+        waste_values = [float(v or 0) for _, v in metrics_items]
+        waste_colors = [MATERIAL_COLORS.get(lbl, BAR3) for lbl, _ in metrics_items]
+        if not waste_colors:
+            waste_colors = SERIES_COLORS
+        _simple_pie_chart(pdf, pie_x, title2_y - 8 - pie_size, pie_size, waste_values, waste_colors, gap_width=1, gap_color=colors.white)
+        _footer(pdf, page_width_points, data)
 
 def draw_performance_table(pdf, page_width_points: float, page_height_points: float, data: dict) -> None:
     padding = 0.78 * inch
@@ -1165,7 +1154,10 @@ def draw_performance_table(pdf, page_width_points: float, page_height_points: fl
             pdf.setFont("IBMPlexSansThai-Regular", 9)
             y_text = y_base + 12
             pdf.drawImage(icon_path, padding + 16, y_base + 11, width=icon_size, height=icon_size, mask='auto')
-            pdf.drawString(padding + 30, y_base + 12, branch["branchName"])
+            # Bound the name to the space before the first numeric column (total_waste at +1.8in).
+            _bn = _fit_text_to_width(branch["branchName"], "IBMPlexSansThai-Regular", 9,
+                                     (padding + 1.8 * inch) - (padding + 30) - 6)
+            pdf.drawString(padding + 30, y_base + 12, _bn)
             _txt_total = _format_number(branch["totalWasteKg"])
             _w_total = stringWidth(_txt_total, "IBMPlexSansThai-Regular", 9)
             pdf.drawString(_right_total - _w_total, y_text, _txt_total)
@@ -2842,7 +2834,7 @@ def generate_pdf_bytes(data: dict) -> bytes:
     # Ensure fonts are registered (works both locally and in Lambda with a layer)
     _register_fonts()
 
-    pdf = canvas.Canvas(buffer, pagesize=(width_points, height_points))
+    pdf = ThaiCanvas(buffer, pagesize=(width_points, height_points))
 
     # Draw pages (mirrors main() in scripts/generate_pdf_report.py)
     draw_cover(pdf, width_points, height_points, data)

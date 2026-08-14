@@ -15,6 +15,9 @@ import base64
 import json
 from decimal import Decimal
 
+from GEPPPlatform.libs.http_response import maybe_gzip
+
+
 class DateTimeEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, datetime):
@@ -22,6 +25,8 @@ class DateTimeEncoder(json.JSONEncoder):
         if isinstance(obj, Decimal):
             return float(obj)
         return super().default(obj)
+
+
 import os
 from glob import glob
 import math
@@ -101,7 +106,7 @@ def main(event, context):
             # Browser will refuse the actual POST unless this preflight echoes
             # back the exact Origin from the allowlist — `*` is rejected when
             # the request needs credentials/origin trust.
-            if "/api/public/customer-leads" in path:
+            if "/api/public/customer-leads" in path or "/api/public/cookie-consent" in path:
                 from GEPPPlatform.services.public.customer_leads_handler import (
                     ALLOWED_ORIGINS, is_origin_allowed,
                 )
@@ -329,6 +334,45 @@ def main(event, context):
                     "body": json.dumps({"success": True, "data": lead_result}),
                 }
 
+            elif "/api/public/cookie-consent" in path and http_method == "POST":
+                # PDPA cookie-consent audit log (gepp.me banner). Origin-allowlisted, same list as
+                # customer-leads. Append-only record of each accept/reject/custom decision.
+                from GEPPPlatform.services.public.cookie_consent_handler import (
+                    handle_cookie_consent_log, is_origin_allowed, ALLOWED_ORIGINS,
+                )
+                req_headers = event.get("headers") or {}
+                origin = req_headers.get("origin") or req_headers.get("Origin")
+                if not is_origin_allowed(origin):
+                    return {
+                        "statusCode": 403,
+                        "headers": {"Vary": "Origin", "Content-Type": "application/json", **_VERSION_HEADERS},
+                        "body": json.dumps({
+                            "success": False,
+                            "error": "origin_not_allowed",
+                            "allowed_origins": sorted(ALLOWED_ORIGINS),
+                        }),
+                    }
+                request_meta = {
+                    "origin":     origin,
+                    "ip_address": (event.get("requestContext", {}).get("http", {}) or {}).get("sourceIp"),
+                    "user_agent": req_headers.get("user-agent") or req_headers.get("User-Agent"),
+                    "referrer":   req_headers.get("referer")    or req_headers.get("Referer"),
+                    # coarse country from CloudFront (never the raw IP) — PDPA data-minimization
+                    "country":    req_headers.get("cloudfront-viewer-country")
+                               or req_headers.get("CloudFront-Viewer-Country"),
+                }
+                consent_result = handle_cookie_consent_log(body, session, request_meta=request_meta)
+                return {
+                    "statusCode": 200,
+                    "headers": {
+                        "Access-Control-Allow-Origin": origin,
+                        "Vary": "Origin",
+                        "Content-Type": "application/json",
+                        **_VERSION_HEADERS,
+                    },
+                    "body": json.dumps({"success": True, "data": consent_result}),
+                }
+
             elif "/api/userapi/documents/" in path:
                 # PUBLIC: Handle API documentation routes (no authentication required)
                 # Pattern: /api/userapi/documents/{service_path}
@@ -503,6 +547,47 @@ def main(event, context):
                 except Exception as webhook_err:
                     logger.error(f"[LINE-WEBHOOK] Error: {webhook_err}", exc_info=True)
                     results = {"success": False, "message": str(webhook_err)}
+
+            elif "/api/scale-report/" in path:
+                # PUBLIC: daily scale report opened by scanning the QR shown on
+                # a weighing tablet. Access is controlled by an expiring HMAC
+                # token in the path rather than a JWT, so it has to sit ahead of
+                # the auth gate — same placement rationale as
+                # /api/input-channel/ below.
+                #
+                # The reader is a walk-in customer, so the response goes through
+                # to_public_payload(), which is an allowlist — internal ids and
+                # anything transaction-level never leave the organisation.
+                #
+                # ?date= lets the page step between days, but only inside the
+                # window the token authorises (resolve_requested_day). Without
+                # that bound a single QR would unlock the station's whole
+                # history to whoever photographed it.
+                from GEPPPlatform.services.cores.scale_reports.scale_report_service import (
+                    get_daily_summary,
+                    to_public_payload,
+                )
+                from GEPPPlatform.services.cores.scale_reports.scale_report_token import (
+                    resolve_requested_day,
+                    verify_report_token,
+                )
+
+                report_token = path.split('/api/scale-report/')[1].split('/')[0].split('?')[0]
+                claims = verify_report_token(report_token)   # raises 401 / 410
+                report_day = resolve_requested_day(          # raises 422 / 403
+                    claims, query_params.get('date')
+                )
+                results = {
+                    "success": True,
+                    "data": to_public_payload(
+                        get_daily_summary(
+                            session,
+                            claims['origin_id'],
+                            claims['org_id'],
+                            report_day,
+                        )
+                    ),
+                }
 
             elif "/api/input-channel/" in path:
                 # Public input channel access (no authorization required)
@@ -907,6 +992,16 @@ def main(event, context):
                         results = {
                             "success": True,
                             "data": reward_result
+                        }
+
+                    elif "/api/import-files" in path:
+                        # Handle all bulk data-import routes (Excel upload → transactions)
+                        from GEPPPlatform.services.cores.imports.import_handlers import handle_import_routes
+
+                        import_result = handle_import_routes(event, data=body, **commonParams)
+                        results = {
+                            "success": True,
+                            "data": import_result
                         }
 
                     elif "/api/transactions" in path:
@@ -1333,9 +1428,11 @@ def main(event, context):
         # If a handler already returned a full proxy response (e.g., PDF binary),
         # pass it through unmodified. Otherwise, wrap as JSON.
         if isinstance(results, dict) and "statusCode" in results and "body" in results:
-            return results
+            # Already-built responses (file downloads, redirects) pass through as-is;
+            # _maybe_gzip declines anything already base64-encoded.
+            return maybe_gzip(results, event)
         else:
-            return {
+            return maybe_gzip({
                 "statusCode": 200,
                 "headers": {
                     "Content-Type": "application/json",
@@ -1343,7 +1440,7 @@ def main(event, context):
                     **_VERSION_HEADERS,
                 },
                 "body": json.dumps(results, cls=DateTimeEncoder),
-            }
+            }, event)
 
     except UnauthorizedException as auth_error:
         return {

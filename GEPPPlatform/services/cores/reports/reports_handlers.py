@@ -127,6 +127,13 @@ def _build_filters_from_query_params(query_params: Dict[str, Any], timezone_name
     if tenant_ids_raw:
         filters['filter_tenant_ids'] = [int(x) for x in tenant_ids_raw.split(',') if x.strip()]
 
+    # Destination filter ("สถานที่รับขยะ"): filter by per-record destination_id.
+    # Combines with the origin filter as AND (transaction origin ∈ origins AND
+    # record destination ∈ destinations). Applies across every report tab.
+    destination_ids_raw = query_params.get('destination_ids')
+    if destination_ids_raw:
+        filters['destination_ids'] = [int(x) for x in destination_ids_raw.split(',') if x.strip()]
+
     # Handle date filters (preserve provided times; apply local day bounds for date-only)
     date_from_input = query_params.get('date_from') or query_params.get('datefrom')
     if date_from_input:
@@ -393,6 +400,74 @@ def _check_transaction_completion(transaction_map: Dict[int, Dict]) -> Tuple[int
 
 # ========== ROUTE HANDLERS ==========
 
+def _resolve_per_capita_scope(
+    reports_service: ReportsService,
+    organization_id: int,
+    filters: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Headcount denominator and the origins whose waste may enter the numerator.
+
+    Waste and people have to be paired per subtree — see `resolve_headcount_scope`. A plain
+    "sum all headcounts, divide all waste" would drag in waste from branches that have no
+    headcount at all, with nothing on the other side of the division to match it.
+
+    Returns {'total': int|None, 'covered_ids': set[int]}; `total` is None when nothing in
+    scope has a headcount, and the card then shows N/A instead of dividing.
+
+    With no location filter the scope is the whole org tree. The dashboard sends
+    `location_ids`, legacy callers `origin_ids`, composite selections `origin_combos`.
+    """
+    from ..users.user_service import resolve_headcount_scope
+    from ....models.subscriptions.organizations import OrganizationSetup
+    from ....models.users.user_location import UserLocation
+
+    setup = reports_service.db.query(OrganizationSetup).filter(
+        OrganizationSetup.organization_id == organization_id,
+        OrganizationSetup.is_active == True,
+        OrganizationSetup.deleted_date.is_(None),
+    ).order_by(OrganizationSetup.created_date.desc()).first()
+    root_nodes = (setup.root_nodes if setup else None) or []
+    if not isinstance(root_nodes, list):
+        root_nodes = [root_nodes] if root_nodes else []
+
+    rows = reports_service.db.query(UserLocation.id, UserLocation.headcount).filter(
+        UserLocation.organization_id == organization_id,
+        UserLocation.is_location == True,
+        UserLocation.deleted_date.is_(None),
+    ).all()
+    headcount_by_id = {r.id: r.headcount for r in rows}
+
+    selected: set = set()
+    for key in ('location_ids', 'origin_ids'):
+        for raw in (filters or {}).get(key) or []:
+            try:
+                selected.add(int(raw))
+            except (TypeError, ValueError):
+                continue
+    # Composite `origin|tag|tenant` selections replace origin_ids with origin_combos
+    # (the parser pops origin_ids). Missing this reads as "no filter" and would quietly
+    # divide by the whole organisation's headcount.
+    for combo in (filters or {}).get('origin_combos') or []:
+        try:
+            selected.add(int(combo[0]))
+        except (TypeError, ValueError, IndexError):
+            continue
+
+    if not selected:
+        # No location filter → every root, i.e. the whole organisation.
+        for node in root_nodes:
+            if isinstance(node, dict):
+                try:
+                    selected.add(int(node.get('nodeId', 0)))
+                except (TypeError, ValueError):
+                    continue
+        if not selected:
+            selected = {rid for rid in headcount_by_id}
+
+    return resolve_headcount_scope(root_nodes, selected, headcount_by_id)
+
+
 def _handle_overview_report(
     reports_service: ReportsService,
     organization_id: int,
@@ -592,6 +667,22 @@ def _handle_overview_report(
     ]
     waste_type_proportions.sort(key=lambda x: x['total_waste'], reverse=True)
 
+    # Waste per head — total waste over the headcount, paired per subtree so only the
+    # locations that actually have a headcount contribute to BOTH sides of the division.
+    # Note the numerator is NOT `total_waste`: waste recorded under a branch nobody gave a
+    # headcount for is excluded, otherwise it would be divided by people who don't cover it.
+    # None when nothing in scope has a headcount → the card shows N/A plus a CTA.
+    per_capita = _resolve_per_capita_scope(reports_service, organization_id, filters or {})
+    headcount = per_capita['total']
+    covered_origin_ids = per_capita['covered_ids']
+    per_capita_waste = sum(
+        w for (oid, w, _ghg, _cat, _group) in record_origins if oid in covered_origin_ids
+    )
+    waste_per_head = (
+        round(per_capita_waste / headcount * 100) / 100
+        if headcount and headcount > 0 else None
+    )
+
     return {
         'transactions_total': len(tx_ids),
         'transactions_approved': len(tx_approved),
@@ -603,11 +694,19 @@ def _handle_overview_report(
         },
         'top_recyclables': top_recyclables,
         'overall_charts': {
+            # `unit` is a language-independent key, not a label: the title is already
+            # translated by the time the PDF sees it, so keying the unit off the title
+            # would break the moment the language changes.
             'chart_stat_data': [
-                {'title': 'Total Recyclables', 'value': round(recyclable_waste * 100) / 100},
-                {'title': 'Number of Trees', 'value': int(round(kg_co2_to_trees(recyclable_ghg_reduction) * 100 / 100))},
+                {'title': 'Total Recyclables', 'value': round(recyclable_waste * 100) / 100, 'unit': 'kg'},
+                {'title': 'Number of Trees', 'value': int(round(kg_co2_to_trees(recyclable_ghg_reduction) * 100 / 100)), 'unit': 'trees'},
                 # {'title': 'Forest (rai)', 'value': round(kg_co2_to_forest_rai(recyclable_ghg_reduction) * 100) / 100},
-                {'title': 'Plastic Saved', 'value': round(plastic_saved * 100) / 100},
+                {'title': 'Plastic Saved', 'value': round(plastic_saved * 100) / 100, 'unit': 'kg'},
+                # headcount travels with the card so the UI can print the denominator —
+                # a bare kg/head number is unreadable without knowing what it divided by.
+                # Its unit lives in the title ("(kg)"), so the sub-line carries the
+                # denominator instead of repeating it.
+                {'title': 'Waste per Head', 'value': waste_per_head, 'headcount': headcount},
             ],
             'chart_data': chart_data
         },
@@ -852,21 +951,42 @@ def _handle_diversion_report(
             "materials_data": [],
         }
 
-    # --- Build kwargs for traceability hierarchy (material / origin filters) ---
-    # material filter -> passed as material_id (comma-separated)
+    # --- Build kwargs for traceability hierarchy (full report filter set) ---
+    # Historically only material + a single origin were honored here, so the report
+    # filter bar (cascading location levels, tag, tenant, destination) silently did
+    # nothing on the diversion tab. We now thread the whole filter set through.
     hierarchy_kwargs: Dict[str, Any] = {}
     mat_ids = filters.get("material_ids")
     if mat_ids:
         hierarchy_kwargs["material_id"] = ",".join(str(m) for m in mat_ids)
-    # origin filter -> passed as origin_id (pipe-separated composite)
-    origin_combos = filters.get("origin_combos")
-    origin_ids = filters.get("origin_ids")
-    if origin_combos:
-        # Use first combo for per-month query; multi-origin handled below via post-filter
-        combo = origin_combos[0]
-        hierarchy_kwargs["origin_id"] = "|".join(str(v) if v is not None else "" for v in combo)
-    elif origin_ids:
-        hierarchy_kwargs["origin_id"] = str(origin_ids[0])
+
+    # Origin-side: prefer the new-style multi-select location_ids (expanded to
+    # descendants, same as the other tabs), else fall back to the legacy origin composite.
+    location_ids = filters.get("location_ids")
+    if location_ids:
+        expanded_origin_ids = reports_service._resolve_descendant_ids(organization_id, location_ids)
+        if expanded_origin_ids:
+            hierarchy_kwargs["origin_ids"] = ",".join(str(x) for x in expanded_origin_ids)
+    else:
+        origin_combos = filters.get("origin_combos")
+        origin_ids = filters.get("origin_ids")
+        if origin_combos:
+            # Use first combo for per-month query; multi-origin handled below via post-filter
+            combo = origin_combos[0]
+            hierarchy_kwargs["origin_id"] = "|".join(str(v) if v is not None else "" for v in combo)
+        elif origin_ids:
+            hierarchy_kwargs["origin_id"] = str(origin_ids[0])
+
+    # Tag / tenant multi-select (AND). Destination filter ("สถานที่รับขยะ"). Member gate.
+    if filters.get("filter_tag_ids"):
+        hierarchy_kwargs["tag_ids"] = ",".join(str(x) for x in filters["filter_tag_ids"])
+    if filters.get("filter_tenant_ids"):
+        hierarchy_kwargs["tenant_ids"] = ",".join(str(x) for x in filters["filter_tenant_ids"])
+    if filters.get("destination_ids"):
+        hierarchy_kwargs["destination_ids"] = ",".join(str(x) for x in filters["destination_ids"])
+    cu_id = (current_user or {}).get("user_id")
+    if cu_id:
+        hierarchy_kwargs["current_user_id"] = cu_id
 
     # --- Collect hierarchy data across all months ---
     all_hierarchy: list = []
@@ -1517,6 +1637,13 @@ def _handle_comparison_report(
         }
         if filters.get('material_ids'):
             side_filters['material_ids'] = filters['material_ids']
+        # New multi-select location/tag/tenant filters (same convention as the other tabs).
+        if filters.get('location_ids'):
+            side_filters['location_ids'] = filters['location_ids']
+        if filters.get('filter_tag_ids'):
+            side_filters['filter_tag_ids'] = filters['filter_tag_ids']
+        if filters.get('filter_tenant_ids'):
+            side_filters['filter_tenant_ids'] = filters['filter_tenant_ids']
         if filters.get('origin_combos'):
             side_filters['origin_combos'] = filters['origin_combos']
         elif filters.get('origin_ids'):
@@ -2359,6 +2486,7 @@ def _handle_export_pdf_report(
             'Total Recyclables': 'วัสดุรีไซเคิลทั้งหมด',
             'Number of Trees': 'จำนวนต้นไม้',
             'Plastic Saved': 'พลาสติกที่ประหยัดได้',
+            'Waste per Head': 'ขยะต่อคน (กก.)',
         }
         for stat in (overview.get('overall_charts', {}) or {}).get('chart_stat_data', []):
             stat['title'] = _stat_title_map.get(stat.get('title'), stat.get('title'))
@@ -2375,10 +2503,13 @@ def _handle_export_pdf_report(
         except Exception:
             pass
 
-        # Translate waste_type_proportions category names
+        # Translate waste_type_proportions category names for DISPLAY, but keep the English
+        # name as `category_name_en` so the PDF can still resolve the pie color (MATERIAL_COLORS
+        # is keyed by English). Without this, every TH row missed the palette → all slices blue.
         if wtp:
             for item in wtp:
                 en_name = item.get('category_name', '')
+                item['category_name_en'] = en_name
                 if en_name in _all_cats:
                     item['category_name'] = _all_cats[en_name]
 
@@ -2484,22 +2615,34 @@ def _handle_export_pdf_report(
     except Exception:
         profile_img_view_url = profile_img_url
 
-    # 4) Resolve location names from origin_ids filter; fallback to "all"
-    _current_user_id = (current_user or {}).get('user_id') or (current_user or {}).get('id')
+    # 4) Resolve location names from the location filter; fallback to "all".
+    # The dashboard sends the location filter as `location_ids` (branch/building/floor/room);
+    # legacy callers use `origin_ids`. Consider BOTH, and resolve any level's name directly from
+    # user_locations (get_origin_by_organization only covers leaf origins, so it would miss a
+    # selected branch/building). Reading only origin_ids here was why the header showed "all"
+    # even when the dashboard was filtered by a location.
     def _resolve_locations_from_filters(_filters: Dict[str, Any]) -> list[str] | str:
         _all_text = 'ทั้งหมด' if language == 'th' else 'all'
-        origin_ids = _filters.get('origin_ids') or []
-        if not origin_ids:
+        raw_ids = list(_filters.get('origin_ids') or []) + list(_filters.get('location_ids') or [])
+        seen: set = set()
+        sel_ids = []
+        for i in raw_ids:
+            if i is not None and i not in seen:
+                seen.add(i)
+                sel_ids.append(i)
+        if not sel_ids:
             return _all_text
         try:
-            origins_result = reports_service.get_origin_by_organization(organization_id=organization_id, current_user_id=_current_user_id)
+            rows = reports_service.db.query(
+                UserLocation.id, UserLocation.display_name,
+                UserLocation.name_th, UserLocation.name_en,
+            ).filter(UserLocation.id.in_(sel_ids)).all()
             name_map = {}
-            for o in origins_result.get('data', []):
-                oid = o.get('origin_id')
-                name = o.get('display_name') or o.get('name_en') or o.get('name_th') or o.get('name')
-                if oid is not None and oid not in name_map:
-                    name_map[oid] = name
-            names = [name_map.get(oid, f"Location {oid}") for oid in origin_ids]
+            for r in rows:
+                name_map[r.id] = (r.display_name
+                                  or (r.name_th if language == 'th' else r.name_en)
+                                  or r.name_en or r.name_th or f"Location {r.id}")
+            names = [name_map.get(i, f"Location {i}") for i in sel_ids]
             names = [n for n in names if n]
             return names or _all_text
         except Exception:
@@ -2666,137 +2809,9 @@ def _handle_export_pdf_report(
             'materials_data': diversion.get('materials_data', []),
         }
 
-    # Pre-compute translated labels so the Lambda can use them directly
-    _LABELS = {
-        'en': {
-            'location': 'Location',
-            'date': 'Date',
-            'kg': 'kg',
-            'copyright': 'Copyright © 2018–2023 GEPP Sa-Ard Co., Ltd. ALL RIGHTS RESERVED',
-            'gepp_report': 'GEPP REPORT',
-            'subtitle': 'Data-Driven Transformation',
-            'overview': 'Overview',
-            'total_transactions': 'Total Transactions',
-            'total_approved': 'Total Approved',
-            'key_indicators': 'Key Indicators',
-            'total_waste_kg': 'Total Waste (kg)',
-            'recycling_rate_pct': 'Recycling rate (%)',
-            'ghg_reduction_kgco2e': 'GHG Reduction (kgCO2e)',
-            'top_recyclables': 'Top Recycling Sources',
-            'overall': 'Overall',
-            'category_proportion': 'Category proportion',
-            'general_waste': 'General Waste',
-            'materials_summary': 'Materials Summary',
-            'category': 'Category',
-            'weight_kg': 'Weight (kg.)',
-            'proportion_pct': 'Proportion (%)',
-            'performance': 'Performance',
-            'recycling_rate': 'Recycling Rate',
-            'total_waste': 'Total Waste',
-            'all_building': 'All Building',
-            'no_data': 'No data',
-            'total_buildings': 'Total Buildings',
-            'all_types_of_waste': 'All Types of Waste',
-            'detailed_performance_metrics': 'Detailed Performance Metrics',
-            'building_name': 'Building Name',
-            'general_kg': 'General (kg)',
-            'total_recyclable_incl': 'Total Recyclable incl. Recycled Organic Waste (kg)',
-            'recycling_rate_pct_header': 'Recycling Rate (%)',
-            'status': 'Status',
-            'status_normal': 'Normal',
-            'status_need_imprv': 'Need Imprv',
-            'comparison': 'Comparison',
-            'risks': 'Risks',
-            'opportunities': 'Opportunities',
-            'quick_wins': 'Quick Wins',
-            'last_year': 'Last Year',
-            'current_year': 'Current Year',
-            'waste_to_energy': 'Waste To Energy',
-            'quantity_comparison': 'Quantity Comparison',
-            'total': 'Total',
-            'main_materials': 'Main Materials',
-            'top_materials_by_qty': 'Top Materials by Quantity (Kg.)',
-            'materials_proportion': 'Materials Proportion',
-            'main_material': 'Main Material',
-            'percentage_pct': 'Percentage (%)',
-            'sub_materials': 'Sub Materials',
-            'sub_material': 'Sub Material',
-            'waste_diversion': 'Waste Diversion',
-            'total_origins': 'Total Origins',
-            'complete_transfers': 'Complete Transfers',
-            'processing_transfers': 'Processing Transfers',
-            'completed_rate': 'Completed Rate',
-            'materials': 'Materials',
-            'destination': 'Destination',
-            'period_details': 'Period Details',
-            'period': 'Period',
-            'months_short': ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
-        },
-        'th': {
-            'location': 'สถานที่',
-            'date': 'วันที่',
-            'kg': 'กก.',
-            'copyright': 'ลิขสิทธิ์ © 2018–2023 บริษัท เก็บ สะอาด จำกัด สงวนลิขสิทธิ์',
-            'gepp_report': 'รายงาน GEPP',
-            'subtitle': 'การเปลี่ยนแปลงที่ขับเคลื่อนด้วยข้อมูล',
-            'overview': 'ภาพรวม',
-            'total_transactions': 'รายการทั้งหมด',
-            'total_approved': 'รายการที่อนุมัติ',
-            'key_indicators': 'ตัวชี้วัดสำคัญ',
-            'total_waste_kg': 'ขยะทั้งหมด (กก.)',
-            'recycling_rate_pct': 'อัตราการรีไซเคิล (%)',
-            'ghg_reduction_kgco2e': 'ลดก๊าซเรือนกระจก (กก.)',
-            'top_recyclables': 'อันดับสถานที่รีไซเคิลสูงสุด',
-            'overall': 'ภาพรวม',
-            'category_proportion': 'สัดส่วนตามประเภท',
-            'general_waste': 'ขยะทั่วไป',
-            'materials_summary': 'สรุปวัสดุ',
-            'category': 'ประเภท',
-            'weight_kg': 'น้ำหนัก (กก.)',
-            'proportion_pct': 'สัดส่วน (%)',
-            'performance': 'ประสิทธิภาพ',
-            'recycling_rate': 'อัตราการรีไซเคิล',
-            'total_waste': 'ขยะทั้งหมด',
-            'all_building': 'ทุกอาคาร',
-            'no_data': 'ไม่มีข้อมูล',
-            'total_buildings': 'จำนวนอาคารทั้งหมด',
-            'all_types_of_waste': 'ขยะทุกประเภท',
-            'detailed_performance_metrics': 'ตัวชี้วัดประสิทธิภาพโดยละเอียด',
-            'building_name': 'ชื่ออาคาร',
-            'general_kg': 'ขยะทั่วไป (กก.)',
-            'total_recyclable_incl': 'วัสดุรีไซเคิลทั้งหมด รวมขยะอินทรีย์ (กก.)',
-            'recycling_rate_pct_header': 'อัตราการรีไซเคิล (%)',
-            'status': 'สถานะ',
-            'status_normal': 'ปกติ',
-            'status_need_imprv': 'ต้องปรับปรุง',
-            'comparison': 'การเปรียบเทียบ',
-            'risks': 'ความเสี่ยง',
-            'opportunities': 'โอกาส',
-            'quick_wins': 'ผลลัพธ์เร็ว',
-            'last_year': 'ปีที่แล้ว',
-            'current_year': 'ปีปัจจุบัน',
-            'waste_to_energy': 'ขยะเพื่อพลังงาน',
-            'quantity_comparison': 'การเปรียบเทียบปริมาณ',
-            'total': 'รวม',
-            'main_materials': 'วัสดุหลัก',
-            'top_materials_by_qty': 'วัสดุยอดนิยมตามปริมาณ (กก.)',
-            'materials_proportion': 'สัดส่วนวัสดุ',
-            'main_material': 'วัสดุหลัก',
-            'percentage_pct': 'เปอร์เซ็นต์ (%)',
-            'sub_materials': 'วัสดุย่อย',
-            'sub_material': 'วัสดุย่อย',
-            'waste_diversion': 'การจัดการของเสีย',
-            'total_origins': 'จำนวนต้นทาง',
-            'complete_transfers': 'การโอนที่เสร็จสิ้น',
-            'processing_transfers': 'การโอนที่กำลังดำเนินการ',
-            'completed_rate': 'อัตราเสร็จสิ้น',
-            'materials': 'วัสดุ',
-            'destination': 'ปลายทาง',
-            'period_details': 'รายละเอียดช่วงเวลา',
-            'period': 'ช่วงเวลา',
-            'months_short': ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'],
-        },
-    }
+    # Translated labels — SINGLE SOURCE in report_i18n.py (shared with pdf_export.py).
+    from .report_i18n import LABELS as _LABELS
+
     labels = _LABELS.get(language, _LABELS['en'])
     # Add category name translation map for comparison chart
     if language == 'th':

@@ -5,12 +5,60 @@ Handles file uploads to AWS S3 with proper naming and organization
 
 import boto3
 import os
+import re
 import uuid
 from datetime import datetime
 from typing import Dict, Any, List, Optional
+from urllib.parse import quote
 from botocore.exceptions import ClientError, BotoCoreError
 import mimetypes
 import hashlib
+
+
+def safe_ascii_filename(filename: Optional[str], fallback_stem: str = 'file', default_ext: str = '') -> str:
+    """Auto-rename a user-supplied filename to a readable ASCII one.
+
+    Thai (or any non-ASCII) filenames cannot be sent as S3 metadata, so rename rather than
+    encode: slugify whatever ASCII the name has and keep the extension. When the stem has no
+    usable ASCII at all — the normal case for a Thai filename — fall back to
+    `{fallback_stem}-{hash}`, where the hash is derived from the original name so re-uploading
+    the same file yields the same label.
+
+    Note the stored S3 *key* is already generated independently (id + timestamp + uuid); this
+    only names the human-readable copy kept in metadata.
+    """
+    name = (filename or '').strip()
+    stem, ext = os.path.splitext(name)
+    ext = (ext or default_ext).lower()
+    # Reject a bogus "extension" (e.g. a dot inside a Thai word) rather than propagate it.
+    if not re.match(r'^\.[a-z0-9]{1,8}$', ext):
+        ext = default_ext
+    slug = re.sub(r'[^A-Za-z0-9._-]+', '-', stem).strip('-._')
+    if not slug:
+        digest = hashlib.sha1(stem.encode('utf-8')).hexdigest()[:8] if stem else ''
+        slug = f"{fallback_stem}-{digest}" if digest else fallback_stem
+    return f"{slug[:80]}{ext}"
+
+
+def ascii_metadata(value: Optional[str], fallback: str = 'unknown') -> str:
+    """Make a value safe to send as S3 object metadata.
+
+    S3 metadata travels in HTTP headers, so it must be ASCII. botocore enforces this
+    *client-side* and raises ParamValidationError before the request is sent, which means a
+    Thai filename silently kills the whole upload — see `upload_material_image`, where the
+    resulting `None` used to be logged as "S3 unavailable?" and the image quietly dropped.
+
+    Percent-encode rather than strip, so the original stays recoverable with
+    `urllib.parse.unquote`. Thai text is ~3 bytes/char before encoding and ~9 after, well
+    within S3's 2KB user-metadata budget for filename-length values.
+    """
+    if not value:
+        return fallback
+    try:
+        value.encode('ascii')
+        return value
+    except UnicodeEncodeError:
+        return quote(value, safe='')
 
 
 class S3FileUploadService:
@@ -103,6 +151,110 @@ class S3FileUploadService:
                 continue
 
         return uploaded_files
+
+    def upload_import_file(
+        self,
+        file_data: bytes,
+        filename: str,
+        content_type: Optional[str],
+        import_type: str,
+        organization_id: int,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Upload a raw import file (e.g. an .xlsx) to S3 under business/imports/.
+
+        Returns a dict {s3_key, s3_url, s3_bucket, file_size, content_type, original_filename}
+        or None on failure.
+        """
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            ext = os.path.splitext(filename or '')[1] or '.xlsx'
+            unique_filename = f"{organization_id}_{timestamp}_{uuid.uuid4().hex[:8]}{ext}"
+            s3_key = f"business/imports/{import_type}/{organization_id}/{unique_filename}"
+
+            if not content_type:
+                content_type, _ = mimetypes.guess_type(filename or '')
+                content_type = content_type or 'application/octet-stream'
+
+            file_size = len(file_data) if isinstance(file_data, (bytes, bytearray)) else 0
+            self.s3_client.put_object(
+                Bucket=self.bucket_name,
+                Key=s3_key,
+                Body=file_data,
+                ContentType=content_type,
+                Metadata={
+                    'original_filename': safe_ascii_filename(filename, f'import-{organization_id}', '.xlsx'),
+                    'original_filename_encoded': ascii_metadata(filename),
+                    'import_type': import_type,
+                    'organization_id': str(organization_id),
+                    'upload_timestamp': timestamp,
+                },
+            )
+            return {
+                'original_filename': filename,
+                's3_key': s3_key,
+                's3_url': f"https://{self.bucket_name}.s3.amazonaws.com/{s3_key}",
+                's3_bucket': self.bucket_name,
+                'file_size': file_size,
+                'content_type': content_type,
+            }
+        except (ClientError, BotoCoreError) as e:
+            print(f"Error uploading import file {filename}: {str(e)}")
+            return None
+        except Exception as e:
+            print(f"Unexpected error uploading import file {filename}: {str(e)}")
+            return None
+
+    def upload_material_image(
+        self,
+        file_data: bytes,
+        filename: Optional[str],
+        content_type: Optional[str],
+        material_id: int,
+    ) -> Optional[str]:
+        """Upload a single material image to S3 under business/materials/{id}/ and return its
+        public URL (or None on failure)."""
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            ext = os.path.splitext(filename or '')[1] or '.png'
+            unique_filename = f"{material_id}_{timestamp}_{uuid.uuid4().hex[:8]}{ext}"
+            s3_key = f"business/materials/{material_id}/{unique_filename}"
+            if not content_type:
+                content_type, _ = mimetypes.guess_type(filename or '')
+                content_type = content_type or 'image/png'
+            self.s3_client.put_object(
+                Bucket=self.bucket_name,
+                Key=s3_key,
+                Body=file_data,
+                ContentType=content_type,
+                Metadata={
+                    'material_id': str(material_id),
+                    # Renamed for readability; the exact original is kept percent-encoded so
+                    # nothing is lost (urllib.parse.unquote round-trips it).
+                    'original_filename': safe_ascii_filename(filename, f'material-{material_id}', '.png'),
+                    'original_filename_encoded': ascii_metadata(filename),
+                    'upload_timestamp': timestamp,
+                },
+            )
+            return f"https://{self.bucket_name}.s3.amazonaws.com/{s3_key}"
+        except (ClientError, BotoCoreError) as e:
+            print(f"Error uploading material image {filename}: {str(e)}")
+            return None
+        except Exception as e:
+            print(f"Unexpected error uploading material image {filename}: {str(e)}")
+            return None
+
+    def download_file(self, s3_key: str) -> Optional[bytes]:
+        """Download a file's bytes from S3; None on failure."""
+        try:
+            response = self.s3_client.get_object(Bucket=self.bucket_name, Key=s3_key)
+            return response['Body'].read()
+        except (ClientError, BotoCoreError) as e:
+            print(f"Error downloading file {s3_key}: {str(e)}")
+            return None
+        except Exception as e:
+            print(f"Unexpected error downloading file {s3_key}: {str(e)}")
+            return None
 
     def delete_file(self, s3_key: str) -> bool:
         """

@@ -14,6 +14,7 @@ from GEPPPlatform.models.users.user_related import UserInputChannel
 from GEPPPlatform.models.users.user_location import UserLocation
 from GEPPPlatform.models.subscriptions.subscription_models import OrganizationRole
 from GEPPPlatform.exceptions import NotFoundException, BadRequestException
+from ....libs.node_ids import to_node_id
 
 
 class InputChannelService:
@@ -218,6 +219,7 @@ class InputChannelService:
                 channel_type='qr',
                 form_type=data.get('form_type', 'daily'),
                 enable_upload_image=data.get('enable_upload_image', False),
+                enable_upload_image_per_material=data.get('enable_upload_image_per_material', False),
                 required_tag=data.get('required_tag', False),
                 is_drop_off_point=data.get('is_drop_off_point', False),
                 sub_material_ids=[],
@@ -325,6 +327,8 @@ class InputChannelService:
                 channel.form_type = data['form_type']
             if 'enable_upload_image' in data:
                 channel.enable_upload_image = data['enable_upload_image']
+            if 'enable_upload_image_per_material' in data:
+                channel.enable_upload_image_per_material = data['enable_upload_image_per_material']
             if 'required_tag' in data:
                 channel.required_tag = data['required_tag']
             if 'is_drop_off_point' in data:
@@ -604,6 +608,7 @@ class InputChannelService:
             existing.sub_material_destination_ids = data.get('sub_material_destination_ids', [])
             existing.subuser_names = data.get('subuser_names', [])
             existing.enable_upload_image = data.get('enable_upload_image', False)
+            existing.enable_upload_image_per_material = data.get('enable_upload_image_per_material', False)
             existing.required_tag = data.get('required_tag', False)
             existing.is_drop_off_point = data.get('is_drop_off_point', False)
             existing.updated_date = datetime.utcnow()
@@ -622,6 +627,7 @@ class InputChannelService:
             sub_material_destination_ids=data.get('sub_material_destination_ids', []),
             subuser_names=data.get('subuser_names', []),
             enable_upload_image=data.get('enable_upload_image', False),
+            enable_upload_image_per_material=data.get('enable_upload_image_per_material', False),
             required_tag=data.get('required_tag', False),
             is_drop_off_point=data.get('is_drop_off_point', False),
             is_active=True
@@ -661,6 +667,8 @@ class InputChannelService:
             channel.subuser_names = data['subuser_names']
         if 'enable_upload_image' in data:
             channel.enable_upload_image = data['enable_upload_image']
+        if 'enable_upload_image_per_material' in data:
+            channel.enable_upload_image_per_material = data['enable_upload_image_per_material']
         if 'required_tag' in data:
             channel.required_tag = data['required_tag']
         if 'is_drop_off_point' in data:
@@ -732,6 +740,7 @@ class InputChannelService:
             'sub_material_destination_ids': channel.sub_material_destination_ids or [],
             'subuser_names': channel.subuser_names or [],
             'enable_upload_image': channel.enable_upload_image,
+            'enable_upload_image_per_material': bool(getattr(channel, 'enable_upload_image_per_material', False)),
             'required_tag': channel.required_tag,
             'is_drop_off_point': channel.is_drop_off_point,
             'is_active': channel.is_active,
@@ -744,6 +753,7 @@ class InputChannelService:
             'subMaterialDestinationIds': channel.sub_material_destination_ids or [],
             'subUsers': channel.subuser_names or [],
             'enableUploadImage': channel.enable_upload_image,
+            'enableUploadImagePerMaterial': bool(getattr(channel, 'enable_upload_image_per_material', False)),
             'requiredTag': channel.required_tag,
             'isDropOffPoint': channel.is_drop_off_point,
         }
@@ -874,8 +884,10 @@ class InputChannelService:
         """
         node_ids = []
         for node in nodes:
-            if 'nodeId' in node:
-                node_ids.append(int(node['nodeId']))
+            # An unsaved node carries a temporary client-side id; it matches no row.
+            _nid = to_node_id(node.get('nodeId'))
+            if _nid is not None:
+                node_ids.append(_nid)
             if 'children' in node and isinstance(node['children'], list):
                 node_ids.extend(self._extract_node_ids_from_tree(node['children']))
         return node_ids
@@ -974,9 +986,12 @@ class InputChannelService:
                 """Collect node IDs. If collecting=True, add all nodes."""
                 ids = set()
                 for node in nodes:
-                    nid = int(node.get('nodeId', 0))
-                    should_collect = collecting or nid in member_loc_ids
-                    if should_collect:
+                    # An unsaved node still carries its temporary client-side id and has no
+                    # location row behind it; converting it used to raise and fail the whole
+                    # request. Skip the node, keep walking its children.
+                    nid = to_node_id(node.get('nodeId'))
+                    should_collect = collecting or (nid is not None and nid in member_loc_ids)
+                    if should_collect and nid is not None:
                         ids.add(nid)
                     children = node.get('children', [])
                     if children:
@@ -1481,9 +1496,9 @@ class InputChannelService:
                 self.db.flush()
                 transaction_record_ids.append(record.id)
 
-                # Upload per-record images from matData
+                # Upload per-record images from matData — gated on the PER-MATERIAL flag.
                 record_images = record_data.get('images', [])
-                if record_images and channel.enable_upload_image:
+                if record_images and getattr(channel, 'enable_upload_image_per_material', False):
                     try:
                         record_file_ids = upload_b64_images(
                             record_images, 'transaction_record', record.id, f"qr_record_{transaction.id}"

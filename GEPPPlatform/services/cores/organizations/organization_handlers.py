@@ -410,12 +410,55 @@ def handle_update_organization_setup(org_service: OrganizationService, user_id: 
             raise ValidationException(validation_errors)
 
         if level_names_only:
-            # Only update level names on the existing active setup (no new version)
+            # Scalar-settings update (no new version). Level names stay per-ORG; the two
+            # data-entry toggles are PER USER → routed to user_locations_settings.
+            user_patch = {k: body[k] for k in ('input_destination', 'show_all_location_options') if k in body}
             level_names = {k: body[k] for k in ('branch_level_name', 'building_level_name', 'floor_level_name', 'room_level_name') if k in body}
-            setup_data = org_service.update_organization_setup_level_names(
-                organization_id=organization.id,
-                level_names=level_names
-            )
+
+            if user_patch:
+                org_service.upsert_user_location_settings(
+                    user_location_id=user_id, organization_id=organization.id, patch=user_patch,
+                )
+
+            # Org-WIDE, owner-only: this one decides whether scale readings skip review
+            # altogether, so the person entering the data must not be able to switch off
+            # the review of their own numbers. Everyone else gets 403 (the UI also renders
+            # the toggle disabled, but the gate has to live here).
+            if 'auto_approve_scale_transactions' in body:
+                flag = body['auto_approve_scale_transactions']
+                if not isinstance(flag, bool):
+                    raise ValidationException('auto_approve_scale_transactions must be a boolean value')
+                if organization.owner_id != user_id:
+                    raise UnauthorizedException(
+                        'Only the organization owner can change scale auto-approval'
+                    )
+                org_service.set_auto_approve_scale_transactions(
+                    organization_id=organization.id, enabled=flag, acting_user_id=user_id,
+                )
+
+            if level_names:
+                setup_data = org_service.update_organization_setup_level_names(
+                    organization_id=organization.id,
+                    level_names=level_names
+                )
+            else:
+                setup_data = org_service.get_organization_setup(organization.id) or {}
+
+            # Reflect the acting user's effective (per-user) toggles in the response.
+            eff = org_service.get_user_location_settings(user_id)
+            if setup_data is not None:
+                setup_data['input_destination'] = eff['input_destination']
+                setup_data['show_all_location_options'] = eff['show_all_location_options']
+                # update_organization_setup_level_names builds its own payload from the
+                # setup row, which has no knowledge of the org-wide flag — read it back
+                # so the client never gets a response that contradicts what it just saved.
+                setup_data['auto_approve_scale_transactions'] = bool(
+                    org_service.get_organization_by_id(organization.id)
+                    .auto_approve_scale_transactions
+                )
+                setup_data['auto_approve_scale_transactions_editable'] = (
+                    organization.owner_id == user_id
+                )
         else:
             # Prepare setup data including locations
             setup_data_dict = setup_request.to_dict()
@@ -444,6 +487,11 @@ def handle_update_organization_setup(org_service: OrganizationService, user_id: 
             'message': 'Organization setup updated successfully'
         }
 
+    # Deliberate 401/404 raised inside the try must not be rewritten by the catch-all
+    # below — a non-owner flipping auto-approve has to come back as "not allowed", not
+    # as a generic "Error updating organization setup".
+    except (UnauthorizedException, NotFoundException):
+        raise
     except ValidationException as e:
         raise BadRequestException(f'Validation error: {"; ".join(e.errors) if hasattr(e, "errors") else str(e)}')
     except ValueError as e:

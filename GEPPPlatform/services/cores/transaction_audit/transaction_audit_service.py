@@ -526,13 +526,40 @@ class TransactionAuditService:
 
             logger.info(f"DEBUG: Status breakdown: {status_counts}")
 
-            # Now get pending transactions
-            query = db.query(Transaction).filter(Transaction.status == TransactionStatus.pending)
+            # Every pending transaction (unchanged), PLUS machine-approved rows that
+            # have never been audited — IoT scale readings under auto-approval.
+            # Nobody has looked at those, so leaving them out (as a status='pending'
+            # filter does) would make auto-approval a way to escape the AI audit
+            # permanently.
+            #
+            # The approved branch is deliberately narrow: `audit_type='auto_scale'`
+            # (indexed) restricts it to auto-approvals, and `ai_audit_status='null'`
+            # to ones not yet audited. Without the audit_type test this would also
+            # sweep in every transaction a human approved before AI audit existed —
+            # tens of thousands of historical rows, and a surprise AI-quota bill.
+            from sqlalchemy import and_ as _and, or_ as _or, exists as _exists
+            auto_approved = _exists().where(
+                _and(
+                    TransactionAudit.transaction_id == Transaction.id,
+                    TransactionAudit.audit_type == 'auto_scale',
+                    TransactionAudit.deleted_date.is_(None),
+                )
+            )
+            query = db.query(Transaction).filter(
+                _or(
+                    Transaction.status == TransactionStatus.pending,
+                    _and(
+                        Transaction.status == TransactionStatus.approved,
+                        Transaction.ai_audit_status == AIAuditStatus.null,
+                        auto_approved,
+                    ),
+                )
+            )
             if organization_id:
                 query = query.filter(Transaction.organization_id == organization_id)
 
             transactions = query.all()
-            logger.info(f"Found {len(transactions)} pending transactions for audit")
+            logger.info(f"Found {len(transactions)} un-audited transactions for audit")
             return transactions
 
         except Exception as e:
@@ -1870,6 +1897,19 @@ class TransactionAuditService:
                                 logger.warning("Traceability group upsert failed for AI-approved transaction %s: %s", transaction_id, str(e))
                         elif audit_status == 'rejected':
                             transaction.status = TransactionStatus.rejected
+
+                        # Keep transaction_records[].status in step with the verdict.
+                        # The manual-audit inbox and the aggregated status column in
+                        # the UI read the RECORDS, not the transaction. Without this,
+                        # an AI rejection of an auto-approved scale transaction leaves
+                        # "transaction rejected / records approved" — two views of the
+                        # same row disagreeing, with the records winning on screen.
+                        if audit_status in ('approved', 'rejected'):
+                            db.query(TransactionRecord).filter(
+                                TransactionRecord.created_transaction_id == transaction_id,
+                                TransactionRecord.is_active == True,
+                                TransactionRecord.deleted_date.is_(None),
+                            ).update({'status': audit_status}, synchronize_session='fetch')
 
                     # Set ai_audit_date to mark when AI audit was performed
                     transaction.ai_audit_date = datetime.now(timezone.utc)
