@@ -3063,6 +3063,12 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                             record.origin_price_per_unit = _round_decimal(record_data['origin_price_per_unit'])
                         if 'total_amount' in record_data:
                             record.total_amount = _round_decimal(record_data['total_amount'])
+                        # ปลายทาง — editable in input_destination mode. Omitted from this list
+                        # originally, so the UI sent a new destination and the save silently
+                        # discarded it. `in` rather than truthiness: None is a real value here,
+                        # meaning "cleared", and must overwrite an existing destination.
+                        if 'destination_id' in record_data:
+                            record.destination_id = record_data['destination_id']
 
                         record.updated_date = datetime.now()
                         records_updated += 1
@@ -3089,6 +3095,20 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
             ).all()
             active_record_ids = [r.id for r in active_records]
             transaction.transaction_records = active_record_ids
+
+            # Keep the transaction-level destination array in step with the records. Create
+            # builds it from the records; without rebuilding it here it keeps the destinations
+            # from the original save forever, so anything reading the transaction (rather than
+            # its records) reports the old destination even after a successful edit.
+            # Flush first: the record edits above are still pending in the session, and a
+            # column-only query reads straight past them — without this the array is rebuilt
+            # from the pre-edit rows and lands one edit behind.
+            self.db.flush()
+            dest_rows = self.db.query(TransactionRecord.destination_id).filter(
+                TransactionRecord.created_transaction_id == transaction_id,
+                TransactionRecord.is_active == True
+            ).order_by(TransactionRecord.id).all()
+            transaction.destination_ids = [r.destination_id for r in dest_rows]
 
             # Recalculate totals and reset all record statuses to pending
             total_weight = Decimal('0')
