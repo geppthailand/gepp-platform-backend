@@ -18,7 +18,7 @@
 --              be added to how much waste the organization produced.
 --
 --              Why not reuse transaction_method: 'scale_input' is what marks a
---              pile as per-weigh-in (migration 081), so overloading it would
+--              pile as per-weigh-in (migration 082), so overloading it would
 --              silently change that grain; and no report filters on it anyway.
 --
 --              FALSE for every existing row and for every weighing except a
@@ -35,4 +35,4 @@ CREATE INDEX IF NOT EXISTS idx_transactions_internal_transfer
     WHERE is_internal_transfer;
 
 COMMENT ON COLUMN transactions.is_internal_transfer IS
-    'TRUE = this weighing moved material that was already reported at its origin (e.g. a sorter weighing out of a waste room). Excluded from waste-generated totals; its traceability legs still count. See migration 082.';
+    'TRUE = this weighing moved material that was already reported at its origin (e.g. a sorter weighing out of a waste room). Excluded from waste-generated totals; its traceability legs still count. See migration 083.';

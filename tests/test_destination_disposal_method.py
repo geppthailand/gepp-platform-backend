@@ -1,4 +1,4 @@
-"""What a destination does with the material it receives (migration 083).
+"""What a destination does with the material it receives (migration 084).
 
 A traceability leg only reads as finished once it carries a disposal_method — that is
 what moves a card into "ปลายทาง (จัดการสำเร็จ)" and what lets the recycling rate classify
@@ -89,7 +89,7 @@ def test_a_mixed_batch_only_terminates_the_configured_ones():
 
 
 def test_a_database_error_degrades_to_no_methods():
-    """Code deployed ahead of migration 083 must still create the hop — unterminated
+    """Code deployed ahead of migration 084 must still create the hop — unterminated
     is recoverable, a failed approval is not."""
     assert _lookup(_Db(explode=True), {21105}) == {}
 

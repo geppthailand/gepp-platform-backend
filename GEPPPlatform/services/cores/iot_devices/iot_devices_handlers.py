@@ -1461,7 +1461,7 @@ def handle_iot_devices_routes(event: Dict[str, Any], data: Dict[str, Any], **com
                 # produced them, so counting them again as waste generated would
                 # report 100 kg of real material as 200. The records still exist —
                 # the traceability pile's weight comes from them — they are just
-                # left out of tonnage. See migration 082.
+                # left out of tonnage. See migration 083.
                 data['is_internal_transfer'] = True
                 # Carried on every record so the traceability leg knows where the
                 # material went; the record path stores it verbatim.

@@ -1,4 +1,4 @@
-"""Resolving the ห้องขยะ a location feeds (migration 080), used to auto-route the first hop.
+"""Resolving the ห้องขยะ a location feeds (migration 081), used to auto-route the first hop.
 
 An admin sets the waste room once on a building; material is weighed at a room or a
 tenant several levels below. Reading only the location's own row therefore found
@@ -133,5 +133,5 @@ def test_unusable_identifiers_return_none(location_id, organization_id):
 
 def test_a_database_error_never_escapes():
     """This runs inside transaction approval. If the column is missing — code deployed
-    ahead of migration 080 — approval must still succeed, just without routing."""
+    ahead of migration 081 — approval must still succeed, just without routing."""
     assert _svc(_Db(explode=True))._waste_room_for_location(21093, 1) is None

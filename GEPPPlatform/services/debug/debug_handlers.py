@@ -343,7 +343,7 @@ def backfill_traceability_group_ids(organization_id: int, **kwargs) -> Dict[str,
         for g in groups:
             # source_transaction_id belongs in the key or this merges piles that are
             # deliberately separate: a scale records several weigh-ins per tenant per
-            # day, each one its own pile (migration 081). Without it a single run of
+            # day, each one its own pile (migration 082). Without it a single run of
             # this route collapses a month of weigh-ins into one group and soft-deletes
             # the rest, which is not recoverable without a restore. NULL on every
             # pre-scale row, so grouping is unchanged for them.

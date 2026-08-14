@@ -66,7 +66,7 @@ class UserLocation(Base, BaseModel):
     # a LOCATION row (is_location=True) and points at another location in the same
     # organization. Lets the server route the first traceability hop on its own
     # instead of waiting for someone to drag a card on the web board.
-    # NULL = no routing, today's behaviour. Migration 080.
+    # NULL = no routing, today's behaviour. Migration 081.
     waste_room_location_id = Column(BigInteger, ForeignKey('user_locations.id'), nullable=True)
 
     # What this destination DOES with material that arrives here (a GRI 306-1 method).
@@ -74,7 +74,7 @@ class UserLocation(Base, BaseModel):
     # the board shows as "จัดการสำเร็จ" and what the recycling rate classifies. A scale
     # can say where material went but not what happened to it, so this supplies the
     # answer once instead of per shipment. NULL = a waypoint that ships onward, which
-    # is every row until an admin sets it. Migration 083.
+    # is every row until an admin sets it. Migration 084.
     default_disposal_method = Column(String(100), nullable=True)
 
     # Location and address information

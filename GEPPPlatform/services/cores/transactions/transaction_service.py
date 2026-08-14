@@ -440,7 +440,7 @@ class TransactionService:
     def _waste_room_for_location(self, location_id: int, organization_id: int) -> Optional[int]:
         """The ห้องขยะ that collects material weighed in at this location, or None.
 
-        Read straight off the location row (migration 080) rather than inferred from
+        Read straight off the location row (migration 081) rather than inferred from
         the org chart: the chart lives in organization_setup.root_nodes as JSON that
         the setup importer rebuilds from scratch, so anything stored there would not
         survive a re-import.
@@ -534,7 +534,7 @@ class TransactionService:
             source_transaction_id = scale_pile_source_transaction_id(transaction)
 
             # ห้องขยะ: for material a scale recorded, an admin can nominate the waste
-            # room this location feeds (migration 080). That standing instruction is
+            # room this location feeds (migration 081). That standing instruction is
             # what replaces someone dragging a card on the board every day, so it also
             # stands in for the per-user "กรอกปลายทาง" opt-in below — an org that has
             # set a waste room has already said where this material goes.
@@ -650,7 +650,7 @@ class TransactionService:
                     ).all():
                         if _method:
                             disposal_by_destination[_did] = _method
-                except Exception:  # noqa: BLE001 — code may be ahead of migration 083
+                except Exception:  # noqa: BLE001 — code may be ahead of migration 084
                     disposal_by_destination = {}
 
             for (group_id, destination_id, material_id), weight in hop_buckets.items():

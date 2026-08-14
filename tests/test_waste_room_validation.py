@@ -1,4 +1,4 @@
-"""Guards on the ห้องขยะ binding (migration 080).
+"""Guards on the ห้องขยะ binding (migration 081).
 
 This column decides where the server will later move material without a human
 confirming it, so a bad row silently ships waste to the wrong place. These tests

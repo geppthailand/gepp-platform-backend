@@ -1,4 +1,4 @@
-"""One weigh-in = one traceability pile, for scale-recorded waste only (migration 081).
+"""One weigh-in = one traceability pile, for scale-recorded waste only (migration 082).
 
 A pile is normally one per (origin, material, tag, tenant) per MONTH. Under a scale
 that grain loses data: later records are appended into a pile that already has a

@@ -1381,8 +1381,8 @@ class TraceabilityService:
     def _internal_transfer_group_ids(self, organization_id: Optional[int]) -> set:
         """Piles whose weight was already reported at its origin, as a set of str ids.
 
-        A ผู้คัดแยก's weigh-out is stamped is_internal_transfer (migration 082) and,
-        being a scale reading, always owns its own pile (migration 081) — so the link
+        A ผู้คัดแยก's weigh-out is stamped is_internal_transfer (migration 083) and,
+        being a scale reading, always owns its own pile (migration 082) — so the link
         is exactly source_transaction_id, and no pile can be part internal and part
         not. Returned as strings because the callers compare against ids that have
         been through JSON.
@@ -1440,7 +1440,7 @@ class TraceabilityService:
     ) -> Optional[str]:
         """Refuse to leave part of a per-weigh-in pile undispatched. None = allowed.
 
-        A pile created by one scale reading (migration 081) is only arithmetically
+        A pile created by one scale reading (migration 082) is only arithmetically
         honest while its root transports sum to the whole pile, because
         `_recalculate_absolute_percentage` divides by the sum of the roots, not by the
         pile weight — dispatch 40 of 100 and the leg is stamped 100%, and the other

@@ -40,4 +40,4 @@ CREATE INDEX IF NOT EXISTS idx_traceability_group_source_transaction
     WHERE source_transaction_id IS NOT NULL;
 
 COMMENT ON COLUMN traceability_transaction_group.source_transaction_id IS
-    'Scale transaction that created this pile, making it a per-weigh-in pile instead of the monthly one. NULL = monthly grain (all pre-existing and non-scale rows). See migration 081.';
+    'Scale transaction that created this pile, making it a per-weigh-in pile instead of the monthly one. NULL = monthly grain (all pre-existing and non-scale rows). See migration 082.';

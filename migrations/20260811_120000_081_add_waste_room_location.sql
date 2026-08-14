@@ -37,4 +37,4 @@ CREATE INDEX IF NOT EXISTS idx_user_locations_waste_room
     WHERE waste_room_location_id IS NOT NULL;
 
 COMMENT ON COLUMN user_locations.waste_room_location_id IS
-    'Location whose waste room collects material weighed in at this location. NULL = no auto-routing. See migration 080.';
+    'Location whose waste room collects material weighed in at this location. NULL = no auto-routing. See migration 081.';

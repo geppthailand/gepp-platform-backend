@@ -63,6 +63,6 @@ def test_missing_organization_skips_the_query_entirely(organization_id):
 
 
 def test_a_database_error_degrades_to_pre_migration_numbers():
-    """If the column is missing — code deployed ahead of migration 082 — the board
+    """If the column is missing — code deployed ahead of migration 083 — the board
     must still render with the old totals rather than fail or blank out."""
     assert _svc(_Db(explode=True))._internal_transfer_group_ids(1) == set()

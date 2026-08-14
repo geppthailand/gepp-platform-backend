@@ -1,6 +1,6 @@
 """A per-weigh-in pile must be dispatched whole, and debug routes must not be live in prod.
 
-Both guards added after review found that migration 081's discriminator on its own
+Both guards added after review found that migration 082's discriminator on its own
 guarantees nothing: `create_transport_transactions` still accepts any number of root
 legs of any weight, and `_recalculate_absolute_percentage` divides by the sum of those
 legs — so dispatching 40 kg of a 100 kg pile is still stamped 100%, and the other 60 kg

@@ -29,5 +29,5 @@ class TraceabilityTransactionGroup(Base, BaseModel):
     # weigh-in instead of a whole month, so it is always dispatched whole and
     # absolute_percentage stays correct without any partial-consumption logic.
     # NULL = the original monthly grain: every pre-existing row and every
-    # non-scale flow. Part of the group lookup key. Migration 081.
+    # non-scale flow. Part of the group lookup key. Migration 082.
     source_transaction_id = Column(BigInteger, ForeignKey('transactions.id'), nullable=True)

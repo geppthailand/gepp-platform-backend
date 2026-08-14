@@ -123,7 +123,7 @@ class Transaction(Base, BaseModel):
     # its origin — a ผู้คัดแยก weighing out of a waste room measures kilograms a tenant
     # already reported on the way in. The records are real and their traceability legs
     # matter, but the weight must not be added to how much waste the org produced, or
-    # the same material is counted twice. FALSE everywhere else. Migration 082.
+    # the same material is counted twice. FALSE everywhere else. Migration 083.
     is_internal_transfer = Column(Boolean, nullable=False, default=False, server_default='false')
 
     # Constraints

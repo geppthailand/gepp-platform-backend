@@ -31,4 +31,4 @@ ALTER TABLE user_locations
     ADD COLUMN IF NOT EXISTS default_disposal_method VARCHAR(100) NULL;
 
 COMMENT ON COLUMN user_locations.default_disposal_method IS
-    'GRI 306-1 method applied to material arriving here, which also marks the leg as final. NULL = a waypoint that ships onward. See migration 083.';
+    'GRI 306-1 method applied to material arriving here, which also marks the leg as final. NULL = a waypoint that ships onward. See migration 084.';

@@ -77,7 +77,7 @@ class ReportsService:
                 Transaction.organization_id == b['source_org_id'],
                 Transaction.origin_id.in_(b['src_ids']),
                 Transaction.deleted_date.is_(None),
-                Transaction.is_internal_transfer.isnot(True),  # see migration 082
+                Transaction.is_internal_transfer.isnot(True),  # see migration 083
                 TransactionRecord.deleted_date.is_(None),
                 or_(TransactionRecord.status != 'rejected', TransactionRecord.status.is_(None)),
             )
@@ -502,7 +502,7 @@ class ReportsService:
                 Transaction.organization_id == b['source_org_id'],
                 Transaction.origin_id.in_(b['src_ids']),
                 Transaction.deleted_date.is_(None),
-                Transaction.is_internal_transfer.isnot(True),  # see migration 082
+                Transaction.is_internal_transfer.isnot(True),  # see migration 083
                 TransactionRecord.deleted_date.is_(None),
                 or_(TransactionRecord.status != 'rejected', TransactionRecord.status.is_(None)),
             )
@@ -572,7 +572,7 @@ class ReportsService:
                 # and both matter for traceability, but summing both reports the same
                 # material twice. This query answers "how much waste did this
                 # organization produce", so the movement leg is left out. isnot(True)
-                # also covers rows written before the column existed. Migration 082.
+                # also covers rows written before the column existed. Migration 083.
                 Transaction.is_internal_transfer.isnot(True),
                 TransactionRecord.deleted_date.is_(None),
                 or_(
@@ -1210,7 +1210,7 @@ class ReportsService:
                 # and both matter for traceability, but summing both reports the same
                 # material twice. This query answers "how much waste did this
                 # organization produce", so the movement leg is left out. isnot(True)
-                # also covers rows written before the column existed. Migration 082.
+                # also covers rows written before the column existed. Migration 083.
                 Transaction.is_internal_transfer.isnot(True),
                 TransactionRecord.deleted_date.is_(None),
                 or_(
