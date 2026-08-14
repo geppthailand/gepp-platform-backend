@@ -3466,7 +3466,7 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
 
             # The record-level cleanup above empties the piles, but only the
             # revert hook knows about the tank stamp (collection_location_id,
-            # migration 085). A deleted weighing officially never happened, so
+            # migration 086). A deleted weighing officially never happened, so
             # its stamp must not survive it — every balance query does exclude
             # deleted rows on its own, but a stale stamp misleads anyone
             # reading the row. Post-commit, best-effort, no-op for non-scale

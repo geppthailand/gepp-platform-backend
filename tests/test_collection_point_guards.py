@@ -231,7 +231,7 @@ def test_a_legacy_pile_is_never_locked():
 
 
 def test_an_unreadable_stamp_never_locks_a_pile():
-    """A session running ahead of migration 085 must not start refusing work."""
+    """A session running ahead of migration 086 must not start refusing work."""
     group = _Group(gid=1, origin_id=500, source_transaction_id=900)
 
     class _Boom(_Db):

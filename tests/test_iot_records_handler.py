@@ -493,7 +493,7 @@ def test_weigher_payload_is_untouched_when_there_is_no_binding(monkeypatch):
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Channel markers (migration 085).
+# Channel markers (migration 086).
 #
 # transaction_method='scale_input' and is_internal_transfer stopped being
 # labels the day the tank model shipped: they now decide which piles are

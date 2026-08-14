@@ -47,9 +47,9 @@ CREATE INDEX IF NOT EXISTS idx_tx_collection_loc
     WHERE collection_location_id IS NOT NULL;
 
 COMMENT ON COLUMN transactions.collection_location_id IS
-    'Tank (collection point) this scale weigh-in was resolved to at approval. Routing fact, not proof of arrival. NULL = non-scale or unresolvable. See migration 085.';
+    'Tank (collection point) this scale weigh-in was resolved to at approval. Routing fact, not proof of arrival. NULL = non-scale or unresolvable. See migration 086.';
 COMMENT ON COLUMN traceability_transport_transactions.delivered_to_collection IS
-    'Destination is a collection point: terminal for the sender''s scope, not an outcome. Balance inflow + rate hand-over marker. See migration 085.';
+    'Destination is a collection point: terminal for the sender''s scope, not an outcome. Balance inflow + rate hand-over marker. See migration 086.';
 
 -- ----------------------------------------------------------------------------
 -- Backfill — DEV DATA ONLY by construction (production has never run the scale

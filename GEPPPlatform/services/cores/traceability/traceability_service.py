@@ -1469,7 +1469,7 @@ class TraceabilityService:
         consolidation; letting either move it would take kilograms out of the
         tank balance without any OUT entry.
 
-        Reads via the group's source transaction stamp (migration 085). Best
+        Reads via the group's source transaction stamp (migration 086). Best
         effort: any read failure means "not locked" — the pre-085 behaviour.
         """
         source_tx_id = getattr(group, 'source_transaction_id', None)
@@ -1481,7 +1481,7 @@ class TraceabilityService:
                 "SELECT collection_location_id FROM transactions "
                 "WHERE id = :tx_id AND deleted_date IS NULL"
             ), {'tx_id': int(source_tx_id)}).fetchone()
-        except Exception:  # noqa: BLE001 — column added by migration 085
+        except Exception:  # noqa: BLE001 — column added by migration 086
             return False
         if not row or row[0] is None:
             return False
@@ -2392,7 +2392,7 @@ class TraceabilityService:
         traceability_transport_files join table (idempotent — duplicates skipped).
         ``current_user_id`` is recorded on each attachment as ``uploaded_by``.
 
-        Collection points (the tank model, migration 085):
+        Collection points (the tank model, migration 086):
         - Every hop whose destination is a collection point gets
           ``delivered_to_collection=True`` — channel-independent, so a web drag
           into the ห้องขยะ counts as tank inflow exactly like a scale hop.
@@ -2919,7 +2919,7 @@ class TraceabilityService:
                     "SOURCE_ALREADY_CONSOLIDATED",
                 )
 
-        # ── Collection-point guards (the tank model, migration 085) ────────
+        # ── Collection-point guards (the tank model, migration 086) ────────
         # A leg delivered to a collection point is terminal for its sender:
         # consuming it here would take kilograms out of the tank balance with
         # no OUT entry ever written.

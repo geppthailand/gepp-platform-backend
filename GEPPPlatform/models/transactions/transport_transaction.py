@@ -35,5 +35,5 @@ class TransportTransaction(Base, BaseModel):
     # ships it) nor an unfinished shipment (nobody drags it onward; the tank's
     # own weigh-outs continue the story). Set by create/consolidate/update paths
     # from is_collection_point(destination), never by callers directly.
-    # DEPLOY ORDER: migration 085 must run before code mapping this column ships.
+    # DEPLOY ORDER: migration 086 must run before code mapping this column ships.
     delivered_to_collection = Column(Boolean, nullable=False, default=False, server_default='false')

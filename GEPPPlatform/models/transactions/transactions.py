@@ -130,7 +130,7 @@ class Transaction(Base, BaseModel):
     # explicit ห้องขยะ binding first, else the nearest ancestor with a ผู้คัดแยก
     # bound. A ROUTING fact, not proof of arrival: balance terms combine it with
     # the actual transport rows. NULL = non-scale, or no tank resolvable.
-    # DEPLOY ORDER: migration 085 must run before code mapping this column ships.
+    # DEPLOY ORDER: migration 086 must run before code mapping this column ships.
     collection_location_id = Column(BigInteger, ForeignKey('user_locations.id'), nullable=True)
 
     # Constraints
