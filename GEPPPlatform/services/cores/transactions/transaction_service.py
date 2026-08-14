@@ -3274,6 +3274,7 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                 UserLocation.deleted_date.is_(None),
             ]
             if data.get('organization_id'):
+#             if enforce_access and data.get('organization_id'):
                 origin_filters.append(UserLocation.organization_id == data['organization_id'])
             origin = self.db.query(UserLocation).filter(*origin_filters).first()
             if not origin:
