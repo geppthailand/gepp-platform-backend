@@ -7,6 +7,7 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfbase.pdfmetrics import stringWidth
 from reportlab.pdfgen import canvas
+from GEPPPlatform.services.cores.thai_canvas import ThaiCanvas
 
 
 PAGE_WIDTH_IN = 11.69
@@ -1915,7 +1916,7 @@ def generate_pdf_bytes(data: dict) -> bytes:
     # Ensure fonts are registered (works both locally and in Lambda with a layer)
     _register_fonts()
 
-    pdf = canvas.Canvas(buffer, pagesize=(width_points, height_points))
+    pdf = ThaiCanvas(buffer, pagesize=(width_points, height_points))
 
     _draw_cover_page(pdf, data)
     pdf.showPage()

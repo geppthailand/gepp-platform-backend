@@ -22,6 +22,134 @@ def _normalize_identity(value: Any) -> str:
     return str(value or '').strip().lower()
 
 
+def is_member_of(members_list: Any, user_id: Any) -> bool:
+    """
+    True when `user_id` appears in a `members` JSONB array.
+
+    The array is written by several code paths over the years, so entries come in
+    three shapes: bare int (5), string ("5"), or object ({"user_id": 5, "role": ...}).
+    All three must match.
+    """
+    if not members_list:
+        return False
+    uid_str = str(user_id)
+    for m in members_list:
+        if isinstance(m, dict):
+            mid = m.get('user_id') or m.get('id')
+            if mid is not None and str(mid) == uid_str:
+                return True
+        elif str(m) == uid_str:
+            return True
+    return False
+
+
+def collect_all_descendants(nodes: Any, ids_set: Set[int]) -> None:
+    """Recursively collect every nodeId from `nodes` and their children into `ids_set`."""
+    if not isinstance(nodes, list):
+        return
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        try:
+            ids_set.add(int(node.get('nodeId', 0)))
+        except (TypeError, ValueError):
+            pass  # virtual/shared or malformed id — skip
+        children = node.get('children') or []
+        if children:
+            collect_all_descendants(children, ids_set)
+
+
+def rollup_headcount(
+    root_nodes: Any,
+    target_ids: Set[int],
+    headcount_by_id: Dict[int, Optional[int]],
+) -> Optional[int]:
+    """
+    Effective headcount for a set of nodes: each node's own value plus the own-values
+    of every descendant.
+
+    A stored value means "people at this node only", so summing down the tree is correct
+    and there is no override rule.
+
+    Overlapping selections are safe: the covered set is accumulated as a set, so
+    [Building 1, Floor 3] counts Floor 3 once even though both reach it. That also makes
+    it correct to pass the already-descendant-expanded `origin_ids` the reports filter
+    sends — the union is the same set either way.
+
+    Returns None — not 0 — when no node in any of the subtrees has a value at all, so
+    "nobody has filled this in" stays distinguishable from "zero people work here".
+    """
+    covered: Set[int] = set()
+    for nid in target_ids:
+        covered.add(nid)
+        covered |= expand_with_descendants(root_nodes, {nid}) - {nid}
+
+    values = [headcount_by_id.get(nid) for nid in covered]
+    present = [v for v in values if v is not None]
+    if not present:
+        return None
+    return sum(present)
+
+
+def collect_path_ancestors(root_nodes: Any, target_ids: Set[int]) -> Set[int]:
+    """
+    Every node on the path from a root down to any node in `target_ids`.
+
+    Tier-2 context: the org chart needs the branch/building above a location the user
+    can reach, or the node renders detached from the tree. Excludes the targets themselves.
+    """
+    ancestors: Set[int] = set()
+    if not isinstance(root_nodes, list):
+        return ancestors
+
+    def walk(nodes, path):
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            try:
+                nid = int(node.get('nodeId', 0))
+            except (TypeError, ValueError):
+                nid = None
+            if nid is not None and nid in target_ids:
+                ancestors.update(path)
+            children = node.get('children') or []
+            if children:
+                walk(children, path + [nid] if nid is not None else path)
+
+    walk(root_nodes, [])
+    return ancestors - target_ids
+
+
+def expand_with_descendants(root_nodes: Any, target_ids: Set[int]) -> Set[int]:
+    """
+    Expand `target_ids` with every descendant of those nodes in the org tree.
+
+    A tag attached to Building 1 must also cover Floor 1..9 — otherwise a user
+    creates a transaction on a child floor and it disappears from their own list.
+    Mirrors how location membership already cascades in `_resolve_location_tiers`.
+    """
+    expanded = set(target_ids)
+    if not isinstance(root_nodes, list):
+        return expanded
+
+    def walk(nodes):
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            try:
+                nid = int(node.get('nodeId', 0))
+            except (TypeError, ValueError):
+                nid = None
+            children = node.get('children') or []
+            if nid is not None and nid in target_ids:
+                collect_all_descendants(children, expanded)
+            if children:
+                walk(children)
+
+    walk(root_nodes)
+    return expanded
+
+
 class UserService:
     """
     High-level user management service with business logic
@@ -1117,7 +1245,11 @@ class UserService:
         # We only fetch (id, members) here so tier resolution can run without
         # paying for the 40+ column row each location carries. The full row is
         # loaded later, only for the page slice.
-        light_query = self.db.query(UserLocation.id, UserLocation.members).filter(
+        # headcount rides along: the rollup for any node needs the whole org's values,
+        # not just the page slice, and this query already spans the org.
+        light_query = self.db.query(
+            UserLocation.id, UserLocation.members, UserLocation.headcount
+        ).filter(
             UserLocation.is_location == True,
             UserLocation.is_active == True,
             UserLocation.deleted_date.is_(None),  # skip soft-deleted rows
@@ -1141,6 +1273,18 @@ class UserService:
         # Stable order for pagination — newest first matches the legacy CRUD.
         light_rows = light_query.order_by(UserLocation.created_date.desc()).all()
         light_locs = [SimpleNamespace(id=r.id, members=r.members) for r in light_rows]
+        headcount_by_id: Dict[int, Optional[int]] = {r.id: r.headcount for r in light_rows}
+
+        # Tree, loaded once — the headcount rollup walks it per serialized location.
+        from ....models.subscriptions.organizations import OrganizationSetup
+        _setup_row = self.db.query(OrganizationSetup).filter(
+            OrganizationSetup.organization_id == organization_id,
+            OrganizationSetup.is_active == True,
+            OrganizationSetup.deleted_date.is_(None)
+        ).order_by(OrganizationSetup.created_date.desc()).first()
+        setup_root_nodes = (_setup_row.root_nodes if _setup_row else None) or []
+        if not isinstance(setup_root_nodes, list):
+            setup_root_nodes = [setup_root_nodes] if setup_root_nodes else []
 
         # ── PHASE 2: Resolve 3-tier access with the lightweight projection.
         # Non-owners ALWAYS go through tier filtering, even when the caller
@@ -1151,16 +1295,21 @@ class UserService:
         # loop paginating through tens of thousands of rows it can't act on.
         tiers = None
         if current_user_id:
-            tiers = self._resolve_location_tiers(
-                light_locs, organization_id, current_user_id
+            tiers = self.resolve_access_scope(
+                organization_id, current_user_id, locations=light_locs
             )
 
         is_owner_now = tiers['is_owner'] if tiers else True
 
-        # Determine the ordered list of assigned IDs (stable, paginatable).
+        # Locations reachable only through a tag/tenant grant. They ride in the same
+        # page as assigned ones (the picker and the org chart both read `data`), but are
+        # serialized with reduced data further down.
+        scoped_set: set = tiers['scoped_ids'] if (tiers and not is_owner_now) else set()
+
+        # Determine the ordered list of visible IDs (stable, paginatable).
         if not is_owner_now and tiers:
-            assigned_set = tiers['assigned_ids']
-            assigned_ordered = [r.id for r in light_rows if r.id in assigned_set]
+            visible_set = tiers['assigned_ids'] | scoped_set
+            assigned_ordered = [r.id for r in light_rows if r.id in visible_set]
         else:
             assigned_ordered = [r.id for r in light_rows]
 
@@ -1283,6 +1432,12 @@ class UserService:
                 'note': location.note,
                 'expired_date': location.expired_date.isoformat() if location.expired_date else None,
                 'footprint': float(location.footprint) if location.footprint else None,
+                # `headcount` is what was typed at this node; `headcount_rollup` adds every
+                # descendant. The org chart shows the rollup, the editor edits the own value.
+                'headcount': location.headcount,
+                'headcount_rollup': rollup_headcount(
+                    setup_root_nodes, {location.id}, headcount_by_id
+                ),
             }
             # Separate ancestor locations (minimal data) from assigned locations (full data)
             loc_id = location.id
@@ -1299,6 +1454,15 @@ class UserService:
                 }
                 ancestor_data.append(ancestor_dict)
             else:
+                # Tag/tenant-scoped: the user can log here but does not manage the place.
+                # Hide the member roster — it is the location's team, not theirs to see.
+                # `tags`/`tenants` are trimmed to their own grants when hydrated below.
+                if loc_id in scoped_set:
+                    location_dict['access'] = 'scoped'
+                    location_dict['members'] = []
+                    location_dict['users'] = []
+                else:
+                    location_dict['access'] = 'assigned'
                 location_data.append(location_dict)
 
         # Fetch tags for all assigned locations in one query
@@ -1359,6 +1523,9 @@ class UserService:
             'is_owner': is_owner,
             'manageable_user_ids': manageable_user_ids,
             'total_assigned': total_assigned,
+            # Handed to the handler so it can trim each scoped location's tags/tenants
+            # down to the user's own grants without resolving the scope a second time.
+            'scoped_by_location': (tiers or {}).get('scoped_by_location') or {},
         }
 
     def get_orphan_locations(
@@ -1530,7 +1697,8 @@ class UserService:
         self,
         locations: list,
         organization_id: int,
-        current_user_id: int
+        current_user_id: int,
+        org_setup: Any = None
     ) -> dict:
         """
         3-tier location access control:
@@ -1556,12 +1724,14 @@ class UserService:
         if org and org.owner_id == current_user_id:
             return {'is_owner': True, 'assigned_ids': set(), 'ancestor_ids': set(), 'member_ids': set()}
 
-        # Get org setup root_nodes for tree traversal
-        org_setup = self.db.query(OrganizationSetup).filter(
-            OrganizationSetup.organization_id == organization_id,
-            OrganizationSetup.is_active == True,
-            OrganizationSetup.deleted_date.is_(None)
-        ).order_by(OrganizationSetup.created_date.desc()).first()
+        # Get org setup root_nodes for tree traversal. Callers that already hold the
+        # setup (e.g. resolve_access_scope) pass it in so we don't re-query per request.
+        if org_setup is None:
+            org_setup = self.db.query(OrganizationSetup).filter(
+                OrganizationSetup.organization_id == organization_id,
+                OrganizationSetup.is_active == True,
+                OrganizationSetup.deleted_date.is_(None)
+            ).order_by(OrganizationSetup.created_date.desc()).first()
 
         if not org_setup or not org_setup.root_nodes or (isinstance(org_setup.root_nodes, list) and len(org_setup.root_nodes) == 0):
             # No setup or empty root_nodes — user already failed owner check above, so not owner
@@ -1570,20 +1740,6 @@ class UserService:
         root_nodes = org_setup.root_nodes
         if not isinstance(root_nodes, list):
             root_nodes = [root_nodes] if root_nodes else []
-
-        # Helper to check membership (supports both plain IDs and objects)
-        def is_member_of(members_list, uid_int, uid_str):
-            if not members_list:
-                return False
-            for m in members_list:
-                if isinstance(m, dict):
-                    mid = m.get('user_id') or m.get('id')
-                    if mid is not None and (mid == uid_int or str(mid) == uid_str):
-                        return True
-                else:
-                    if m == uid_int or str(m) == uid_str:
-                        return True
-            return False
 
         # Build the set of user IDs whose membership grants visibility:
         # current user + all created_by_id chain descendants
@@ -1596,7 +1752,7 @@ class UserService:
             if not loc_members:
                 continue
             for chain_uid in chain_user_ids:
-                if is_member_of(loc_members, chain_uid, str(chain_uid)):
+                if is_member_of(loc_members, chain_uid):
                     member_loc_ids.add(loc.id if hasattr(loc, 'id') else loc.get('id'))
                     break  # no need to check other chain users for this location
 
@@ -1605,15 +1761,6 @@ class UserService:
 
         assigned_ids = set()
         ancestor_ids = set()
-
-        def collect_all_descendants(nodes, ids_set):
-            """Recursively collect all node IDs from the given nodes and their children."""
-            for node in nodes:
-                nid = int(node.get('nodeId', 0))
-                ids_set.add(nid)
-                children = node.get('children', [])
-                if children:
-                    collect_all_descendants(children, ids_set)
 
         def walk_tree(nodes, path_from_root):
             """Walk tree to find member nodes, collect their descendants and trace ancestors."""
@@ -1657,6 +1804,136 @@ class UserService:
             'assigned_ids': assigned_ids,
             'ancestor_ids': ancestor_ids,
             'member_ids': member_loc_ids
+        }
+
+    def resolve_access_scope(
+        self,
+        organization_id: int,
+        current_user_id: int,
+        locations: Optional[list] = None
+    ) -> Dict[str, Any]:
+        """
+        Full access verdict for a user: location membership (3 tiers) PLUS tag/tenant
+        membership, which grants *limited* access to the locations a tag/tenant is
+        attached to.
+
+        Two independent ways in:
+          - member of a location  → every transaction at that location and below.
+          - member of a tag/tenant → only transactions at the tag/tenant's locations
+            (+ descendants) that actually carry that tag/tenant, inside its date window.
+
+        Returns:
+            {
+              'is_owner': bool,
+              'assigned_ids': set[int],    # tier 1 — full access
+              'ancestor_ids': set[int],    # tier 2 — read-only path context
+              'member_ids': set[int],      # direct location membership
+              'scoped_ids': set[int],      # tier 1.5 — reachable ONLY via tag/tenant
+              'scoped_grants': [
+                  {'kind': 'tag'|'tenant', 'id': int, 'name': str,
+                   'location_ids': set[int], 'start_date': date|None, 'end_date': date|None}
+              ],
+              'scoped_by_location': {loc_id: {'tag_ids': set, 'tenant_ids': set}},
+            }
+
+        Use `libs.locationAccess.build_visibility_clause()` to turn this into a filter —
+        do not hand-roll the predicate at call sites, or reads will drift apart.
+        """
+        from ....models.subscriptions.organizations import OrganizationSetup
+        from ....models.users.user_related import UserLocationTag, UserTenant
+
+        empty_scope = {
+            'scoped_ids': set(),
+            'scoped_grants': [],
+            'scoped_by_location': {},
+        }
+
+        org_setup = self.db.query(OrganizationSetup).filter(
+            OrganizationSetup.organization_id == organization_id,
+            OrganizationSetup.is_active == True,
+            OrganizationSetup.deleted_date.is_(None)
+        ).order_by(OrganizationSetup.created_date.desc()).first()
+
+        if locations is None:
+            locations = self.crud.get_user_locations(organization_id=organization_id)
+
+        tiers = self._resolve_location_tiers(
+            locations, organization_id, int(current_user_id), org_setup=org_setup
+        )
+
+        # Owners see everything; no point resolving grants.
+        if tiers['is_owner']:
+            return {**tiers, **empty_scope}
+
+        root_nodes = (org_setup.root_nodes if org_setup else None) or []
+        if not isinstance(root_nodes, list):
+            root_nodes = [root_nodes] if root_nodes else []
+
+        # Same identity set the tier resolver uses: the user plus anyone they created.
+        chain_user_ids = {int(current_user_id)} | self._get_created_by_descendants(
+            int(current_user_id), organization_id
+        )
+
+        scoped_grants: List[Dict[str, Any]] = []
+        scoped_by_location: Dict[int, Dict[str, set]] = {}
+
+        for kind, model in (('tag', UserLocationTag), ('tenant', UserTenant)):
+            rows = self.db.query(model).filter(
+                model.organization_id == organization_id,
+                model.is_active == True,
+                model.deleted_date.is_(None)
+            ).all()
+
+            for row in rows:
+                if not any(is_member_of(row.members, uid) for uid in chain_user_ids):
+                    continue
+
+                attached: Set[int] = set()
+                for loc_id in (row.user_locations or []):
+                    try:
+                        attached.add(int(loc_id))
+                    except (TypeError, ValueError):
+                        continue
+                # Legacy single-FK column, still populated on older rows.
+                if row.user_location_id:
+                    attached.add(int(row.user_location_id))
+                if not attached:
+                    continue
+
+                location_ids = expand_with_descendants(root_nodes, attached)
+
+                scoped_grants.append({
+                    'kind': kind,
+                    'id': row.id,
+                    'name': row.name,
+                    'location_ids': location_ids,
+                    'start_date': row.start_date,
+                    'end_date': row.end_date,
+                })
+
+                key = 'tag_ids' if kind == 'tag' else 'tenant_ids'
+                for loc_id in location_ids:
+                    bucket = scoped_by_location.setdefault(
+                        loc_id, {'tag_ids': set(), 'tenant_ids': set()}
+                    )
+                    bucket[key].add(row.id)
+
+        # Locations already fully assigned don't need the limited treatment.
+        scoped_ids = set(scoped_by_location.keys()) - tiers['assigned_ids']
+
+        # Scoped locations need their path context too, or the org chart renders them
+        # detached. Same tier-2 semantics as assigned locations get.
+        ancestor_ids = set(tiers['ancestor_ids'])
+        if scoped_ids:
+            ancestor_ids |= collect_path_ancestors(root_nodes, scoped_ids)
+            ancestor_ids -= (tiers['assigned_ids'] | scoped_ids)
+
+        return {
+            **tiers,
+            'ancestor_ids': ancestor_ids,
+            'scoped_ids': scoped_ids,
+            'scoped_grants': scoped_grants,
+            'scoped_by_location': scoped_by_location,
         }
 
     def _extract_node_ids(self, nodes, location_ids: set):

@@ -176,7 +176,9 @@ def find_duplicates(conn, tx_id: int) -> Optional[dict]:
         )
         target_imgs = _collect_extractions(cur.fetchall())
 
-        # 1) Exact-match candidate set: pull other txns in the project.
+        # 1) Exact-match candidate set: the PROJECT_SCAN_LIMIT most recent
+        #    txns in the project. Bounded because step 2 loads every one of
+        #    their extractions into memory for the Python-side comparison.
         cur.execute(
             "SELECT id FROM epr_transactions_embeded "
             "WHERE id != %s "
@@ -187,6 +189,36 @@ def find_duplicates(conn, tx_id: int) -> Optional[dict]:
             (tx_id, target_project_id, PROJECT_SCAN_LIMIT),
         )
         candidate_ids = [r[0] for r in cur.fetchall()]
+
+        # 1b) document_number is the strongest signal (HIGH confidence), so it
+        #     gets full-project coverage rather than being capped at the recent
+        #     window: an indexed lookup pulls in matches of any age. Cheap —
+        #     idx_epr_transaction_image_doc_no serves it directly.
+        #     The weaker signals (key_identifiers, vendor/date/total) stay
+        #     bounded by the window above; missing an old fuzzy match is
+        #     low-stakes, and widening them means an unbounded in-memory scan.
+        target_doc_nos = sorted({
+            str(e["document_number"]).strip()
+            for e in target_imgs
+            if e.get("document_number")
+        })
+        if target_doc_nos:
+            # ponytail: matches the stored value as-is. The extractor returns
+            # trimmed JSON, so an untrimmed stored doc number would be missed
+            # here — btrim() in the predicate would defeat the index. If that
+            # ever shows up, index btrim(extracted_data->>'document_number').
+            cur.execute(
+                "SELECT DISTINCT i.transaction_id "
+                "FROM epr_transaction_image i "
+                "JOIN epr_transactions_embeded t ON t.id = i.transaction_id "
+                "WHERE i.extracted_data->>'document_number' = ANY(%s) "
+                "AND i.transaction_id != %s "
+                "AND t.deleted_date IS NULL "
+                "AND t.epr_project_id = %s",
+                (target_doc_nos, tx_id, target_project_id),
+            )
+            known = set(candidate_ids)
+            candidate_ids += [r[0] for r in cur.fetchall() if r[0] not in known]
 
         # 2) Pull their extracted_data, group by tx.
         extractions_by_tx: dict[int, List[dict]] = {}

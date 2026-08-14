@@ -100,7 +100,8 @@ class TransactionService:
     def create_transaction(
         self,
         transaction_data: Dict[str, Any],
-        transaction_records_data: List[Dict[str, Any]] = None
+        transaction_records_data: List[Dict[str, Any]] = None,
+        enforce_access: bool = False
     ) -> Dict[str, Any]:
         """
         Create a new transaction with optional transaction records
@@ -108,13 +109,19 @@ class TransactionService:
         Args:
             transaction_data: Dict containing transaction information
             transaction_records_data: List of dicts containing transaction record data
+            enforce_access: check that `created_by_id` may actually write at `origin_id`
+                with the given tag/tenant. Only the authenticated web path passes True —
+                bulk import, QR and scale channels create rows on behalf of non-user
+                actors and resolve their own permissions upstream.
 
         Returns:
             Dict with success status and transaction data
         """
         try:
             # Validate transaction data
-            validation_errors = self._validate_transaction_data(transaction_data)
+            validation_errors = self._validate_transaction_data(
+                transaction_data, enforce_access=enforce_access
+            )
             if validation_errors:
                 return {
                     'success': False,
@@ -2240,16 +2247,21 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
             shared_visible_parent_ids: Optional[set] = None
             if current_user_id is not None and organization_id:
                 from ..users.user_service import UserService
+                from ....libs.locationAccess import build_visibility_clause
                 user_service = UserService(self.db)
-                locations = user_service.crud.get_user_locations(organization_id=organization_id)
-                tiers = user_service._resolve_location_tiers(locations, organization_id, int(current_user_id))
-                if not tiers['is_owner']:
-                    assigned_ids = tiers['assigned_ids']
-                    shared_visible_parent_ids = assigned_ids or set()
-                    if not assigned_ids:
-                        own_conditions.append(Transaction.origin_id.is_(None))
-                    else:
-                        own_conditions.append(Transaction.origin_id.in_(list(assigned_ids)))
+                scope = user_service.resolve_access_scope(organization_id, int(current_user_id))
+                if not scope['is_owner']:
+                    # Cross-org shares stay gated on assigned_ids only: a tag/tenant grant
+                    # is scoped to this org's locations and must not pull in another org's
+                    # shared branch, which carries no tag/tenant of ours to match on.
+                    shared_visible_parent_ids = scope['assigned_ids'] or set()
+                    own_conditions.append(build_visibility_clause(
+                        scope,
+                        origin_col=Transaction.origin_id,
+                        tag_col=Transaction.location_tag_id,
+                        tenant_col=Transaction.tenant_id,
+                        date_col=Transaction.transaction_date,
+                    ))
 
             # Hide transactions whose origin is no longer in the active org chart — e.g. a location
             # a setup-import replaced (moved to the recycle bin) or a reverted import stripped out.
@@ -3208,8 +3220,8 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
 
     # ========== PRIVATE HELPER METHODS ==========
 
-    def _validate_transaction_data(self, data: Dict[str, Any]) -> List[str]:
-        """Validate transaction data"""
+    def _validate_transaction_data(self, data: Dict[str, Any], enforce_access: bool = False) -> List[str]:
+        """Validate transaction data. See `create_transaction` for `enforce_access`."""
         errors = []
 
         # Required fields
@@ -3262,14 +3274,56 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                 UserLocation.deleted_date.is_(None),
             ]
             if data.get('organization_id'):
+#             if enforce_access and data.get('organization_id'):
                 origin_filters.append(UserLocation.organization_id == data['organization_id'])
             origin = self.db.query(UserLocation).filter(*origin_filters).first()
             if not origin:
                 errors.append('Origin location not found, deleted, or not in this organization')
 
+        # Access check: may this user write at this origin with this tag/tenant?
+        if enforce_access and data.get('origin_id') and data.get('organization_id') \
+                and data.get('created_by_id'):
+            errors.extend(self._validate_origin_access(data))
+
         # Note: destination_ids is populated from transaction records, no validation needed here
 
         return errors
+
+    def _validate_origin_access(self, data: Dict[str, Any]) -> List[str]:
+        """
+        Gate writes on the same rules that gate reads.
+
+        A user who only reaches a location through a tag/tenant must stamp that tag/tenant
+        on the transaction — otherwise they would create a record that immediately vanishes
+        from their own list, since the read filter has nothing to match on.
+        """
+        from ....libs.locationAccess import grant_for_write
+        from ..users.user_service import UserService
+
+        try:
+            scope = UserService(self.db).resolve_access_scope(
+                int(data['organization_id']), int(data['created_by_id'])
+            )
+        except (TypeError, ValueError):
+            return ['Invalid organization or user for access check']
+
+        # Match the read filter on the record's own date, not "now" — a back-dated entry
+        # inside a closed tenancy window is exactly what the window is for.
+        when = data.get('transaction_date')
+        if isinstance(when, str):
+            try:
+                when = datetime.fromisoformat(when.replace('Z', '+00:00'))
+            except ValueError:
+                when = None
+
+        reason = grant_for_write(
+            scope,
+            data.get('origin_id'),
+            data.get('tag_id') or data.get('location_tag_id'),
+            data.get('tenant_id'),
+            when=when,
+        )
+        return [reason] if reason else []
 
     def _validate_transaction_record_data(self, data: Dict[str, Any]) -> List[str]:
         """Validate transaction record data"""
