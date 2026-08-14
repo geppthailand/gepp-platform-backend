@@ -101,7 +101,7 @@ def main(event, context):
             # Browser will refuse the actual POST unless this preflight echoes
             # back the exact Origin from the allowlist — `*` is rejected when
             # the request needs credentials/origin trust.
-            if "/api/public/customer-leads" in path:
+            if "/api/public/customer-leads" in path or "/api/public/cookie-consent" in path:
                 from GEPPPlatform.services.public.customer_leads_handler import (
                     ALLOWED_ORIGINS, is_origin_allowed,
                 )
@@ -327,6 +327,45 @@ def main(event, context):
                         **_VERSION_HEADERS,
                     },
                     "body": json.dumps({"success": True, "data": lead_result}),
+                }
+
+            elif "/api/public/cookie-consent" in path and http_method == "POST":
+                # PDPA cookie-consent audit log (gepp.me banner). Origin-allowlisted, same list as
+                # customer-leads. Append-only record of each accept/reject/custom decision.
+                from GEPPPlatform.services.public.cookie_consent_handler import (
+                    handle_cookie_consent_log, is_origin_allowed, ALLOWED_ORIGINS,
+                )
+                req_headers = event.get("headers") or {}
+                origin = req_headers.get("origin") or req_headers.get("Origin")
+                if not is_origin_allowed(origin):
+                    return {
+                        "statusCode": 403,
+                        "headers": {"Vary": "Origin", "Content-Type": "application/json", **_VERSION_HEADERS},
+                        "body": json.dumps({
+                            "success": False,
+                            "error": "origin_not_allowed",
+                            "allowed_origins": sorted(ALLOWED_ORIGINS),
+                        }),
+                    }
+                request_meta = {
+                    "origin":     origin,
+                    "ip_address": (event.get("requestContext", {}).get("http", {}) or {}).get("sourceIp"),
+                    "user_agent": req_headers.get("user-agent") or req_headers.get("User-Agent"),
+                    "referrer":   req_headers.get("referer")    or req_headers.get("Referer"),
+                    # coarse country from CloudFront (never the raw IP) — PDPA data-minimization
+                    "country":    req_headers.get("cloudfront-viewer-country")
+                               or req_headers.get("CloudFront-Viewer-Country"),
+                }
+                consent_result = handle_cookie_consent_log(body, session, request_meta=request_meta)
+                return {
+                    "statusCode": 200,
+                    "headers": {
+                        "Access-Control-Allow-Origin": origin,
+                        "Vary": "Origin",
+                        "Content-Type": "application/json",
+                        **_VERSION_HEADERS,
+                    },
+                    "body": json.dumps({"success": True, "data": consent_result}),
                 }
 
             elif "/api/userapi/documents/" in path:

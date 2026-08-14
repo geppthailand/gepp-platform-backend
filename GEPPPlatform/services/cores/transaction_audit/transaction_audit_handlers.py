@@ -1208,8 +1208,12 @@ def _should_filter_audit_by_member(db_session: Any, current_user_id: Any) -> boo
 
 def _apply_member_filter_to_transaction_query(query, db_session: Any, current_user_id: Any, organization_id: Any = None):
     """
-    Filter transactions to those from the user's assigned locations (3-tier model).
-    Owners see all transactions; members see only assigned locations + descendants.
+    Filter transactions to what this user may see.
+
+    Owners see everything. Location members see their assigned locations + descendants.
+    Tag/tenant members see only transactions carrying a tag/tenant they belong to, at
+    that tag/tenant's locations. Shares one definition with the transaction list and
+    reports via `libs.locationAccess` — do not re-derive the predicate here.
     """
     if current_user_id is None:
         return query
@@ -1218,18 +1222,21 @@ def _apply_member_filter_to_transaction_query(query, db_session: Any, current_us
         return query
 
     from ..users.user_service import UserService
+    from ....libs.locationAccess import build_visibility_clause
+
     user_service = UserService(db_session)
-    locations = user_service.crud.get_user_locations(organization_id=organization_id)
-    tiers = user_service._resolve_location_tiers(locations, int(organization_id), int(current_user_id))
+    scope = user_service.resolve_access_scope(int(organization_id), int(current_user_id))
 
-    if tiers['is_owner']:
+    clause = build_visibility_clause(
+        scope,
+        origin_col=Transaction.origin_id,
+        tag_col=Transaction.location_tag_id,
+        tenant_col=Transaction.tenant_id,
+        date_col=Transaction.transaction_date,
+    )
+    if clause is None:
         return query
-
-    assigned_ids = tiers['assigned_ids']
-    if not assigned_ids:
-        return query.filter(Transaction.origin_id.is_(None))
-
-    return query.filter(Transaction.origin_id.in_(list(assigned_ids)))
+    return query.filter(clause)
 
 
 def _parse_audit_report_date_range(query_params: Dict[str, Any]):

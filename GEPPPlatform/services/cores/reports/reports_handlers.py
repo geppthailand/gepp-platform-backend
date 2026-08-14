@@ -400,6 +400,69 @@ def _check_transaction_completion(transaction_map: Dict[int, Dict]) -> Tuple[int
 
 # ========== ROUTE HANDLERS ==========
 
+def _resolve_filtered_headcount(
+    reports_service: ReportsService,
+    organization_id: int,
+    filters: Dict[str, Any],
+) -> Optional[int]:
+    """
+    Rolled-up headcount for the locations currently in scope, or None when nothing in
+    that subtree has a value (→ the card shows N/A rather than dividing by zero).
+
+    With no location filter the scope is the whole org tree. The dashboard sends
+    `location_ids`, legacy callers `origin_ids`; both arrive already expanded to
+    descendants, which is harmless — `rollup_headcount` accumulates a set.
+    """
+    from ..users.user_service import rollup_headcount
+    from ....models.subscriptions.organizations import OrganizationSetup
+    from ....models.users.user_location import UserLocation
+
+    setup = reports_service.db.query(OrganizationSetup).filter(
+        OrganizationSetup.organization_id == organization_id,
+        OrganizationSetup.is_active == True,
+        OrganizationSetup.deleted_date.is_(None),
+    ).order_by(OrganizationSetup.created_date.desc()).first()
+    root_nodes = (setup.root_nodes if setup else None) or []
+    if not isinstance(root_nodes, list):
+        root_nodes = [root_nodes] if root_nodes else []
+
+    rows = reports_service.db.query(UserLocation.id, UserLocation.headcount).filter(
+        UserLocation.organization_id == organization_id,
+        UserLocation.is_location == True,
+        UserLocation.deleted_date.is_(None),
+    ).all()
+    headcount_by_id = {r.id: r.headcount for r in rows}
+
+    selected: set = set()
+    for key in ('location_ids', 'origin_ids'):
+        for raw in (filters or {}).get(key) or []:
+            try:
+                selected.add(int(raw))
+            except (TypeError, ValueError):
+                continue
+    # Composite `origin|tag|tenant` selections replace origin_ids with origin_combos
+    # (the parser pops origin_ids). Missing this reads as "no filter" and would quietly
+    # divide by the whole organisation's headcount.
+    for combo in (filters or {}).get('origin_combos') or []:
+        try:
+            selected.add(int(combo[0]))
+        except (TypeError, ValueError, IndexError):
+            continue
+
+    if not selected:
+        # No location filter → every root, i.e. the whole organisation.
+        for node in root_nodes:
+            if isinstance(node, dict):
+                try:
+                    selected.add(int(node.get('nodeId', 0)))
+                except (TypeError, ValueError):
+                    continue
+        if not selected:
+            selected = {rid for rid in headcount_by_id}
+
+    return rollup_headcount(root_nodes, selected, headcount_by_id)
+
+
 def _handle_overview_report(
     reports_service: ReportsService,
     organization_id: int,
@@ -599,6 +662,15 @@ def _handle_overview_report(
     ]
     waste_type_proportions.sort(key=lambda x: x['total_waste'], reverse=True)
 
+    # Waste per head — total waste (not just recyclables) over the rolled-up headcount of
+    # the filtered locations. `value` is None when no location in scope has a headcount:
+    # the card renders N/A with a CTA instead of a misleading 0 or a divide-by-zero.
+    headcount = _resolve_filtered_headcount(reports_service, organization_id, filters or {})
+    waste_per_head = (
+        round(total_waste / headcount * 100) / 100
+        if headcount and headcount > 0 else None
+    )
+
     return {
         'transactions_total': len(tx_ids),
         'transactions_approved': len(tx_approved),
@@ -615,6 +687,9 @@ def _handle_overview_report(
                 {'title': 'Number of Trees', 'value': int(round(kg_co2_to_trees(recyclable_ghg_reduction) * 100 / 100))},
                 # {'title': 'Forest (rai)', 'value': round(kg_co2_to_forest_rai(recyclable_ghg_reduction) * 100) / 100},
                 {'title': 'Plastic Saved', 'value': round(plastic_saved * 100) / 100},
+                # headcount travels with the card so the UI can print the denominator —
+                # a bare kg/head number is unreadable without knowing what it divided by.
+                {'title': 'Waste per Head', 'value': waste_per_head, 'headcount': headcount},
             ],
             'chart_data': chart_data
         },
