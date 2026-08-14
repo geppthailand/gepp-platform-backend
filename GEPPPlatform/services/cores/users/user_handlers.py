@@ -1210,6 +1210,21 @@ def handle_update_location(
         if 'address' in data:
             location.address = data['address']
 
+        # People at this node only. Empty string / null clears it back to "not set",
+        # which is what drives the N/A rule in reports — distinct from an entered 0.
+        if 'headcount' in data:
+            raw_headcount = data['headcount']
+            if raw_headcount is None or raw_headcount == '':
+                location.headcount = None
+            else:
+                try:
+                    parsed = int(raw_headcount)
+                except (TypeError, ValueError):
+                    raise BadRequestException('headcount must be a whole number')
+                if parsed < 0:
+                    raise BadRequestException('headcount cannot be negative')
+                location.headcount = parsed
+
         # Handle user assignments - store in members JSONB column
         if 'users' in data:
             location.members = _normalize_members_payload(data['users'])

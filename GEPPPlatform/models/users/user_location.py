@@ -77,6 +77,9 @@ class UserLocation(Base, BaseModel):
     type = Column(Text)  # Business unit type details
     hub_type = Column(Text)  # Hub type for waste management locations (from hubData.type)
     population = Column(Text)
+    # People at this node ONLY, excluding sub-levels — the rollup adds descendants,
+    # so storing a subtree total here double-counts. NULL = not set (distinct from 0).
+    headcount = Column(Integer)
     material = Column(Text)  # Materials handled
     
     # Profile and documents

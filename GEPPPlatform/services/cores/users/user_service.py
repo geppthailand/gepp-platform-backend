@@ -59,6 +59,38 @@ def collect_all_descendants(nodes: Any, ids_set: Set[int]) -> None:
             collect_all_descendants(children, ids_set)
 
 
+def rollup_headcount(
+    root_nodes: Any,
+    target_ids: Set[int],
+    headcount_by_id: Dict[int, Optional[int]],
+) -> Optional[int]:
+    """
+    Effective headcount for a set of nodes: each node's own value plus the own-values
+    of every descendant.
+
+    A stored value means "people at this node only", so summing down the tree is correct
+    and there is no override rule.
+
+    Overlapping selections are safe: the covered set is accumulated as a set, so
+    [Building 1, Floor 3] counts Floor 3 once even though both reach it. That also makes
+    it correct to pass the already-descendant-expanded `origin_ids` the reports filter
+    sends — the union is the same set either way.
+
+    Returns None — not 0 — when no node in any of the subtrees has a value at all, so
+    "nobody has filled this in" stays distinguishable from "zero people work here".
+    """
+    covered: Set[int] = set()
+    for nid in target_ids:
+        covered.add(nid)
+        covered |= expand_with_descendants(root_nodes, {nid}) - {nid}
+
+    values = [headcount_by_id.get(nid) for nid in covered]
+    present = [v for v in values if v is not None]
+    if not present:
+        return None
+    return sum(present)
+
+
 def collect_path_ancestors(root_nodes: Any, target_ids: Set[int]) -> Set[int]:
     """
     Every node on the path from a root down to any node in `target_ids`.
@@ -1161,7 +1193,11 @@ class UserService:
         # We only fetch (id, members) here so tier resolution can run without
         # paying for the 40+ column row each location carries. The full row is
         # loaded later, only for the page slice.
-        light_query = self.db.query(UserLocation.id, UserLocation.members).filter(
+        # headcount rides along: the rollup for any node needs the whole org's values,
+        # not just the page slice, and this query already spans the org.
+        light_query = self.db.query(
+            UserLocation.id, UserLocation.members, UserLocation.headcount
+        ).filter(
             UserLocation.is_location == True,
             UserLocation.is_active == True,
             UserLocation.deleted_date.is_(None),  # skip soft-deleted rows
@@ -1185,6 +1221,18 @@ class UserService:
         # Stable order for pagination — newest first matches the legacy CRUD.
         light_rows = light_query.order_by(UserLocation.created_date.desc()).all()
         light_locs = [SimpleNamespace(id=r.id, members=r.members) for r in light_rows]
+        headcount_by_id: Dict[int, Optional[int]] = {r.id: r.headcount for r in light_rows}
+
+        # Tree, loaded once — the headcount rollup walks it per serialized location.
+        from ....models.subscriptions.organizations import OrganizationSetup
+        _setup_row = self.db.query(OrganizationSetup).filter(
+            OrganizationSetup.organization_id == organization_id,
+            OrganizationSetup.is_active == True,
+            OrganizationSetup.deleted_date.is_(None)
+        ).order_by(OrganizationSetup.created_date.desc()).first()
+        setup_root_nodes = (_setup_row.root_nodes if _setup_row else None) or []
+        if not isinstance(setup_root_nodes, list):
+            setup_root_nodes = [setup_root_nodes] if setup_root_nodes else []
 
         # ── PHASE 2: Resolve 3-tier access with the lightweight projection.
         # Non-owners ALWAYS go through tier filtering, even when the caller
@@ -1332,6 +1380,12 @@ class UserService:
                 'note': location.note,
                 'expired_date': location.expired_date.isoformat() if location.expired_date else None,
                 'footprint': float(location.footprint) if location.footprint else None,
+                # `headcount` is what was typed at this node; `headcount_rollup` adds every
+                # descendant. The org chart shows the rollup, the editor edits the own value.
+                'headcount': location.headcount,
+                'headcount_rollup': rollup_headcount(
+                    setup_root_nodes, {location.id}, headcount_by_id
+                ),
             }
             # Separate ancestor locations (minimal data) from assigned locations (full data)
             loc_id = location.id
