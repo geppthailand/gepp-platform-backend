@@ -640,9 +640,20 @@ class TraceabilityService:
                 if n.get("children"):
                     _index_nodes(n["children"])
 
+        # Piles sitting INSIDE a collection point have no transports at all — a
+        # weigh-in whose resolved tank IS its origin creates no hop, the material
+        # is already in the room. Dropping them for "no transports" (the rule for
+        # every other hopless pile, which is still just waiting to be dispatched)
+        # deleted real kilograms from the diagram: a tenant's whole delivery
+        # vanished from the picture while the board and the tank ledger both
+        # counted it. They are kept with an empty children list and the
+        # in_collection flag the frontend already reads.
+        _in_tank_gids = {
+            gd.get("id") for gd in group_list if gd.get("in_collection")
+        }
         for g in groups:
             transports = by_group.get(g.id, [])
-            if not transports:
+            if not transports and g.id not in _in_tank_gids:
                 continue
             group_dict = next((x for x in group_list if x.get("id") == g.id), None)
             if group_dict is None:
@@ -1720,6 +1731,26 @@ class TraceabilityService:
         if location_ids:
             locs = self.db.query(UserLocation).filter(UserLocation.id.in_(location_ids)).all()
             location_map = {loc.id: loc for loc in locs}
+        # ผู้เช่า: the diagram draws a tenant as the SENDER of a delivery, so it
+        # needs the name, not just the id it has always carried. A tenant is a tag
+        # on a pile rather than a node in the chart — two tenants in one building
+        # weigh at the same location — which is why it cannot be read off the
+        # location. One batched lookup; a failure degrades to "no name", and the
+        # frontend then falls back to the location, exactly as it does today.
+        tenant_name_by_id: Dict[int, str] = {}
+        tenant_ids = {g.tenant_id for g in groups if getattr(g, 'tenant_id', None) is not None}
+        if tenant_ids:
+            try:
+                from ....models.users.user_related import UserTenant
+                for _t in self.db.query(UserTenant).filter(
+                    UserTenant.id.in_(tenant_ids),
+                    UserTenant.organization_id == organization_id,
+                    UserTenant.deleted_date.is_(None),
+                ).all():
+                    if _t.name:
+                        tenant_name_by_id[int(_t.id)] = _t.name
+            except Exception:  # noqa: BLE001 — a name is decoration, never fail the board
+                tenant_name_by_id = {}
         record_ids = []
         carried_over_ids = []
         for g in groups:
@@ -1794,6 +1825,11 @@ class TraceabilityService:
                 "transaction_month": g.transaction_month,
                 "location_tag_id": g.location_tag_id,
                 "tenant_id": g.tenant_id,
+                # None when the pile has no tenant, or the tenant was deleted —
+                # both mean "draw the location as the sender" downstream.
+                "tenant_name": tenant_name_by_id.get(
+                    int(g.tenant_id)
+                ) if getattr(g, 'tenant_id', None) is not None else None,
                 "total_weight_kg": total_weight,
                 "weight": total_weight,
                 "record_ids": record_ids_g,
