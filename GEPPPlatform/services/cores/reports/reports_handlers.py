@@ -26,6 +26,44 @@ from GEPPPlatform.models.transactions.transactions import TransactionStatus
 
 # ========== HELPER FUNCTIONS ==========
 
+def resolve_rate_presentation(
+    outcome_scope: bool,
+    scope_touches_tank: bool,
+    measured: float,
+    estimate: float,
+) -> Tuple[Optional[float], str, Optional[float]]:
+    """Which recycling rate a scope gets to see, and what it must be called.
+
+    Returns (rate | None, basis, toggle_estimate | None).
+
+    The rule is one sentence: a rate is suppressed ONLY where the tank model
+    actually bites. Everything else keeps a number — labelled, so nobody
+    mistakes an estimate for a measurement.
+
+      • scope never meets a tank → the pre-tank ESTIMATE, exactly the number
+        every report showed before collection points existed. This covers every
+        pre-scale organization in every view, and the filtered corners of a
+        scale site its tanks never touch. (measured == estimate here anyway:
+        with nothing delivered, the supersede is a no-op.)
+      • org-wide scope of a tank site → the MEASURED rate ('outcome'), plus the
+        estimate for a view-only toggle — people who watched the old number for
+        years deserve to see both and understand the drop, without a switch
+        that changes the official figure.
+      • narrowed scope that touches a tank → None ('unavailable'). One tenant's
+        deliveries measured against a shared room's outcomes is a wrong number,
+        not a conservative one; the UI leads with separation quality and the
+        kilograms still sitting in the room instead.
+
+    Pure function — all four inputs are already computed by the overview
+    handler — so the whole presentation policy is testable without a database.
+    """
+    if not scope_touches_tank:
+        return estimate, 'estimate', None
+    if outcome_scope:
+        return measured, 'outcome', estimate
+    return None, 'unavailable', None
+
+
 def _validate_organization_id(current_user: Dict[str, Any]) -> int:
     """Validate and extract organization_id from current_user"""
     organization_id = current_user.get('organization_id')
@@ -698,6 +736,34 @@ def _handle_overview_report(
     )
     recycle_rate = ((recyclable_waste / rate_total) * 100) if rate_total > 0 else 0.0
 
+    # Does THIS scope's material ever meet a tank? This one signal decides how
+    # the rate is presented. Suppressing the rate is only honest where the tank
+    # model actually bites — material handed into a shared room, so a narrowed
+    # generation set can no longer be matched against outcomes. Everywhere else
+    # (every pre-scale organization, and any filtered corner of a scale site the
+    # tanks never touch) the pre-tank estimate is exactly as valid as it was the
+    # day before this feature shipped, and hiding it there just breaks reports
+    # people already rely on. Both inputs are already in hand — no extra query.
+    scope_touches_tank = bool(superseded_by_record) or any(
+        leaf.get('delivered')
+        for leaves in group_leaf_data.values()
+        for leaf in leaves
+    )
+
+    # The pre-tank number: generation set only, no supersede — byte-for-byte
+    # what every report showed before collection points existed. Serves two
+    # jobs: the primary rate wherever the scope never meets a tank, and the
+    # "ประมาณการ" side of the org-scope toggle so the UI can flip views without
+    # a second request. Same in-memory data, no extra query.
+    _est_recyclable, _, _, _, _est_total = compute_recycling_rate(
+        record_weights, group_leaf_data, group_completion,
+    )
+    recycle_rate_estimate = ((_est_recyclable / _est_total) * 100) if _est_total > 0 else 0.0
+
+    recycle_rate_out, recycle_rate_basis, recycle_rate_toggle = resolve_rate_presentation(
+        outcome_scope, scope_touches_tank, recycle_rate, recycle_rate_estimate
+    )
+
     # How much of THIS scope's material is sitting in a sorting room waiting for
     # an outcome. In a narrowed scope this is the only honest thing to say about
     # the missing rate, so it has to be measured even though the rate itself is
@@ -841,12 +907,15 @@ def _handle_overview_report(
         'transactions_approved': len(tx_approved),
         'key_indicators': {
             'total_waste': round(total_waste * 100) / 100,
-            # None (not 0) when the scope cannot support an outcome-based
-            # answer — the UI shows "อยู่ระหว่างจัดการโดยจุดรวม" with
-            # in_collection_kg rather than a number that looks authoritative
-            # and isn't. See the scope predicate above.
-            'recycle_rate': recycle_rate if outcome_scope else None,
-            'recycle_rate_basis': 'outcome' if outcome_scope else 'unavailable',
+            # See resolve_rate_presentation for the whole policy. None (not 0)
+            # only where an answer would be wrong — a narrowed scope whose
+            # material meets a tank; the UI shows "อยู่ระหว่างจัดการโดยจุดรวม"
+            # with in_collection_kg there instead. recycle_rate_estimate is the
+            # pre-tank number, non-null only when it rides along as the
+            # view-toggle counterpart of a measured rate.
+            'recycle_rate': recycle_rate_out,
+            'recycle_rate_basis': recycle_rate_basis,
+            'recycle_rate_estimate': recycle_rate_toggle,
             'separation_rate': separation_rate,
             'in_collection_kg': in_collection_kg,
             'ghg_reduction': round(recyclable_ghg_reduction * 100) / 100,
