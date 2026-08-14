@@ -3260,20 +3260,25 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
             if not org:
                 errors.append('Organization not found or inactive')
 
-        # Validate origin location exists
+        # Validate origin location exists, belongs to the SAME organization, and is
+        # not soft-deleted. The org check matters because this is the last line of
+        # defence on the IoT records route, which has no membership gate of its own:
+        # without it any authenticated tablet can post weighings onto another
+        # organisation's location. The deleted_date check keeps rows off locations
+        # that reports and the traceability board no longer see — they would be
+        # written, then silently counted nowhere.
         if data.get('origin_id'):
             origin_filters = [
                 UserLocation.id == data['origin_id'],
-                UserLocation.is_active == True
+                UserLocation.is_active == True,
+                UserLocation.deleted_date.is_(None),
             ]
-            # Without an org predicate any active location id in the whole database is
-            # accepted as an origin. Scoped to the enforced path so the transport/import
-            # flows that legitimately reference partner-org locations keep working.
-            if enforce_access and data.get('organization_id'):
+            if data.get('organization_id'):
+#             if enforce_access and data.get('organization_id'):
                 origin_filters.append(UserLocation.organization_id == data['organization_id'])
             origin = self.db.query(UserLocation).filter(*origin_filters).first()
             if not origin:
-                errors.append('Origin location not found or inactive')
+                errors.append('Origin location not found, deleted, or not in this organization')
 
         # Access check: may this user write at this origin with this tag/tenant?
         if enforce_access and data.get('origin_id') and data.get('organization_id') \
