@@ -5,6 +5,7 @@ WARNING: These endpoints should only be available in development environments
 
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 
@@ -13,15 +14,39 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy import update
 
 from ...models.transactions.transactions import Transaction, TransactionStatus
-from ...database import get_session
 from ...exceptions import APIException
 
 logger = logging.getLogger(__name__)
+
+
+def _debug_routes_enabled() -> bool:
+    """Whether /api/debug/* may run at all.
+
+    The module has always said "development only" in a docstring, but nothing
+    enforced it, so every one of these routes was live in production to any
+    authenticated user — including backfill_group_ids, which merges traceability
+    groups and soft-deletes the losers. That is unrecoverable without a restore.
+
+    Fails closed: outside AWS Lambda (local dev, tests) they are on, and in a
+    deployed function they are off unless someone deliberately sets
+    ENABLE_DEBUG_ROUTES. AWS_LAMBDA_FUNCTION_NAME is injected by the runtime, so
+    no deployment change is needed for the safe default to take effect.
+    """
+    if os.environ.get('ENABLE_DEBUG_ROUTES', '').strip().lower() in ('1', 'true', 'yes', 'on'):
+        return True
+    return not os.environ.get('AWS_LAMBDA_FUNCTION_NAME')
+
 
 def handle_debug_routes(event: Dict[str, Any], data: Optional[Dict[str, Any]] = None, **kwargs) -> Dict[str, Any]:
     """
     Route handler for debug endpoints
     """
+    if not _debug_routes_enabled():
+        raise APIException(
+            message="Debug endpoints are disabled in this environment",
+            status_code=404,
+            error_code="NOT_FOUND",
+        )
     try:
         path = event.get("rawPath", "")
         method = event.get("requestContext", {}).get("http", {}).get("method", "GET")
@@ -156,6 +181,9 @@ def reset_all_transactions_to_pending(user_id: int, organization_id: int, **kwar
                 raise e
         else:
             # Create new session using context manager
+            # Imported here rather than at module scope: importing this module must
+            # not require a database, so the route gate above can be read cheaply.
+            from ...database import get_session
             with get_session() as session:
                 # Find all transactions for the organization that are NOT already pending
                 transactions_to_reset = session.query(Transaction).filter(
@@ -313,8 +341,14 @@ def backfill_traceability_group_ids(organization_id: int, **kwargs) -> Dict[str,
         # Group by key
         key_to_groups = defaultdict(list)
         for g in groups:
+            # source_transaction_id belongs in the key or this merges piles that are
+            # deliberately separate: a scale records several weigh-ins per tenant per
+            # day, each one its own pile (migration 082). Without it a single run of
+            # this route collapses a month of weigh-ins into one group and soft-deletes
+            # the rest, which is not recoverable without a restore. NULL on every
+            # pre-scale row, so grouping is unchanged for them.
             key = (g.origin_id, g.material_id, g.location_tag_id, g.tenant_id,
-                   g.transaction_year, g.transaction_month)
+                   g.transaction_year, g.transaction_month, g.source_transaction_id)
             key_to_groups[key].append(g)
 
         records_updated = 0

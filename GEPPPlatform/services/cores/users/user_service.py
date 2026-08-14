@@ -16,6 +16,7 @@ from ....models.subscriptions.organizations import Organization
 from ....models.users.user_related import UserRoleEnum
 from ....models.users.user_location_materials import UserLocationMaterial
 from ....models.cores.references import Material
+from ....libs.node_ids import to_node_id
 
 
 def _normalize_identity(value: Any) -> str:
@@ -1382,6 +1383,10 @@ class UserService:
                 # Location and address information
                 'coordinate': location.coordinate,
                 'address': location.address,
+                # ห้องขยะ this location's material is collected in (migration 081)
+                'waste_room_location_id': location.waste_room_location_id,
+                # What a destination does with material it receives (migration 084)
+                'default_disposal_method': location.default_disposal_method,
                 'postal_code': location.postal_code,
                 'country_id': location.country_id,
                 'province_id': location.province_id,
@@ -1765,8 +1770,14 @@ class UserService:
         def walk_tree(nodes, path_from_root):
             """Walk tree to find member nodes, collect their descendants and trace ancestors."""
             for node in nodes:
-                nid = int(node.get('nodeId', 0))
+                nid = to_node_id(node.get('nodeId'))
                 children = node.get('children', [])
+                if nid is None:
+                    # Cannot match a membership, but its subtree may still contain
+                    # real nodes — carry the path through unchanged.
+                    if children:
+                        walk_tree(children, path_from_root)
+                    continue
 
                 if nid in member_loc_ids:
                     # This node + all descendants → assigned (tier 1)
