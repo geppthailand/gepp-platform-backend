@@ -29,6 +29,10 @@ logger = logging.getLogger(__name__)
 # Kept in sync with AdminService._SETTINGS_AUTO_APPROVE_MODES.
 _MODES = ('inherit', 'on', 'off')
 
+# transactions.transaction_method for anything a scale recorded. The value was
+# already allowed by the DB constraint (migration 002); nothing wrote it before.
+SCALE_TRANSACTION_METHOD = 'scale_input'
+
 # Returned as `source` so the caller can record WHY a transaction was
 # auto-approved in its audit note.
 SOURCE_DEVICE = 'device'
@@ -112,10 +116,32 @@ def stamp_scale_origin(data: Dict[str, Any]) -> None:
 
     Rows created before this shipped cannot be back-filled: nothing distinguishes them.
     """
-    data['transaction_method'] = 'scale_input'
+    data['transaction_method'] = SCALE_TRANSACTION_METHOD
     for record in (data.get('records') or data.get('transaction_records') or []):
         if isinstance(record, dict):
             record['transaction_type'] = 'iot'
+
+
+def scale_pile_source_transaction_id(transaction: Any) -> Optional[int]:
+    """Return the id to key this transaction's traceability piles by, or None.
+
+    A traceability pile is normally one per (origin, material, tag, tenant) per
+    MONTH. That grain breaks under a scale: the code appends later records into a
+    pile that already has a transport, and such a pile is hidden from the
+    "waiting to ship" column, so the first dispatch of the month would swallow
+    the rest of that tenant's month.
+
+    Returning the transaction id makes each weigh-in its own pile, which is then
+    always dispatched whole — the property that keeps absolute_percentage honest
+    without any partial-shipment machinery.
+
+    Returning None keeps the monthly grain, which is what every non-scale flow
+    and every pre-existing row uses. Callers put the result straight into the
+    group lookup, where None compares as IS NULL and matches those rows.
+    """
+    if getattr(transaction, 'transaction_method', None) != SCALE_TRANSACTION_METHOD:
+        return None
+    return getattr(transaction, 'id', None)
 
 
 def apply_auto_approve_to_payload(data: Dict[str, Any]) -> None:

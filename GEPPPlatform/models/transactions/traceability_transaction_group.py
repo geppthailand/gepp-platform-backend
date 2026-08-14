@@ -24,3 +24,10 @@ class TraceabilityTransactionGroup(Base, BaseModel):
     transaction_month = Column(Integer, nullable=True)
     location_tag_id = Column(BigInteger, nullable=True)
     tenant_id = Column(BigInteger, nullable=True)
+
+    # Scale transaction that created this pile. Present = this pile covers ONE
+    # weigh-in instead of a whole month, so it is always dispatched whole and
+    # absolute_percentage stays correct without any partial-consumption logic.
+    # NULL = the original monthly grain: every pre-existing row and every
+    # non-scale flow. Part of the group lookup key. Migration 082.
+    source_transaction_id = Column(BigInteger, ForeignKey('transactions.id'), nullable=True)

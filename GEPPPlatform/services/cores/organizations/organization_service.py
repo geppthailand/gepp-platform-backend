@@ -13,6 +13,7 @@ from ....models.users.user_location import UserLocation
 from ....models.users.user_locations_settings import UserLocationSettings
 from ....exceptions import ValidationException
 from .organization_role_presets import OrganizationRolePresets
+from ....libs.node_ids import to_node_id
 
 logger = logging.getLogger(__name__)
 
@@ -360,8 +361,11 @@ class OrganizationService:
                 return []
             result = []
             for node in nodes:
-                nid = int(node.get('nodeId', 0))
-                if nid not in visible_ids:
+                # An unsaved node carries a temporary client-side id and has no location
+                # row, so it can never be in visible_ids — same outcome as the old default
+                # of 0, without raising on the way there.
+                nid = to_node_id(node.get('nodeId'))
+                if nid is None or nid not in visible_ids:
                     continue
                 pruned = dict(node)
                 if 'children' in pruned:

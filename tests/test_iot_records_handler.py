@@ -404,6 +404,30 @@ def test_sorter_post_is_read_the_other_way_round(monkeypatch):
     assert data["records"][0]["destination_id"] == SCRAP_DEALER
 
 
+def test_sorter_post_is_marked_as_an_internal_transfer(monkeypatch):
+    """These kilograms were already weighed in from the tenant that produced them.
+
+    The records have to exist — a traceability pile's weight comes only from its
+    records — so the double count is prevented by labelling the weighing instead,
+    and the reports leave labelled rows out of waste-generated totals.
+    """
+    payload = {"origin_id": SCRAP_DEALER, "records": [{"material_id": 7}]}
+    data, _ = _run_records_route(monkeypatch, _sorter_db(), payload=payload)
+
+    assert data["is_internal_transfer"] is True
+
+
+def test_a_normal_weighing_is_not_an_internal_transfer(monkeypatch):
+    """The weigher records material arriving from a tenant — that IS generation.
+
+    Absence matters as much as presence here: mark this one and an organization's
+    reported tonnage silently drops to zero.
+    """
+    data, _ = _run_records_route(monkeypatch, _AutoApproveDb(org_flag=False))
+
+    assert data.get("is_internal_transfer") is not True
+
+
 def test_sorter_post_records_provenance(monkeypatch):
     """A server-substituted origin must be identifiable afterwards — the payload
     alone no longer explains what happened."""
