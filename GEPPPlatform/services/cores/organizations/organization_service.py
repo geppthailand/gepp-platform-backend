@@ -347,13 +347,19 @@ class OrganizationService:
         ).all()
         light_locs = [SimpleNamespace(id=r.id, members=r.members) for r in light_rows]
 
-        tiers = user_service._resolve_location_tiers(light_locs, organization_id, current_user_id)
+        # Full scope, not just location membership: a user who reaches a location only
+        # through a tag/tenant they belong to still needs that node in the tree, or the
+        # org chart renders nothing at all for them and every downstream picker is empty.
+        scope = user_service.resolve_access_scope(
+            organization_id, current_user_id, locations=light_locs
+        )
 
-        if tiers['is_owner']:
+        if scope['is_owner']:
             return setup
 
-        visible_ids = tiers['assigned_ids'] | tiers['ancestor_ids']
-        ancestor_ids = tiers['ancestor_ids']
+        scoped_ids = scope['scoped_ids']
+        visible_ids = scope['assigned_ids'] | scope['ancestor_ids'] | scoped_ids
+        ancestor_ids = scope['ancestor_ids']
 
         def prune_tree(nodes):
             if not nodes:
@@ -368,6 +374,10 @@ class OrganizationService:
                     pruned['children'] = prune_tree(pruned['children'])
                 if nid in ancestor_ids:
                     pruned['is_ancestor'] = True
+                # Reachable via tag/tenant only: visible, but this user does not manage
+                # the place, so the chart must not offer edit/drag/delete on it.
+                if nid in scoped_ids:
+                    pruned['is_scoped'] = True
                 result.append(pruned)
             return result
 
