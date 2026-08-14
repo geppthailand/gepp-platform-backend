@@ -24,6 +24,11 @@ from GEPPPlatform.services.cores.iot_devices.auto_approve import (
     resolve_auto_approve,
     stamp_scale_origin,
 )
+from GEPPPlatform.services.cores.iot_devices.sorter import (
+    get_sorter_location_id,
+    is_allowed_destination,
+    list_destinations,
+)
 from GEPPPlatform.models.users.user_location import UserLocation
 from GEPPPlatform.models.users.user_related import UserLocationTag, UserTenant
 from GEPPPlatform.models.subscriptions.organizations import OrganizationSetup
@@ -355,6 +360,48 @@ def handle_get_locations_by_membership(user_service: UserService, query_params: 
 
         if not organization_id:
             raise NotFoundException('User is not part of any organization')
+
+        # ── ผู้คัดแยก: the same request, a different list ────────────────
+        # A sorter records what LEAVES their waste room, so the picker has to
+        # offer destinations. The tablet is unchanged — it renders whatever
+        # comes back and posts the chosen id in the same field — so the swap
+        # happens entirely here, and `list_destinations` returns rows in the
+        # exact five-key shape below. Materials stay the global list.
+        #
+        # Failing soft is deliberate: if the destination branch cannot produce a
+        # list, fall through to the normal membership list rather than 500 the
+        # tablet's login and strand the station.
+        sorter_location_id = get_sorter_location_id(
+            db_session, current_user['user_id'], organization_id
+        )
+        if sorter_location_id:
+            try:
+                destinations = list_destinations(db_session, organization_id)
+            except Exception as exc:  # noqa: BLE001
+                _iot_logger.warning(
+                    "[sorter] destination list failed for user %s (org %s), falling back to origins: %s",
+                    current_user['user_id'], organization_id, exc,
+                )
+                destinations = None
+            if destinations:
+                return {
+                    'success': True,
+                    'data': {
+                        'locations': destinations,
+                        'materials': _get_cached_materials(db_session),
+                    },
+                }
+            if destinations is not None:
+                # An empty picker is a setup problem, not a tablet problem: say so
+                # instead of showing a blank list the operator cannot act on.
+                _iot_logger.warning(
+                    "[sorter] org %s has no destinations configured; user %s cannot record outbound",
+                    organization_id, current_user['user_id'],
+                )
+                raise NotFoundException(
+                    'No destinations are configured for this organization yet. '
+                    'Ask an admin to add a destination before sorting.'
+                )
 
         member_locations = user_service.get_locations_by_member(
             member_user_id=current_user['user_id'],
@@ -1387,6 +1434,45 @@ def handle_iot_devices_routes(event: Dict[str, Any], data: Dict[str, Any], **com
             # transaction list even when the org keeps the review step.
             stamp_scale_origin(data)
 
+            # ── ผู้คัดแยก: read the payload the other way round ──────────────
+            # The tablet posted the location it was offered, and a sorter was
+            # offered destinations. So the id in `origin` is where the material is
+            # GOING; where it is coming FROM is the sorter's own waste room, which
+            # only the server knows.
+            #
+            # The destination is validated against the same list the picker was
+            # built from — nothing downstream checks destination_id at all, so if
+            # it is wrong here it is wrong forever.
+            sorter_location_id = get_sorter_location_id(
+                db_session, current_user_id, current_user_organization_id
+            )
+            if sorter_location_id:
+                posted_location_id = data.get('origin_id')
+                if posted_location_id in (None, ''):
+                    raise ValidationException('Destination is required')
+                if not is_allowed_destination(
+                    db_session, current_user_organization_id, posted_location_id
+                ):
+                    raise ValidationException(
+                        'That destination is not available for this organization'
+                    )
+                data['origin_id'] = sorter_location_id
+                # Carried on every record so the traceability leg knows where the
+                # material went; the record path stores it verbatim.
+                for _rec in (data.get('records') or []):
+                    if isinstance(_rec, dict):
+                        _rec['destination_id'] = int(posted_location_id)
+                # Provenance: this row's origin was substituted by the server based
+                # on mutable state (the binding). Without a marker there is no way
+                # to tell a swapped row from one the tablet addressed itself, and
+                # no way to reconcile if a binding is later changed.
+                data['notes'] = (
+                    f"{data.get('notes')}\n" if data.get('notes') else ''
+                ) + (
+                    f"Sorted at #{sorter_location_id} by user #{current_user_id} "
+                    f"→ destination #{int(posted_location_id)}"
+                )
+
             # ── Auto-approval (org switch + per-device override) ──────────
             # When enabled the weighing is stored as `approved` instead of
             # `pending`: the operator on the tablet confirmed the reading, so
@@ -1483,10 +1569,18 @@ def handle_iot_devices_routes(event: Dict[str, Any], data: Dict[str, Any], **com
             except ValueError:
                 raise ValidationException('date must be YYYY-MM-DD')
 
+            # Same substitution as allowed-materials: a sorter's tablet is holding
+            # a destination id. The summary they care about is their own station's
+            # intake, and it is the only one they are entitled to.
+            sorter_location_id = get_sorter_location_id(
+                db_session, current_user['user_id'], organization_id
+            )
+            if sorter_location_id:
+                origin_id = sorter_location_id
             # Scoped to the logged-in operator's memberships, not merely the
             # device's organisation — a borrowed tablet must not be able to
             # read the intake of every site in the org.
-            if origin_id not in member_origin_ids(
+            elif origin_id not in member_origin_ids(
                 db_session, current_user['user_id'], organization_id
             ):
                 raise UnauthorizedException('User is not a member of this location')
@@ -1557,6 +1651,22 @@ def handle_iot_devices_routes(event: Dict[str, Any], data: Dict[str, Any], **com
             organization_id = current_user.get('organization_id')
             if not organization_id:
                 raise ValidationException('User is not associated with an organization')
+
+            # A sorter's tablet holds a DESTINATION id, which they are not a member
+            # of — the membership gate below would 401 them out of their own screen.
+            # Resolve against their waste room instead: the materials they may
+            # record are the ones allowed where the pile physically is, not the
+            # ones allowed at the scrap dealer. (Destinations live under hub_node,
+            # which the allowed-materials tree walk never visits, so asking about a
+            # destination would also silently return "every material".)
+            sorter_location_id = get_sorter_location_id(
+                db_session, current_user['user_id'], organization_id
+            )
+            if sorter_location_id:
+                return handle_get_location_allowed_materials(
+                    db_session, str(sorter_location_id), organization_id
+                )
+
             # Verify user is a member of the requested location (including descendants)
             if int(location_id) not in member_origin_ids(
                 db_session, current_user['user_id'], organization_id

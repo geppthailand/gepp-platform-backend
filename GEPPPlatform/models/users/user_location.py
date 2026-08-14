@@ -2,7 +2,7 @@
 Main user-location model with organizational tree structure
 """
 
-from sqlalchemy import Column, String, Text, Boolean, DateTime, ForeignKey, Enum, Integer, Table
+from sqlalchemy import Column, String, Text, Boolean, DateTime, ForeignKey, Enum, Integer, BigInteger, Table
 from sqlalchemy.orm import relationship
 from sqlalchemy.dialects.postgresql import JSON, JSONB
 from sqlalchemy.types import DECIMAL
@@ -53,7 +53,15 @@ class UserLocation(Base, BaseModel):
     platform = Column(Enum(PlatformEnum), nullable=False, default=PlatformEnum.NA)
     platform_role = Column(String(50))  # 'super-admin', 'gepp-admin', or None (maps to UserRoleEnum)
     organization_role_id = Column(ForeignKey('organization_roles.id'))
-    
+
+    # ผู้คัดแยก: the location this user sorts at. Set on the USER row (is_user=True);
+    # points at a location row (is_location=True) in the same organization.
+    # NULL = not a sorter. Deliberately NOT a members[].role — that array is
+    # rewritten wholesale by the org-chart save and by the org-role cascade, which
+    # would destroy the binding. One column per user also makes "one user sorts at
+    # one place" true by construction. Migration 079.
+    sorter_location_id = Column(BigInteger, ForeignKey('user_locations.id'), nullable=True)
+
     # Location and address information
     coordinate = Column(Text)  # Stored as "lat,lng" string
     address = Column(Text)
