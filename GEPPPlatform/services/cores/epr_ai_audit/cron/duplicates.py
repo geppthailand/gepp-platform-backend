@@ -81,11 +81,44 @@ def _exact_signals(target_imgs: List[dict], cand_imgs: List[dict]) -> dict:
     }
 
 
-def _confidence(exact: dict, max_desc_sim: Optional[float]) -> Optional[str]:
-    """Translate raw signals into a confidence label, or None if nothing matched."""
-    if exact["matched_document_numbers"] or exact["matched_doc_triples"]:
+def _payload_date(raw_date) -> Optional[str]:
+    """Calendar day ('YYYY-MM-DD') of a payload transactionDate, or None.
+
+    Payload dates are ISO strings like '2026-06-11T00:00:00.000Z', so the
+    first 10 characters are the day. Anything shorter/odd yields None and the
+    caller treats the day as unknown."""
+    if not raw_date:
+        return None
+    day = str(raw_date).strip()[:10]
+    return day if len(day) == 10 else None
+
+
+def _confidence(exact: dict, max_desc_sim: Optional[float],
+                same_day: bool = True) -> Optional[str]:
+    """Translate raw signals into a confidence label, or None if nothing matched.
+
+    HIGH (= auto-flags the transaction) requires an exact document_number match
+    AND both transactions landing on the same calendar day. Two things forced
+    that pairing:
+
+    - The vendor/date/total triple used to be HIGH on its own, but recurring
+      pickups from the same vendor on the same day for the same amount are
+      normal here, so it fired constantly on legitimate transactions.
+    - document_number alone isn't reliable either: extractors routinely pick up
+      a permit/licence number pre-printed on every form, which then looks like
+      one document number shared across months of unrelated shipments.
+
+    A genuine double-entry is same-document AND same-day. Everything weaker
+    stays at medium — surfaced for review, no auto-flag.
+
+    `same_day` is True when the day is unknown on either side, so a missing
+    payload date doesn't silently downgrade a real duplicate.
+    """
+    if exact["matched_document_numbers"] and same_day:
         return "high"
-    if exact["matched_identifiers"]:
+    if (exact["matched_document_numbers"]
+            or exact["matched_doc_triples"]
+            or exact["matched_identifiers"]):
         return "medium"
     if max_desc_sim is not None:
         if max_desc_sim >= DESC_SIM_MEDIUM_FUZZY:
@@ -158,7 +191,8 @@ def find_duplicates(conn, tx_id: int) -> Optional[dict]:
     """
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT epr_project_id FROM epr_transactions_embeded "
+            "SELECT epr_project_id, raw_data->>'transactionDate' "
+            "FROM epr_transactions_embeded "
             "WHERE id = %s AND deleted_date IS NULL",
             (tx_id,),
         )
@@ -166,6 +200,7 @@ def find_duplicates(conn, tx_id: int) -> Optional[dict]:
         if not row:
             return None
         target_project_id = row[0]
+        target_day = _payload_date(row[1])
         if target_project_id is None:
             return {"transaction_id": tx_id, "target_image_count": 0, "candidates": []}
 
@@ -232,6 +267,17 @@ def find_duplicates(conn, tx_id: int) -> Optional[dict]:
             for cand_tx_id, ed in cur.fetchall():
                 extractions_by_tx.setdefault(cand_tx_id, []).append(ed)
 
+        # 2b) Payload transaction day per candidate — gates HIGH confidence
+        #     (see _confidence). Cheap: one indexed lookup over the same ids.
+        day_by_tx: dict[int, Optional[str]] = {}
+        if candidate_ids:
+            cur.execute(
+                "SELECT id, raw_data->>'transactionDate' "
+                "FROM epr_transactions_embeded WHERE id = ANY(%s)",
+                (candidate_ids,),
+            )
+            day_by_tx = {r[0]: _payload_date(r[1]) for r in cur.fetchall()}
+
     # 3) Description-similarity sweep (separate connection scope to keep the
     #    queries small and re-use HNSW per call). Returns max sim per cand tx.
     sims_by_tx = _collect_description_similarities(conn, tx_id, target_project_id)
@@ -251,7 +297,11 @@ def find_duplicates(conn, tx_id: int) -> Optional[dict]:
         # else treat it as not a signal at all.
         effective_sim = max_sim if (max_sim is not None and max_sim >= DESC_SIM_LOW_FUZZY) else None
 
-        conf = _confidence(exact, effective_sim)
+        cand_day = day_by_tx.get(cand_id)
+        same_day = (target_day is None or cand_day is None
+                    or target_day == cand_day)
+
+        conf = _confidence(exact, effective_sim, same_day=same_day)
         if conf is None:
             continue
 
@@ -259,6 +309,7 @@ def find_duplicates(conn, tx_id: int) -> Optional[dict]:
             "id": cand_id,
             "confidence": conf,
             **exact,
+            "same_payload_day": same_day,
             "description_similarity": float(max_sim) if max_sim is not None else None,
         })
 

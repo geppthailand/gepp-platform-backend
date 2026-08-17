@@ -176,6 +176,18 @@ totalQuantity rule:
   mismatch (payload 5000 vs a visible pile of ~50). When uncertain, do not flag.
 - Do NOT do arithmetic on visible numbers unless the document explicitly
   presents the result of that arithmetic as the total.
+- MULTIPLE WEIGHTS (very common on weighing sheets and QC forms: one row per
+  bale/bundle/bag, plus tare, gross, net and a grand total): the payload claims
+  the TOTAL. A single row's weight is a COMPONENT of that total, never a
+  competing value for it. If ANY visible figure is within tolerance of the
+  payload, that is a MATCH. Set image_indicates to a brief list of what you saw.
+- A per-bale / per-bundle / per-item / tare figure being smaller than the
+  payload is EXPECTED and is NOT evidence of a mismatch. (Sheet lists ten bales
+  around 308 kg each, payload 3070 → MATCH or CANT VERIFY, never a flag. Do not
+  explain that "the document indicates 308 kg" — that reasoning is INVALID
+  under this rule.)
+- Flag only when the document shows an explicit GRAND TOTAL that disagrees with
+  the payload. No explicit total on the page → CANT VERIFY.
 
 totalPrice rule:
 - ±1% tolerance. Currency is THB.
