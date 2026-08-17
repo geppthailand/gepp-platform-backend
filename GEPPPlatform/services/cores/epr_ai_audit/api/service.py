@@ -107,6 +107,24 @@ class EprAiAuditService:
             {**params, "page_size": page_size, "offset": offset},
         ).fetchall()
 
+        dup_ids = {
+            d.get("embeded_id")
+            for r in rows
+            for d in ((r[6] or {}).get("duplicates") or [])
+            if d.get("embeded_id") is not None
+        }
+        dup_source_ids: Dict[int, Any] = {}
+        if dup_ids:
+            dup_source_ids = dict(
+                self.db.execute(
+                    text(
+                        "SELECT id, raw_data->>'id' FROM epr_transactions_embeded "
+                        "WHERE id = ANY(:ids)"
+                    ),
+                    {"ids": list(dup_ids)},
+                ).fetchall()
+            )
+
         tx_ids = [r[0] for r in rows]
         records_by_tx: Dict[int, List[Dict[str, Any]]] = {}
         if tx_ids:
@@ -143,7 +161,7 @@ class EprAiAuditService:
                 "epr_project_id": r[3],
                 "ai_score": float(r[4]) if r[4] is not None else None,
                 "status": r[5],
-                "flags": r[6],
+                "flags": _with_dup_transaction_ids(r[6], dup_source_ids),
                 "timestamps": _timestamps_obj(r[7], r[8], r[9]),
                 "records_count": r[10],
                 "records": records_by_tx.get(r[0], []),
@@ -450,6 +468,22 @@ class EprAiAuditService:
                 "type_id": type_id,
             },
         ).scalar_one()
+
+
+def _with_dup_transaction_ids(flags, source_ids) -> Optional[Dict[str, Any]]:
+    """Add each duplicate's source transaction id (`raw_data->>'id'`) to
+    `flags.duplicates[]`. Resolved at read time from `embeded_id`, so rows
+    deduped before this existed are covered without a backfill."""
+    dups = (flags or {}).get("duplicates")
+    if not dups:
+        return flags
+    return {
+        **flags,
+        "duplicates": [
+            {**d, "transaction_id": source_ids.get(d.get("embeded_id"))}
+            for d in dups
+        ],
+    }
 
 
 def _timestamps_obj(created, updated, deleted) -> Dict[str, Any]:

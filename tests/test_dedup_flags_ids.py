@@ -1,35 +1,27 @@
-"""Each surfaced duplicate carries the source transaction id, not just our
-internal ids — reviewers look duplicates up in the EPR app by that id."""
+"""The audit list resolves each duplicate's source transaction id at read
+time, so rows deduped before this existed carry it too."""
 
-from GEPPPlatform.services.cores.epr_ai_audit.cron.worker import (
-    _summarize_candidates_for_flags,
+from GEPPPlatform.services.cores.epr_ai_audit.api.service import (
+    _with_dup_transaction_ids,
 )
 
 
-def _candidate(cid):
-    return {"id": cid, "confidence": "high", "matched_document_numbers": ["INV-1"]}
+def test_source_ids_are_attached_by_embeded_id():
+    flags = {
+        "dedup_at": "x",
+        "duplicates": [
+            {"id": 746, "embeded_id": 746, "legacy_id": None},
+            {"id": 151008, "embeded_id": 727, "legacy_id": 151008},
+            {"id": 999, "embeded_id": 999, "legacy_id": None},  # row gone
+        ],
+    }
+    out = _with_dup_transaction_ids(flags, {746: "151030", 727: "151008"})
+    assert [d["transaction_id"] for d in out["duplicates"]] == [
+        "151030", "151008", None,
+    ]
+    assert out["dedup_at"] == "x"
 
 
-def test_legacy_and_source_ids_are_surfaced():
-    out = _summarize_candidates_for_flags(
-        [_candidate(727)], {727: (151008, "151008")}
-    )
-    assert out[0]["id"] == 151008
-    assert out[0]["embeded_id"] == 727
-    assert out[0]["legacy_id"] == 151008
-    assert out[0]["transaction_id"] == "151008"
-
-
-def test_api_inserted_candidate_keeps_source_id_without_legacy_id():
-    out = _summarize_candidates_for_flags(
-        [_candidate(746)], {746: (None, "151030")}
-    )
-    assert out[0]["id"] == 746
-    assert out[0]["legacy_id"] is None
-    assert out[0]["transaction_id"] == "151030"
-
-
-def test_missing_row_degrades_to_nulls():
-    out = _summarize_candidates_for_flags([_candidate(999)], {})
-    assert out[0]["id"] == 999
-    assert out[0]["transaction_id"] is None
+def test_flags_without_duplicates_pass_through():
+    assert _with_dup_transaction_ids(None, {}) is None
+    assert _with_dup_transaction_ids({"duplicates": []}, {}) == {"duplicates": []}
