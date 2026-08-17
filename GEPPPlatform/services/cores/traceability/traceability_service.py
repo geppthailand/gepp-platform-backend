@@ -394,8 +394,8 @@ class TraceabilityService:
         # weighs material out, so it would keep counting kilograms that are
         # already sitting in treatment/disposal above.
         collection_points = self._collection_point_balances(organization_id, year, month)
-        total_in_collection = round(
-            sum(float(cp.get("balance_kg") or 0) for cp in collection_points), 2
+        _cp_summary = self.summarise_collection_balances(
+            collection_points, self._PILE_WEIGHT_TOLERANCE_KG
         )
 
         return {
@@ -406,7 +406,11 @@ class TraceabilityService:
                 "total_disposal": total_disposal,
                 "total_treatment": total_treatment,
                 "total_managed_waste": total_managed_waste,
-                "total_in_collection": total_in_collection,
+                "total_in_collection": _cp_summary["in_collection_kg"],
+                # Kept apart from the stock above on purpose — see
+                # summarise_collection_balances. Both are positive numbers.
+                "collection_shortfall": _cp_summary["shortfall_kg"],
+                "collection_points_negative": _cp_summary["negative_points"],
             },
         }
 
@@ -1554,6 +1558,46 @@ class TraceabilityService:
             f"This pile was recorded by a scale and must be dispatched whole: "
             f"{dispatched:.2f} kg entered against a pile of {pile_weight:.2f} kg."
         )
+
+    @staticmethod
+    def summarise_collection_balances(
+        balances: List[Dict[str, Any]], tolerance_kg: float = 0.01
+    ) -> Dict[str, float]:
+        """Roll tank ledgers up WITHOUT letting an over-drawn room cancel a full one.
+
+        Summing balances straight across hid the problem twice over: a building
+        holding 10 kg beside one that has shipped 8 kg more than it ever received
+        reported "2 kg in collection", so neither the stock nor the discrepancy
+        was visible. They are different facts and they are now separate numbers.
+
+        A negative balance is not a bug to suppress — it is the strongest signal
+        the system produces that waste is reaching a room WITHOUT passing the
+        scale (or that a weighing was wrong). Hiding it would throw away the one
+        measurement that can catch an unmetered inflow.
+
+        Returns kilograms, both totals POSITIVE:
+          in_collection_kg  — stock actually standing in rooms
+          shortfall_kg      — how much more has left than ever arrived
+          negative_points   — how many rooms are over-drawn
+        """
+        held = 0.0
+        short = 0.0
+        negatives = 0
+        for cp in balances or []:
+            try:
+                bal = float(cp.get("balance_kg") or 0)
+            except (TypeError, ValueError):
+                continue
+            if bal > tolerance_kg:
+                held += bal
+            elif bal < -tolerance_kg:
+                short += -bal
+                negatives += 1
+        return {
+            "in_collection_kg": round(held, 2),
+            "shortfall_kg": round(short, 2),
+            "negative_points": negatives,
+        }
 
     def _collection_point_balances(
         self, organization_id: int, year: int, month: int
