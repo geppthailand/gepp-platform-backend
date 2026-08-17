@@ -169,23 +169,26 @@ _SURFACED_CONFIDENCE_TIERS = {"high", "medium", "medium-fuzzy"}
 _INTEGRITY_PARALLELISM = 4
 
 
-def _fetch_legacy_ids(conn, embeded_ids):
-    """Return {embeded_id: legacy_tx_id} for candidates that were imported
-    from the legacy MySQL DB. Missing keys = the row was API-inserted and
-    has no legacy id."""
+def _fetch_candidate_source_ids(conn, embeded_ids):
+    """Return {embeded_id: (legacy_tx_id, source_transaction_id)}.
+
+    `legacy_tx_id` is set only for rows imported from the legacy MySQL DB
+    (missing = API-inserted). `source_transaction_id` is the caller's own
+    transaction id (`raw_data->>'id'`) so reviewers can look the duplicate up
+    in the EPR app.
+    """
     if not embeded_ids:
         return {}
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT id, (raw_data->>'_legacy_id')::bigint "
-            "FROM epr_transactions_embeded "
-            "WHERE id = ANY(%s) AND raw_data ? '_legacy_id'",
+            "SELECT id, (raw_data->>'_legacy_id')::bigint, raw_data->>'id' "
+            "FROM epr_transactions_embeded WHERE id = ANY(%s)",
             (list(embeded_ids),),
         )
-        return {row[0]: row[1] for row in cur.fetchall()}
+        return {row[0]: (row[1], row[2]) for row in cur.fetchall()}
 
 
-def _summarize_candidates_for_flags(candidates, legacy_id_map=None):
+def _summarize_candidates_for_flags(candidates, source_id_map=None):
     """Reduce raw dedup candidates into a compact summary stored on the
     parent transaction's `flags` JSONB column.
 
@@ -202,7 +205,7 @@ def _summarize_candidates_for_flags(candidates, legacy_id_map=None):
     so consumers can quickly see WHY it was flagged without parsing the
     underlying fields themselves.
     """
-    legacy_id_map = legacy_id_map or {}
+    source_id_map = source_id_map or {}
     out = []
     for c in candidates:
         if c.get("confidence") not in _SURFACED_CONFIDENCE_TIERS:
@@ -216,11 +219,12 @@ def _summarize_candidates_for_flags(candidates, legacy_id_map=None):
         if sim is not None and sim >= _FLAGS_IMAGE_SIM_THRESHOLD:
             matched_by.append("image")
         embeded_id = c.get("id")
-        legacy_id = legacy_id_map.get(embeded_id)
+        legacy_id, transaction_id = source_id_map.get(embeded_id, (None, None))
         out.append({
             "id": legacy_id if legacy_id is not None else embeded_id,
             "embeded_id": embeded_id,
             "legacy_id": legacy_id,
+            "transaction_id": transaction_id,
             "confidence": c.get("confidence"),
             "matched_by": matched_by,
             "matched_document_numbers": c.get("matched_document_numbers") or [],
@@ -1347,9 +1351,11 @@ def _write_dedup_outcome(conn, tx_id: int, candidates, integrity=None, reason=No
     `flags.integrity.skipped = true` so they're not stuck on `pending`.
     All updates committed in one small transaction."""
     integrity = integrity or {"issues": [], "matched_fields": [], "records": []}
-    legacy_id_map = _fetch_legacy_ids(conn, [c.get("id") for c in candidates])
+    source_id_map = _fetch_candidate_source_ids(
+        conn, [c.get("id") for c in candidates]
+    )
     flags_obj = {
-        "duplicates": _summarize_candidates_for_flags(candidates, legacy_id_map),
+        "duplicates": _summarize_candidates_for_flags(candidates, source_id_map),
         "integrity": {
             "issues": integrity.get("issues") or [],
             "matched_fields": integrity.get("matched_fields") or [],
