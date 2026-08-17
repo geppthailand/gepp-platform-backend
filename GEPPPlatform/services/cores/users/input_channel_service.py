@@ -14,6 +14,7 @@ from GEPPPlatform.models.users.user_related import UserInputChannel
 from GEPPPlatform.models.users.user_location import UserLocation
 from GEPPPlatform.models.subscriptions.subscription_models import OrganizationRole
 from GEPPPlatform.exceptions import NotFoundException, BadRequestException
+from ....libs.node_ids import to_node_id
 
 
 class InputChannelService:
@@ -883,8 +884,10 @@ class InputChannelService:
         """
         node_ids = []
         for node in nodes:
-            if 'nodeId' in node:
-                node_ids.append(int(node['nodeId']))
+            # An unsaved node carries a temporary client-side id; it matches no row.
+            _nid = to_node_id(node.get('nodeId'))
+            if _nid is not None:
+                node_ids.append(_nid)
             if 'children' in node and isinstance(node['children'], list):
                 node_ids.extend(self._extract_node_ids_from_tree(node['children']))
         return node_ids
@@ -983,9 +986,12 @@ class InputChannelService:
                 """Collect node IDs. If collecting=True, add all nodes."""
                 ids = set()
                 for node in nodes:
-                    nid = int(node.get('nodeId', 0))
-                    should_collect = collecting or nid in member_loc_ids
-                    if should_collect:
+                    # An unsaved node still carries its temporary client-side id and has no
+                    # location row behind it; converting it used to raise and fail the whole
+                    # request. Skip the node, keep walking its children.
+                    nid = to_node_id(node.get('nodeId'))
+                    should_collect = collecting or (nid is not None and nid in member_loc_ids)
+                    if should_collect and nid is not None:
                         ids.add(nid)
                     children = node.get('children', [])
                     if children:

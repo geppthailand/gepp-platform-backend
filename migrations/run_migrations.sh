@@ -16,10 +16,16 @@ DEBUG_MODE=${DEBUG_MODE:-false}
 # Enhanced connection pooling and performance settings
 DB_PERFORMANCE_OPTS="-c statement_timeout=300s -c lock_timeout=60s -c idle_in_transaction_session_timeout=120s"
 
-# Load environment variables from .env file if it exists
+# Which env file supplies the DB connection. Defaults to .env, which is
+# PRODUCTION. run_dev.sh overrides it so there is a supported way to migrate the
+# dev database — without one, the only options were localhost or production, and
+# both databases are called "postgres" so the banner below cannot tell them apart.
+MIGRATION_ENV_FILE="${MIGRATION_ENV_FILE:-$SCRIPT_DIR/.env}"
+
+# Load environment variables from the selected env file if it exists
 load_env() {
-    if [ -f "$SCRIPT_DIR/.env" ]; then
-        echo "Loading environment variables from .env file..."
+    if [ -f "$MIGRATION_ENV_FILE" ]; then
+        echo "Loading environment variables from $(basename "$MIGRATION_ENV_FILE")..."
         # Use the original working method from the backup script
         while IFS='=' read -r key value || [ -n "$key" ]; do
             # Skip comments and empty lines
@@ -35,10 +41,10 @@ load_env() {
                 export "$key=$value"
                 echo "  Loaded: $key=${value:+[HIDDEN]}"
             fi
-        done < "$SCRIPT_DIR/.env"
+        done < "$MIGRATION_ENV_FILE"
         echo "  Environment loaded successfully"
     else
-        echo "No .env file found in $SCRIPT_DIR, using environment variables"
+        echo "No env file at $MIGRATION_ENV_FILE, using environment variables"
     fi
 }
 

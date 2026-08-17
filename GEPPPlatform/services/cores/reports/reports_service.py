@@ -77,6 +77,7 @@ class ReportsService:
                 Transaction.organization_id == b['source_org_id'],
                 Transaction.origin_id.in_(b['src_ids']),
                 Transaction.deleted_date.is_(None),
+                Transaction.is_internal_transfer.isnot(True),  # see migration 083
                 TransactionRecord.deleted_date.is_(None),
                 or_(TransactionRecord.status != 'rejected', TransactionRecord.status.is_(None)),
             )
@@ -501,6 +502,7 @@ class ReportsService:
                 Transaction.organization_id == b['source_org_id'],
                 Transaction.origin_id.in_(b['src_ids']),
                 Transaction.deleted_date.is_(None),
+                Transaction.is_internal_transfer.isnot(True),  # see migration 083
                 TransactionRecord.deleted_date.is_(None),
                 or_(TransactionRecord.status != 'rejected', TransactionRecord.status.is_(None)),
             )
@@ -565,6 +567,13 @@ class ReportsService:
             ).filter(
                 Transaction.organization_id == organization_id,
                 Transaction.deleted_date.is_(None),
+                # A ผู้คัดแยก weighing material OUT of a waste room measures kilograms
+                # the tenant already reported on the way in. Both weighings are real
+                # and both matter for traceability, but summing both reports the same
+                # material twice. This query answers "how much waste did this
+                # organization produce", so the movement leg is left out. isnot(True)
+                # also covers rows written before the column existed. Migration 083.
+                Transaction.is_internal_transfer.isnot(True),
                 TransactionRecord.deleted_date.is_(None),
                 or_(
                     TransactionRecord.status != 'rejected',
@@ -806,25 +815,32 @@ class ReportsService:
 
     def _apply_member_filter_to_transaction_query(self, query, current_user_id: Any, organization_id: Optional[int] = None):
         """
-        Filter transactions to those from the user's assigned locations (3-tier model).
-        Owners see all transactions; members see only assigned locations + descendants.
+        Filter transactions to what this user may see.
+
+        Owners see everything. Location members see their assigned locations + descendants.
+        Tag/tenant members additionally see transactions at the tag/tenant's locations that
+        carry that tag/tenant (and only those) — so report aggregates never include rows the
+        user cannot see in the transaction list.
         """
         if current_user_id is None or organization_id is None:
             return query
 
         from ..users.user_service import UserService
+        from ....libs.locationAccess import build_visibility_clause
+
         user_service = UserService(self.db)
-        locations = user_service.crud.get_user_locations(organization_id=organization_id)
-        tiers = user_service._resolve_location_tiers(locations, int(organization_id), int(current_user_id))
+        scope = user_service.resolve_access_scope(int(organization_id), int(current_user_id))
 
-        if tiers['is_owner']:
+        clause = build_visibility_clause(
+            scope,
+            origin_col=Transaction.origin_id,
+            tag_col=Transaction.location_tag_id,
+            tenant_col=Transaction.tenant_id,
+            date_col=Transaction.transaction_date,
+        )
+        if clause is None:
             return query
-
-        assigned_ids = tiers['assigned_ids']
-        if not assigned_ids:
-            return query.filter(Transaction.origin_id.is_(None))
-
-        return query.filter(Transaction.origin_id.in_(list(assigned_ids)))
+        return query.filter(clause)
 
     def _shared_visible_parent_ids(self, organization_id, current_user_id) -> Optional[set]:
         """3-tier ACCESS gate for cross-org shared nodes (passed to _resolve_shared_branches).
@@ -908,13 +924,19 @@ class ReportsService:
                     expanded_ids = self._resolve_descendant_ids(organization_id, member_origin_ids)
                     new_ids = set(expanded_ids) - set(member_origin_ids)
                     if new_ids:
-                        extra_combos = self.db.query(
+                        extra_query = self.db.query(
                             Transaction.origin_id,
                             Transaction.location_tag_id,
                             Transaction.tenant_id
                         ).filter(
                             *base_filter,
                             Transaction.origin_id.in_(list(new_ids))
+                        )
+                        # Re-apply the visibility gate. Without it this expansion hands back
+                        # combos the user cannot actually read — for a tag/tenant-scoped user
+                        # that means other tenants' names appearing in their filter dropdown.
+                        extra_combos = self._apply_member_filter_to_transaction_query(
+                            extra_query, current_user_id, organization_id
                         ).distinct().all()
                         combos_result = list(combos_result) + list(extra_combos)
 
@@ -1183,6 +1205,13 @@ class ReportsService:
             ).filter(
                 Transaction.organization_id == organization_id,
                 Transaction.deleted_date.is_(None),
+                # A ผู้คัดแยก weighing material OUT of a waste room measures kilograms
+                # the tenant already reported on the way in. Both weighings are real
+                # and both matter for traceability, but summing both reports the same
+                # material twice. This query answers "how much waste did this
+                # organization produce", so the movement leg is left out. isnot(True)
+                # also covers rows written before the column existed. Migration 083.
+                Transaction.is_internal_transfer.isnot(True),
                 TransactionRecord.deleted_date.is_(None),
                 or_(
                     TransactionRecord.status != 'rejected',

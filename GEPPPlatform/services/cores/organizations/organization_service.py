@@ -13,6 +13,7 @@ from ....models.users.user_location import UserLocation
 from ....models.users.user_locations_settings import UserLocationSettings
 from ....exceptions import ValidationException
 from .organization_role_presets import OrganizationRolePresets
+from ....libs.node_ids import to_node_id
 
 logger = logging.getLogger(__name__)
 
@@ -347,27 +348,40 @@ class OrganizationService:
         ).all()
         light_locs = [SimpleNamespace(id=r.id, members=r.members) for r in light_rows]
 
-        tiers = user_service._resolve_location_tiers(light_locs, organization_id, current_user_id)
+        # Full scope, not just location membership: a user who reaches a location only
+        # through a tag/tenant they belong to still needs that node in the tree, or the
+        # org chart renders nothing at all for them and every downstream picker is empty.
+        scope = user_service.resolve_access_scope(
+            organization_id, current_user_id, locations=light_locs
+        )
 
-        if tiers['is_owner']:
+        if scope['is_owner']:
             return setup
 
-        visible_ids = tiers['assigned_ids'] | tiers['ancestor_ids']
-        ancestor_ids = tiers['ancestor_ids']
+        scoped_ids = scope['scoped_ids']
+        visible_ids = scope['assigned_ids'] | scope['ancestor_ids'] | scoped_ids
+        ancestor_ids = scope['ancestor_ids']
 
         def prune_tree(nodes):
             if not nodes:
                 return []
             result = []
             for node in nodes:
-                nid = int(node.get('nodeId', 0))
-                if nid not in visible_ids:
+                # An unsaved node carries a temporary client-side id and has no location
+                # row, so it can never be in visible_ids — same outcome as the old default
+                # of 0, without raising on the way there.
+                nid = to_node_id(node.get('nodeId'))
+                if nid is None or nid not in visible_ids:
                     continue
                 pruned = dict(node)
                 if 'children' in pruned:
                     pruned['children'] = prune_tree(pruned['children'])
                 if nid in ancestor_ids:
                     pruned['is_ancestor'] = True
+                # Reachable via tag/tenant only: visible, but this user does not manage
+                # the place, so the chart must not offer edit/drag/delete on it.
+                if nid in scoped_ids:
+                    pruned['is_scoped'] = True
                 result.append(pruned)
             return result
 

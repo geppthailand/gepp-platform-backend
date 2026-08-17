@@ -14,6 +14,7 @@ import uuid
 import logging
 from datetime import datetime
 from botocore.exceptions import ClientError
+from ..file_upload_service import ascii_metadata, safe_ascii_filename
 
 logger = logging.getLogger(__name__)
 
@@ -315,7 +316,10 @@ def upload_pdf_to_s3(
             Body=pdf_bytes,
             ContentType='application/pdf',
             Metadata={
-                'original_filename': filename,
+                # Report filenames can carry the org/report name in Thai; raw non-ASCII here
+                # makes botocore reject the upload client-side, which would fail the export.
+                'original_filename': safe_ascii_filename(filename, f'report-{organization_id}', '.pdf'),
+                'original_filename_encoded': ascii_metadata(filename),
                 'organization_id': str(organization_id),
                 'file_type': file_type,
                 'upload_timestamp': timestamp

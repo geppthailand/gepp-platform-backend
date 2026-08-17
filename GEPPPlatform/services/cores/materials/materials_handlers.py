@@ -12,6 +12,7 @@ from .tags_service import TagsService
 from .tag_groups_service import TagGroupsService
 from .material_categories_service import MaterialCategoriesService
 from ....exceptions import APIException, ValidationException, NotFoundException
+from ....libs.node_ids import to_node_id
 
 
 def handle_materials_routes(event: Dict[str, Any], **common_params) -> Dict[str, Any]:
@@ -490,17 +491,19 @@ def handle_get_location_materials(db_session, current_user: Dict) -> Dict[str, A
 
         def collect_descendants(nodes, ids_set):
             for node in nodes:
-                nid = int(node.get('nodeId', 0))
-                ids_set.add(nid)
+                # See to_node_id: an unsaved node has no location row to contribute.
+                nid = to_node_id(node.get('nodeId'))
+                if nid is not None:
+                    ids_set.add(nid)
                 children = node.get('children', [])
                 if children:
                     collect_descendants(children, ids_set)
 
         def walk_tree(nodes):
             for node in nodes:
-                nid = int(node.get('nodeId', 0))
+                nid = to_node_id(node.get('nodeId'))
                 children = node.get('children', [])
-                if nid in member_loc_ids and children:
+                if nid is not None and nid in member_loc_ids and children:
                     collect_descendants(children, relevant_ids)
                 elif children:
                     walk_tree(children)
