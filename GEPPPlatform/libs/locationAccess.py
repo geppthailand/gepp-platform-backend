@@ -149,18 +149,70 @@ def accessible_location_ids(scope: Dict[str, Any]) -> set:
     return set(scope.get('assigned_ids') or set()) | set(scope.get('scoped_ids') or set())
 
 
-def _in_window(grant: Dict[str, Any], when: Any) -> bool:
-    """Is `when` inside this grant's [start_date, end_date]? Missing date ⇒ no constraint."""
+def is_window_active(start_date: Any, end_date: Any, when: Any) -> bool:
+    """
+    Is `when` inside [start_date, end_date]? A missing bound is no constraint.
+
+    `end_date` is inclusive of its whole day (see `_window_end`) — a tag ending 30 June
+    is still live all day on the 30th.
+
+    Read filters use this against the *record's* date; pickers and devices use it against
+    *now*, to decide whether an option should be offered at all. Those are different
+    questions: back-dating into a closed window is legal for a read, but an expired
+    tag must never appear in a picker.
+    """
     if when is None:
         return True
     when = _strip_tz(when)
-    start = grant.get('start_date')
-    end = grant.get('end_date')
-    if start is not None and when < _strip_tz(start):
+    if start_date is not None and when < _strip_tz(start_date):
         return False
-    if end is not None and when > _window_end(_strip_tz(end)):
+    if end_date is not None and when > _window_end(_strip_tz(end_date)):
         return False
     return True
+
+
+def _in_window(grant: Dict[str, Any], when: Any) -> bool:
+    """Is `when` inside this grant's [start_date, end_date]? Missing date ⇒ no constraint."""
+    return is_window_active(grant.get('start_date'), grant.get('end_date'), when)
+
+
+def active_scope(scope: Dict[str, Any], when: Any) -> Dict[str, Any]:
+    """
+    Narrow a scope to grants that are live at `when`, rebuilding `scoped_ids` and
+    `scoped_by_location` to match.
+
+    For pickers and offline devices, which must not offer an expired tag/tenant — and,
+    since a scoped location is only reachable *through* a grant, must drop the location
+    itself once its last live grant lapses. Filtering `scoped_grants` alone is not enough:
+    the other two keys are what callers build lists from, so leaving them stale would keep
+    an expired tenant's location on screen with no selectable tenant under it.
+
+    Returns a shallow copy; the original scope is untouched. Owners pass through unchanged.
+    """
+    if scope.get('is_owner'):
+        return scope
+
+    live = [
+        g for g in (scope.get('scoped_grants') or [])
+        if is_window_active(g.get('start_date'), g.get('end_date'), when)
+    ]
+
+    scoped_by_location: Dict[int, Dict[str, set]] = {}
+    for grant in live:
+        key = 'tag_ids' if grant.get('kind') == 'tag' else 'tenant_ids'
+        for loc_id in (grant.get('location_ids') or set()):
+            bucket = scoped_by_location.setdefault(
+                loc_id, {'tag_ids': set(), 'tenant_ids': set()}
+            )
+            bucket[key].add(grant['id'])
+
+    assigned_ids = scope.get('assigned_ids') or set()
+    return {
+        **scope,
+        'scoped_grants': live,
+        'scoped_by_location': scoped_by_location,
+        'scoped_ids': set(scoped_by_location.keys()) - assigned_ids,
+    }
 
 
 def grant_for_write(

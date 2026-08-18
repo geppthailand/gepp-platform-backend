@@ -13,7 +13,7 @@ from GEPPPlatform.services.auth.auth_handlers import AuthHandlers
 from GEPPPlatform.services.cores.transactions.transaction_service import TransactionService
 from GEPPPlatform.services.cores.users.user_service import UserService
 from GEPPPlatform.services.cores.users.user_handlers import handle_get_location_allowed_materials
-from GEPPPlatform.services.cores.scale_reports.bkk_time import parse_day
+from GEPPPlatform.services.cores.scale_reports.bkk_time import parse_day, bkk_today
 from GEPPPlatform.services.cores.scale_reports.scale_report_service import get_daily_summary
 from GEPPPlatform.services.cores.scale_reports.scale_report_token import (
     build_report_url,
@@ -481,7 +481,32 @@ def handle_get_locations_by_membership(user_service: UserService, query_params: 
             set(member_origin_ids),
         )
 
-        # Keep original membership order first, then append remaining descendants
+        # ── Tag/tenant access, same rules as the web ─────────────────────────
+        # Location membership is no longer the only way in: a user who belongs to a
+        # tag/tenant gets limited access to the locations it is attached to, even with
+        # no membership on the location itself. The scale has to offer those or the
+        # operator cannot weigh at the station they were given access to.
+        #
+        # `active_scope(..., now)` drops grants whose date window has closed, and with
+        # them any location reachable only through an expired grant — an expired tenant
+        # must not reach the device at all. Note this is "live NOW", which is stricter
+        # than the read filter: a report may still show last quarter's tenant, but the
+        # picker must not offer it today.
+        from ....libs.locationAccess import active_scope, is_window_active
+
+        scope = user_service.resolve_access_scope(
+            organization_id, int(current_user['user_id'])
+        )
+        scope = active_scope(scope, datetime.combine(bkk_today(), datetime.min.time()))
+        is_owner = bool(scope.get('is_owner'))
+        assigned_ids: Set[int] = set(scope.get('assigned_ids') or set())
+        scoped_by_location: Dict[int, Dict[str, set]] = scope.get('scoped_by_location') or {}
+
+        # Full access keeps the role filter (a viewer must not get a dataInput station);
+        # a tag/tenant grant carries no role, so it stands on its own.
+        scoped_only_ids = set(scoped_by_location.keys()) - set(expanded_ids)
+
+        # Keep original membership order first, then descendants, then scoped-only.
         ordered_ids: List[int] = []
         seen: Set[int] = set()
         for mid in member_origin_ids:
@@ -491,6 +516,9 @@ def handle_get_locations_by_membership(user_service: UserService, query_params: 
         for did in sorted(expanded_ids - seen):
             ordered_ids.append(did)
             seen.add(did)
+        for sid in sorted(scoped_only_ids - seen):
+            ordered_ids.append(sid)
+            seen.add(sid)
 
         # Build location paths for all returned locations
         location_paths = user_service._build_location_paths(
@@ -542,43 +570,72 @@ def handle_get_locations_by_membership(user_service: UserService, query_params: 
             ).all()
             tenant_by_id = {t.id: t for t in tenants_orm}
         # Build locations_list with tags and tenants (id, name, members)
+        now_bkk = datetime.combine(bkk_today(), datetime.min.time())
+
+        def _entry(t, kind: str) -> Dict[str, Any]:
+            return {
+                'id': t.id,
+                'name': t.name or f'{kind} {t.id}',
+                'members': t.members or [],
+                'start_date': t.start_date.isoformat() if t.start_date else None,
+                'end_date': t.end_date.isoformat() if t.end_date else None,
+            }
+
         locations_list = []
         for origin_id in ordered_ids:
             loc_orm = origin_to_loc.get(origin_id)
             if not loc_orm:
                 continue
             location_path = location_paths.get(origin_id) or ''
+
+            # What may this user pick HERE?
+            #   full access  → every tag/tenant on the location
+            #   scoped only  → strictly the ones they belong to. Offering the rest would
+            #                  let the operator file a weigh-in under a tenant they cannot
+            #                  then see, which is the trap the web picker also guards.
+            allowed = None if (is_owner or origin_id in assigned_ids) else scoped_by_location.get(origin_id)
+            allowed_tag_ids = None if allowed is None else allowed.get('tag_ids') or set()
+            allowed_tenant_ids = None if allowed is None else allowed.get('tenant_ids') or set()
+
             tags_list = []
             tenants_list = []
-            if loc_orm:
-                for tid in (loc_orm.tags or []):
-                    tid_int = int(tid) if isinstance(tid, str) and tid.isdigit() else tid
-                    t = tag_by_id.get(tid_int)
-                    if t:
-                        tags_list.append({
-                            'id': t.id,
-                            'name': t.name or f'Tag {t.id}',
-                            'members': t.members or [],
-                            'start_date': t.start_date.isoformat() if t.start_date else None,
-                            'end_date': t.end_date.isoformat() if t.end_date else None
-                        })
-                for tid in (loc_orm.tenants or []):
-                    tid_int = int(tid) if isinstance(tid, str) and tid.isdigit() else tid
-                    t = tenant_by_id.get(tid_int)
-                    if t:
-                        tenants_list.append({
-                            'id': t.id,
-                            'name': t.name or f'Tenant {t.id}',
-                            'members': t.members or [],
-                            'start_date': t.start_date.isoformat() if t.start_date else None,
-                            'end_date': t.end_date.isoformat() if t.end_date else None
-                        })
+            for tid in (loc_orm.tags or []):
+                tid_int = int(tid) if isinstance(tid, str) and tid.isdigit() else tid
+                t = tag_by_id.get(tid_int)
+                if not t:
+                    continue
+                if allowed_tag_ids is not None and t.id not in allowed_tag_ids:
+                    continue
+                # Expired tags never reach the device — it caches this payload and would
+                # keep offering them long after the window closed.
+                if not is_window_active(t.start_date, t.end_date, now_bkk):
+                    continue
+                tags_list.append(_entry(t, 'Tag'))
+            for tid in (loc_orm.tenants or []):
+                tid_int = int(tid) if isinstance(tid, str) and tid.isdigit() else tid
+                t = tenant_by_id.get(tid_int)
+                if not t:
+                    continue
+                if allowed_tenant_ids is not None and t.id not in allowed_tenant_ids:
+                    continue
+                if not is_window_active(t.start_date, t.end_date, now_bkk):
+                    continue
+                tenants_list.append(_entry(t, 'Tenant'))
+
+            # A scoped-only location whose grants all expired has nothing selectable left,
+            # and posting a bare origin there would be rejected by the write guard — so
+            # drop the row rather than ship a dead entry to the scale.
+            if allowed is not None and not tags_list and not tenants_list:
+                continue
+
             locations_list.append({
                 'origin_id': origin_id,
                 'display_name': (loc_orm.display_name if loc_orm and loc_orm.display_name else ''),
                 'path': location_path,
                 'tags': tags_list,
-                'tenants': tenants_list
+                'tenants': tenants_list,
+                # Lets the tablet require a tag/tenant selection here without re-deriving it.
+                'access': 'assigned' if allowed is None else 'scoped',
             })
         
         return {
