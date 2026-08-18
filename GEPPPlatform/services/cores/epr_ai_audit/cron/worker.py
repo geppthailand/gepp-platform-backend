@@ -153,11 +153,14 @@ def _pending_record_images(conn, tx_id: int):
 # in the flags summary. Mirrors duplicates.DESC_SIM_LOW_FUZZY.
 _FLAGS_IMAGE_SIM_THRESHOLD = 0.70
 
-# Only these confidence tiers are surfaced in flags.duplicates[]. Lower tiers
-# (medium, low-fuzzy) are too noisy for reviewers on document-heavy projects
-# where tax IDs/vendors cluster naturally. The full candidate list — including
-# the dropped tiers — is still persisted on epr_dedup_jobs.result for audit.
-_SURFACED_CONFIDENCE_TIERS = {"high", "medium-fuzzy"}
+# Only these confidence tiers are surfaced in flags.duplicates[]. `low-fuzzy`
+# is too noisy for reviewers on document-heavy projects where tax IDs/vendors
+# cluster naturally. The full candidate list — including the dropped tier — is
+# still persisted on epr_dedup_jobs.result for audit.
+# `medium` is included because it now carries vendor/date/total triple matches
+# (demoted from high in duplicates._confidence) — worth a look, not worth an
+# auto-flag.
+_SURFACED_CONFIDENCE_TIERS = {"high", "medium", "medium-fuzzy"}
 
 # Per-payload parallelism for integrity LLM calls. Each call is pure HTTP I/O
 # (fetch image → vision LLM → JSON parse) with no shared mutable state and no
