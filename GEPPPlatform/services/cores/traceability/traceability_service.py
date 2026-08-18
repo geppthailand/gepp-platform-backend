@@ -531,7 +531,14 @@ class TraceabilityService:
         location_ids = set()
         material_ids = set()
         for g in groups:
-            if g.origin_id is not None and by_group.get(g.id):
+            # `and by_group.get(g.id)` used to sit here: only piles that had a
+            # transport contributed their origin to the name lookup. That held
+            # while a pile with no transport was never emitted — but an in-tank
+            # pile has no transport BY DEFINITION (the material was weighed
+            # straight into the room) and is emitted now, so its origin was
+            # never looked up and every card fell back to "Location {id}".
+            # A pile that is drawn always needs its origin's name.
+            if g.origin_id is not None:
                 location_ids.add(g.origin_id)
         for t in all_transports:
             if t.origin_id is not None:

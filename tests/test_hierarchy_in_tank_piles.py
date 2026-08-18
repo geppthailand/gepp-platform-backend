@@ -110,9 +110,9 @@ def _hierarchy_groups(monkeypatch, groups, group_dicts, transports_by_group):
     )["data"]
 
 
-def _dict(gid, weight, tenant_name=None, in_collection=False, tenant_id=None):
+def _dict(gid, weight, tenant_name=None, in_collection=False, tenant_id=None, origin_id=21091):
     return {
-        "id": gid, "group_id": gid, "origin_id": 21091, "material_id": 3,
+        "id": gid, "group_id": gid, "origin_id": origin_id, "material_id": 3,
         "weight": weight, "total_weight_kg": weight,
         "tenant_id": tenant_id, "tenant_name": tenant_name,
         "location_tag_id": None, "in_collection": in_collection,
@@ -198,3 +198,80 @@ def test_both_halves_of_a_tank_appear_under_the_same_origin(monkeypatch):
     assert by_id[8324]["in_collection"] is False
     assert len(by_id[8324]["children"]) == 1
     assert by_id[8324]["children"][0]["disposal_method"] == "Recycling (Own)"
+
+
+def test_an_in_tank_pile_still_gets_its_origin_s_real_name(monkeypatch):
+    """Regression: the name lookup only collected origins of piles that had a
+    transport. An in-tank pile has none BY DEFINITION — the material was
+    weighed straight into the room — so its origin was never looked up and
+    every card on the board and the diagram fell back to "Location 4384"
+    (observed on dev org 31, where the location is really "Tower 4 (office)").
+    A pile that is drawn always needs its origin's name."""
+    seen_ids = {}
+
+    class _Loc:
+        def __init__(self, lid):
+            self.id = lid
+            self.display_name = f"Real name {lid}"
+            self.name_en = None
+            self.name_th = None
+
+    class _Q:
+        def __init__(self, rows, sink=None):
+            self._rows = rows
+            self._sink = sink
+
+        def filter(self, *criteria):
+            if self._sink is not None:
+                self._sink['called'] = True
+            return self
+
+        def all(self):
+            return self._rows
+
+        def distinct(self):
+            return self
+
+        def join(self, *a, **k):
+            return _Q([])
+
+    g = _Group(8323, origin_id=4384, tenant_id=None)
+
+    from GEPPPlatform.services.cores.users import user_service as _us
+    monkeypatch.setattr(_us.UserService, "_build_location_paths", lambda self, org, locs: {})
+
+    svc = TraceabilityService(db=None)
+    monkeypatch.setattr(svc, "_apply_idle_carry_over", lambda *a, **k: None)
+    monkeypatch.setattr(svc, "_backfill_traceability_groups_for_month", lambda *a, **k: None)
+    monkeypatch.setattr(svc, "_parse_month_range", lambda *a, **k: (2026, 8))
+    monkeypatch.setattr(
+        svc, "_groups_to_dict_list",
+        lambda *a, **k: [_dict(8323, 11.41, in_collection=True, origin_id=4384)],
+    )
+    monkeypatch.setattr(
+        TraceabilityService, "_location_to_dict",
+        lambda self, loc, path="": {"id": loc.id, "display_name": loc.display_name},
+    )
+
+    class _Db:
+        def query(self, *entities, **k):
+            name = getattr(entities[0], "__name__", "")
+            if name == "TraceabilityTransactionGroup":
+                return _Q([g])
+            if name == "TransportTransaction":
+                return _Q([])
+            if name == "UserLocation":
+                seen_ids['asked'] = True
+                return _Q([_Loc(4384)])
+            return _Q([])
+
+    svc.db = _Db()
+    origins = svc.get_traceability_hierarchy(
+        organization_id=31, date_from="2026-08-01", date_to="2026-08-31"
+    )["data"]
+
+    assert seen_ids.get('asked'), "the origin of an in-tank pile was never looked up"
+    (origin,) = origins
+    assert origin["name"] == "Real name 4384"
+    assert origin["name"] != "Location 4384"
+    assert origin["origin"] is not None, "the card also needs the location object"
