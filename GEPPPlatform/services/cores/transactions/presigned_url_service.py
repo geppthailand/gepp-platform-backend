@@ -17,6 +17,28 @@ from ....models.cores.files import File, FileType, FileStatus, FileSource
 
 logger = logging.getLogger(__name__)
 
+# Content-types worth forcing on the presigned GET so the browser renders the file
+# INLINE (native <iframe>/<img>) instead of downloading it. Objects are sometimes
+# stored as binary/octet-stream (no ContentType set at upload), which makes a native
+# viewer download instead of display — overriding it here is what lets the frontend
+# drop the flaky third-party doc viewer for PDFs.
+_INLINE_CONTENT_TYPES = {
+    'pdf': 'application/pdf',
+    'png': 'image/png',
+    'jpg': 'image/jpeg',
+    'jpeg': 'image/jpeg',
+    'gif': 'image/gif',
+    'webp': 'image/webp',
+    'bmp': 'image/bmp',
+    'svg': 'image/svg+xml',
+}
+
+
+def _inline_content_type_for_key(s3_key: str) -> Optional[str]:
+    """Return the content-type to force on a view presign, by file extension, or None."""
+    ext = s3_key.rsplit('.', 1)[-1].lower() if '.' in s3_key else ''
+    return _INLINE_CONTENT_TYPES.get(ext)
+
 
 class TransactionPresignedUrlService:
     """Service for generating S3 presigned URLs for transaction file uploads"""
@@ -524,13 +546,19 @@ class TransactionPresignedUrlService:
 
                     logger.info(f"Generating view presigned URL for key: {s3_key}")
 
+                    # Force a viewable content-type (PDF/image) so the browser renders the
+                    # file inline in a native viewer rather than downloading it — some objects
+                    # were stored as binary/octet-stream. Content-Disposition is left untouched
+                    # so the modal's download button keeps working.
+                    params = {'Bucket': self.bucket_name, 'Key': s3_key}
+                    inline_ct = _inline_content_type_for_key(s3_key)
+                    if inline_ct:
+                        params['ResponseContentType'] = inline_ct
+
                     # Generate presigned URL for GET operation
                     presigned_url = self.s3_client.generate_presigned_url(
                         'get_object',
-                        Params={
-                            'Bucket': self.bucket_name,
-                            'Key': s3_key
-                        },
+                        Params=params,
                         ExpiresIn=expiration_seconds
                     )
 
