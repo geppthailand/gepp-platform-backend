@@ -873,8 +873,6 @@ def _handle_overview_report(
     # sum of every tank's balance. Narrowed scope: what this scope handed over
     # and is still awaiting an outcome for. Either way it explains the gap
     # between "generated" and "accounted for" instead of leaving it unexplained.
-    collection_shortfall_kg = 0.0
-    collection_points_negative = 0
     if outcome_scope:
         try:
             from ..traceability.traceability_service import TraceabilityService
@@ -895,18 +893,13 @@ def _handle_overview_report(
                 except (ValueError, TypeError):
                     pass
             _cps = _tsvc._collection_point_balances(organization_id, _as_of.year, _as_of.month)
-            # Same roll-up the board uses, so the two screens can never disagree:
-            # stock and shortfall stay separate rather than cancelling out.
-            _summary = _tsvc.summarise_collection_balances(_cps)
-            in_collection_kg = _summary['in_collection_kg']
-            collection_shortfall_kg = _summary['shortfall_kg']
-            collection_points_negative = _summary['negative_points']
+            in_collection_kg = round(
+                sum(float(cp.get('balance_kg') or 0) for cp in _cps), 2
+            )
         except Exception as _cp_err:  # noqa: BLE001
             logger.warning("[overview] collection balance read failed: %s", _cp_err)
             in_collection_kg = superseded_kg
     else:
-        # A narrowed scope reports what IT handed over and is still waiting on;
-        # a shortfall belongs to the room, which is org-level by nature.
         in_collection_kg = superseded_kg
 
     return {
@@ -932,11 +925,6 @@ def _handle_overview_report(
             ),
             'separation_rate': separation_rate,
             'in_collection_kg': in_collection_kg,
-            # More has left the collection points than ever arrived there —
-            # waste reaching a room without passing the scale, or a bad
-            # weighing. Positive number; 0 means every room balances.
-            'collection_shortfall_kg': collection_shortfall_kg,
-            'collection_points_negative': collection_points_negative,
             'ghg_reduction': round(recyclable_ghg_reduction * 100) / 100,
             'total_ghg_generated': round(ghg_reduction * 100) / 100,
         },
