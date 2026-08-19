@@ -227,14 +227,35 @@ class EsgReportService:
         verified = base.filter(EsgRecord.status == EntryStatus.VERIFIED).count()
         pending = base.filter(EsgRecord.status == EntryStatus.PENDING_VERIFY).count()
 
-        scope_breakdown = []
-        total_scope = 0
-        for scope in ['Scope 1', 'Scope 2', 'Scope 3']:
-            val = float(base.filter(EsgRecord.pillar == scope).with_entities(
-                func.coalesce(func.sum((EsgRecord.kgco2e / 1000.0)), 0)
-            ).scalar() or 0)
-            scope_breakdown.append({'scope': scope, 'tco2e': val})
-            total_scope += val
+        # Scope totals resolved from esg_data_category, NOT EsgRecord.pillar.
+        # `pillar` is CHAR(1) holding 'E'/'S'/'G', so the old
+        # `pillar == 'Scope 1'` comparison never matched and every scope came
+        # back 0.0 — which is why Scope Trend Analysis rendered "No data yet".
+        # category 1 → Scope 1, category 2 → Scope 2, category 3 or any
+        # is_scope3 category (27..41) → Scope 3.
+        scope_rows = (
+            base
+            .join(EsgDataCategory, EsgDataCategory.id == EsgRecord.category_id)
+            .with_entities(
+                EsgDataCategory.id.label('cat_id'),
+                EsgDataCategory.is_scope3.label('is_s3'),
+                func.coalesce(func.sum(EsgRecord.kgco2e / 1000.0), 0).label('tco2e'),
+            )
+            .group_by(EsgDataCategory.id, EsgDataCategory.is_scope3)
+            .all()
+        )
+        scope_totals = {'Scope 1': 0.0, 'Scope 2': 0.0, 'Scope 3': 0.0}
+        for r in scope_rows:
+            v = float(r.tco2e or 0)
+            if r.cat_id == 1:
+                scope_totals['Scope 1'] += v
+            elif r.cat_id == 2:
+                scope_totals['Scope 2'] += v
+            elif r.is_s3 or r.cat_id == 3:
+                scope_totals['Scope 3'] += v
+        scope_breakdown = [{'scope': k, 'tco2e': round(scope_totals[k], 5)}
+                           for k in ('Scope 1', 'Scope 2', 'Scope 3')]
+        total_scope = sum(scope_totals.values())
 
         # Add percentage
         for s in scope_breakdown:
@@ -362,7 +383,32 @@ class EsgReportService:
             .scalar() or 0
         )
 
-        reduction = round((base_tco2e - current_tco2e) / base_tco2e * 100, 1) if base_tco2e > 0 else 0
+        # Compare base year against the LATEST FULL YEAR of data, not
+        # `current_tco2e` — that argument is the all-time total, so a 4-year
+        # dataset reported "-234.5% reduction" against its own base year.
+        # Prefer the last *complete* calendar year. The year in progress is
+        # partial (e.g. Jan–Aug), so comparing it to a full base year overstates
+        # the reduction — it read 44.5% off 8 months of data against 12.
+        this_year = datetime.now(timezone.utc).year
+        years = [
+            int(r[0]) for r in
+            base.filter(EsgRecord.entry_date.isnot(None))
+            .with_entities(extract('year', EsgRecord.entry_date))
+            .distinct().all()
+            if r[0] is not None
+        ]
+        complete_years = [y for y in years if y < this_year]
+        compare_year = max(complete_years) if complete_years else (max(years) if years else None)
+
+        compare_tco2e = current_tco2e
+        if compare_year:
+            compare_tco2e = float(
+                base.filter(extract('year', EsgRecord.entry_date) == compare_year)
+                .with_entities(func.coalesce(func.sum((EsgRecord.kgco2e / 1000.0)), 0))
+                .scalar() or 0
+            )
+
+        reduction = round((base_tco2e - compare_tco2e) / base_tco2e * 100, 1) if base_tco2e > 0 else 0
         target_pct = float(settings.reduction_target_percent) if settings.reduction_target_percent else 0
 
         return {
@@ -371,7 +417,20 @@ class EsgReportService:
             'target_percent': target_pct,
             'target_year': settings.reduction_target_year,
             'current_reduction_percent': reduction,
-            'on_track': reduction >= target_pct * 0.8 if target_pct > 0 else False,
+            'compare_year': compare_year,
+            # Straight-line expectation for elapsed time, rather than comparing
+            # cumulative progress against 80% of the *final* target regardless
+            # of how many years remain (which marks any early-stage org as
+            # off track).
+            'expected_reduction_percent': round(
+                target_pct * (compare_year - settings.base_year)
+                / max(1, (settings.reduction_target_year - settings.base_year)), 1
+            ) if (compare_year and settings.reduction_target_year) else None,
+            'on_track': (
+                reduction >= target_pct * (compare_year - settings.base_year)
+                / max(1, (settings.reduction_target_year - settings.base_year))
+            ) if (target_pct > 0 and compare_year and settings.reduction_target_year)
+            else False,
             'has_target': True,
         }
 
@@ -441,17 +500,36 @@ class EsgReportService:
         subcategories = self.db.query(EsgDataSubcategory).filter(EsgDataSubcategory.is_active == True).all()
         datapoints = self.db.query(EsgDatapoint).filter(EsgDatapoint.is_active == True).all()
 
-        # Get datapoint IDs that have entries
-        filled_ids = set(
-            r[0] for r in
-            self.db.query(EsgRecord.id)
+        # Datapoint IDs that actually have data. These live inside each record's
+        # `datapoints` JSONB array — the previous version collected
+        # EsgRecord.id (record primary keys) and compared them against
+        # esg_datapoint.id, so "filled" was really the record count. With 524
+        # records over 456 datapoints that produced overall_score = 114.9%,
+        # every pillar score 0.0, and therefore framework_alignment all zeros.
+        filled_ids = set()
+        for (dp_array,) in (
+            self.db.query(EsgRecord.datapoints)
             .filter(
                 EsgRecord.organization_id == organization_id,
                 EsgRecord.is_active == True,
-                EsgRecord.id.isnot(None),
             )
-            .distinct().all()
+            .all()
+        ):
+            for d in (dp_array or []):
+                dp_id = d.get('datapoint_id') if isinstance(d, dict) else None
+                if dp_id:
+                    filled_ids.add(int(dp_id))
+
+        # Honour focus_mode: in 'scope3_only' the S and G pillars are out of
+        # product scope, so counting their datapoints in the denominator
+        # understates coverage of what the org is actually asked to report.
+        _fm = (
+            self.db.query(EsgOrganizationSettings.focus_mode)
+            .filter(EsgOrganizationSettings.organization_id == organization_id)
+            .first()
         )
+        if ((_fm[0] if _fm else None) or 'scope3_only') == 'scope3_only':
+            datapoints = [d for d in datapoints if d.pillar == 'E']
 
         # Build pillar scores
         dp_by_pillar = {}
@@ -460,7 +538,10 @@ class EsgReportService:
 
         pillars = []
         total_dp = len(datapoints)
-        total_filled = len(filled_ids)
+        # Count only datapoints that are in scope, otherwise a filled datapoint
+        # outside the current focus_mode would push the score over 100%.
+        _in_scope = {d.id for d in datapoints}
+        total_filled = len(filled_ids & _in_scope)
 
         for pillar, label in [('E', 'Environment'), ('S', 'Social'), ('G', 'Governance')]:
             ids = dp_by_pillar.get(pillar, [])

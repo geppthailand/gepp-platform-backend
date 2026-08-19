@@ -241,6 +241,44 @@ class EsgDashboardService:
             })
         return out
 
+    def _scope_breakdown(self, organization_id: int, user_id: Optional[int] = None,
+                          jwt_user_id: Optional[int] = None) -> list:
+        """
+        Scope 1 / 2 / 3 totals — used by full_esg mode.
+
+        Resolved from `esg_data_category`, NOT from `EsgRecord.pillar`.
+        `pillar` is CHAR(1) holding 'E' / 'S' / 'G' (copied from the category
+        row by esg_data_entry_service), so the previous `pillar == 'Scope 1'`
+        comparison could never match and silently returned 0.0 for every
+        scope — the whole breakdown and the full_esg donut read as empty.
+
+        Mapping: category 1 → Scope 1, category 2 → Scope 2,
+        category 3 or any is_scope3 category (27..41) → Scope 3.
+        """
+        base = self._base_query(organization_id, user_id, jwt_user_id=jwt_user_id)
+        rows = (
+            base
+            .join(EsgDataCategory, EsgDataCategory.id == EsgRecord.category_id)
+            .with_entities(
+                EsgDataCategory.id.label('cat_id'),
+                EsgDataCategory.is_scope3.label('is_s3'),
+                func.coalesce(func.sum(EsgRecord.kgco2e / 1000.0), 0).label('tco2e'),
+            )
+            .group_by(EsgDataCategory.id, EsgDataCategory.is_scope3)
+            .all()
+        )
+        totals = {'Scope 1': 0.0, 'Scope 2': 0.0, 'Scope 3': 0.0}
+        for r in rows:
+            val = float(r.tco2e or 0)
+            if r.cat_id == 1:
+                totals['Scope 1'] += val
+            elif r.cat_id == 2:
+                totals['Scope 2'] += val
+            elif r.is_s3 or r.cat_id == 3:
+                totals['Scope 3'] += val
+        return [{'scope': k, 'tco2e': round(totals[k], 5)}
+                for k in ('Scope 1', 'Scope 2', 'Scope 3')]
+
     # ─── public ─────────────────────────────────────────────────────────
 
     def get_summary(
@@ -278,13 +316,10 @@ class EsgDashboardService:
             scope_breakdown = []
             scope3_breakdown = self._scope3_breakdown(organization_id, user_id, jwt_user_id=jwt_user_id)
         else:
-            scope_breakdown = []
-            for scope_tag in ['Scope 1', 'Scope 2', 'Scope 3']:
-                val = base.filter(EsgRecord.pillar == scope_tag).with_entities(
-                    func.coalesce(func.sum((EsgRecord.kgco2e / 1000.0)), 0)
-                ).scalar()
-                scope_breakdown.append({'scope': scope_tag, 'tco2e': float(val or 0)})
-            scope3_breakdown = []
+            scope_breakdown = self._scope_breakdown(organization_id, user_id, jwt_user_id=jwt_user_id)
+            # Keep the 15-category detail available in full_esg too — switching
+            # focus mode shouldn't blank out the Scope 3 breakdown the UI draws.
+            scope3_breakdown = self._scope3_breakdown(organization_id, user_id, jwt_user_id=jwt_user_id)
 
         # Top 3 emission contributors. Scope3 mode → top by category 1..15;
         # legacy mode → top by raw category text.
@@ -375,12 +410,13 @@ class EsgDashboardService:
                 for r in scope3 if r['tco2e'] > 0
             ]
         else:
-            donut_data = []
-            for scope_tag in ['Scope 1', 'Scope 2', 'Scope 3']:
-                val = base.filter(EsgRecord.pillar == scope_tag).with_entities(
-                    func.coalesce(func.sum((EsgRecord.kgco2e / 1000.0)), 0)
-                ).scalar()
-                donut_data.append({'label': scope_tag, 'value': float(val or 0)})
+            # Same pillar/CHAR(1) trap as get_summary — resolve from the
+            # category, not from EsgRecord.pillar. See _scope_breakdown.
+            donut_data = [
+                {'label': r['scope'], 'value': r['tco2e']}
+                for r in self._scope_breakdown(
+                    organization_id, user_id, jwt_user_id=jwt_user_id)
+            ]
 
         # Line chart: monthly tCO2e trend
         monthly_data = []

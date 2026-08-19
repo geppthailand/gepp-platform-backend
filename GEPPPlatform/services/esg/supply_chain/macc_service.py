@@ -195,9 +195,9 @@ class MaccService:
         )
 
         # Calculate total_cost if not provided
-        if not initiative.total_cost and initiative.potential_tco2e and initiative.cost_per_tco2e:
-            initiative.total_cost = round(
-                float(initiative.potential_tco2e) * float(initiative.cost_per_tco2e), 2
+        if not initiative.implementation_cost and initiative.abatement_potential_tco2e and initiative.cost_per_tco2e:
+            initiative.implementation_cost = round(
+                float(initiative.abatement_potential_tco2e) * float(initiative.cost_per_tco2e), 2
             )
 
         self.session.add(initiative)
@@ -230,9 +230,9 @@ class MaccService:
                 setattr(initiative, field, data[field])
 
         # Recalculate total_cost if relevant inputs changed
-        if initiative.potential_tco2e and initiative.cost_per_tco2e and 'total_cost' not in data:
-            initiative.total_cost = round(
-                float(initiative.potential_tco2e) * float(initiative.cost_per_tco2e), 2
+        if initiative.abatement_potential_tco2e and initiative.cost_per_tco2e and 'total_cost' not in data:
+            initiative.implementation_cost = round(
+                float(initiative.abatement_potential_tco2e) * float(initiative.cost_per_tco2e), 2
             )
 
         initiative.updated_date = datetime.now(timezone.utc)
@@ -263,7 +263,7 @@ class MaccService:
         cumulative_cost = 0.0
 
         for init in initiatives:
-            potential = float(init.potential_tco2e or 0)
+            potential = float(init.abatement_potential_tco2e or 0)
             cost_per = float(init.cost_per_tco2e or 0)
             total = potential * cost_per
 
@@ -274,7 +274,7 @@ class MaccService:
                 'id': init.id,
                 'name': init.name,
                 'category': init.category,
-                'scope': init.scope,
+                'scope': init.applicable_scope,
                 'difficulty': init.difficulty,
                 'status': init.status,
                 'potential_tco2e': round(potential, 2),

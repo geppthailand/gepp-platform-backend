@@ -78,7 +78,7 @@ class SupplierSubmissionService:
         if supplier_id:
             query = query.filter(EsgSupplierSubmission.supplier_id == int(supplier_id))
         if status:
-            query = query.filter(EsgSupplierSubmission.status == status)
+            query = query.filter(EsgSupplierSubmission.submission_status == status)
         if year:
             query = query.filter(EsgSupplierSubmission.reporting_year == year)
 
@@ -113,11 +113,11 @@ class SupplierSubmissionService:
             return None
 
         if action == 'approve':
-            submission.status = 'approved'
+            submission.submission_status = 'verified'
         elif action == 'reject':
-            submission.status = 'rejected'
+            submission.submission_status = 'rejected'
         else:
-            submission.status = action
+            submission.submission_status = action
 
         submission.verified_by = reviewer_id
         submission.verified_at = datetime.now(timezone.utc)
@@ -185,16 +185,16 @@ class SupplierSubmissionService:
             if not sub:
                 skipped += 1
                 continue
-            if sub.status == 'approved':
+            if sub.submission_status == 'verified':
                 skipped += 1
                 continue
-            sub.status = 'approved'
+            sub.submission_status = 'verified'
             sub.verified_at = datetime.now(timezone.utc)
             approved += 1
 
         self.session.flush()
         return {
-            'approved': approved,
+            'verified': approved,
             'skipped': skipped,
             'total': len(submission_ids),
         }

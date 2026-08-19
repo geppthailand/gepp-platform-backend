@@ -12,7 +12,7 @@ LABELS = {
         'location': 'Location',
         'date': 'Date',
         'kg': 'kg',
-        'copyright': 'Copyright © 2018–2023 GEPP Sa-Ard Co., Ltd. ALL RIGHTS RESERVED',
+        'copyright': 'Copyright © 2018–2026 GEPP Sa-Ard Co., Ltd. ALL RIGHTS RESERVED',
         'gepp_report': 'GEPP REPORT',
         'subtitle': 'Data-Driven Transformation',
         'overview': 'Overview',

@@ -92,7 +92,7 @@ class AnomalyDetectionService:
         """Query past submissions for this supplier and extract numeric values by field."""
         query = self.session.query(EsgSupplierSubmission).filter(
             EsgSupplierSubmission.supplier_id == supplier_id,
-            EsgSupplierSubmission.status.in_(['approved', 'submitted']),
+            EsgSupplierSubmission.submission_status.in_(['verified', 'submitted']),
         )
         if category:
             query = query.filter(EsgSupplierSubmission.scope3_category == category)
@@ -124,7 +124,7 @@ class AnomalyDetectionService:
         prev_sub = self.session.query(EsgSupplierSubmission).filter(
             EsgSupplierSubmission.supplier_id == submission.supplier_id,
             EsgSupplierSubmission.reporting_year == prev_year,
-            EsgSupplierSubmission.status.in_(['approved', 'submitted']),
+            EsgSupplierSubmission.submission_status.in_(['verified', 'submitted']),
         ).order_by(EsgSupplierSubmission.created_date.desc()).first()
 
         if not prev_sub or not prev_sub.raw_data:
@@ -169,7 +169,7 @@ class AnomalyDetectionService:
         if submission_ids:
             query = query.filter(EsgSupplierSubmission.id.in_(submission_ids))
         else:
-            query = query.filter(EsgSupplierSubmission.status == 'submitted')
+            query = query.filter(EsgSupplierSubmission.submission_status == 'submitted')
 
         submissions = query.all()
         scanned = 0
