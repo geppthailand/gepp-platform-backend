@@ -47,7 +47,7 @@ class SupplierService:
             like = f'%{search}%'
             query = query.filter(
                 or_(
-                    EsgSupplier.company_name.ilike(like),
+                    EsgSupplier.supplier_name.ilike(like),
                     EsgSupplier.contact_email.ilike(like),
                     EsgSupplier.tax_id.ilike(like),
                 )
@@ -90,7 +90,7 @@ class SupplierService:
         """Create a new supplier and return its dict representation."""
         supplier = EsgSupplier(
             organization_id=org_id,
-            company_name=data['company_name'],
+            supplier_name=data['company_name'],
             tax_id=data.get('tax_id'),
             contact_name=data.get('contact_name'),
             contact_email=data.get('contact_email'),
@@ -123,7 +123,7 @@ class SupplierService:
             return None
 
         updatable = [
-            'company_name', 'tax_id', 'contact_name', 'contact_email',
+            'supplier_name', 'tax_id', 'contact_name', 'contact_email',
             'contact_phone', 'country', 'industry', 'data_collection_level',
             'scope3_category', 'annual_spend_thb', 'status',
         ]
@@ -219,10 +219,10 @@ class SupplierService:
                 .first()
             )
 
-            if latest and latest.status == 'approved':
+            if latest and latest.submission_status == 'verified':
                 color = 'green'
                 green += 1
-            elif latest and latest.status in ('submitted', 'pending'):
+            elif latest and latest.submission_status in ('submitted', 'pending'):
                 color = 'amber'
                 amber += 1
             else:
@@ -231,7 +231,7 @@ class SupplierService:
 
             details.append({
                 'supplier_id': s.id,
-                'company_name': s.company_name,
+                'company_name': s.supplier_name,
                 'color': color,
                 'last_submission': latest.to_dict() if latest else None,
             })

@@ -654,6 +654,31 @@ class EsgService:
             dp_by_sub.setdefault(d.esg_data_subcategory_id, []).append(d)
 
         # 4. Assemble nested hierarchy
+        #
+        # Respect the org's focus_mode. In 'scope3_only' (the default and the
+        # current product scope) the Social and Governance pillars are out of
+        # scope — the frontend already hides those routes behind FocusGate, so
+        # listing their categories here made the Data Warehouse table read as a
+        # full three-pillar ESG product even with zero S/G entries.
+        from ...models.esg.settings import EsgOrganizationSettings
+        _settings = (
+            self.db.query(EsgOrganizationSettings.focus_mode)
+            .filter(EsgOrganizationSettings.organization_id == organization_id)
+            .first()
+        )
+        scope3_only = ((_settings[0] if _settings else None) or 'scope3_only') == 'scope3_only'
+        if scope3_only:
+            categories = [c for c in categories if c.pillar == 'E']
+            # Narrow subcategories/datapoints to match, otherwise the `totals`
+            # block below still divides by all 456 datapoints and reports a
+            # diluted completeness_pct for a tree that no longer shows them.
+            _cat_ids = {c.id for c in categories}
+            subcategories = [s for s in subcategories
+                             if s.esg_data_category_id in _cat_ids]
+            _sub_ids = {s.id for s in subcategories}
+            datapoints = [d for d in datapoints
+                          if d.esg_data_subcategory_id in _sub_ids]
+
         pillar_names = {'E': ('Environment', 'สิ่งแวดล้อม'), 'S': ('Social', 'สังคม'), 'G': ('Governance', 'บรรษัทภิบาล')}
         pillar_map = {}
 

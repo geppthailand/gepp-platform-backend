@@ -6,8 +6,6 @@ import json
 import logging
 from typing import Dict, Any
 
-from GEPPPlatform.libs.authGuard import verify_jwt
-
 from .supplier_service import SupplierService
 from .supplier_portal_service import SupplierPortalService
 from .supplier_submission_service import SupplierSubmissionService
@@ -19,8 +17,16 @@ from .macc_service import MaccService
 logger = logging.getLogger(__name__)
 
 
-def handle_supply_chain_routes(event: Dict[str, Any], context, session) -> Dict[str, Any]:
-    """Route supply chain API requests."""
+def handle_supply_chain_routes(event: Dict[str, Any], context, session,
+                               user: Dict[str, Any] = None) -> Dict[str, Any]:
+    """
+    Route supply chain API requests.
+
+    `user` is the already-verified JWT payload, supplied by
+    esg_handlers.handle_esg_routes (which authenticates every /api/esg/* call
+    before dispatching). It is required for everything except the
+    magic-link supplier portal, which is intentionally unauthenticated.
+    """
     path = event.get('path', '') or event.get('rawPath', '')
     method = event.get('httpMethod', 'GET')
     body = json.loads(event.get('body', '{}') or '{}')
@@ -33,7 +39,9 @@ def handle_supply_chain_routes(event: Dict[str, Any], context, session) -> Dict[
             return _handle_supplier_portal(path, method, body, params, session)
 
         # --- All other routes require auth ---
-        user = verify_jwt(headers)
+        # Previously called verify_jwt(headers), but that helper's signature is
+        # verify_jwt(token, secret_key) — it never could have worked. The caller
+        # authenticates and hands the payload down instead.
         if not user:
             return _response(401, {'error': 'Unauthorized'})
 

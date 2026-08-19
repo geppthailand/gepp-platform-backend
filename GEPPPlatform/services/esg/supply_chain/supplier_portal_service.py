@@ -77,9 +77,8 @@ class SupplierPortalService:
             supplier_id=supplier_id,
             organization_id=org_id,
             token=token,
-            email=email,
+            email_sent_to=email,   # column is email_sent_to, not email
             expires_at=expires_at,
-            status='active',
         )
         self.session.add(link)
         self.session.flush()
@@ -104,7 +103,9 @@ class SupplierPortalService:
         if not link:
             return {'valid': False, 'error': 'Token not found'}
 
-        if link.status != 'active':
+        # esg_supplier_magic_links has no `status` column — single-use is
+        # tracked by used_at, and revocation by is_active.
+        if link.used_at is not None or not link.is_active:
             return {'valid': False, 'error': 'Token has already been used'}
 
         if link.expires_at and link.expires_at < datetime.now(timezone.utc):
@@ -170,12 +171,11 @@ class SupplierPortalService:
             organization_id=org_id,
             reporting_year=reporting_year,
             raw_data=data,
-            status='submitted',
+            submission_status='submitted',
         )
         self.session.add(submission)
 
-        # Mark token as used
-        link.status = 'used'
+        # Mark token as used (used_at is the only single-use marker).
         link.used_at = datetime.now(timezone.utc)
         self.session.flush()
 

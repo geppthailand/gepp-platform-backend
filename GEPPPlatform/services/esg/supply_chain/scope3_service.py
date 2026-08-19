@@ -86,7 +86,7 @@ class Scope3Service:
 
         for entry in entries:
             cat_num = entry.category_number
-            tco2e = float(entry.tco2e or 0)
+            tco2e = float(entry.calculated_tco2e or 0)
             grand_total += tco2e
 
             if cat_num not in cat_map:
@@ -172,25 +172,25 @@ class Scope3Service:
             spend_currency=data.get('spend_currency', 'THB'),
             activity_data=data.get('activity_data'),
             activity_unit=data.get('activity_unit'),
-            emission_factor=data.get('emission_factor'),
+            emission_factor_value=data.get('emission_factor_value'),
             emission_factor_source=data.get('emission_factor_source'),
         )
 
         # Calculate tCO2e
         if calc_method == 'spend_based' and entry.spend_amount:
-            entry.tco2e = self._calculate_spend_based(
+            entry.calculated_tco2e = self._calculate_spend_based(
                 float(entry.spend_amount),
                 entry.spend_currency,
                 entry.category_number,
             )
         elif calc_method == 'supplier_specific' and entry.supplier_id:
-            entry.tco2e = self._calculate_supplier_specific(
+            entry.calculated_tco2e = self._calculate_supplier_specific(
                 entry.supplier_id,
                 entry.activity_data,
                 entry.activity_unit,
             )
-        elif entry.emission_factor and entry.activity_data:
-            entry.tco2e = float(entry.activity_data) * float(entry.emission_factor) / 1000
+        elif entry.emission_factor_value and entry.activity_data:
+            entry.calculated_tco2e = float(entry.activity_data) * float(entry.emission_factor_value) / 1000
 
         self.session.add(entry)
         self.session.flush()
@@ -211,8 +211,8 @@ class Scope3Service:
         updatable = [
             'category_number', 'description', 'calculation_method',
             'supplier_id', 'spend_amount', 'spend_currency',
-            'activity_data', 'activity_unit', 'emission_factor',
-            'emission_factor_source', 'tco2e', 'reporting_year',
+            'activity_data', 'activity_unit', 'emission_factor_value',
+            'emission_factor_source', 'calculated_tco2e', 'reporting_year',
         ]
         for field in updatable:
             if field in data:
@@ -221,7 +221,7 @@ class Scope3Service:
         # Recalculate if key inputs changed
         calc_method = entry.calculation_method or 'spend_based'
         if calc_method == 'spend_based' and entry.spend_amount:
-            entry.tco2e = self._calculate_spend_based(
+            entry.calculated_tco2e = self._calculate_spend_based(
                 float(entry.spend_amount),
                 entry.spend_currency,
                 entry.category_number,
@@ -254,7 +254,7 @@ class Scope3Service:
 
         for entry in entries:
             if method == 'spend_based' and entry.spend_amount:
-                entry.tco2e = self._calculate_spend_based(
+                entry.calculated_tco2e = self._calculate_spend_based(
                     float(entry.spend_amount),
                     entry.spend_currency,
                     category_number,
@@ -262,7 +262,7 @@ class Scope3Service:
                 entry.calculation_method = 'spend_based'
                 updated += 1
             elif method == 'supplier_specific' and entry.supplier_id:
-                entry.tco2e = self._calculate_supplier_specific(
+                entry.calculated_tco2e = self._calculate_supplier_specific(
                     entry.supplier_id,
                     entry.activity_data,
                     entry.activity_unit,
@@ -270,7 +270,7 @@ class Scope3Service:
                 entry.calculation_method = 'supplier_specific'
                 updated += 1
 
-            total_tco2e += float(entry.tco2e or 0)
+            total_tco2e += float(entry.calculated_tco2e or 0)
 
         self.session.flush()
         return {
