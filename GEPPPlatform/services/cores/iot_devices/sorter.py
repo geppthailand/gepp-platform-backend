@@ -65,14 +65,32 @@ def get_sorter_location_id(db_session, user_id: Any, organization_id: Any) -> Op
     return int(row[0]) if row else None
 
 
-def list_destinations(db_session, organization_id: Any) -> List[Dict[str, Any]]:
+def list_destinations(
+    db_session, organization_id: Any, user_id: Any = None
+) -> List[Dict[str, Any]]:
     """Destinations a sorter may ship to, in the EXACT shape the tablet already parses.
 
-    Deliberately NOT ``TraceabilityService.get_destination_locations``: that one
-    intersects with the caller's assigned locations, and a sorter is a member of
-    their waste room only — the intersection is empty, so the tablet would show an
-    empty picker. Authorisation here comes from holding the binding at all; the
-    list is the organisation's destinations.
+    Scoped to the destinations THIS sorter is a member of. The first cut handed
+    over every destination in the organisation, on the reasoning that holding the
+    binding was authorisation enough and that a sorter — a member of their waste
+    room only — would otherwise see an empty picker. That trade stops being
+    acceptable the moment an organisation has more than one: a ผู้คัดแยก at one
+    tower could file a weigh-out against a recycler that belongs to another, and
+    nothing downstream would ever question it.
+
+    So membership on the destination is now the permission, and an admin grants
+    it in the same place they grant every other location. A sorter with no
+    destination membership gets an EMPTY list on purpose: the caller reports
+    "nothing assigned" rather than quietly widening the scope, because a rule
+    that silently falls back to everything is not a rule.
+
+    ``user_id=None`` keeps the organisation-wide list — used by nothing on the
+    weighing path, and never on the write check.
+
+    Deliberately NOT ``TraceabilityService.get_destination_locations``: that
+    intersects with assigned locations *and* their descendants, which pulls in
+    the whole subtree of anything the sorter can see. Here the destination
+    itself must carry the membership.
 
     Two sources, matching the rest of the platform's idea of "a destination":
       • ``type='hub'`` locations — external: recyclers, municipality, landfill
@@ -115,6 +133,10 @@ def list_destinations(db_session, organization_id: Any) -> List[Dict[str, Any]]:
     for row in list(hub_rows) + list(flagged_rows):
         by_id.setdefault(int(row[0]), row[1] or f"Location {row[0]}")
 
+    if user_id is not None:
+        allowed = _member_location_ids(db_session, organization_id, user_id)
+        by_id = {k: v for k, v in by_id.items() if k in allowed}
+
     return [
         {
             'origin_id': loc_id,
@@ -127,18 +149,61 @@ def list_destinations(db_session, organization_id: Any) -> List[Dict[str, Any]]:
     ]
 
 
-def is_allowed_destination(db_session, organization_id: Any, location_id: Any) -> bool:
+def _member_location_ids(db_session, organization_id: Any, user_id: Any) -> set:
+    """Location ids whose ``members`` array carries this user.
+
+    Owners are not special-cased: an owner weighing at a station is subject to
+    the same routing as anyone else, and treating them as unrestricted would put
+    the loosest possible list in front of the account most likely to be shared.
+
+    Best-effort with a CLOSED default: any failure returns the empty set, so a
+    broken read denies rather than opens. That is the opposite of how the rest of
+    this module degrades, and deliberately so — everywhere else a failure costs
+    visibility, here it would cost authorisation.
+    """
+    try:
+        uid = str(int(user_id))
+    except (TypeError, ValueError):
+        return set()
+    try:
+        rows = db_session.execute(text(
+            "SELECT id FROM user_locations "
+            "WHERE organization_id = :org_id "
+            "  AND is_active = TRUE AND deleted_date IS NULL "
+            "  AND EXISTS (SELECT 1 FROM jsonb_array_elements(members) m "
+            "              WHERE m->>'user_id' = :uid)"
+        ), {'org_id': organization_id, 'uid': uid}).fetchall()
+    except Exception as exc:  # noqa: BLE001 — see docstring: closed on failure
+        logger.warning(
+            "[sorter] membership lookup failed for user %s (org %s): %s",
+            user_id, organization_id, exc,
+        )
+        return set()
+    return {int(r[0]) for r in rows if r[0] is not None}
+
+
+def is_allowed_destination(
+    db_session, organization_id: Any, location_id: Any, user_id: Any = None
+) -> bool:
     """Whether a sorter may ship to this location — same list the picker was built from.
 
     Called on write. Without it the destination is whatever the client posted: the
     record path stores ``destination_id`` verbatim with no existence, org or
     liveness check of its own.
+
+    Takes the same ``user_id`` the picker was built with and reaches the same
+    function, so the two cannot drift: narrowing the picker without narrowing
+    this would leave the API accepting every destination in the organisation
+    while the tablet showed one.
     """
     try:
         target = int(location_id)
     except (TypeError, ValueError):
         return False
-    return any(d['origin_id'] == target for d in list_destinations(db_session, organization_id))
+    return any(
+        d['origin_id'] == target
+        for d in list_destinations(db_session, organization_id, user_id)
+    )
 
 
 def _flagged_destination_ids(db_session, organization_id: Any) -> set:
