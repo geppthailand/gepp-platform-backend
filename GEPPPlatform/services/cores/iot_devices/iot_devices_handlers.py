@@ -558,13 +558,31 @@ def handle_get_locations_by_membership(user_service: UserService, query_params: 
         )
         if sorter_location_id:
             try:
-                destinations = list_destinations(db_session, organization_id)
+                destinations = list_destinations(
+                    db_session, organization_id, current_user['user_id']
+                )
             except Exception as exc:  # noqa: BLE001
                 _iot_logger.warning(
                     "[sorter] destination list failed for user %s (org %s), falling back to origins: %s",
                     current_user['user_id'], organization_id, exc,
                 )
                 destinations = None
+            # An EMPTY list is an answer, not a failure: this sorter is a member
+            # of no destination. Falling through to the origin list here would
+            # hand them a picker of ORIGINS labelled as destinations — they would
+            # file a weigh-out to somewhere material comes FROM. Better to return
+            # nothing and have the tablet say so. `None` (a real read failure)
+            # still falls through, which is the pre-existing behaviour.
+            if destinations is not None and len(destinations) == 0:
+                _iot_logger.warning(
+                    "[sorter] user %s (org %s) is bound to station %s but is a member "
+                    "of no destination — returning an empty picker",
+                    current_user['user_id'], organization_id, sorter_location_id,
+                )
+                return {
+                    'success': True,
+                    'data': {'location': {'branches': [], 'buildings': [], 'floors': [], 'rooms': []}},
+                }
             if destinations:
                 return {
                     'success': True,
@@ -1674,7 +1692,8 @@ def handle_iot_devices_routes(event: Dict[str, Any], data: Dict[str, Any], **com
                 if posted_location_id in (None, ''):
                     raise ValidationException('Destination is required')
                 if not is_allowed_destination(
-                    db_session, current_user_organization_id, posted_location_id
+                    db_session, current_user_organization_id, posted_location_id,
+                    current_user_id,
                 ):
                     raise ValidationException(
                         'That destination is not available for this organization'

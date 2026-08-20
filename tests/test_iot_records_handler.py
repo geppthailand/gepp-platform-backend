@@ -76,14 +76,22 @@ class _AutoApproveDb(_FakeDb):
     """
 
     def __init__(self, device_mode=None, org_flag=False, sorter_location_id=None,
-                 destinations=()):
+                 destinations=(), member_of=None):
         self.device_mode = device_mode
         self.org_flag = org_flag
         self.sorter_location_id = sorter_location_id
         self.destinations = list(destinations)
+        # Destinations this sorter is a MEMBER of — the permission that decides
+        # what the picker offers and what the write check accepts. Defaults to
+        # every offered destination, so tests about the payload rewrite stay
+        # about the payload rewrite; the scoping itself is pinned separately in
+        # test_sorter_destination_scope.py and by the route test below.
+        self.member_of = list(self.destinations if member_of is None else member_of)
 
     def execute(self, statement, params=None):
         sql = str(statement)
+        if "jsonb_array_elements(members)" in sql:
+            return _FakeRows([(d,) for d in self.member_of])
         if "sorter_location_id" in sql:
             return _FakeResult((self.sorter_location_id,) if self.sorter_location_id else None)
         if "type = 'hub'" in sql or "id = ANY" in sql:
@@ -580,3 +588,56 @@ def test_a_normal_weighing_still_obeys_the_switches(monkeypatch):
 
     assert data.get("status") != "approved"
     assert service.auto_approvals == []
+
+
+def test_a_sorter_cannot_post_to_a_destination_they_do_not_belong_to(monkeypatch):
+    """Membership on the destination is the permission, and the WRITE path has to
+    enforce it — not just the picker. Narrowing the picker alone would leave the
+    API accepting every destination in the organisation while the tablet showed
+    one, which is a hole rather than a restriction.
+
+    Asserts the write never happened rather than which exception surfaced: sibling
+    modules stub APIException, so asserting on the class tests the import order.
+    """
+    reached_create = []
+
+    def fake_create(service, data, user_id, organization_id, trusted_channel=None):
+        reached_create.append(data)
+        return {"success": True, "transaction": {"id": 4242}}
+
+    monkeypatch.setattr(handlers, "handle_create_transaction", fake_create)
+    monkeypatch.setattr(handlers, "TransactionService", _CapturingTransactionService)
+
+    # The dealer is offered by the organisation but this sorter belongs to 502.
+    db = _AutoApproveDb(
+        sorter_location_id=WASTE_ROOM,
+        destinations=[SCRAP_DEALER, 502],
+        member_of=[502],
+    )
+    try:
+        handlers.handle_iot_devices_routes(
+            _records_event(),
+            data={"data": {"origin_id": SCRAP_DEALER, "records": [{"material_id": 7}]}},
+            db_session=db,
+            method="POST",
+            current_device={"device_id": 3},
+            current_user={"user_id": 5, "organization_id": 10},
+        )
+    except Exception:  # noqa: BLE001 — class identity is not what is under test
+        pass
+
+    assert reached_create == [], "a destination the sorter does not belong to must not be written"
+
+
+def test_a_sorter_can_still_post_to_a_destination_they_belong_to(monkeypatch):
+    """The counterweight: the guard must not lock out the legitimate case."""
+    db = _AutoApproveDb(
+        sorter_location_id=WASTE_ROOM,
+        destinations=[SCRAP_DEALER, 502],
+        member_of=[SCRAP_DEALER],
+    )
+    payload = {"origin_id": SCRAP_DEALER, "records": [{"material_id": 7}]}
+    data, _, _channel = _run_records_route(monkeypatch, db, payload=payload)
+
+    assert data["origin_id"] == WASTE_ROOM
+    assert data["records"][0]["destination_id"] == SCRAP_DEALER
