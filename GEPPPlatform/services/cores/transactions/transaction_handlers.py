@@ -2,10 +2,11 @@
 Transaction API handlers for CRUD operations
 """
 
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import logging
 import traceback
 
+from ..iot_devices.auto_approve import SCALE_TRANSACTION_METHOD
 from .transaction_service import TransactionService
 from .presigned_url_service import TransactionPresignedUrlService
 from GEPPPlatform.services.cores.users.user_service import UserService
@@ -189,10 +190,15 @@ def handle_create_transaction(
     transaction_service: TransactionService,
     data: Dict[str, Any],
     current_user_id: str,
-    current_user_organization_id: int
+    current_user_organization_id: int,
+    trusted_channel: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Handle POST /api/transactions - Create new transaction
+
+    ``trusted_channel='iot'`` marks a request that came through
+    /api/iot-devices/records, where the server itself stamps the scale markers.
+    Any other caller has those markers stripped — see below.
     """
     try:
         # Validate request data
@@ -202,6 +208,19 @@ def handle_create_transaction(
         # Extract transaction data and records data
         transaction_data = data.get('transaction', data)  # Support both nested and flat structure
         transaction_records_data = data.get('transaction_records', data.get('records', []))
+
+        # ── Channel markers are server-stamped, never client-supplied ──────
+        # transaction_method='scale_input' and is_internal_transfer decide real
+        # arithmetic now: which piles are per-weighing, which locations become
+        # collection points, whose kilograms are superseded in the recycling
+        # rate, and what a tank's balance says. The IoT route sets both itself
+        # (stamp_scale_origin / the ผู้คัดแยก branch) from facts it can verify.
+        # Accepting them from an ordinary authenticated client would let anyone
+        # fabricate weigh-outs against any origin they can write to.
+        if trusted_channel != 'iot':
+            if transaction_data.get('transaction_method') == SCALE_TRANSACTION_METHOD:
+                transaction_data.pop('transaction_method', None)
+            transaction_data.pop('is_internal_transfer', None)
 
         # Set organization_id and created_by_id from current user
         transaction_data['organization_id'] = current_user_organization_id

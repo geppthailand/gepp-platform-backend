@@ -1712,6 +1712,16 @@ def handle_iot_devices_routes(event: Dict[str, Any], data: Dict[str, Any], **com
             auto_approve, flag_source = resolve_auto_approve(
                 db_session, device_id, current_user_organization_id
             )
+            # A ผู้คัดแยก's weigh-out is a TRACEABILITY act, not a new waste
+            # intake: the material was already reviewed when it was weighed IN,
+            # and this row only records where it went. It is therefore always
+            # stored approved, regardless of the org/device auto-approve
+            # switches — a pending weigh-out would hold the traceability leg
+            # (created at approval) hostage to a review that has nothing left
+            # to review, and since these rows are hidden from the transaction
+            # list, nobody would ever see it waiting.
+            if sorter_location_id:
+                auto_approve, flag_source = True, 'sorter'
             try:
                 operator_id = int(current_user_id)
             except (TypeError, ValueError):
@@ -1743,7 +1753,11 @@ def handle_iot_devices_routes(event: Dict[str, Any], data: Dict[str, Any], **com
                 transaction_service,
                 data,
                 current_user_id,
-                current_user_organization_id
+                current_user_organization_id,
+                # This IS the scale channel: the markers on `data` were stamped
+                # above by the server (stamp_scale_origin / the ผู้คัดแยก branch),
+                # not sent by the tablet. Every other caller has them stripped.
+                trusted_channel='iot',
             )
 
             transaction_id = None

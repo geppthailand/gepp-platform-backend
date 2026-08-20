@@ -697,14 +697,23 @@ def draw_overview(pdf, page_width_points: float, page_height_points: float, data
     pdf.drawString(margin + pad, ki_y + ki_h - 30, _t('key_indicators', data))
     ki = data["overview_data"]["key_indicators"]
     tw = float(ki.get("total_waste", 0) or 0)
-    rr = float(ki.get("recycle_rate", 0) or 0)
+    # None is "no honest answer for this scope" (material crosses into a shared
+    # sorting room) — NOT zero. `or 0` printed it as a real-looking 0%, which is
+    # worse in an exported document than on screen: nothing around it explains.
+    rr_raw = ki.get("recycle_rate")
+    rr = float(rr_raw) if rr_raw is not None else None
     ghg = float(ki.get("ghg_reduction", 0) or 0)
     norm_base = max(tw, ghg, 1.0)
     row_w = left_col_w - 2 * pad
     row_x = margin + pad
     row_y = ki_y + ki_h - 50
     _label_progress(pdf, row_x, row_y - 24, row_w, _t('total_waste_kg', data), _format_number(tw), tw / norm_base, colors.HexColor("#84b8a3"), colors.HexColor("#e1e7ef"), bar_h=6)
-    _label_progress(pdf, row_x, row_y - 58, row_w, _t('recycling_rate_pct', data), f"{_format_number(rr)}", rr / 100.0, colors.HexColor("#9ac7b5"), colors.HexColor("#e1e7ef"), bar_h=6)
+    _label_progress(
+        pdf, row_x, row_y - 58, row_w, _t('recycling_rate_pct', data),
+        f"{_format_number(rr)}" if rr is not None else "—",
+        (rr / 100.0) if rr is not None else 0.0,
+        colors.HexColor("#9ac7b5"), colors.HexColor("#e1e7ef"), bar_h=6,
+    )
     _label_progress(pdf, row_x, row_y - 92, row_w, _t('ghg_reduction_kgco2e', data), _format_number(ghg), ghg / norm_base, colors.HexColor("#b6d7c9"), colors.HexColor("#e1e7ef"), bar_h=6)
     tr_h = 2.15 * inch
     tr_y = ki_y - 8 - tr_h

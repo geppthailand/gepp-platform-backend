@@ -29,3 +29,11 @@ class TransportTransaction(Base, BaseModel):
     is_root = Column(Boolean, nullable=False, default=True)
     parent_id = Column(BigInteger, ForeignKey("traceability_transport_transactions.id"), nullable=True)
     absolute_percentage = Column(Numeric, nullable=True)
+
+    # Destination is a collection point ("ส่งถึงจุดรวมแล้ว"): terminal for the
+    # SENDER's scope — neither an outcome (no disposal_method; the tank still
+    # ships it) nor an unfinished shipment (nobody drags it onward; the tank's
+    # own weigh-outs continue the story). Set by create/consolidate/update paths
+    # from is_collection_point(destination), never by callers directly.
+    # DEPLOY ORDER: migration 086 must run before code mapping this column ships.
+    delivered_to_collection = Column(Boolean, nullable=False, default=False, server_default='false')
