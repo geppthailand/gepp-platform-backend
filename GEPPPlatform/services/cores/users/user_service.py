@@ -1770,6 +1770,41 @@ class UserService:
             print(f"Error extracting setup location IDs for organization {organization_id}: {str(e)}")
             return None
 
+    def _sorter_bound_location_ids(self, user_ids: Set[int], organization_id: int) -> Set[int]:
+        """Waste rooms these users are bound to sort at, counted as direct membership.
+
+        A ผู้คัดแยก's room is bound by a column, `user_locations.sorter_location_id`
+        (migration 079), deliberately NOT by `user_locations.members`: the org-chart
+        save rewrites that array wholesale, so a membership row there would be
+        destroyed on the next save. See `iot_devices/sorter.py`.
+
+        But access is decided from membership. The scale tablet substitutes the bound
+        room as the ORIGIN of a weigh-out, so without this the write guard sees a
+        location the user is deliberately not a member of and rejects every save —
+        and the pile the weigh-out creates sits at an origin its own author cannot
+        read. Reading the binding here is what makes the two agree.
+
+        Validated exactly as `get_sorter_location_id` validates it: same organisation,
+        active, not deleted. A stale binding grants nothing.
+        """
+        if not user_ids:
+            return set()
+        try:
+            rows = self.db.execute(text(
+                "SELECT loc.id "
+                "FROM user_locations u "
+                "JOIN user_locations loc ON loc.id = u.sorter_location_id "
+                "WHERE u.id = ANY(:user_ids) "
+                "  AND u.organization_id = :org_id "
+                "  AND loc.organization_id = :org_id "
+                "  AND loc.is_active = TRUE "
+                "  AND loc.deleted_date IS NULL"
+            ), {'user_ids': [int(uid) for uid in user_ids], 'org_id': organization_id}).fetchall()
+        except Exception as e:  # noqa: BLE001 — column added by migration 079
+            print(f"[sorter] binding scope lookup failed for organization {organization_id}: {e}")
+            return set()
+        return {int(row[0]) for row in rows}
+
     def _resolve_location_tiers(
         self,
         locations: list,
@@ -1832,6 +1867,10 @@ class UserService:
                 if is_member_of(loc_members, chain_uid):
                     member_loc_ids.add(loc.id if hasattr(loc, 'id') else loc.get('id'))
                     break  # no need to check other chain users for this location
+
+        # A ผู้คัดแยก reaches their waste room through a column, not the members
+        # array, so membership alone leaves them with access to nothing.
+        member_loc_ids |= self._sorter_bound_location_ids(chain_user_ids, organization_id)
 
         if not member_loc_ids:
             return {'is_owner': False, 'assigned_ids': set(), 'ancestor_ids': set(), 'member_ids': set()}

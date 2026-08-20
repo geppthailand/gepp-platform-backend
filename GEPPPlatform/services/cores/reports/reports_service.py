@@ -527,7 +527,8 @@ class ReportsService:
         organization_id: int,
         filters: Optional[Dict[str, Any]] = None,
         current_user_id: Any = None,
-        report_type: str = None
+        report_type: str = None,
+        include_internal_rows: bool = False,
     ) -> Dict[str, Any]:
         """
         Optimized data fetch for overview/comparison/performance reports.
@@ -535,6 +536,19 @@ class ReportsService:
         Returns lightweight rows for fast Python-side aggregation.
 
         If report_type='comparison', date filtering is applied without clamping.
+
+        ``rows`` always means WASTE GENERATED — internal transfers (a ผู้คัดแยก
+        weighing material out of a collection point) are excluded, because those
+        kilograms were already counted when someone weighed them in. Its
+        20-column shape is load-bearing: the materials, performance and
+        comparison handlers unpack these tuples positionally, and shared-org
+        rows are built to match. Do not widen it.
+
+        ``include_internal_rows`` additionally returns those excluded weigh-outs
+        as a SEPARATE list, plus the collection-point stamps needed to tell which
+        generation records they supersede. Only the overview handler asks for
+        this — it is the one report that computes an outcome-based recycling
+        rate, which needs both halves of the ledger.
         """
         try:
             query = self.db.query(
@@ -649,15 +663,158 @@ class ReportsService:
             if shared_rows:
                 rows = list(rows) + shared_rows
 
-            return {
+            result = {
                 'success': True,
                 'rows': rows,
                 'total_records': len(rows),
             }
 
+            if include_internal_rows:
+                result['internal_rows'] = self._fetch_internal_transfer_rows(
+                    organization_id, filters, report_type
+                )
+                result['collection_markers'] = self._fetch_collection_markers(
+                    organization_id, filters, report_type
+                )
+
+            return result
+
         except Exception as e:
             logger.error(f"Error in get_overview_data: {str(e)}")
             raise
+
+    def _fetch_internal_transfer_rows(
+        self,
+        organization_id: int,
+        filters: Optional[Dict[str, Any]],
+        report_type: str = None,
+    ) -> List[Any]:
+        """Weigh-outs from collection points, in the SAME 20-column shape as rows.
+
+        These are the only records that say what actually HAPPENED to material
+        that passed through a ห้องขยะ: a ผู้คัดแยก opened the pile, sorted it, and
+        weighed each stream out to a real destination. They are excluded from
+        "waste generated" (already counted on the way in) but they are exactly
+        what the outcome-based recycling rate must be built from.
+
+        Deliberately NOT passed through ``_apply_active_setup_filter``: the
+        origin here is server-stamped from the ผู้คัดแยก binding, never client
+        input, and collection points routinely live outside the org-chart JSON
+        (bindings are columns precisely so they survive a chart re-import). A
+        setup filter here would silently drop an organisation's only real
+        outcome data. Location/tag/tenant/material filters are likewise not
+        applied — the caller only uses these rows in the unfiltered org scope
+        (see the scope predicate in the overview handler); date filters ARE
+        applied, because the rate is windowed.
+        """
+        query = self.db.query(
+            TransactionRecord.origin_quantity,          # 0
+            TransactionRecord.transaction_date,         # 1
+            TransactionRecord.created_transaction_id,   # 2
+            Transaction.origin_id,                      # 3
+            Transaction.status,                         # 4
+            Material.unit_weight,                       # 5
+            Material.calc_ghg,                          # 6
+            Material.category_id,                       # 7
+            Material.main_material_id,                  # 8
+            Material.tags.label('material_tags'),       # 9
+            TransactionRecord.origin_weight_kg,         # 10
+            TransactionRecord.category_id.label('record_category_id'),          # 11
+            TransactionRecord.main_material_id.label('record_main_material_id'),# 12
+            TransactionRecord.material_id,              # 13
+            Material.name_en.label('material_name_en'), # 14
+            Material.name_th.label('material_name_th'), # 15
+            TransactionRecord.disposal_method,          # 16
+            TransactionRecord.status.label('record_status'),  # 17
+            TransactionRecord.traceability_group_id,        # 18
+            TransactionRecord.id.label('record_id'),        # 19
+        ).join(
+            Transaction,
+            TransactionRecord.created_transaction_id == Transaction.id
+        ).outerjoin(
+            Material,
+            TransactionRecord.material_id == Material.id
+        ).filter(
+            Transaction.organization_id == organization_id,
+            Transaction.deleted_date.is_(None),
+            Transaction.is_internal_transfer.is_(True),
+            Transaction.status == TransactionStatus.approved,
+            TransactionRecord.deleted_date.is_(None),
+            or_(
+                TransactionRecord.status != 'rejected',
+                TransactionRecord.status.is_(None)
+            ),
+        )
+        # Same windowing the generation query uses (both branches of the
+        # comparison/non-comparison split are identical there today).
+        if filters:
+            if filters.get('date_from'):
+                query = query.filter(TransactionRecord.transaction_date >= filters['date_from'])
+            if filters.get('date_to'):
+                query = query.filter(TransactionRecord.transaction_date <= filters['date_to'])
+        return list(query.all())
+
+    def _fetch_collection_markers(
+        self,
+        organization_id: int,
+        filters: Optional[Dict[str, Any]],
+        report_type: str = None,
+    ) -> Dict[int, Dict[str, Any]]:
+        """{transaction_id: {collection_location_id, origin_id, hopless_kg}}.
+
+        Tells the rate which generation records were weighed in AT a collection
+        point and never left it — material that is physically sitting in the
+        room. Those kilograms have no legs to trace and must not be guessed from
+        material category: the room's own weigh-outs will report their fate
+        later, or they are still in the balance.
+
+        ``hopless_kg`` is the pile's weight minus whatever already shipped out
+        of it, so a weigh-in whose records named their own destinations only
+        supersedes the part that actually stayed. Idle roots are NOT shipped —
+        they are the board's "waiting" placeholder and the material is still in
+        the room — so they stay counted as hopless, matching the tank ledger.
+
+        Deliberately unwindowed: markers are looked up BY transaction id from
+        rows that are already date-filtered, so a date predicate here would only
+        re-filter what the caller has already narrowed. ``filters``/
+        ``report_type`` are accepted to keep the fetcher signatures uniform.
+        """
+        out: Dict[int, Dict[str, Any]] = {}
+        try:
+            from sqlalchemy import text as _text
+            rows = self.db.execute(_text(
+                "SELECT t.id, t.collection_location_id, t.origin_id, "
+                "  GREATEST(0, COALESCE(SUM(gp.pile), 0) - COALESCE(SUM(gp.roots), 0)) "
+                "FROM transactions t "
+                "JOIN LATERAL ( "
+                "  SELECT g.id, "
+                "    COALESCE((SELECT SUM(r.origin_weight_kg) FROM transaction_records r "
+                "              WHERE r.id = ANY(g.transaction_record_id) "
+                "                AND r.status = 'approved' AND r.deleted_date IS NULL), 0) AS pile, "
+                "    COALESCE((SELECT SUM(x.weight) FROM traceability_transport_transactions x "
+                "              WHERE x.transaction_group_id = g.id AND x.parent_id IS NULL "
+                "                AND x.status <> 'idle' "
+                "                AND x.is_active = TRUE AND x.deleted_date IS NULL), 0) AS roots "
+                "  FROM traceability_transaction_group g "
+                "  WHERE g.source_transaction_id = t.id "
+                "    AND g.is_active = TRUE AND g.deleted_date IS NULL "
+                ") gp ON TRUE "
+                "WHERE t.organization_id = :org_id "
+                "  AND t.collection_location_id IS NOT NULL "
+                "  AND t.collection_location_id = t.origin_id "
+                "  AND t.status = 'approved' AND t.deleted_date IS NULL "
+                "GROUP BY t.id, t.collection_location_id, t.origin_id"
+            ), {'org_id': organization_id}).fetchall()
+            for tx_id, coll_id, origin_id, hopless in rows:
+                out[int(tx_id)] = {
+                    'collection_location_id': int(coll_id) if coll_id is not None else None,
+                    'origin_id': int(origin_id) if origin_id is not None else None,
+                    'hopless_kg': float(hopless or 0),
+                }
+        except Exception as exc:  # noqa: BLE001 — pre-085 session: no markers yet
+            logger.warning("collection marker read failed for org %s: %s", organization_id, exc)
+            return {}
+        return out
 
     def _should_filter_reports_by_member(self, current_user_id: Any) -> bool:
         """Return True if we should filter by origin/tag/tenant members (non-admin with a role)."""
@@ -841,6 +998,40 @@ class ReportsService:
         if clause is None:
             return query
         return query.filter(clause)
+
+    def visibility_is_unrestricted(self, current_user_id: Any, organization_id: Optional[int] = None) -> bool:
+        """True when this user's report rows are NOT narrowed by member scoping.
+
+        The outcome-based recycling rate is only meaningful over a whole
+        collection-point catchment: the generation half and the weigh-out half
+        must describe the same material. Member scoping narrows the generation
+        half invisibly — no request filter is present, yet the rows are a
+        subset — so a scoped user would get a rate computed from one building's
+        deliveries against the whole site's outcomes. Callers use this to fall
+        back to composition-only reporting instead.
+
+        Mirrors _apply_member_filter_to_transaction_query exactly: a clause is
+        built for everyone except owners, and only a None clause means "no
+        narrowing applied".
+        """
+        if current_user_id is None or organization_id is None:
+            return True
+        try:
+            from ..users.user_service import UserService
+            from ....libs.locationAccess import build_visibility_clause
+
+            scope = UserService(self.db).resolve_access_scope(
+                int(organization_id), int(current_user_id)
+            )
+            return build_visibility_clause(
+                scope,
+                origin_col=Transaction.origin_id,
+                tag_col=Transaction.location_tag_id,
+                tenant_col=Transaction.tenant_id,
+                date_col=Transaction.transaction_date,
+            ) is None
+        except Exception:  # noqa: BLE001 — unknown scope ⇒ assume restricted
+            return False
 
     def _shared_visible_parent_ids(self, organization_id, current_user_id) -> Optional[set]:
         """3-tier ACCESS gate for cross-org shared nodes (passed to _resolve_shared_branches).

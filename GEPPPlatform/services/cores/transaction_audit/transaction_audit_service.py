@@ -555,6 +555,19 @@ class TransactionAuditService:
                     ),
                 )
             )
+            # ใบชั่งออกของผู้คัดแยก (is_internal_transfer) never enters the AI
+            # audit. It is a traceability record — where already-reviewed
+            # material went — not a waste intake with photos to second-guess.
+            # Sweeping it in would let the AI reject it, which withdraws the
+            # tank's outbound legs (the revert hook) on a row that is hidden
+            # from the transaction list, so nobody would ever see the
+            # rejection to overturn it.
+            query = query.filter(Transaction.is_internal_transfer.isnot(True))
+            # Deleted rows were being swept in too (observed on dev: soft-
+            # deleted weighings sat in this queue) — the status filters above
+            # never excluded them. Auditing a deleted transaction burns AI
+            # quota and can flip statuses on a row no list shows any more.
+            query = query.filter(Transaction.deleted_date.is_(None))
             if organization_id:
                 query = query.filter(Transaction.organization_id == organization_id)
 
@@ -2198,6 +2211,37 @@ class TransactionAuditService:
 
             db.commit()
             logger.info(f"Updated {updated_count} transactions. AI audit enabled: {allow_ai_audit}")
+
+            # ── Traceability side-effects, POST-COMMIT and best-effort ──────
+            # The AI verdict is the default pipeline for auto-approved scale
+            # transactions, so it must maintain the same traceability state the
+            # human paths do:
+            #   approved → (re)build piles + auto-hops. _create_first_hops is
+            #     idempotent (finds existing groups, dedupes existing hops), so
+            #     calling it on an intact transaction is a no-op — but after an
+            #     edit reset it is the ONLY thing that rebuilds the pile.
+            #   rejected → withdraw the footprint so the tank balance and the
+            #     board stop counting a weighing that officially never happened.
+            # Runs after the verdict commit on purpose: both helpers manage
+            # their own commit/rollback and must not entangle the verdict batch.
+            if allow_ai_audit:
+                try:
+                    from ..transactions.transaction_service import TransactionService
+                    _txn_svc = TransactionService(db)
+                    for _res in audit_results:
+                        if _res.get('skip_status_update', False):
+                            continue
+                        _tx = db.query(Transaction).filter(
+                            Transaction.id == _res['transaction_id']
+                        ).first()
+                        if not _tx:
+                            continue
+                        if _res.get('audit_status') == 'approved':
+                            _txn_svc._create_first_hops_for_approved_transaction(_tx)
+                        elif _res.get('audit_status') == 'rejected':
+                            _txn_svc.revert_scale_traceability(_tx)
+                except Exception as _hook_err:  # noqa: BLE001
+                    logger.error("Post-audit traceability sync failed: %s", str(_hook_err))
 
             # Verify the data was saved by re-querying
             for result in audit_results:

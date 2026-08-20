@@ -135,8 +135,9 @@ def _run_records_route(monkeypatch, db, payload=None):
     """POST /api/iot-devices/records, returning the payload as create saw it."""
     seen = {}
 
-    def fake_create(service, data, user_id, organization_id):
+    def fake_create(service, data, user_id, organization_id, trusted_channel=None):
         seen["data"] = data
+        seen["trusted_channel"] = trusted_channel
         return {"success": True, "transaction": {"id": 4242}}
 
     monkeypatch.setattr(handlers, "handle_create_transaction", fake_create)
@@ -151,12 +152,12 @@ def _run_records_route(monkeypatch, db, payload=None):
         current_device={"device_id": 3},
         current_user={"user_id": 5, "organization_id": 10},
     )
-    return seen["data"], _CapturingTransactionService.last
+    return seen["data"], _CapturingTransactionService.last, seen.get("trusted_channel")
 
 
 def test_records_stay_pending_when_auto_approve_is_off(monkeypatch):
     """Default for every existing org: nothing about the payload changes."""
-    data, service = _run_records_route(monkeypatch, _AutoApproveDb(org_flag=False))
+    data, service, _channel = _run_records_route(monkeypatch, _AutoApproveDb(org_flag=False))
 
     assert "status" not in data
     assert "approved_by_id" not in data
@@ -165,7 +166,7 @@ def test_records_stay_pending_when_auto_approve_is_off(monkeypatch):
 
 
 def test_org_flag_approves_transaction_and_records(monkeypatch):
-    data, service = _run_records_route(monkeypatch, _AutoApproveDb(org_flag=True))
+    data, service, _channel = _run_records_route(monkeypatch, _AutoApproveDb(org_flag=True))
 
     assert data["status"] == "approved"
     # Both levels — the records drive the audit inbox and the UI status column.
@@ -183,7 +184,7 @@ def test_org_flag_approves_transaction_and_records(monkeypatch):
 
 def test_device_override_off_beats_enabled_org(monkeypatch):
     """One misbehaving scale can be pulled out without touching the org."""
-    data, service = _run_records_route(
+    data, service, _channel = _run_records_route(
         monkeypatch, _AutoApproveDb(device_mode="off", org_flag=True)
     )
 
@@ -193,7 +194,7 @@ def test_device_override_off_beats_enabled_org(monkeypatch):
 
 def test_device_override_on_beats_disabled_org(monkeypatch):
     """...and a single scale can be piloted the same way."""
-    data, service = _run_records_route(
+    data, service, _channel = _run_records_route(
         monkeypatch, _AutoApproveDb(device_mode="on", org_flag=False)
     )
 
@@ -321,7 +322,7 @@ def test_scale_payload_is_stamped_as_iot(monkeypatch):
     """The tablet posts 'manual_input'/'origin' — the server has to correct both, or a
     weighing is indistinguishable from something typed on the web."""
     payload = {'origin_id': 1, 'records': [{'material_id': 7, 'transaction_type': 'manual_input'}]}
-    data, _ = _run_records_route(monkeypatch, _AutoApproveDb(org_flag=False), payload=payload)
+    data, _, _channel = _run_records_route(monkeypatch, _AutoApproveDb(org_flag=False), payload=payload)
 
     assert data['transaction_method'] == 'scale_input'
     assert data['records'][0]['transaction_type'] == 'iot'
@@ -330,7 +331,7 @@ def test_scale_payload_is_stamped_as_iot(monkeypatch):
 def test_source_is_stamped_even_when_auto_approve_is_off(monkeypatch):
     """Channel and approval are independent: turning auto-approval off must not make
     scale rows anonymous again."""
-    data, service = _run_records_route(monkeypatch, _AutoApproveDb(org_flag=False))
+    data, service, _channel = _run_records_route(monkeypatch, _AutoApproveDb(org_flag=False))
 
     assert data['transaction_method'] == 'scale_input'
     assert 'status' not in data
@@ -398,7 +399,7 @@ def test_sorter_post_is_read_the_other_way_round(monkeypatch):
     """The tablet was offered destinations, so the id it posted is where the
     material WENT — the origin is the sorter's own waste room."""
     payload = {"origin_id": SCRAP_DEALER, "records": [{"material_id": 7}]}
-    data, _ = _run_records_route(monkeypatch, _sorter_db(), payload=payload)
+    data, _, _channel = _run_records_route(monkeypatch, _sorter_db(), payload=payload)
 
     assert data["origin_id"] == WASTE_ROOM
     assert data["records"][0]["destination_id"] == SCRAP_DEALER
@@ -412,7 +413,7 @@ def test_sorter_post_is_marked_as_an_internal_transfer(monkeypatch):
     and the reports leave labelled rows out of waste-generated totals.
     """
     payload = {"origin_id": SCRAP_DEALER, "records": [{"material_id": 7}]}
-    data, _ = _run_records_route(monkeypatch, _sorter_db(), payload=payload)
+    data, _, _channel = _run_records_route(monkeypatch, _sorter_db(), payload=payload)
 
     assert data["is_internal_transfer"] is True
 
@@ -423,7 +424,7 @@ def test_a_normal_weighing_is_not_an_internal_transfer(monkeypatch):
     Absence matters as much as presence here: mark this one and an organization's
     reported tonnage silently drops to zero.
     """
-    data, _ = _run_records_route(monkeypatch, _AutoApproveDb(org_flag=False))
+    data, _, _channel = _run_records_route(monkeypatch, _AutoApproveDb(org_flag=False))
 
     assert data.get("is_internal_transfer") is not True
 
@@ -432,7 +433,7 @@ def test_sorter_post_records_provenance(monkeypatch):
     """A server-substituted origin must be identifiable afterwards — the payload
     alone no longer explains what happened."""
     payload = {"origin_id": SCRAP_DEALER, "records": [{"material_id": 7}]}
-    data, _ = _run_records_route(monkeypatch, _sorter_db(), payload=payload)
+    data, _, _channel = _run_records_route(monkeypatch, _sorter_db(), payload=payload)
 
     assert f"Sorted at #{WASTE_ROOM}" in data["notes"]
     assert f"destination #{SCRAP_DEALER}" in data["notes"]
@@ -449,7 +450,7 @@ def test_sorter_cannot_post_to_a_destination_never_offered(monkeypatch):
     """
     reached_create = []
 
-    def fake_create(service, data, user_id, organization_id):
+    def fake_create(service, data, user_id, organization_id, trusted_channel=None):
         reached_create.append(data)
         return {"success": True, "transaction": {"id": 4242}}
 
@@ -473,7 +474,7 @@ def test_sorter_cannot_post_to_a_destination_never_offered(monkeypatch):
 
 def test_sorter_stamping_still_marks_the_row_as_scale_sourced(monkeypatch):
     payload = {"origin_id": SCRAP_DEALER, "records": [{"material_id": 7}]}
-    data, _ = _run_records_route(monkeypatch, _sorter_db(), payload=payload)
+    data, _, _channel = _run_records_route(monkeypatch, _sorter_db(), payload=payload)
 
     assert data["transaction_method"] == "scale_input"
     assert data["records"][0]["transaction_type"] == "iot"
@@ -482,10 +483,100 @@ def test_sorter_stamping_still_marks_the_row_as_scale_sourced(monkeypatch):
 def test_weigher_payload_is_untouched_when_there_is_no_binding(monkeypatch):
     """Regression: everyone without a binding must behave exactly as before."""
     payload = {"origin_id": 2445, "records": [{"material_id": 7}]}
-    data, _ = _run_records_route(
+    data, _, _channel = _run_records_route(
         monkeypatch, _AutoApproveDb(sorter_location_id=None), payload=payload
     )
 
     assert data["origin_id"] == 2445
     assert data["records"][0].get("destination_id") is None
     assert "notes" not in data
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Channel markers (migration 086).
+#
+# transaction_method='scale_input' and is_internal_transfer stopped being
+# labels the day the tank model shipped: they now decide which piles are
+# per-weighing, which locations become collection points, whose kilograms
+# get superseded in the recycling rate, and what a tank's balance says.
+# The server stamps them from facts it can verify; a client must not be
+# able to assert them. These pin the trust boundary at the route.
+# ─────────────────────────────────────────────────────────────────────
+
+
+def test_the_scale_route_declares_itself_the_trusted_channel(monkeypatch):
+    """Without this the create handler strips the very markers the route
+    just stamped, and every weighing degrades to an ordinary web entry."""
+    _data, _service, channel = _run_records_route(
+        monkeypatch, _AutoApproveDb(org_flag=False)
+    )
+    assert channel == "iot"
+
+
+def test_the_trusted_channel_is_declared_for_a_sorter_too(monkeypatch):
+    """The weigh-out carries is_internal_transfer, which is what keeps its
+    kilograms out of "waste generated" and inside the tank's outflow."""
+    payload = {"origin_id": SCRAP_DEALER, "records": [{"material_id": 7}]}
+    data, _service, channel = _run_records_route(
+        monkeypatch, _sorter_db(), payload=payload
+    )
+    assert channel == "iot"
+    assert data["is_internal_transfer"] is True
+
+
+# ─────────────────────────────────────────────────────────────────────
+# The weigh-out is a TRACEABILITY act, not a waste intake.
+#
+# The material was already reviewed when it was weighed IN; this row only
+# records where it went. So it is always stored approved — no switch can
+# park it as pending — and it is hidden from the transaction list (see
+# list_transactions) and never swept into the AI audit. A pending or
+# AI-rejected weigh-out would be invisible everywhere a human looks,
+# holding the tank's outbound legs hostage to a review nobody can perform.
+# ─────────────────────────────────────────────────────────────────────
+
+
+def test_sorter_weigh_out_is_approved_even_with_every_switch_off(monkeypatch):
+    """Device override unset, org flag off — the exact configuration that
+    parks a normal weighing as pending must still approve a weigh-out."""
+    payload = {"origin_id": SCRAP_DEALER, "records": [{"material_id": 7}]}
+    data, _, _channel = _run_records_route(
+        monkeypatch, _sorter_db(device_mode=None, org_flag=False), payload=payload
+    )
+
+    assert data["status"] == "approved"
+    assert data["records"][0]["status"] == "approved"
+
+
+def test_sorter_forced_approval_is_attributed_to_the_binding(monkeypatch):
+    """The audit note must say WHY this was machine-approved: 'sorter', not a
+    device or org switch that was in fact off."""
+    payload = {"origin_id": SCRAP_DEALER, "records": [{"material_id": 7}]}
+    _data, service, _channel = _run_records_route(
+        monkeypatch, _sorter_db(device_mode=None, org_flag=False), payload=payload
+    )
+
+    assert len(service.auto_approvals) == 1
+    assert service.auto_approvals[0]["flag_source"] == "sorter"
+
+
+def test_a_device_switched_OFF_cannot_park_a_weigh_out_as_pending(monkeypatch):
+    """The per-device kill switch beats the org flag for weigh-INS; the
+    weigh-out is not that fight — it must approve regardless."""
+    payload = {"origin_id": SCRAP_DEALER, "records": [{"material_id": 7}]}
+    data, _, _channel = _run_records_route(
+        monkeypatch, _sorter_db(device_mode="off", org_flag=True), payload=payload
+    )
+
+    assert data["status"] == "approved"
+
+
+def test_a_normal_weighing_still_obeys_the_switches(monkeypatch):
+    """Regression: the forced approval is scoped to the sorter binding —
+    a weigher's intake with everything off must stay pending for review."""
+    data, service, _channel = _run_records_route(
+        monkeypatch, _AutoApproveDb(device_mode=None, org_flag=False)
+    )
+
+    assert data.get("status") != "approved"
+    assert service.auto_approvals == []

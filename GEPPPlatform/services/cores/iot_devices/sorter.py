@@ -38,6 +38,11 @@ def get_sorter_location_id(db_session, user_id: Any, organization_id: Any) -> Op
     organization, active, not soft-deleted. A sorter whose waste room was deleted
     must fall back to the weigher path — not post material onto a dead location
     that reports will silently drop.
+
+    The USER row is validated the same way: a deactivated sorter's still-live
+    token must stop producing weigh-outs for a dead station — the tank balance
+    counts every weigh-out as outflow, so a ghost account would silently drain a
+    tank nobody can inspect.
     """
     if not user_id or not organization_id:
         return None
@@ -48,6 +53,8 @@ def get_sorter_location_id(db_session, user_id: Any, organization_id: Any) -> Op
             "JOIN user_locations loc ON loc.id = u.sorter_location_id "
             "WHERE u.id = :user_id "
             "  AND u.organization_id = :org_id "
+            "  AND u.is_active = TRUE "
+            "  AND u.deleted_date IS NULL "
             "  AND loc.organization_id = :org_id "
             "  AND loc.is_active = TRUE "
             "  AND loc.deleted_date IS NULL"

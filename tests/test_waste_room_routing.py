@@ -26,6 +26,13 @@ class _Q:
     def filter(self, *_a, **_k):
         return self
 
+    def order_by(self, *_a, **_k):
+        # The setup lookup picks the newest active row, matching how the tablet's
+        # own picker chooses one — resolving against a different chart version
+        # than the picker used would route material to a tank the operator was
+        # never shown.
+        return self
+
     def first(self):
         return self._single
 

@@ -8,12 +8,15 @@ import csv
 import os
 import json
 import ast
+import logging
 import math
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 import boto3
 
 from .reports_service import ReportsService
+
+logger = logging.getLogger(__name__)
 from .ghg_equivalents import kg_co2_to_trees, kg_co2_to_forest_rai
 from ..transactions.presigned_url_service import TransactionPresignedUrlService
 from ....exceptions import APIException, ValidationException, NotFoundException
@@ -22,6 +25,44 @@ from GEPPPlatform.models.users.user_location import UserLocation
 from GEPPPlatform.models.transactions.transactions import TransactionStatus
 
 # ========== HELPER FUNCTIONS ==========
+
+def resolve_rate_presentation(
+    outcome_scope: bool,
+    scope_touches_tank: bool,
+    measured: float,
+    estimate: float,
+) -> Tuple[Optional[float], str, Optional[float]]:
+    """Which recycling rate a scope gets to see, and what it must be called.
+
+    Returns (rate | None, basis, toggle_estimate | None).
+
+    The rule is one sentence: a rate is suppressed ONLY where the tank model
+    actually bites. Everything else keeps a number — labelled, so nobody
+    mistakes an estimate for a measurement.
+
+      • scope never meets a tank → the pre-tank ESTIMATE, exactly the number
+        every report showed before collection points existed. This covers every
+        pre-scale organization in every view, and the filtered corners of a
+        scale site its tanks never touch. (measured == estimate here anyway:
+        with nothing delivered, the supersede is a no-op.)
+      • org-wide scope of a tank site → the MEASURED rate ('outcome'), plus the
+        estimate for a view-only toggle — people who watched the old number for
+        years deserve to see both and understand the drop, without a switch
+        that changes the official figure.
+      • narrowed scope that touches a tank → None ('unavailable'). One tenant's
+        deliveries measured against a shared room's outcomes is a wrong number,
+        not a conservative one; the UI leads with separation quality and the
+        kilograms still sitting in the room instead.
+
+    Pure function — all four inputs are already computed by the overview
+    handler — so the whole presentation policy is testable without a database.
+    """
+    if not scope_touches_tank:
+        return estimate, 'estimate', None
+    if outcome_scope:
+        return measured, 'outcome', estimate
+    return None, 'unavailable', None
+
 
 def _validate_organization_id(current_user: Dict[str, Any]) -> int:
     """Validate and extract organization_id from current_user"""
@@ -485,9 +526,35 @@ def _handle_overview_report(
     result = reports_service.get_overview_data(
         organization_id=organization_id,
         filters=filters if filters else None,
-        current_user_id=current_user_id
+        current_user_id=current_user_id,
+        include_internal_rows=True,
     )
     rows = result.get('rows', [])
+    internal_rows = result.get('internal_rows') or []
+    collection_markers = result.get('collection_markers') or {}
+
+    # ── Scope predicate for the OUTCOME-based rate ─────────────────────────
+    # The outcome rate compares what a site GENERATED against what its
+    # collection points actually SHIPPED. That comparison is only sound when
+    # both halves describe the same material. Any narrowing of the generation
+    # half — a request filter, or invisible member scoping — breaks it: one
+    # tenant's deliveries would be measured against the whole building's
+    # outcomes, and a filter on the waste room itself would show ~0 generated
+    # beside every outcome in the org. So narrowing switches the page to
+    # composition reporting (what was handed over, how well it was separated)
+    # and reports the outcome rate as unavailable rather than as a wrong number.
+    _scope_filter_keys = (
+        'origin_ids', 'origin_combos', 'location_ids', 'destination_ids',
+        'filter_tag_ids', 'filter_tenant_ids', 'location_tag_id', 'tenant_id',
+        'material_ids',
+    )
+    _has_scope_filter = bool(filters) and any(
+        filters.get(k) is not None for k in _scope_filter_keys
+    )
+    outcome_scope = (
+        not _has_scope_filter
+        and reports_service.visibility_is_unrestricted(current_user_id, organization_id)
+    )
 
     # Tuple indices from query:
     # 0: origin_quantity, 1: transaction_date, 2: created_transaction_id,
@@ -508,6 +575,7 @@ def _handle_overview_report(
 
     # Collect per-record data for 3-tier recycling rate calculation
     record_weights = []  # (weight, calc_ghg, cat_id, group_id)
+    record_tx_ids = []   # parallel to record_weights: the weighing each came from
     record_origins = []  # (origin_id, weight, calc_ghg, cat_id, group_id) for origin_waste_map
     all_record_ids = []  # collect record IDs for group mapping
 
@@ -564,6 +632,10 @@ def _handle_overview_report(
 
         # Temporarily store with record_id; group_id will be resolved below
         record_weights.append((weight, calc_ghg, cat_id, record_id))
+        # Parallel to record_weights: which weighing each record came from, so
+        # the collection-point markers (keyed by transaction) can be attributed
+        # back to individual records.
+        record_tx_ids.append(tx_id)
         if origin_id is not None:
             record_origins.append((origin_id, weight, calc_ghg, cat_id, record_id))
         all_record_ids.append(record_id)
@@ -576,7 +648,7 @@ def _handle_overview_report(
     # This is the source of truth — does not depend on the reverse pointer (traceability_group_id column)
     from ....models.transactions.traceability_transaction_group import TraceabilityTransactionGroup
     record_to_group = {}
-    if all_record_ids:
+    if all_record_ids or internal_rows:
         groups = reports_service.db.query(
             TraceabilityTransactionGroup.id,
             TraceabilityTransactionGroup.transaction_record_id,
@@ -601,12 +673,109 @@ def _handle_overview_report(
     ]
     group_ids = {gid for _, _, _, gid in record_weights if gid is not None}
 
+    # ── Two-scope rate assembly ────────────────────────────────────────────
+    # GENERATION set (record_weights, built above from `rows`) answers "how much
+    # waste did this site produce" — unchanged, and every card that reports
+    # tonnage keeps reading it.
+    #
+    # RATE set = the generation set MINUS material handed over to a collection
+    # point, PLUS that point's own weigh-outs. Those weigh-outs are the only
+    # records that say what actually happened to the material: someone opened
+    # the pile, sorted it, and shipped each stream to a real destination.
+    # Without them a scale-run site reports its outcomes as a guess from
+    # material category; with them, and without the supersede, it reports the
+    # same kilograms twice.
+    rate_record_weights = list(record_weights)
+    # Material weighed in AT a collection point that never left it: no legs to
+    # trace, so the leaf-based supersede cannot see it. Attribute the marker's
+    # hopless remainder across that transaction's records by weight. Built in
+    # EVERY scope: a narrowed scope does not report an outcome rate, but it must
+    # still be able to say how much of its material is waiting in a sorting room.
+    superseded_by_record: Dict[int, float] = {}
+    marker_rows: Dict[int, list] = {}
+    for _idx, _tx_id in enumerate(record_tx_ids):
+        if _tx_id in collection_markers:
+            marker_rows.setdefault(_tx_id, []).append(_idx)
+    for _tx_id, _idxs in marker_rows.items():
+        hopless = float(collection_markers[_tx_id].get('hopless_kg') or 0)
+        if hopless <= 0:
+            continue
+        tx_total = sum(rate_record_weights[i][0] for i in _idxs)
+        if tx_total <= 0:
+            continue
+        for i in _idxs:
+            share = rate_record_weights[i][0] / tx_total
+            superseded_by_record[i] = hopless * share
+
+    if outcome_scope:
+        # The weigh-outs join the rate set. Ones whose approve-time hook failed
+        # have no traceability group: excluded rather than category-guessed,
+        # because a groupless weigh-out would replace a real measurement with
+        # exactly the guess this whole mechanism exists to remove.
+        for irow in internal_rows:
+            _rid = irow[19]
+            _gid = record_to_group.get(_rid)
+            if _gid is None:
+                logger.warning(
+                    "[overview] internal transfer record %s has no traceability group; "
+                    "excluded from the recycling rate", _rid,
+                )
+                continue
+            _w = float(irow[0] or 0) * float(irow[5] or 0)
+            rate_record_weights.append((_w, float(irow[6] or 0), irow[7] or irow[11], _gid))
+        group_ids = group_ids | {
+            gid for _, _, _, gid in rate_record_weights if gid is not None
+        }
+
     # 3-tier recycling rate calculation using traceability data
     group_leaf_data, group_completion = fetch_group_leaf_data(reports_service.db, group_ids)
-    recyclable_waste, recyclable_ghg_reduction, _, traceability_fully_managed = compute_recycling_rate(
-        record_weights, group_leaf_data, group_completion
+    recyclable_waste, recyclable_ghg_reduction, _, traceability_fully_managed, rate_total = compute_recycling_rate(
+        rate_record_weights, group_leaf_data, group_completion,
+        supersede_delivered=outcome_scope,
+        superseded_by_record=superseded_by_record if outcome_scope else None,
     )
-    recycle_rate = ((recyclable_waste / total_waste) * 100) if total_waste > 0 else 0.0
+    recycle_rate = ((recyclable_waste / rate_total) * 100) if rate_total > 0 else 0.0
+
+    # Does THIS scope's material ever meet a tank? This one signal decides how
+    # the rate is presented. Suppressing the rate is only honest where the tank
+    # model actually bites — material handed into a shared room, so a narrowed
+    # generation set can no longer be matched against outcomes. Everywhere else
+    # (every pre-scale organization, and any filtered corner of a scale site the
+    # tanks never touch) the pre-tank estimate is exactly as valid as it was the
+    # day before this feature shipped, and hiding it there just breaks reports
+    # people already rely on. Both inputs are already in hand — no extra query.
+    scope_touches_tank = bool(superseded_by_record) or any(
+        leaf.get('delivered')
+        for leaves in group_leaf_data.values()
+        for leaf in leaves
+    )
+
+    # The pre-tank number: generation set only, no supersede — byte-for-byte
+    # what every report showed before collection points existed. Serves two
+    # jobs: the primary rate wherever the scope never meets a tank, and the
+    # "ประมาณการ" side of the org-scope toggle so the UI can flip views without
+    # a second request. Same in-memory data, no extra query.
+    _est_recyclable, _est_ghg, _, _, _est_total = compute_recycling_rate(
+        record_weights, group_leaf_data, group_completion,
+    )
+    recycle_rate_estimate = ((_est_recyclable / _est_total) * 100) if _est_total > 0 else 0.0
+
+    recycle_rate_out, recycle_rate_basis, recycle_rate_toggle = resolve_rate_presentation(
+        outcome_scope, scope_touches_tank, recycle_rate, recycle_rate_estimate
+    )
+
+    # How much of THIS scope's material is sitting in a sorting room waiting for
+    # an outcome. In a narrowed scope this is the only honest thing to say about
+    # the missing rate, so it has to be measured even though the rate itself is
+    # not reported — the supersede pass above ran with the flag OFF there, and
+    # would have returned zero. Measured over the generation set alone: the
+    # weigh-outs are somebody else's scope by definition.
+    _, _, _gen_total, _, _gen_rate_total = compute_recycling_rate(
+        record_weights, group_leaf_data, group_completion,
+        supersede_delivered=True,
+        superseded_by_record=superseded_by_record,
+    )
+    superseded_kg = round(max(0.0, _gen_total - _gen_rate_total), 2)
 
     # Build origin_waste_map using 3-tier recyclable logic
     origin_waste_map = {}
@@ -683,12 +852,91 @@ def _handle_overview_report(
         if headcount and headcount > 0 else None
     )
 
+    # ── Separation quality ("ฝีมือคัดแยก") ─────────────────────────────────
+    # What a tenant CAN be measured on. Their material's final fate is decided
+    # in a shared sorting room and cannot honestly be attributed back to them —
+    # but how cleanly they handed it over is entirely theirs, differs between
+    # good and careless tenants, and moves in the right direction when they
+    # improve. This is the number a filtered (per-tenant) view leads with.
+    # Same category set the rate's own fallback tier uses — imported, not
+    # retyped, so the two can never drift apart.
+    from .recycling_rate_helper import _RECYCLABLE_CATEGORIES
+    separation_recyclable = sum(
+        w for w, _ghg, cat, _g in record_weights if cat in _RECYCLABLE_CATEGORIES
+    )
+    separation_rate = (
+        round(separation_recyclable / total_waste * 10000) / 100
+        if total_waste > 0 else 0.0
+    )
+
+    # Material still sitting in collection points, in this scope. Org scope: the
+    # sum of every tank's balance. Narrowed scope: what this scope handed over
+    # and is still awaiting an outcome for. Either way it explains the gap
+    # between "generated" and "accounted for" instead of leaving it unexplained.
+    collection_shortfall_kg = 0.0
+    collection_points_negative = 0
+    if outcome_scope:
+        try:
+            from ..traceability.traceability_service import TraceabilityService
+            _tsvc = TraceabilityService(reports_service.db)
+            # Cumulative to the END of the VIEWED window, not to today: the card
+            # sits beside date-filtered totals, and "what is still in the rooms"
+            # next to January's tonnage has to mean January. date_to is stored as
+            # a UTC ISO string; the ledger buckets by Bangkok months like the
+            # board does, so convert before taking year/month.
+            _as_of = datetime.now(ZoneInfo('Asia/Bangkok'))
+            _date_to_raw = (filters or {}).get('date_to')
+            if _date_to_raw:
+                try:
+                    _dt = datetime.fromisoformat(str(_date_to_raw).replace('Z', '+00:00'))
+                    if _dt.tzinfo is None:
+                        _dt = _dt.replace(tzinfo=timezone.utc)
+                    _as_of = _dt.astimezone(ZoneInfo('Asia/Bangkok'))
+                except (ValueError, TypeError):
+                    pass
+            _cps = _tsvc._collection_point_balances(organization_id, _as_of.year, _as_of.month)
+            # Same roll-up the board uses, so the two screens can never disagree:
+            # stock and shortfall stay separate rather than cancelling out.
+            _summary = _tsvc.summarise_collection_balances(_cps)
+            in_collection_kg = _summary['in_collection_kg']
+            collection_shortfall_kg = _summary['shortfall_kg']
+            collection_points_negative = _summary['negative_points']
+        except Exception as _cp_err:  # noqa: BLE001
+            logger.warning("[overview] collection balance read failed: %s", _cp_err)
+            in_collection_kg = superseded_kg
+    else:
+        # A narrowed scope reports what IT handed over and is still waiting on;
+        # a shortfall belongs to the room, which is org-level by nature.
+        in_collection_kg = superseded_kg
+
     return {
         'transactions_total': len(tx_ids),
         'transactions_approved': len(tx_approved),
         'key_indicators': {
             'total_waste': round(total_waste * 100) / 100,
-            'recycle_rate': recycle_rate,
+            # See resolve_rate_presentation for the whole policy. None (not 0)
+            # only where an answer would be wrong — a narrowed scope whose
+            # material meets a tank; the UI shows "อยู่ระหว่างจัดการโดยจุดรวม"
+            # with in_collection_kg there instead. recycle_rate_estimate is the
+            # pre-tank number, non-null only when it rides along as the
+            # view-toggle counterpart of a measured rate.
+            'recycle_rate': recycle_rate_out,
+            'recycle_rate_basis': recycle_rate_basis,
+            'recycle_rate_estimate': recycle_rate_toggle,
+            # GHG saved is derived from what counts as recycled, so it belongs to
+            # the SAME basis as the rate. Without this the view toggle moved the
+            # rate while the GHG figure sat still, quietly mixing a measured
+            # number with an estimated one on the same card.
+            'ghg_reduction_estimate': (
+                round(_est_ghg * 100) / 100 if recycle_rate_toggle is not None else None
+            ),
+            'separation_rate': separation_rate,
+            'in_collection_kg': in_collection_kg,
+            # More has left the collection points than ever arrived there —
+            # waste reaching a room without passing the scale, or a bad
+            # weighing. Positive number; 0 means every room balances.
+            'collection_shortfall_kg': collection_shortfall_kg,
+            'collection_points_negative': collection_points_negative,
             'ghg_reduction': round(recyclable_ghg_reduction * 100) / 100,
             'total_ghg_generated': round(ghg_reduction * 100) / 100,
         },
@@ -1370,8 +1618,12 @@ def _handle_performance_report(
         # Split Waste to Energy out of General Waste
         _split_waste_to_energy(material_metrics, cat_mm_map, _perf_gw_mm_id, category_names)
 
-        # 3-tier recycling rate using pre-fetched traceability data
-        recyclable_weight, _, _, node_fully_traced = compute_recycling_rate(
+        # 3-tier recycling rate using pre-fetched traceability data.
+        # supersede_delivered stays OFF here: this report answers "what did each
+        # node hand over, by composition" — the two-scope outcome arithmetic is
+        # the overview's job, and switching it on would zero out every tenant
+        # node while the local denominator kept their full weight.
+        recyclable_weight, _, _, node_fully_traced, _ = compute_recycling_rate(
             node_record_weights, perf_group_leaf_data, perf_group_completion
         )
         if not node_fully_traced:
