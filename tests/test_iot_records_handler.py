@@ -76,7 +76,7 @@ class _AutoApproveDb(_FakeDb):
     """
 
     def __init__(self, device_mode=None, org_flag=False, sorter_location_id=None,
-                 destinations=(), member_of=None):
+                 destinations=(), member_of=None, dest_materials=None):
         self.device_mode = device_mode
         self.org_flag = org_flag
         self.sorter_location_id = sorter_location_id
@@ -87,9 +87,16 @@ class _AutoApproveDb(_FakeDb):
         # about the payload rewrite; the scoping itself is pinned separately in
         # test_sorter_destination_scope.py and by the route test below.
         self.member_of = list(self.destinations if member_of is None else member_of)
+        # What each destination accepts. Empty/absent = not configured = accepts
+        # anything, which is the platform convention and the default here so
+        # existing tests stay about what they were about.
+        self.dest_materials = dict(dest_materials or {})
 
     def execute(self, statement, params=None):
         sql = str(statement)
+        if "SELECT id, materials FROM user_locations" in sql:
+            wanted = (params or {}).get('ids') or []
+            return _FakeRows([(i, self.dest_materials.get(i)) for i in wanted])
         if "jsonb_array_elements(members)" in sql:
             return _FakeRows([(d,) for d in self.member_of])
         if "sorter_location_id" in sql:
@@ -640,4 +647,65 @@ def test_a_sorter_can_still_post_to_a_destination_they_belong_to(monkeypatch):
     data, _, _channel = _run_records_route(monkeypatch, db, payload=payload)
 
     assert data["origin_id"] == WASTE_ROOM
+    assert data["records"][0]["destination_id"] == SCRAP_DEALER
+
+
+def test_a_sorter_cannot_post_a_material_the_destination_does_not_accept(monkeypatch):
+    """The picker narrows the list; this is what makes it mean something. A tablet
+    holding a list cached from before a config change would otherwise still post
+    the old material, and nothing downstream compares material to destination."""
+    reached_create = []
+
+    def fake_create(service, data, user_id, organization_id, trusted_channel=None):
+        reached_create.append(data)
+        return {"success": True, "transaction": {"id": 4242}}
+
+    monkeypatch.setattr(handlers, "handle_create_transaction", fake_create)
+    monkeypatch.setattr(handlers, "TransactionService", _CapturingTransactionService)
+
+    db = _AutoApproveDb(
+        sorter_location_id=WASTE_ROOM,
+        destinations=[SCRAP_DEALER],
+        dest_materials={SCRAP_DEALER: [290, 94]},
+    )
+    try:
+        handlers.handle_iot_devices_routes(
+            _records_event(),
+            data={"data": {"origin_id": SCRAP_DEALER, "records": [{"material_id": 7}]}},
+            db_session=db,
+            method="POST",
+            current_device={"device_id": 3},
+            current_user={"user_id": 5, "organization_id": 10},
+        )
+    except Exception:  # noqa: BLE001 — class identity is not what is under test
+        pass
+
+    assert reached_create == [], "a material the destination does not accept must not be written"
+
+
+def test_an_accepted_material_still_goes_through(monkeypatch):
+    """The counterweight: the guard must not block the legitimate weigh-out."""
+    db = _AutoApproveDb(
+        sorter_location_id=WASTE_ROOM,
+        destinations=[SCRAP_DEALER],
+        dest_materials={SCRAP_DEALER: [290, 94]},
+    )
+    payload = {"origin_id": SCRAP_DEALER, "records": [{"material_id": 94}]}
+    data, _, _channel = _run_records_route(monkeypatch, db, payload=payload)
+
+    assert data["origin_id"] == WASTE_ROOM
+    assert data["records"][0]["destination_id"] == SCRAP_DEALER
+
+
+def test_an_unconfigured_destination_accepts_anything(monkeypatch):
+    """Empty materials means the organisation never limited this destination, so
+    the guard must not invent a limit."""
+    db = _AutoApproveDb(
+        sorter_location_id=WASTE_ROOM,
+        destinations=[SCRAP_DEALER],
+        dest_materials={SCRAP_DEALER: []},
+    )
+    payload = {"origin_id": SCRAP_DEALER, "records": [{"material_id": 7}]}
+    data, _, _channel = _run_records_route(monkeypatch, db, payload=payload)
+
     assert data["records"][0]["destination_id"] == SCRAP_DEALER

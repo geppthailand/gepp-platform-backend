@@ -25,6 +25,8 @@ from GEPPPlatform.services.cores.iot_devices.auto_approve import (
     stamp_scale_origin,
 )
 from GEPPPlatform.services.cores.iot_devices.sorter import (
+    allowed_material_ids,
+    filter_materials,
     get_sorter_location_id,
     is_allowed_destination,
     list_destinations,
@@ -584,11 +586,29 @@ def handle_get_locations_by_membership(user_service: UserService, query_params: 
                     'data': {'location': {'branches': [], 'buildings': [], 'floors': [], 'rooms': []}},
                 }
             if destinations:
+                # Only the materials this sorter's destinations actually accept.
+                # The tablet holds ONE material list per session and copies it to
+                # every location itself, so this union is as narrow as the scale
+                # can be told without an app change — and for the common case of
+                # one destination it is exactly that destination's list.
+                _allowed = allowed_material_ids(
+                    db_session, organization_id, [d['origin_id'] for d in destinations]
+                )
+                _materials = filter_materials(_get_cached_materials(db_session), _allowed)
+                if _allowed is not None and not _materials:
+                    # Configured down to nothing that still exists: say so rather
+                    # than shipping an empty picker the operator cannot act on.
+                    _iot_logger.warning(
+                        "[sorter] user %s (org %s): destinations accept material ids %s, "
+                        "none of which are live — falling back to the full list",
+                        current_user['user_id'], organization_id, sorted(_allowed),
+                    )
+                    _materials = _get_cached_materials(db_session)
                 return {
                     'success': True,
                     'data': {
                         'locations': destinations,
-                        'materials': _get_cached_materials(db_session),
+                        'materials': _materials,
                     },
                 }
             if destinations is not None:
@@ -1698,6 +1718,28 @@ def handle_iot_devices_routes(event: Dict[str, Any], data: Dict[str, Any], **com
                     raise ValidationException(
                         'That destination is not available for this organization'
                     )
+                # The picker narrowed the list; this makes it mean something. A
+                # tablet holding a list cached from before a config change would
+                # otherwise still post material the destination no longer accepts,
+                # and nothing downstream looks at material against destination.
+                _dest_allowed = allowed_material_ids(
+                    db_session, current_user_organization_id, [posted_location_id]
+                )
+                if _dest_allowed is not None:
+                    for _rec in (data.get('records') or []):
+                        if not isinstance(_rec, dict):
+                            continue
+                        _mid = _rec.get('material_id')
+                        if _mid in (None, ''):
+                            continue
+                        try:
+                            _mid_int = int(_mid)
+                        except (TypeError, ValueError):
+                            raise ValidationException('material_id must be an integer')
+                        if _mid_int not in _dest_allowed:
+                            raise ValidationException(
+                                'That material is not accepted at the selected destination'
+                            )
                 data['origin_id'] = sorter_location_id
                 # These kilograms were already weighed in from the tenant that
                 # produced them, so counting them again as waste generated would

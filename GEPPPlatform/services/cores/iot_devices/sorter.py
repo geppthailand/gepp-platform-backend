@@ -149,6 +149,78 @@ def list_destinations(
     ]
 
 
+def allowed_material_ids(db_session, organization_id: Any, destination_ids: Any) -> Optional[set]:
+    """Material ids acceptable at these destinations, or None for "no restriction".
+
+    A destination's ``materials`` column is the org's own answer to "what do you
+    accept here". The platform's long-standing convention — see
+    handle_get_location_allowed_materials — is that an EMPTY array means *not
+    configured*, i.e. everything is allowed. That convention is load-bearing
+    here: if one destination is unconfigured, restricting the union would refuse
+    material the org never said no to, so a single unconfigured destination
+    widens the answer back to None.
+
+    Returns a UNION across the destinations, which is as narrow as the scale can
+    be told: the tablet holds one material list for the whole session and copies
+    it to every location itself (see production_api_service.dart, "ใส่ materials
+    ทั้งหมดในทุก location"), so per-destination lists cannot reach it without an
+    app change. Pass a single destination on the write path to get the exact set.
+
+    Best-effort with an OPEN default: a failed read returns None, leaving the
+    picker as wide as it is today rather than blocking a weigh-out over a
+    database hiccup. The write path pairs this with its own check, so an open
+    failure here costs precision, not authorisation.
+    """
+    try:
+        ids = [int(d) for d in (destination_ids or []) if d is not None]
+    except (TypeError, ValueError):
+        return None
+    if not ids:
+        return None
+    try:
+        rows = db_session.execute(text(
+            "SELECT id, materials FROM user_locations "
+            "WHERE organization_id = :org_id AND id = ANY(:ids) "
+            "  AND is_active = TRUE AND deleted_date IS NULL"
+        ), {'org_id': organization_id, 'ids': ids}).fetchall()
+    except Exception as exc:  # noqa: BLE001 — see docstring
+        logger.warning(
+            "[sorter] allowed-material lookup failed for org %s: %s", organization_id, exc
+        )
+        return None
+
+    union: set = set()
+    for row in rows:
+        configured = row[1]
+        if not configured or not isinstance(configured, list) or len(configured) == 0:
+            # Unconfigured destination: accepts anything, so nothing to restrict.
+            return None
+        for mid in configured:
+            try:
+                union.add(int(mid))
+            except (TypeError, ValueError):
+                continue
+    # A destination id that matched no live row contributes nothing; if that left
+    # the union empty there is no restriction we can honestly express.
+    return union or None
+
+
+def filter_materials(materials: List[Dict[str, Any]], allowed: Optional[set]) -> List[Dict[str, Any]]:
+    """Narrow a serialised material payload to `allowed`, returning a NEW list.
+
+    Never mutates the input: the caller's list is a shared process-level cache,
+    and filtering it in place would leak one sorter's restriction into every
+    other tablet served by the same warm container.
+
+    An empty result is returned as-is rather than falling back to everything —
+    the caller decides what to do about it, and quietly widening here would make
+    the restriction unenforceable.
+    """
+    if allowed is None:
+        return list(materials or [])
+    return [m for m in (materials or []) if m.get('material_id') in allowed]
+
+
 def _member_location_ids(db_session, organization_id: Any, user_id: Any) -> set:
     """Location ids whose ``members`` array carries this user.
 
