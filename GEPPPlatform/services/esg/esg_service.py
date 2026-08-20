@@ -329,7 +329,12 @@ class EsgService:
             query = query.filter(EsgOrganizationDataExtraction.processing_status == status)
 
         total = query.count()
-        extractions = query.order_by(EsgOrganizationDataExtraction.created_date.desc()) \
+        # Newest first by id. Previously ordered by created_date alone, which is
+        # not unique here — LINE batches share a timestamp, so rows came back in
+        # arbitrary order (124, 148, 132) and, worse, an unstable sort makes
+        # OFFSET pagination duplicate or skip rows between pages. id is the
+        # monotonic unique key, so it doubles as the tiebreaker.
+        extractions = query.order_by(EsgOrganizationDataExtraction.id.desc()) \
             .offset((page - 1) * page_size).limit(page_size).all()
 
         return {
