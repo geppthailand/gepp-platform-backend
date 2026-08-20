@@ -591,6 +591,12 @@ def handle_get_locations_by_membership(user_service: UserService, query_params: 
                 # every location itself, so this union is as narrow as the scale
                 # can be told without an app change — and for the common case of
                 # one destination it is exactly that destination's list.
+                #
+                # NOTE: this is NOT the list the operator picks from. The installed
+                # build parses it into MembershipModel.materials and never reads it
+                # back; the picker is filled by a second call, per location, to
+                # /locations/{id}/allowed-materials (see that route below). Keep the
+                # two in agreement — narrowing only here changes nothing on screen.
                 _allowed = allowed_material_ids(
                     db_session, organization_id, [d['origin_id'] for d in destinations]
                 )
@@ -1956,17 +1962,47 @@ def handle_iot_devices_routes(event: Dict[str, Any], data: Dict[str, Any], **com
             if not organization_id:
                 raise ValidationException('User is not associated with an organization')
 
-            # A sorter's tablet holds a DESTINATION id, which they are not a member
-            # of — the membership gate below would 401 them out of their own screen.
-            # Resolve against their waste room instead: the materials they may
-            # record are the ones allowed where the pile physically is, not the
-            # ones allowed at the scrap dealer. (Destinations live under hub_node,
-            # which the allowed-materials tree walk never visits, so asking about a
-            # destination would also silently return "every material".)
+            # ── ผู้คัดแยก: ask about the DESTINATION they picked ──────────────
+            # This route is what fills the material picker on the weighing screen
+            # (app_state.selectLocation -> getAllowedMaterials), so whatever it
+            # answers IS what the operator sees. It used to substitute the
+            # sorter's own waste room, on two arguments that have both since
+            # stopped holding:
+            #
+            #   "they are not a member of the destination, the gate below would
+            #   401 them" — membership on the destination is now what puts it in
+            #   their picker at all (list_destinations), so they always are; and
+            #
+            #   "the tree walk never visits hub nodes" — the walk seeds its chain
+            #   with the queried node itself, so a destination's OWN materials
+            #   column is read. Only inheritance from ancestors is unavailable to
+            #   a hub, which is fine: a destination configures itself.
+            #
+            # It also has to be the destination for the picker to agree with the
+            # write: /records checks the chosen destination's materials, so a
+            # picker built from the station offers material that save() refuses.
+            # Observed on prod org 31 — station 'ห้องคัดแยกขยะ One Bangkok' has
+            # nothing configured, so the walk fell through to all 270 materials
+            # while the destination 'Trash Room' accepts 4.
             sorter_location_id = get_sorter_location_id(
                 db_session, current_user['user_id'], organization_id
             )
             if sorter_location_id:
+                if is_allowed_destination(
+                    db_session, organization_id, location_id, current_user['user_id']
+                ):
+                    return handle_get_location_allowed_materials(
+                        db_session, str(location_id), organization_id
+                    )
+                # Not one of their destinations — a tablet still holding a list
+                # from before a membership change, or an origin id from the
+                # weigher screen. The station keeps the screen alive rather than
+                # 401-ing it; the write guard is the real gate either way.
+                _iot_logger.warning(
+                    "[sorter] user %s (org %s) asked for materials at %s, which is not "
+                    "one of their destinations — answering for station %s",
+                    current_user['user_id'], organization_id, location_id, sorter_location_id,
+                )
                 return handle_get_location_allowed_materials(
                     db_session, str(sorter_location_id), organization_id
                 )
