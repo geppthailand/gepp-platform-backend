@@ -1518,6 +1518,59 @@ class TraceabilityService:
             return False
         return int(row[0]) == int(group.origin_id)
 
+    def _consolidated_contribution_by_transport(
+        self, group_id: int, transport_ids: List[int]
+    ) -> Dict[int, float]:
+        """For each consolidated transport in `transport_ids`, how much of it came from `group_id`.
+
+        Returns {transport_id: contributed_kg}, omitting transports that are not
+        consolidation results. A pile can feed a batch either way:
+          - as a raw group   → source_kind='group',     source_group_id = the pile
+          - via its own leg  → source_kind='transport', source_transport_id belongs to the pile
+
+        Both are summed, since one pile may contribute through several source rows.
+        Best-effort: on any failure return {} so the caller falls back to face-value
+        weights, i.e. the stricter pre-existing behaviour, rather than 500.
+        """
+        if not transport_ids:
+            return {}
+        try:
+            rows = (
+                self.db.query(
+                    TraceabilityConsolidation.consolidated_transport_id,
+                    TraceabilityConsolidationSource.contributed_weight,
+                )
+                .join(
+                    TraceabilityConsolidationSource,
+                    TraceabilityConsolidationSource.consolidation_id == TraceabilityConsolidation.id,
+                )
+                .outerjoin(
+                    TransportTransaction,
+                    TransportTransaction.id == TraceabilityConsolidationSource.source_transport_id,
+                )
+                .filter(
+                    TraceabilityConsolidation.consolidated_transport_id.in_(transport_ids),
+                    TraceabilityConsolidation.is_active == True,  # noqa: E712
+                    TraceabilityConsolidation.deleted_date.is_(None),
+                    TraceabilityConsolidationSource.is_active == True,  # noqa: E712
+                    TraceabilityConsolidationSource.deleted_date.is_(None),
+                    or_(
+                        TraceabilityConsolidationSource.source_group_id == group_id,
+                        TransportTransaction.transaction_group_id == group_id,
+                    ),
+                )
+                .all()
+            )
+        except Exception:  # noqa: BLE001 — see docstring
+            return {}
+
+        out: Dict[int, float] = {}
+        for transport_id, weight in rows:
+            if transport_id is None:
+                continue
+            out[int(transport_id)] = out.get(int(transport_id), 0.0) + float(weight or 0)
+        return out
+
     def _reject_partial_dispatch(
         self,
         group: TraceabilityTransactionGroup,
@@ -1545,7 +1598,7 @@ class TraceabilityService:
         if pile_weight <= 0:
             return None
 
-        existing_q = self.db.query(TransportTransaction.weight).filter(
+        existing_q = self.db.query(TransportTransaction.id, TransportTransaction.weight).filter(
             TransportTransaction.transaction_group_id == group.id,
             TransportTransaction.parent_id.is_(None),
             TransportTransaction.is_active == True,
@@ -1553,7 +1606,22 @@ class TraceabilityService:
         )
         if ignore_transport_ids:
             existing_q = existing_q.filter(~TransportTransaction.id.in_(ignore_transport_ids))
-        dispatched = sum(float(r[0] or 0) for r in existing_q.all())
+        existing_roots = existing_q.all()
+
+        # A consolidated root carries the WHOLE batch, not just this pile: consolidation
+        # hangs one transport off the "primary" source group, so a 24.80 kg pile merged
+        # into a 63.17 kg batch gets a 63.17 kg root. Counting that at face value made
+        # `dispatched` exceed `pile_weight` permanently and blocked every later leg on the
+        # pile — including forwarding the consolidated batch onward, which is not a partial
+        # dispatch at all. Count only what this pile actually put into the batch.
+        contributed = self._consolidated_contribution_by_transport(
+            group.id, [tid for tid, _w in existing_roots]
+        )
+
+        dispatched = sum(
+            float(contributed[tid]) if tid in contributed else float(w or 0)
+            for tid, w in existing_roots
+        )
         dispatched += sum(float(w or 0) for w in new_root_weights)
 
         # Round before comparing: the subtraction alone puts 100.01 - 100.0 slightly

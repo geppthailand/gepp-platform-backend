@@ -44,6 +44,36 @@ def handle_esg_routes(event: Dict[str, Any], data: Dict[str, Any], **params) -> 
     current_user_org_id = current_user.get('organization_id')
 
     try:
+        # ===== SUPPLY CHAIN / SCOPE 3 / CBAM / MACC =====
+        # services/esg/supply_chain/ was complete but never reachable — nothing
+        # dispatched to it, so /api/esg/supply-chain/* and /supplier-portal/*
+        # both answered ROUTE_NOT_FOUND and the Supply Chain + CBAM pages were
+        # permanently empty. It speaks the Lambda-proxy shape
+        # ({statusCode, headers, body:json-string}) rather than the plain payload
+        # every other ESG route returns, so translate at this boundary.
+        if '/api/esg/supply-chain' in path or '/api/esg/supplier-portal' in path:
+            import json as _json
+            from .supply_chain.supply_chain_handlers import handle_supply_chain_routes
+            # That module reads `httpMethod` / `body` off the event; the HTTP-API
+            # v2 payload carries neither, so pass them explicitly.
+            sc_event = dict(event)
+            sc_event['path'] = path
+            sc_event['httpMethod'] = method
+            sc_event['body'] = _json.dumps(data or {}, default=str)
+            sc_event['queryStringParameters'] = query_params or {}
+            raw = handle_supply_chain_routes(sc_event, None, db_session,
+                                             user=current_user)
+            payload = _json.loads(raw.get('body') or '{}')
+            status = int(raw.get('statusCode') or 200)
+            if status < 400:
+                return payload
+            err = payload.get('error') or payload.get('message') or 'Supply chain request failed'
+            if status == 401:
+                raise UnauthorizedException(err)
+            if status == 404:
+                raise NotFoundException(err)
+            raise BadRequestException(err)
+
         # ===== LIFF APIs (/api/esg/liff/*) =====
         # Every LIFF endpoint is scoped to the current LINE user — they
         # see their own dashboard / history / report only. The org-wide
@@ -64,6 +94,38 @@ def handle_esg_routes(event: Dict[str, Any], data: Dict[str, Any], **params) -> 
                 user_id=liff_user_id,
                 lang='th' if lang.startswith('th') else 'en',
             )
+
+        # ── LIFF insight/chart endpoints ──────────────────────────────
+        # The Dashboard + Report chart sections have called these for a while
+        # (esgApi.liffGet* wrappers) but no route existed, so every card showed
+        # its empty state. All derived from real rows — see
+        # esg_liff_insights_service.
+        elif path in ('/api/esg/liff/enhanced-scope', '/api/esg/liff/carbon-budget',
+                      '/api/esg/liff/macc', '/api/esg/liff/alerts',
+                      '/api/esg/liff/quick-wins', '/api/esg/liff/sbti-pathway',
+                      '/api/esg/liff/scope3-pareto',
+                      '/api/esg/liff/risk-opportunity') and method == 'GET':
+            from .esg_liff_insights_service import EsgLiffInsightsService
+            svc = EsgLiffInsightsService(db_session)
+            year = int(query_params.get('year', 0)) or None
+            lang = (query_params.get('lang') or 'en').lower()
+            lang = 'th' if lang.startswith('th') else 'en'
+            leaf = path.rsplit('/', 1)[1]
+            if leaf == 'enhanced-scope':
+                return svc.get_enhanced_scope(current_user_org_id, year)
+            if leaf == 'carbon-budget':
+                return svc.get_carbon_budget(current_user_org_id)
+            if leaf == 'macc':
+                return svc.get_macc(current_user_org_id, year)
+            if leaf == 'alerts':
+                return svc.get_alerts(current_user_org_id, lang)
+            if leaf == 'quick-wins':
+                return svc.get_quick_wins(current_user_org_id)
+            if leaf == 'sbti-pathway':
+                return svc.get_sbti_pathway(current_user_org_id)
+            if leaf == 'scope3-pareto':
+                return svc.get_scope3_pareto(current_user_org_id, year)
+            return svc.get_risk_opportunity(current_user_org_id)
 
         elif path == '/api/esg/liff/summary' and method == 'GET':
             dash = EsgDashboardService(db_session)

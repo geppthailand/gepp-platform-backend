@@ -33,6 +33,7 @@ from GEPPPlatform.models.users.user_location import UserLocation
 from GEPPPlatform.models.users.user_related import UserLocationTag, UserTenant
 from GEPPPlatform.models.subscriptions.organizations import OrganizationSetup
 from GEPPPlatform.models.cores.iot_devices import IoTDevice
+from GEPPPlatform.libs.locationAccess import active_scope, is_window_active
 
 from ....exceptions import APIException, UnauthorizedException, ValidationException, NotFoundException
 
@@ -345,6 +346,187 @@ def member_origin_ids(db_session, user_id: Any, organization_id: Any) -> Set[int
     return expanded
 
 
+def can_input_at_location(db_session, user_id: Any, organization_id: Any, location_id: Any) -> bool:
+    """May this user record a weigh-in at `location_id` — and therefore see its materials?
+
+    True for: org owner, a member of the location (or of an ancestor), or a member of a
+    tag/tenant attached to it whose date window is still open.
+
+    **Deliberately wider than `member_origin_ids()`, and the difference is the point.**
+    `/my-memberships` now offers tenant-scoped locations on the tablet, so the operator picks
+    one and the device immediately asks what materials it may weigh there. Gating that on
+    location membership alone 401s them out of a station they were just given, and the device
+    falls back to the global material list — which is how "the location's materials are not
+    sent" showed up.
+
+    The daily-summary route keeps the narrower `member_origin_ids()` gate on purpose: it
+    returns the whole location's intake, unfiltered by tag/tenant, so a tenant member passing
+    that gate would read every other tenant's weights at the same site. Two gates that look
+    interchangeable but answer different questions — do not merge them.
+    """
+    loc = int(location_id)
+
+    # Cheapest first: plain membership covers the common operator.
+    if loc in member_origin_ids(db_session, user_id, organization_id):
+        return True
+
+    scope = UserService(db_session).resolve_access_scope(organization_id, int(user_id))
+    if scope.get('is_owner'):
+        return True
+
+    # Expired grants must not reopen a station, so narrow to what is live right now.
+    scope = active_scope(scope, datetime.combine(bkk_today(), datetime.min.time()))
+    return loc in (scope.get('assigned_ids') or set()) or loc in (scope.get('scoped_ids') or set())
+
+
+def entities_by_location(
+    db_session,
+    model,
+    organization_id: int,
+    origin_to_loc: Dict[int, Any],
+    reverse_attr: str,
+) -> Dict[int, List[Any]]:
+    """Map origin_id -> [tag|tenant] attached to it, from BOTH directions of the link.
+
+    The association is stored twice: authoritatively on the tag/tenant
+    (`user_locations` JSONB, plus the legacy single-FK `user_location_id`), and
+    denormalised back onto the location (`user_locations.tags` / `.tenants`).
+
+    Reading only the location's copy — which is what this endpoint used to do — means a
+    tenant attached through any path that did not also backfill the reverse array is
+    invisible to the scale, while the web and the write guard (which both work off
+    `user_locations`) can see it. That is a silent, data-dependent disappearance: it works in
+    one environment and not another with identical code. So read the authoritative side and
+    union the location's copy on top, and a link recorded either way is honoured.
+
+    One query per model for the whole org — these tables are org-scoped and small, and this
+    replaces an N-key `IN` list built by scanning every location first.
+    """
+    out: Dict[int, List[Any]] = {oid: [] for oid in origin_to_loc}
+    if not origin_to_loc:
+        return out
+
+    rows = db_session.query(model).filter(
+        model.organization_id == organization_id,
+        model.is_active == True,  # noqa: E712
+        model.deleted_date.is_(None),
+    ).all()
+    by_id = {r.id: r for r in rows}
+
+    def _as_int(v):
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return None
+
+    # Forward: the tag/tenant names its locations.
+    for row in rows:
+        targets = set()
+        for raw in (getattr(row, 'user_locations', None) or []):
+            loc_id = _as_int(raw)
+            if loc_id is not None:
+                targets.add(loc_id)
+        legacy = _as_int(getattr(row, 'user_location_id', None))
+        if legacy is not None:
+            targets.add(legacy)
+        for loc_id in targets:
+            if loc_id in out:
+                out[loc_id].append(row)
+
+    # Reverse: the location names its tags/tenants. Union, skipping duplicates.
+    for loc_id, loc in origin_to_loc.items():
+        already = {r.id for r in out[loc_id]}
+        for raw in (getattr(loc, reverse_attr, None) or []):
+            entity_id = _as_int(raw)
+            entity = by_id.get(entity_id) if entity_id is not None else None
+            if entity is not None and entity.id not in already:
+                out[loc_id].append(entity)
+                already.add(entity.id)
+
+    # Stable order regardless of which side supplied the row.
+    for loc_id in out:
+        out[loc_id].sort(key=lambda r: r.id)
+    return out
+
+
+def tablet_member_ids(raw: Any, ensure_id: Optional[int] = None) -> List[int]:
+    """`members` as plain ints, which is the only shape the tablet can parse.
+
+    The device's generated deserialiser casts every element with `(e as num).toInt()`, so a
+    dict entry — `{"user_id": 5, "role": ...}`, the shape `user_locations.members` uses — would
+    throw and take the entire /my-memberships parse down with it, not just that one label.
+    Every row is numeric today; flattening keeps it that way if the writers ever diverge.
+
+    `ensure_id` adds an id that is not already present. This is deliberate: the installed
+    tablet build decides which labels are pickable by testing `members.contains(myUserId)`, so
+    a member of a LOCATION saw only the labels they happened to be listed inside — the rest
+    were dropped on arrival however correct the payload was. The server has already authorised
+    every label it puts in this list, so telling the device the operator may use them is the
+    truthful statement here; `members` on this endpoint means "may pick", not "is enrolled in".
+
+    Newer builds ignore this and trust the list as sent (see buildLocationSelectionOptions in
+    the scale app), so it degrades to a harmless no-op once the fleet is updated.
+    """
+    out: List[int] = []
+    for entry in (raw or []):
+        value = entry.get('user_id') or entry.get('id') if isinstance(entry, dict) else entry
+        try:
+            member_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if member_id not in out:
+            out.append(member_id)
+    if ensure_id is not None and int(ensure_id) not in out:
+        out.append(int(ensure_id))
+    return out
+
+
+def pick_selectable_entities(
+    entities: Any,
+    allowed_ids: Optional[Set[int]],
+    when: Any,
+    kind: str,
+    ensure_member_id: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """Which tags (or tenants) on one location may this user pick at the scale.
+
+    Two independent gates, and they answer different questions:
+
+      * `allowed_ids is None` → the user has FULL access to this location (owner, or a member
+        of the location itself). They may pick every tag/tenant attached to it, including ones
+        they are not personally a member of — being a member of the place outranks being a
+        member of a label on it.
+      * `allowed_ids` is a set → the user reaches this location ONLY through a tag/tenant
+        grant. They may pick strictly those. Offering the rest would let them file a weigh-in
+        under a tenant whose transactions they cannot then read back.
+
+    The date window applies in BOTH cases: an expired tag is never selectable, no matter how
+    the user got here. `when` is compared against the window rather than "is it expired" being
+    precomputed, so this stays a pure function and is testable without a clock.
+
+    `entities` are already-resolved ORM rows (see `entities_by_location`), so a tag that was
+    soft-deleted while a location still lists it never reaches here.
+    """
+    out: List[Dict[str, Any]] = []
+    for entity in (entities or []):
+        if allowed_ids is not None and entity.id not in allowed_ids:
+            continue
+        # Expired never reaches the device: it caches this payload and would keep offering
+        # the option long after the window closed.
+        if not is_window_active(entity.start_date, entity.end_date, when):
+            continue
+        out.append({
+            'id': entity.id,
+            'name': entity.name or f'{kind} {entity.id}',
+            # New list every time — never hand back (or mutate) the ORM attribute, or an
+            # injected id could be flushed into the row on the next commit.
+            'members': tablet_member_ids(entity.members, ensure_member_id),
+            'start_date': entity.start_date.isoformat() if entity.start_date else None,
+            'end_date': entity.end_date.isoformat() if entity.end_date else None,
+        })
+    return out
+
+
 def handle_get_locations_by_membership(user_service: UserService, query_params: Dict[str, Any], current_user: Dict[str, Any], db_session) -> Dict[str, Any]:
     """Handle POST /api/iot-devices/my-memberships - Get locations where current user is in members list (default role=dataInput)"""
     try:
@@ -492,15 +674,20 @@ def handle_get_locations_by_membership(user_service: UserService, query_params: 
         # must not reach the device at all. Note this is "live NOW", which is stricter
         # than the read filter: a report may still show last quarter's tenant, but the
         # picker must not offer it today.
-        from ....libs.locationAccess import active_scope, is_window_active
-
         scope = user_service.resolve_access_scope(
             organization_id, int(current_user['user_id'])
         )
         scope = active_scope(scope, datetime.combine(bkk_today(), datetime.min.time()))
         is_owner = bool(scope.get('is_owner'))
-        assigned_ids: Set[int] = set(scope.get('assigned_ids') or set())
         scoped_by_location: Dict[int, Dict[str, set]] = scope.get('scoped_by_location') or {}
+        # Membership regardless of role, plus descendants. `expanded_ids` above is built from
+        # the role-filtered list (dataInput), so an operator who is a member of a location
+        # under some OTHER role reaches it only via a tag/tenant grant and would be treated as
+        # scoped — showing just their own tenant instead of every tenant on the location.
+        # Membership is membership for this purpose; the role filter decides which stations
+        # appear, not how much of a station's contents the member may see.
+        assigned_ids: Set[int] = set(scope.get('assigned_ids') or set())
+
 
         # Full access keeps the role filter (a viewer must not get a dataInput station);
         # a tag/tenant grant carries no role, so it stands on its own.
@@ -533,53 +720,25 @@ def handle_get_locations_by_membership(user_service: UserService, query_params: 
         # only SELECT instead of ORM hydration with joinedload.
         materials_list = _get_cached_materials(db_session)
         
-        # Load tags and tenants per location (id, name, members)
+        # Which tags/tenants sit on each returned location.
         origin_ids = ordered_ids
         origin_to_loc = {}
-        tag_ids_all = set()
-        tenant_ids_all = set()
         if origin_ids:
             locations_orm = db_session.query(UserLocation).filter(
                 UserLocation.id.in_(origin_ids),
                 UserLocation.deleted_date.is_(None)
             ).all()
             origin_to_loc = {loc.id: loc for loc in locations_orm}
-            for loc in locations_orm:
-                for tid in (loc.tags or []):
-                    tag_ids_all.add(int(tid) if isinstance(tid, str) and tid.isdigit() else tid)
-                for tid in (loc.tenants or []):
-                    tenant_ids_all.add(int(tid) if isinstance(tid, str) and tid.isdigit() else tid)
-        tag_ids_all = [x for x in tag_ids_all if x is not None]
-        tenant_ids_all = [x for x in tenant_ids_all if x is not None]
-        tag_by_id = {}
-        tenant_by_id = {}
-        if tag_ids_all:
-            tags_orm = db_session.query(UserLocationTag).filter(
-                UserLocationTag.id.in_(tag_ids_all),
-                UserLocationTag.organization_id == organization_id,
-                UserLocationTag.is_active == True,
-                UserLocationTag.deleted_date.is_(None)
-            ).all()
-            tag_by_id = {t.id: t for t in tags_orm}
-        if tenant_ids_all:
-            tenants_orm = db_session.query(UserTenant).filter(
-                UserTenant.id.in_(tenant_ids_all),
-                UserTenant.organization_id == organization_id,
-                UserTenant.is_active == True,
-                UserTenant.deleted_date.is_(None)
-            ).all()
-            tenant_by_id = {t.id: t for t in tenants_orm}
+
+        tags_by_origin = entities_by_location(
+            db_session, UserLocationTag, organization_id, origin_to_loc, 'tags'
+        )
+        tenants_by_origin = entities_by_location(
+            db_session, UserTenant, organization_id, origin_to_loc, 'tenants'
+        )
+
         # Build locations_list with tags and tenants (id, name, members)
         now_bkk = datetime.combine(bkk_today(), datetime.min.time())
-
-        def _entry(t, kind: str) -> Dict[str, Any]:
-            return {
-                'id': t.id,
-                'name': t.name or f'{kind} {t.id}',
-                'members': t.members or [],
-                'start_date': t.start_date.isoformat() if t.start_date else None,
-                'end_date': t.end_date.isoformat() if t.end_date else None,
-            }
 
         locations_list = []
         for origin_id in ordered_ids:
@@ -588,44 +747,48 @@ def handle_get_locations_by_membership(user_service: UserService, query_params: 
                 continue
             location_path = location_paths.get(origin_id) or ''
 
-            # What may this user pick HERE?
-            #   full access  → every tag/tenant on the location
-            #   scoped only  → strictly the ones they belong to. Offering the rest would
-            #                  let the operator file a weigh-in under a tenant they cannot
-            #                  then see, which is the trap the web picker also guards.
-            allowed = None if (is_owner or origin_id in assigned_ids) else scoped_by_location.get(origin_id)
-            allowed_tag_ids = None if allowed is None else allowed.get('tag_ids') or set()
-            allowed_tenant_ids = None if allowed is None else allowed.get('tenant_ids') or set()
+            # What may this user pick HERE? Three cases, and the third is why this is not a
+            # single boolean:
+            #
+            #   assigned directly (or owner) → every live tag/tenant attached to THIS location.
+            #       Being a member of the place outranks being a member of a label on it, so
+            #       labels they do not personally belong to are still selectable.
+            #   reachable only via a tag/tenant → strictly their own. Offering the rest would
+            #       let the operator file a weigh-in under a tenant they cannot then read back.
+            #   inherited by descent → no labels at all. The floors under an assigned building
+            #       come through as plain locations; a label attached to a floor belongs to
+            #       whoever is assigned to that floor.
+            # Full access — direct membership OR inherited by descent — offers every live
+            # tag/tenant attached to THIS location, including labels the operator does not
+            # personally belong to. Each location carries its own: a tenant on a floor shows up
+            # under that floor, not folded into the building above it.
+            #
+            # `expanded_ids` (not `scoped_by_location`) has to be consulted first. A user can be
+            # both a location member and a tag/tenant member, and grants expand to descendants,
+            # so every floor under an assigned building also appears in scoped_by_location.
+            # Checking grants first classified those floors as "scoped", found none of the
+            # grants physically attached to the floor, and dropped the floor entirely.
+            is_full = is_owner or origin_id in expanded_ids or origin_id in assigned_ids
+            scoped_here = None if is_full else scoped_by_location.get(origin_id)
 
-            tags_list = []
-            tenants_list = []
-            for tid in (loc_orm.tags or []):
-                tid_int = int(tid) if isinstance(tid, str) and tid.isdigit() else tid
-                t = tag_by_id.get(tid_int)
-                if not t:
-                    continue
-                if allowed_tag_ids is not None and t.id not in allowed_tag_ids:
-                    continue
-                # Expired tags never reach the device — it caches this payload and would
-                # keep offering them long after the window closed.
-                if not is_window_active(t.start_date, t.end_date, now_bkk):
-                    continue
-                tags_list.append(_entry(t, 'Tag'))
-            for tid in (loc_orm.tenants or []):
-                tid_int = int(tid) if isinstance(tid, str) and tid.isdigit() else tid
-                t = tenant_by_id.get(tid_int)
-                if not t:
-                    continue
-                if allowed_tenant_ids is not None and t.id not in allowed_tenant_ids:
-                    continue
-                if not is_window_active(t.start_date, t.end_date, now_bkk):
-                    continue
-                tenants_list.append(_entry(t, 'Tenant'))
+            allowed_tag_ids = None if scoped_here is None else (scoped_here.get('tag_ids') or set())
+            allowed_tenant_ids = None if scoped_here is None else (scoped_here.get('tenant_ids') or set())
+            # Every label reaching the device here is one the operator is authorised to use, so
+            # stamp them as a member of it — the installed build filters on that and would
+            # otherwise discard the ones they are not personally enrolled in.
+            operator_id = int(current_user['user_id'])
+            tags_list = pick_selectable_entities(
+                tags_by_origin.get(origin_id), allowed_tag_ids, now_bkk, 'Tag', operator_id
+            )
+            tenants_list = pick_selectable_entities(
+                tenants_by_origin.get(origin_id), allowed_tenant_ids, now_bkk, 'Tenant', operator_id
+            )
 
-            # A scoped-only location whose grants all expired has nothing selectable left,
-            # and posting a bare origin there would be rejected by the write guard — so
-            # drop the row rather than ship a dead entry to the scale.
-            if allowed is not None and not tags_list and not tenants_list:
+            # A scoped-only location whose grants all expired has nothing selectable left, and
+            # posting a bare origin there would be rejected by the write guard — so drop the row
+            # rather than ship a dead entry. An inherited location with no labels is fine: full
+            # access can write against the bare origin.
+            if scoped_here is not None and not tags_list and not tenants_list:
                 continue
 
             locations_list.append({
@@ -634,8 +797,11 @@ def handle_get_locations_by_membership(user_service: UserService, query_params: 
                 'path': location_path,
                 'tags': tags_list,
                 'tenants': tenants_list,
-                # Lets the tablet require a tag/tenant selection here without re-deriving it.
-                'access': 'assigned' if allowed is None else 'scoped',
+                # 'scoped' means the operator only reaches this location through a tag/tenant,
+                # so a selection is mandatory — the write guard rejects a bare origin there.
+                # 'assigned' covers both direct membership and inheritance by descent, where a
+                # bare origin is valid.
+                'access': 'scoped' if scoped_here is not None else 'assigned',
             })
         
         return {
@@ -1744,9 +1910,10 @@ def handle_iot_devices_routes(event: Dict[str, Any], data: Dict[str, Any], **com
                     db_session, str(sorter_location_id), organization_id
                 )
 
-            # Verify user is a member of the requested location (including descendants)
-            if int(location_id) not in member_origin_ids(
-                db_session, current_user['user_id'], organization_id
+            # Membership OR a live tag/tenant grant OR owner — see can_input_at_location for
+            # why this gate is intentionally wider than the daily-summary one.
+            if not can_input_at_location(
+                db_session, current_user['user_id'], organization_id, location_id
             ):
                 raise UnauthorizedException('User is not a member of this location')
             return handle_get_location_allowed_materials(db_session, location_id, organization_id)
