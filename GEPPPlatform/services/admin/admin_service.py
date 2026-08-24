@@ -2591,10 +2591,142 @@ class AdminService:
 
     # ── IoT Hardwares: physical-tablet registry + pair/unpair ───────
 
+    # Whitelisted lifecycle values — mirrors the CHECK constraint added in
+    # migration 087. Kept here (not in the DB) so the API can 400 with a
+    # readable message instead of surfacing a constraint violation.
+    HARDWARE_LIFECYCLE_STATUSES = (
+        'active', 'maintenance', 'repair', 'storage', 'retired',
+    )
+
+    # A tablet is "online" if it checked in within 3 missed 5 s beats.
+    _HARDWARE_ONLINE_WINDOW_S = 15
+
+    # Effective battery for a hardware row: its own checkin reading, falling
+    # back to the paired device's health snapshot. Written as a correlated
+    # subquery so it can be used in WHERE and in aggregate queries that don't
+    # join iot_device_health (the COUNT half of the list, and the summary).
+    #
+    # Every place that reads, filters, counts or sorts battery MUST use this
+    # (or the matching COALESCE in _serialize_hardware_row) — otherwise the
+    # number on screen and the number being filtered on disagree, which is
+    # what happened when "battery: low first" ignored the fallback.
+    _HW_BATTERY_SQL = (
+        "COALESCE(h.last_battery_level, "
+        "         (SELECT dh2.battery_level FROM iot_device_health dh2 "
+        "           WHERE dh2.device_id = h.paired_iot_device_id))"
+    )
+
+    # Below this, a tablet is flagged as needing attention. Mirrors
+    # BATTERY_CRITICAL in the frontend's hardwareStatus.ts.
+    _HW_BATTERY_CRITICAL = 20
+
+    def _hardware_select_sql(self) -> str:
+        """Shared SELECT list for hardware list + detail.
+
+        Keeping one projection means the list row and the drawer's overview
+        can't drift apart — every field the drawer shows is already on the
+        row the list fetched.
+        """
+        return (
+            "SELECT h.id, h.mac_address, h.serial_number, h.device_code, "
+            "       h.device_model, h.os_version, h.app_version, "
+            "       h.last_checkin_at, h.last_ip_address, "
+            "       h.paired_iot_device_id, d.device_name, h.paired_at, h.created_date, "
+            "       h.last_lat, h.last_lng, h.last_location_accuracy_m, h.last_location_at, "
+            "       o.id AS organization_id, "
+            "       o.name AS organization_name, "
+            "       dh.current_route, "
+            "       h.tags, "
+            "       h.lifecycle_status, h.status_note, h.status_changed_at, "
+            "       h.last_battery_level, h.last_battery_charging, "
+            "       h.last_network_type, h.last_network_strength, "
+            "       h.last_storage_free_mb, h.last_telemetry_at, "
+            "       h.checkin_count, h.first_checkin_at, h.deleted_date, "
+            "       (SELECT COUNT(*) FROM iot_hardware_history hh "
+            "         WHERE hh.hardware_id = h.id "
+            "           AND hh.event_type = 'issue' "
+            "           AND hh.resolved_date IS NULL) AS open_issues, "
+            "       dh.battery_level AS device_battery_level, "
+            "       d.maintenance_mode "
+            "FROM iot_hardwares h "
+            "LEFT JOIN iot_devices d ON d.id = h.paired_iot_device_id "
+            "LEFT JOIN organizations o ON o.id = d.organization_id "
+            "LEFT JOIN iot_device_health dh ON dh.device_id = d.id "
+        )
+
+    def _serialize_hardware_row(self, r, now) -> Dict[str, Any]:
+        last_checkin = r[7]
+        online = False
+        if last_checkin is not None:
+            try:
+                delta = (now - last_checkin).total_seconds()
+                online = delta <= self._HARDWARE_ONLINE_WINDOW_S
+            except Exception:
+                online = False
+        # Battery: prefer the hardware-row reading (works for unpaired
+        # tablets) and fall back to the paired device's health snapshot so
+        # older app builds that only report battery on /sync still show up.
+        battery_level = r[24] if r[24] is not None else r[34]
+        return {
+            'id': r[0],
+            'mac_address': r[1],
+            'serial_number': r[2],
+            'device_code': r[3],
+            'device_model': r[4],
+            'os_version': r[5],
+            'app_version': r[6],
+            'last_checkin_at': last_checkin.isoformat() if last_checkin else None,
+            'online': online,
+            'last_ip_address': r[8],
+            'paired_iot_device_id': r[9],
+            'paired_iot_device_name': r[10],
+            'paired_at': r[11].isoformat() if r[11] else None,
+            'created_date': r[12].isoformat() if r[12] else None,
+            # GPS — drives the Map tab.
+            'last_lat': float(r[13]) if r[13] is not None else None,
+            'last_lng': float(r[14]) if r[14] is not None else None,
+            'last_location_accuracy_m': float(r[15]) if r[15] is not None else None,
+            'last_location_at': r[16].isoformat() if r[16] else None,
+            # Joined org name + current_route — handy for the Map popup.
+            'organization_id': r[17],
+            'organization_name': r[18],
+            'current_route': r[19],
+            # Per-hardware tags (location, pilot batch, hw revision …).
+            # Postgres returns JSONB as a list/dict already; if a row
+            # somehow has NULL despite the NOT NULL default, normalise.
+            'tags': list(r[20]) if isinstance(r[20], list) else [],
+            # Lifecycle (migration 087).
+            'lifecycle_status': r[21] or 'active',
+            'status_note': r[22],
+            'status_changed_at': r[23].isoformat() if r[23] else None,
+            # Telemetry.
+            'battery_level': battery_level,
+            'battery_charging': r[25],
+            'network_type': r[26],
+            'network_strength': r[27],
+            'storage_free_mb': r[28],
+            'last_telemetry_at': r[29].isoformat() if r[29] else None,
+            'checkin_count': int(r[30] or 0),
+            'first_checkin_at': r[31].isoformat() if r[31] else None,
+            'deleted_date': r[32].isoformat() if r[32] else None,
+            'is_deleted': r[32] is not None,
+            'open_issues': int(r[33] or 0),
+            # Paired device's maintenance flag — surfaced so ops don't have
+            # to cross-check the Devices page to see a muted unit.
+            'device_maintenance_mode': bool(r[35]) if r[35] is not None else False,
+        }
+
     def list_iot_hardwares(self, query_params: dict) -> Dict[str, Any]:
         """GET /api/admin/iot-hardwares — list all reporting tablets.
 
-        Filters: paired ('yes'|'no'), search (mac/serial/model).
+        Filters:
+          * paired         — 'yes' | 'no'
+          * status         — comma-separated lifecycle_status values
+          * search         — mac / serial / model / device_code
+          * includeDeleted — 'true' (both) | 'only' (deleted only);
+                             omitted = live rows only
+          * needsAttention — 'true' → rows with ≥1 open issue, battery < 20,
+                             or offline for > 1 h
         """
         from sqlalchemy import text as _t
 
@@ -2610,11 +2742,17 @@ class AdminService:
 
         paired = (query_params.get('paired') or '').strip().lower()
         search = (query_params.get('search') or '').strip()
+        include_deleted = (query_params.get('includeDeleted') or '').strip().lower()
+        needs_attention = (query_params.get('needsAttention') or '').strip().lower() in (
+            'true', '1', 'yes'
+        )
+        status_raw = (query_params.get('status') or '').strip()
 
-        # Sort. Default to `id ASC` so rows don't reshuffle on every refresh
-        # when devices check in (the old `last_checkin_at DESC` default
-        # caused exactly that). Sort field is whitelisted to avoid SQL
-        # injection through the column name; unknown values fall back to id.
+        # Sort. Default is `created_date DESC` — newest registration first,
+        # which is what ops asked for AND stable across the list's 5 s live
+        # refresh. `last_checkin_at DESC` is deliberately NOT the default:
+        # it reshuffles rows on every heartbeat (regression fixed 2026-05).
+        # Sort field is whitelisted so the column name can't be injected.
         _SORT_COLS = {
             'id':                   'h.id',
             'mac_address':          'h.mac_address',
@@ -2626,22 +2764,53 @@ class AdminService:
             'last_checkin_at':      'h.last_checkin_at',
             'paired_iot_device_id': 'h.paired_iot_device_id',
             'created_date':         'h.created_date',
+            'updated_date':         'h.updated_date',
+            'lifecycle_status':     'h.lifecycle_status',
+            # Must match the battery the row actually displays, otherwise
+            # "battery: low first" appears broken for every tablet whose
+            # reading came from the paired device's health snapshot rather
+            # than from its own checkin (i.e. the whole fleet until the app
+            # build that reports battery on /checkin has rolled out).
+            'battery_level':        self._HW_BATTERY_SQL,
+            'checkin_count':        'h.checkin_count',
         }
-        sort_field_raw = (query_params.get('sortField') or 'id').strip()
-        sort_order_raw = (query_params.get('sortOrder') or 'asc').strip().lower()
-        sort_col = _SORT_COLS.get(sort_field_raw, 'h.id')
+        sort_field_raw = (query_params.get('sortField') or 'created_date').strip()
+        sort_order_raw = (query_params.get('sortOrder') or 'desc').strip().lower()
+        sort_col = _SORT_COLS.get(sort_field_raw, 'h.created_date')
         sort_dir = 'DESC' if sort_order_raw in ('desc', 'descend') else 'ASC'
-        # Always tiebreak on id ASC so adjacent rows with equal sort
+        # Always tiebreak on id DESC so adjacent rows with equal sort
         # values keep a deterministic order across refreshes. NULLS LAST
         # keeps not-yet-checked-in rows out of the way regardless of dir.
-        order_sql = f"{sort_col} {sort_dir} NULLS LAST, h.id ASC"
+        order_sql = f"{sort_col} {sort_dir} NULLS LAST, h.id DESC"
 
-        where = ['h.deleted_date IS NULL']
+        where: list = []
         params: Dict[str, Any] = {}
+        if include_deleted == 'only':
+            where.append('h.deleted_date IS NOT NULL')
+        elif include_deleted in ('true', '1', 'yes', 'all'):
+            pass  # no deleted_date predicate — show both
+        else:
+            where.append('h.deleted_date IS NULL')
+
         if paired == 'yes':
             where.append('h.paired_iot_device_id IS NOT NULL')
         elif paired == 'no':
             where.append('h.paired_iot_device_id IS NULL')
+
+        if status_raw:
+            wanted = [
+                s.strip().lower() for s in status_raw.split(',')
+                if s.strip().lower() in self.HARDWARE_LIFECYCLE_STATUSES
+            ]
+            if wanted:
+                # Bind each value separately — ANY(:list) with a Python list
+                # needs array binding support we can't assume across drivers.
+                keys = []
+                for i, v in enumerate(wanted):
+                    keys.append(f':st{i}')
+                    params[f'st{i}'] = v
+                where.append(f"h.lifecycle_status IN ({', '.join(keys)})")
+
         if search:
             where.append(
                 '('
@@ -2652,7 +2821,27 @@ class AdminService:
                 ')'
             )
             params['search'] = f'%{search}%'
-        where_sql = ' AND '.join(where)
+
+        if needs_attention:
+            # Mirrors `attentionReasons()` in the frontend's hardwareStatus.ts
+            # so the ⚠ badge and this filter can't disagree.
+            where.append(
+                '('
+                'EXISTS (SELECT 1 FROM iot_hardware_history hx '
+                '         WHERE hx.hardware_id = h.id '
+                '           AND hx.event_type = \'issue\' '
+                '           AND hx.resolved_date IS NULL) '
+                f'OR {self._HW_BATTERY_SQL} < {self._HW_BATTERY_CRITICAL} '
+                # Offline only counts for units that are *supposed* to be
+                # online — a spare in storage being quiet is not a problem,
+                # and flagging it trains operators to ignore the filter.
+                "OR (h.lifecycle_status = 'active' AND ("
+                "     h.last_checkin_at IS NULL "
+                "     OR h.last_checkin_at < NOW() - INTERVAL '1 hour'))"
+                ')'
+            )
+
+        where_sql = ' AND '.join(where) if where else 'TRUE'
 
         total = int(self.db_session.execute(_t(
             f"SELECT COUNT(*) FROM iot_hardwares h WHERE {where_sql}"
@@ -2663,70 +2852,93 @@ class AdminService:
         params_paged['_off'] = (page - 1) * page_size
 
         rows = self.db_session.execute(_t(
-            "SELECT h.id, h.mac_address, h.serial_number, h.device_code, "
-            "       h.device_model, h.os_version, h.app_version, "
-            "       h.last_checkin_at, h.last_ip_address, "
-            "       h.paired_iot_device_id, d.device_name, h.paired_at, h.created_date, "
-            "       h.last_lat, h.last_lng, h.last_location_accuracy_m, h.last_location_at, "
-            "       o.id AS organization_id, "
-            "       o.name AS organization_name, "
-            "       dh.current_route, "
-            "       h.tags "
-            "FROM iot_hardwares h "
-            "LEFT JOIN iot_devices d ON d.id = h.paired_iot_device_id "
-            "LEFT JOIN organizations o ON o.id = d.organization_id "
-            "LEFT JOIN iot_device_health dh ON dh.device_id = d.id "
-            f"WHERE {where_sql} "
-            f"ORDER BY {order_sql} "
-            "LIMIT :_lim OFFSET :_off"
+            self._hardware_select_sql()
+            + f"WHERE {where_sql} "
+            + f"ORDER BY {order_sql} "
+            + "LIMIT :_lim OFFSET :_off"
         ), params_paged).fetchall()
 
-        items = []
         now = self.db_session.execute(_t("SELECT NOW()")).fetchone()[0]
-        for r in rows:
-            last_checkin = r[7]
-            online = False
-            if last_checkin is not None:
-                try:
-                    delta = (now - last_checkin).total_seconds()
-                    online = delta <= 15  # 3 missed beats @ 5 s
-                except Exception:
-                    online = False
-            items.append({
-                'id': r[0],
-                'mac_address': r[1],
-                'serial_number': r[2],
-                'device_code': r[3],
-                'device_model': r[4],
-                'os_version': r[5],
-                'app_version': r[6],
-                'last_checkin_at': last_checkin.isoformat() if last_checkin else None,
-                'online': online,
-                'last_ip_address': r[8],
-                'paired_iot_device_id': r[9],
-                'paired_iot_device_name': r[10],
-                'paired_at': r[11].isoformat() if r[11] else None,
-                'created_date': r[12].isoformat() if r[12] else None,
-                # GPS — drives the Map tab.
-                'last_lat': float(r[13]) if r[13] is not None else None,
-                'last_lng': float(r[14]) if r[14] is not None else None,
-                'last_location_accuracy_m': float(r[15]) if r[15] is not None else None,
-                'last_location_at': r[16].isoformat() if r[16] else None,
-                # Joined org name + current_route — handy for the Map popup.
-                'organization_id': r[17],
-                'organization_name': r[18],
-                'current_route': r[19],
-                # Per-hardware tags (location, pilot batch, hw revision …).
-                # Postgres returns JSONB as a list/dict already; if a row
-                # somehow has NULL despite the NOT NULL default, normalise.
-                'tags': list(r[20]) if isinstance(r[20], list) else [],
-            })
+        items = [self._serialize_hardware_row(r, now) for r in rows]
 
         return {
             'items': items,
             'total': total,
             'page': page,
             'pageSize': page_size,
+        }
+
+    def get_iot_hardware(self, hardware_id: int) -> Dict[str, Any]:
+        """GET /api/admin/iot-hardwares/{id} — single unit, incl. deleted.
+
+        Deleted rows ARE returned here (unlike the default list view) so the
+        detail drawer still works from the "Deleted" tab and from a stale
+        link after someone removed the unit.
+        """
+        from sqlalchemy import text as _t
+
+        row = self.db_session.execute(_t(
+            self._hardware_select_sql() + "WHERE h.id = :id"
+        ), {'id': hardware_id}).fetchone()
+        if not row:
+            raise NotFoundException(f'iot_hardware {hardware_id} not found')
+        now = self.db_session.execute(_t("SELECT NOW()")).fetchone()[0]
+        return self._serialize_hardware_row(row, now)
+
+    def get_iot_hardware_summary(self, query_params: dict) -> Dict[str, Any]:
+        """GET /api/admin/iot-hardwares/summary — header counters.
+
+        One round-trip for the whole stat strip: totals, per-status counts,
+        online now, unpaired, low battery, open issues, deleted. Computed
+        with FILTER aggregates so the page makes a single call rather than
+        six count queries.
+        """
+        from sqlalchemy import text as _t
+
+        r = self.db_session.execute(_t(
+            "SELECT "
+            "  COUNT(*) FILTER (WHERE h.deleted_date IS NULL) AS total, "
+            "  COUNT(*) FILTER (WHERE h.deleted_date IS NULL "
+            f"    AND h.last_checkin_at > NOW() - INTERVAL '{self._HARDWARE_ONLINE_WINDOW_S} seconds') AS online, "
+            "  COUNT(*) FILTER (WHERE h.deleted_date IS NULL "
+            "    AND h.paired_iot_device_id IS NULL) AS unpaired, "
+            "  COUNT(*) FILTER (WHERE h.deleted_date IS NULL "
+            f"    AND {self._HW_BATTERY_SQL} < {self._HW_BATTERY_CRITICAL}) AS low_battery, "
+            "  COUNT(*) FILTER (WHERE h.deleted_date IS NOT NULL) AS deleted, "
+            "  COUNT(*) FILTER (WHERE h.deleted_date IS NULL "
+            "    AND h.lifecycle_status = 'active') AS st_active, "
+            "  COUNT(*) FILTER (WHERE h.deleted_date IS NULL "
+            "    AND h.lifecycle_status = 'maintenance') AS st_maintenance, "
+            "  COUNT(*) FILTER (WHERE h.deleted_date IS NULL "
+            "    AND h.lifecycle_status = 'repair') AS st_repair, "
+            "  COUNT(*) FILTER (WHERE h.deleted_date IS NULL "
+            "    AND h.lifecycle_status = 'storage') AS st_storage, "
+            "  COUNT(*) FILTER (WHERE h.deleted_date IS NULL "
+            "    AND h.lifecycle_status = 'retired') AS st_retired "
+            "FROM iot_hardwares h"
+        )).fetchone()
+
+        open_issues = int(self.db_session.execute(_t(
+            "SELECT COUNT(*) FROM iot_hardware_history hh "
+            "JOIN iot_hardwares h ON h.id = hh.hardware_id "
+            "WHERE hh.event_type = 'issue' AND hh.resolved_date IS NULL "
+            "  AND h.deleted_date IS NULL"
+        )).fetchone()[0] or 0)
+
+        return {
+            'total': int(r[0] or 0),
+            'online': int(r[1] or 0),
+            'unpaired': int(r[2] or 0),
+            'low_battery': int(r[3] or 0),
+            'deleted': int(r[4] or 0),
+            'open_issues': open_issues,
+            'by_status': {
+                'active': int(r[5] or 0),
+                'maintenance': int(r[6] or 0),
+                'repair': int(r[7] or 0),
+                'storage': int(r[8] or 0),
+                'retired': int(r[9] or 0),
+            },
         }
 
     def _ensure_hardware_exists(self, hardware_id: int):
@@ -2931,6 +3143,21 @@ class AdminService:
                 'actor': actor_id,
                 'pl': _json.dumps({'pin': pending_pin}),
             })
+
+        self._log_hardware_history(
+            hardware_id,
+            'pair',
+            f'Paired to device #{device_id} · {dev[1] or "—"}',
+            None,
+            severity='info',
+            payload={
+                'device_id': device_id,
+                'device_name': dev[1],
+                # Never log the PIN itself — only that one was pushed.
+                'pin_set': bool(pending_pin),
+            },
+            actor_id=actor_id,
+        )
         self.db_session.commit()
 
         return {
@@ -2957,46 +3184,585 @@ class AdminService:
         prev_device_id = (
             int(existing[0]) if (existing and existing[0] is not None) else None
         )
+        actor_id = self._actor_id(current_user)
 
-        # Clear hardware → device.
-        self.db_session.execute(_t(
-            "UPDATE iot_hardwares SET "
-            "  paired_iot_device_id = NULL, paired_at = NULL, paired_by = NULL, "
-            "  updated_date = NOW() "
-            "WHERE id = :id"
-        ), {'id': hardware_id})
-        # Clear device → hardware (only if it points back at us).
         if prev_device_id:
+            # Clears both sides, queues a `force_logout {unpair: true}` so
+            # the tablet also drops its *device* credentials (not just the
+            # operator session), and bumps admin_watching_until so it picks
+            # that up within ~1 s instead of up to 30 s on the idle cadence.
+            self._unpair_hardware_inner(hardware_id, prev_device_id, actor_id)
+        else:
+            # Nothing to tear down, but still normalise the columns —
+            # paired_at / paired_by can be non-NULL on rows whose device was
+            # hard-deleted out from under them (FK is ON DELETE SET NULL).
             self.db_session.execute(_t(
-                "UPDATE iot_devices SET hardware_id = NULL, updated_date = NOW() "
-                "WHERE id = :id AND hardware_id = :hw"
-            ), {'id': prev_device_id, 'hw': hardware_id})
+                "UPDATE iot_hardwares SET "
+                "  paired_iot_device_id = NULL, paired_at = NULL, paired_by = NULL, "
+                "  updated_date = NOW() "
+                "WHERE id = :id"
+            ), {'id': hardware_id})
 
-            # Queue a force_logout command so the tablet drops back into the
-            # pre-login state on its next /sync. The `unpair: true` payload
-            # flag tells the tablet to also clear *device* credentials (not
-            # just the operator session) and restart the hardware checkin loop.
-            actor_id = (current_user or {}).get('user_id') or (current_user or {}).get('id')
-            self.db_session.execute(_t(
-                "INSERT INTO iot_device_commands "
-                "(device_id, command_type, payload, status, issued_by) "
-                "VALUES (:dev, 'force_logout', CAST(:pl AS JSONB), 'pending', :actor)"
-            ), {
-                'dev': prev_device_id,
-                'actor': actor_id,
-                'pl': '{"unpair": true}',
-            })
-            # Drop the tablet into long-poll mode so it fetches the queued
-            # force_logout within ~1 s (vs up to 30 s on the idle-cadence
-            # sync). Without this an idle paired tablet can take 30 s to
-            # actually log out, which made the Unpair button feel slow.
-            self._bump_admin_watching_until(prev_device_id, minutes=5)
+        self._log_hardware_history(
+            hardware_id,
+            'unpair',
+            'Unpaired from device'
+            + (f' #{prev_device_id}' if prev_device_id else ''),
+            None,
+            severity='info',
+            payload={'device_id': prev_device_id},
+            actor_id=actor_id,
+        )
         self.db_session.commit()
 
         return {
             'hardware_id': hardware_id,
             'unpaired_from_iot_device_id': prev_device_id,
             'paired': False,
+        }
+
+    # ── IoT Hardwares: lifecycle, soft delete, history ──────────────
+
+    def _log_hardware_history(
+        self,
+        hardware_id: int,
+        event_type: str,
+        title: str,
+        detail: str | None = None,
+        severity: str = 'info',
+        payload: dict | None = None,
+        actor_id: int | None = None,
+    ) -> None:
+        """Append one row to the hardware timeline. Never commits.
+
+        Callers commit as part of their own transaction so the event and the
+        change it describes land atomically — a pair that succeeded but
+        whose breadcrumb was rolled back would be worse than no breadcrumb.
+        """
+        from sqlalchemy import text as _t
+        import json as _json
+
+        self.db_session.execute(_t(
+            "INSERT INTO iot_hardware_history "
+            "  (hardware_id, event_type, severity, title, detail, payload, created_by) "
+            "VALUES (:hw, :et, :sev, :title, :detail, CAST(:pl AS JSONB), :actor)"
+        ), {
+            'hw': hardware_id,
+            'et': event_type[:32],
+            'sev': severity[:16],
+            'title': (title or '')[:200],
+            'detail': detail,
+            'pl': _json.dumps(payload) if payload is not None else None,
+            'actor': actor_id,
+        })
+
+    @staticmethod
+    def _actor_id(current_user: dict | None):
+        cu = current_user or {}
+        return cu.get('user_id') or cu.get('id')
+
+    def update_iot_hardware_status(
+        self, hardware_id: int, data: dict, current_user: dict
+    ) -> Dict[str, Any]:
+        """POST /api/admin/iot-hardwares/{id}/status
+
+        Body: ``{status: 'maintenance', note?: '...'}``
+
+        Lifecycle is independent of pairing — a unit can sit in
+        `maintenance` while still paired, which is exactly what ops wants
+        when they're swapping a battery and expect the tablet back on the
+        same account in an hour.
+
+        The one coupling: moving to `retired` unpairs the unit, because a
+        retired tablet that keeps auto-logging-in is a security problem.
+        """
+        from sqlalchemy import text as _t
+
+        self._ensure_hardware_exists(hardware_id)
+
+        status = (data.get('status') or data.get('lifecycle_status') or '').strip().lower()
+        if status not in self.HARDWARE_LIFECYCLE_STATUSES:
+            raise BadRequestException(
+                'status must be one of: '
+                + ', '.join(self.HARDWARE_LIFECYCLE_STATUSES)
+            )
+        note_raw = data.get('note', data.get('status_note'))
+        note = None if note_raw is None else str(note_raw).strip()[:2000] or None
+
+        prev = self.db_session.execute(_t(
+            "SELECT lifecycle_status, paired_iot_device_id "
+            "FROM iot_hardwares WHERE id = :id"
+        ), {'id': hardware_id}).fetchone()
+        prev_status = (prev[0] if prev else None) or 'active'
+        paired_device_id = int(prev[1]) if (prev and prev[1] is not None) else None
+
+        actor_id = self._actor_id(current_user)
+
+        self.db_session.execute(_t(
+            "UPDATE iot_hardwares SET "
+            "  lifecycle_status = :st, status_note = :note, "
+            "  status_changed_at = NOW(), status_changed_by = :actor, "
+            "  updated_date = NOW() "
+            "WHERE id = :id"
+        ), {'id': hardware_id, 'st': status, 'note': note, 'actor': actor_id})
+
+        unpaired_device_id = None
+        if status == 'retired' and paired_device_id:
+            unpaired_device_id = paired_device_id
+            self._unpair_hardware_inner(hardware_id, paired_device_id, actor_id)
+
+        # `retired` and `repair` are the states ops escalates on, so they
+        # get warning severity — that's what colours the timeline entry and
+        # what the "needs attention" filter keys off downstream.
+        severity = 'warning' if status in ('repair', 'retired') else 'info'
+        self._log_hardware_history(
+            hardware_id,
+            'status_change',
+            f'Status changed: {prev_status} → {status}',
+            note,
+            severity=severity,
+            payload={
+                'from': prev_status,
+                'to': status,
+                'unpaired_device_id': unpaired_device_id,
+            },
+            actor_id=actor_id,
+        )
+        self.db_session.commit()
+
+        return {
+            'id': hardware_id,
+            'lifecycle_status': status,
+            'previous_status': prev_status,
+            'status_note': note,
+            'unpaired_device_id': unpaired_device_id,
+        }
+
+    def _unpair_hardware_inner(
+        self, hardware_id: int, device_id: int, actor_id
+    ) -> None:
+        """Clear both sides of a pairing + queue force_logout. No commit.
+
+        Extracted from `unpair_iot_hardware` so retire and soft-delete can
+        reuse the exact same teardown — three copies of this drifting apart
+        is how you end up with a tablet still holding live credentials for
+        a unit that was decommissioned.
+        """
+        from sqlalchemy import text as _t
+
+        # `iot_device_commands.issued_by` is NOT NULL, so an unresolvable
+        # actor would fail the INSERT halfway through the teardown — leaving
+        # the pairing cleared but no force_logout queued, i.e. a tablet still
+        # holding live credentials. Fail loudly up front instead. Mirrors the
+        # guard in `soft_delete_iot_device`.
+        if not actor_id:
+            raise BadRequestException('Cannot determine issuing admin user')
+
+        self.db_session.execute(_t(
+            "UPDATE iot_hardwares SET "
+            "  paired_iot_device_id = NULL, paired_at = NULL, paired_by = NULL, "
+            "  updated_date = NOW() "
+            "WHERE id = :id"
+        ), {'id': hardware_id})
+        self.db_session.execute(_t(
+            "UPDATE iot_devices SET hardware_id = NULL, updated_date = NOW() "
+            "WHERE id = :id AND hardware_id = :hw"
+        ), {'id': device_id, 'hw': hardware_id})
+        self.db_session.execute(_t(
+            "INSERT INTO iot_device_commands "
+            "(device_id, command_type, payload, status, issued_by) "
+            "VALUES (:dev, 'force_logout', CAST(:pl AS JSONB), 'pending', :actor)"
+        ), {'dev': device_id, 'actor': actor_id, 'pl': '{"unpair": true}'})
+        self._bump_admin_watching_until(device_id, minutes=5)
+
+    def soft_delete_iot_hardware(
+        self, hardware_id: int, current_user: dict, query_params: dict | None = None
+    ) -> Dict[str, Any]:
+        """DELETE /api/admin/iot-hardwares/{id} — soft delete.
+
+        Sets `deleted_date` and unpairs the unit so the tablet stops
+        auto-logging-in. The row is NOT hard-deleted: `iot_devices.hardware_id`
+        references it and `mac_address` is UNIQUE, so a hard delete would
+        either lose pairing history or let the next checkin insert a
+        duplicate identity for the same physical tablet.
+
+        Deliberate non-behaviour: the row does **not** come back when the
+        tablet checks in again. It phones home every ~5 s, so reviving on
+        checkin would make Delete look broken. `last_checkin_at` keeps
+        advancing (the Deleted view shows when it last called home) and the
+        checkin handler drops a `checkin_after_delete` breadcrumb once per
+        day, but only an explicit Restore brings the unit back.
+        """
+        from sqlalchemy import text as _t
+
+        row = self.db_session.execute(_t(
+            "SELECT id, mac_address, paired_iot_device_id, deleted_date "
+            "FROM iot_hardwares WHERE id = :id"
+        ), {'id': hardware_id}).fetchone()
+        if not row:
+            raise NotFoundException(f'iot_hardware {hardware_id} not found')
+        if row[3] is not None:
+            # Idempotent — deleting twice is a no-op, not a 409. Ops
+            # double-clicking the confirm button shouldn't see an error.
+            return {
+                'id': hardware_id,
+                'deleted': True,
+                'already_deleted': True,
+                'unpaired_device_id': None,
+            }
+
+        paired_device_id = int(row[2]) if row[2] is not None else None
+        actor_id = self._actor_id(current_user)
+        reason = None
+        if query_params:
+            reason_raw = query_params.get('reason')
+            if reason_raw:
+                reason = str(reason_raw).strip()[:2000] or None
+
+        if paired_device_id:
+            self._unpair_hardware_inner(hardware_id, paired_device_id, actor_id)
+
+        self.db_session.execute(_t(
+            "UPDATE iot_hardwares SET deleted_date = NOW(), is_active = FALSE, "
+            "  updated_date = NOW() "
+            "WHERE id = :id"
+        ), {'id': hardware_id})
+
+        self._log_hardware_history(
+            hardware_id,
+            'delete',
+            'Hardware removed from the active list',
+            reason,
+            severity='warning',
+            payload={
+                'mac_address': row[1],
+                'unpaired_device_id': paired_device_id,
+            },
+            actor_id=actor_id,
+        )
+        self.db_session.commit()
+
+        return {
+            'id': hardware_id,
+            'deleted': True,
+            'unpaired_device_id': paired_device_id,
+        }
+
+    def restore_iot_hardware(
+        self, hardware_id: int, current_user: dict
+    ) -> Dict[str, Any]:
+        """POST /api/admin/iot-hardwares/{id}/restore — undo a soft delete.
+
+        Comes back as `active` and unpaired: whatever it was bound to before
+        may well have been re-assigned in the meantime, so ops re-pairs
+        explicitly rather than us guessing.
+        """
+        from sqlalchemy import text as _t
+
+        row = self.db_session.execute(_t(
+            "SELECT id, deleted_date FROM iot_hardwares WHERE id = :id"
+        ), {'id': hardware_id}).fetchone()
+        if not row:
+            raise NotFoundException(f'iot_hardware {hardware_id} not found')
+        if row[1] is None:
+            return {'id': hardware_id, 'deleted': False, 'already_active': True}
+
+        actor_id = self._actor_id(current_user)
+        self.db_session.execute(_t(
+            "UPDATE iot_hardwares SET deleted_date = NULL, is_active = TRUE, "
+            "  lifecycle_status = 'active', status_changed_at = NOW(), "
+            "  status_changed_by = :actor, updated_date = NOW() "
+            "WHERE id = :id"
+        ), {'id': hardware_id, 'actor': actor_id})
+        self._log_hardware_history(
+            hardware_id,
+            'restore',
+            'Hardware restored to the active list',
+            None,
+            severity='info',
+            actor_id=actor_id,
+        )
+        self.db_session.commit()
+        return {'id': hardware_id, 'deleted': False, 'lifecycle_status': 'active'}
+
+    # Event types ops may create by hand. System events (pair, unpair,
+    # status_change, delete, restore, checkin_after_delete) are written by
+    # the service and are not accepted from the client.
+    _HARDWARE_MANUAL_EVENT_TYPES = ('note', 'issue')
+    _HARDWARE_SEVERITIES = ('info', 'warning', 'critical')
+
+    def list_iot_hardware_history(
+        self, hardware_id: int, query_params: dict
+    ) -> Dict[str, Any]:
+        """GET /api/admin/iot-hardwares/{id}/history
+
+        Params: page, pageSize, type (csv event_type), openOnly ('true').
+        Newest first — a timeline is read from the top.
+        """
+        from sqlalchemy import text as _t
+
+        try:
+            page = max(1, int(query_params.get('page', 1) or 1))
+        except Exception:
+            page = 1
+        try:
+            page_size = int(query_params.get('pageSize', 50) or 50)
+        except Exception:
+            page_size = 50
+        page_size = max(1, min(page_size, 200))
+
+        where = ['hh.hardware_id = :hw']
+        params: Dict[str, Any] = {'hw': hardware_id}
+
+        type_raw = (query_params.get('type') or '').strip()
+        if type_raw:
+            keys = []
+            for i, v in enumerate(
+                [x.strip()[:32] for x in type_raw.split(',') if x.strip()]
+            ):
+                keys.append(f':ty{i}')
+                params[f'ty{i}'] = v
+            if keys:
+                where.append(f"hh.event_type IN ({', '.join(keys)})")
+
+        if (query_params.get('openOnly') or '').strip().lower() in ('true', '1', 'yes'):
+            where.append("hh.event_type = 'issue' AND hh.resolved_date IS NULL")
+
+        where_sql = ' AND '.join(where)
+
+        total = int(self.db_session.execute(_t(
+            f"SELECT COUNT(*) FROM iot_hardware_history hh WHERE {where_sql}"
+        ), params).fetchone()[0] or 0)
+
+        params_paged = dict(params)
+        params_paged['_lim'] = page_size
+        params_paged['_off'] = (page - 1) * page_size
+
+        rows = self.db_session.execute(_t(
+            "SELECT hh.id, hh.event_type, hh.severity, hh.title, hh.detail, "
+            "       hh.payload, hh.resolved_date, hh.created_date, "
+            "       hh.created_by, "
+            "       COALESCE(NULLIF(TRIM(CONCAT_WS(' ', u.first_name, u.last_name)), ''), "
+            "                u.display_name, u.email) AS actor_name, "
+            "       COALESCE(NULLIF(TRIM(CONCAT_WS(' ', ru.first_name, ru.last_name)), ''), "
+            "                ru.display_name, ru.email) AS resolver_name "
+            "FROM iot_hardware_history hh "
+            "LEFT JOIN user_locations u ON u.id = hh.created_by "
+            "LEFT JOIN user_locations ru ON ru.id = hh.resolved_by "
+            f"WHERE {where_sql} "
+            "ORDER BY hh.created_date DESC, hh.id DESC "
+            "LIMIT :_lim OFFSET :_off"
+        ), params_paged).fetchall()
+
+        items = []
+        for r in rows:
+            items.append({
+                'id': r[0],
+                'event_type': r[1],
+                'severity': r[2],
+                'title': r[3],
+                'detail': r[4],
+                'payload': r[5],
+                'resolved_date': r[6].isoformat() if r[6] else None,
+                'is_open': r[1] == 'issue' and r[6] is None,
+                'created_date': r[7].isoformat() if r[7] else None,
+                'created_by': r[8],
+                'created_by_name': r[9],
+                'resolved_by_name': r[10],
+            })
+
+        return {
+            'items': items,
+            'total': total,
+            'page': page,
+            'pageSize': page_size,
+        }
+
+    def create_iot_hardware_history(
+        self, hardware_id: int, data: dict, current_user: dict
+    ) -> Dict[str, Any]:
+        """POST /api/admin/iot-hardwares/{id}/history
+
+        Body: ``{event_type: 'issue'|'note', title, detail?, severity?}``.
+        This is how ops records "screen flickers when charging" against a
+        physical unit so the next person doesn't rediscover it.
+        """
+        from sqlalchemy import text as _t
+        import json as _json
+
+        # Allow logging against a deleted unit — post-mortem notes on a
+        # decommissioned tablet are legitimate.
+        exists = self.db_session.execute(_t(
+            "SELECT id FROM iot_hardwares WHERE id = :id"
+        ), {'id': hardware_id}).fetchone()
+        if not exists:
+            raise NotFoundException(f'iot_hardware {hardware_id} not found')
+
+        event_type = (data.get('event_type') or 'note').strip().lower()
+        if event_type not in self._HARDWARE_MANUAL_EVENT_TYPES:
+            raise BadRequestException(
+                'event_type must be one of: '
+                + ', '.join(self._HARDWARE_MANUAL_EVENT_TYPES)
+            )
+        title = (data.get('title') or '').strip()
+        if not title:
+            raise BadRequestException('title is required')
+        detail_raw = data.get('detail')
+        detail = None if detail_raw is None else str(detail_raw).strip()[:5000] or None
+        severity = (data.get('severity') or '').strip().lower()
+        if severity not in self._HARDWARE_SEVERITIES:
+            # Notes are informational by nature; an unspecified issue is a
+            # warning so it shows up in "needs attention" without the
+            # operator having to pick a severity.
+            severity = 'warning' if event_type == 'issue' else 'info'
+
+        actor_id = self._actor_id(current_user)
+        row = self.db_session.execute(_t(
+            "INSERT INTO iot_hardware_history "
+            "  (hardware_id, event_type, severity, title, detail, payload, created_by) "
+            "VALUES (:hw, :et, :sev, :title, :detail, CAST(:pl AS JSONB), :actor) "
+            "RETURNING id, created_date"
+        ), {
+            'hw': hardware_id,
+            'et': event_type,
+            'sev': severity,
+            'title': title[:200],
+            'detail': detail,
+            'pl': _json.dumps(data.get('payload')) if isinstance(data.get('payload'), dict) else None,
+            'actor': actor_id,
+        }).fetchone()
+        self.db_session.commit()
+
+        return {
+            'id': int(row[0]),
+            'hardware_id': hardware_id,
+            'event_type': event_type,
+            'severity': severity,
+            'title': title[:200],
+            'detail': detail,
+            'created_date': row[1].isoformat() if row[1] else None,
+            'is_open': event_type == 'issue',
+        }
+
+    def resolve_iot_hardware_history(
+        self, hardware_id: int, entry_id: int, data: dict, current_user: dict
+    ) -> Dict[str, Any]:
+        """POST /api/admin/iot-hardwares/{id}/history/{entryId}/resolve
+
+        Closes an `issue` row. Any resolution text is appended to `detail`
+        rather than overwriting it — the original report is the evidence.
+        """
+        from sqlalchemy import text as _t
+
+        row = self.db_session.execute(_t(
+            "SELECT id, event_type, resolved_date, detail "
+            "FROM iot_hardware_history WHERE id = :id AND hardware_id = :hw"
+        ), {'id': entry_id, 'hw': hardware_id}).fetchone()
+        if not row:
+            raise NotFoundException(
+                f'history entry {entry_id} not found for hardware {hardware_id}'
+            )
+        if row[1] != 'issue':
+            raise BadRequestException('only `issue` entries can be resolved')
+        if row[2] is not None:
+            return {'id': entry_id, 'is_open': False, 'already_resolved': True}
+
+        resolution_raw = data.get('resolution') if isinstance(data, dict) else None
+        resolution = (
+            None if resolution_raw is None
+            else str(resolution_raw).strip()[:2000] or None
+        )
+        detail = row[3]
+        if resolution:
+            detail = f'{detail}\n\n— Resolved: {resolution}' if detail else f'Resolved: {resolution}'
+
+        actor_id = self._actor_id(current_user)
+        self.db_session.execute(_t(
+            "UPDATE iot_hardware_history SET resolved_date = NOW(), "
+            "  resolved_by = :actor, detail = :detail "
+            "WHERE id = :id"
+        ), {'id': entry_id, 'actor': actor_id, 'detail': detail})
+        self.db_session.commit()
+
+        return {'id': entry_id, 'is_open': False}
+
+    # Battery buckets are written by /api/iot-hardwares/checkin at 15-min
+    # granularity; 30 days keeps ~2.9k rows per tablet.
+    _HARDWARE_BATTERY_BUCKET_MIN = 15
+    _HARDWARE_BATTERY_RETENTION_DAYS = 30
+
+    def list_iot_hardware_battery_history(
+        self, hardware_id: int, query_params: dict
+    ) -> Dict[str, Any]:
+        """GET /api/admin/iot-hardwares/{id}/battery-history?range=24h|7d|30d
+
+        Returns chronological buckets. Gaps (tablet off / out of signal) are
+        simply missing rows — the chart renders them as breaks rather than
+        interpolating a battery level nobody measured.
+        """
+        from sqlalchemy import text as _t
+
+        rng = (query_params.get('range') or '24h').strip()
+        interval_sql = {
+            '6h': "INTERVAL '6 hours'",
+            '24h': "INTERVAL '24 hours'",
+            '7d': "INTERVAL '7 days'",
+            '30d': "INTERVAL '30 days'",
+        }.get(rng)
+        if interval_sql is None:
+            rng, interval_sql = '24h', "INTERVAL '24 hours'"
+
+        rows = self.db_session.execute(_t(
+            "SELECT bucket_start, battery_level, battery_min, battery_max, "
+            "       battery_charging, network_type, network_strength, samples, "
+            "       last_checkin_at "
+            "FROM iot_hardware_battery_history "
+            "WHERE hardware_id = :hw "
+            "  AND bucket_start >= NOW() - " + interval_sql + " "
+            "ORDER BY bucket_start ASC"
+        ), {'hw': hardware_id}).fetchall()
+
+        items = [{
+            'bucket_start': r[0].isoformat() if r[0] else None,
+            'battery_level': r[1],
+            'battery_min': r[2],
+            'battery_max': r[3],
+            'battery_charging': r[4],
+            'network_type': r[5],
+            'network_strength': r[6],
+            'samples': int(r[7] or 0),
+            'last_checkin_at': r[8].isoformat() if r[8] else None,
+        } for r in rows]
+
+        # Headline min/max come from the per-bucket min/max columns, not the
+        # bucket's last value: a tablet can drop from 79% to 40% and back to
+        # 100% inside one 15-min bucket, and reporting only the closing value
+        # would hide exactly the dip ops is looking for. `latest` still uses
+        # the closing value of the newest bucket — that's "battery right now".
+        mins = [
+            it['battery_min'] if it['battery_min'] is not None else it['battery_level']
+            for it in items
+            if it['battery_min'] is not None or it['battery_level'] is not None
+        ]
+        maxes = [
+            it['battery_max'] if it['battery_max'] is not None else it['battery_level']
+            for it in items
+            if it['battery_max'] is not None or it['battery_level'] is not None
+        ]
+        closing = [
+            it['battery_level'] for it in items if it['battery_level'] is not None
+        ]
+        return {
+            'items': items,
+            'range': rng,
+            'bucket_minutes': self._HARDWARE_BATTERY_BUCKET_MIN,
+            'summary': {
+                'samples': sum(it['samples'] for it in items),
+                'min': min(mins) if mins else None,
+                'max': max(maxes) if maxes else None,
+                'latest': closing[-1] if closing else None,
+                'buckets': len(items),
+            },
         }
 
     # ── IoT Devices: aggregated history (5-min buckets) ─────────────
@@ -3047,13 +3813,25 @@ class AdminService:
             )
         ))
 
+        # The hardware battery buckets are written inline by /checkin (no
+        # worker), but they still need a retention sweep — piggyback on this
+        # call rather than standing up a second scheduled function.
+        purged_battery = self.db_session.execute(_t(
+            "DELETE FROM iot_hardware_battery_history "
+            "WHERE bucket_start < NOW() - INTERVAL ':d days'".replace(
+                ':d', str(self._HARDWARE_BATTERY_RETENTION_DAYS)
+            )
+        ))
+
         self.db_session.commit()
 
         return {
             'inserted': getattr(result, 'rowcount', 0) or 0,
             'purged': getattr(purged, 'rowcount', 0) or 0,
+            'purged_hardware_battery': getattr(purged_battery, 'rowcount', 0) or 0,
             'bucket_minutes': self._HISTORY_BUCKET_MIN,
             'retention_days': self._HISTORY_RETENTION_DAYS,
+            'hardware_battery_retention_days': self._HARDWARE_BATTERY_RETENTION_DAYS,
         }
 
     def list_online_history(self, query_params: dict) -> Dict[str, Any]:

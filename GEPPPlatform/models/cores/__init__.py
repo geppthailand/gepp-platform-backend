@@ -12,7 +12,9 @@ from .references import (
     Nationality, PhoneNumberCountryCode
 )
 from .iot_devices import IoTDevice
-from .iot_hardwares import IoTHardware
+from .iot_hardwares import (
+    IoTHardware, IoTHardwareHistory, IoTHardwareBatteryHistory
+)
 from .device_health import DeviceHealth
 from .device_events import DeviceEvent
 from .device_commands import DeviceCommand
@@ -32,6 +34,7 @@ __all__ = [
     'MaterialTag', 'MaterialTagGroup',
     'Nationality', 'PhoneNumberCountryCode',
     'IoTDevice', 'IoTHardware',
+    'IoTHardwareHistory', 'IoTHardwareBatteryHistory',
     'DeviceHealth', 'DeviceEvent', 'DeviceCommand', 'DeviceHealthHistory',
 
     # Permissions

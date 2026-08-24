@@ -52,27 +52,60 @@ def handle_admin_routes(path: str, data: dict, **commonParams):
         ):
             return admin_handler.admin_service.aggregate_health_snapshot()
 
-        # IoT hardwares: POST /admin/iot-hardwares/{id}/{pair|unpair|tags}
+        # IoT hardwares:
+        #   POST /admin/iot-hardwares/{id}/{pair|unpair|tags|status|restore|history}
         if (
             len(path_parts) == 3
             and path_parts[0] == 'iot-hardwares'
-            and path_parts[2] in ('pair', 'unpair', 'tags')
+            and path_parts[2] in (
+                'pair', 'unpair', 'tags', 'status', 'restore', 'history',
+            )
         ):
             try:
                 hardware_id = int(path_parts[1])
             except ValueError:
                 raise NotFoundException(f'POST endpoint not found: {internal_path}')
             current_user = commonParams.get('current_user', {})
-            if path_parts[2] == 'pair':
+            sub = path_parts[2]
+            if sub == 'pair':
                 return admin_handler.admin_service.pair_iot_hardware(
                     hardware_id, data, current_user=current_user
                 )
-            if path_parts[2] == 'tags':
+            if sub == 'tags':
                 return admin_handler.admin_service.update_iot_hardware_tags(
                     hardware_id, data
                 )
+            if sub == 'status':
+                return admin_handler.admin_service.update_iot_hardware_status(
+                    hardware_id, data, current_user=current_user
+                )
+            if sub == 'restore':
+                return admin_handler.admin_service.restore_iot_hardware(
+                    hardware_id, current_user=current_user
+                )
+            if sub == 'history':
+                return admin_handler.admin_service.create_iot_hardware_history(
+                    hardware_id, data, current_user=current_user
+                )
             return admin_handler.admin_service.unpair_iot_hardware(
                 hardware_id, current_user=current_user
+            )
+
+        # IoT hardwares: POST /admin/iot-hardwares/{id}/history/{entryId}/resolve
+        if (
+            len(path_parts) == 5
+            and path_parts[0] == 'iot-hardwares'
+            and path_parts[2] == 'history'
+            and path_parts[4] == 'resolve'
+        ):
+            try:
+                hardware_id = int(path_parts[1])
+                entry_id = int(path_parts[3])
+            except ValueError:
+                raise NotFoundException(f'POST endpoint not found: {internal_path}')
+            return admin_handler.admin_service.resolve_iot_hardware_history(
+                hardware_id, entry_id, data,
+                current_user=commonParams.get('current_user', {}),
             )
 
         # IoT devices: POST /admin/iot-devices/{id}/{commands|tags|maintenance|debug-log|settings}
@@ -158,6 +191,36 @@ def handle_admin_routes(path: str, data: dict, **commonParams):
         # IoT hardwares: GET /admin/iot-hardwares (list)
         if len(path_parts) == 1 and path_parts[0] == 'iot-hardwares':
             return admin_handler.admin_service.list_iot_hardwares(query_params)
+
+        # IoT hardwares: GET /admin/iot-hardwares/summary  (stat strip)
+        #                GET /admin/iot-hardwares/{id}     (detail)
+        if len(path_parts) == 2 and path_parts[0] == 'iot-hardwares':
+            if path_parts[1] == 'summary':
+                return admin_handler.admin_service.get_iot_hardware_summary(
+                    query_params
+                )
+            try:
+                hardware_id = int(path_parts[1])
+            except ValueError:
+                raise NotFoundException(f"GET endpoint not found: {internal_path}")
+            return admin_handler.admin_service.get_iot_hardware(hardware_id)
+
+        # IoT hardwares: GET /admin/iot-hardwares/{id}/{history|battery-history}
+        if len(path_parts) == 3 and path_parts[0] == 'iot-hardwares':
+            try:
+                hardware_id = int(path_parts[1])
+            except ValueError:
+                raise NotFoundException(f"GET endpoint not found: {internal_path}")
+            sub = path_parts[2]
+            if sub == 'history':
+                return admin_handler.admin_service.list_iot_hardware_history(
+                    hardware_id, query_params
+                )
+            if sub == 'battery-history':
+                return admin_handler.admin_service.list_iot_hardware_battery_history(
+                    hardware_id, query_params
+                )
+            raise NotFoundException(f"GET endpoint not found: {internal_path}")
 
         # IoT devices: realtime / by-organization / tags / recent-activity
         # (no numeric id)
@@ -301,6 +364,20 @@ def handle_admin_routes(path: str, data: dict, **commonParams):
             raise NotFoundException(f"PUT endpoint not found: {internal_path}")
 
     elif method == "DELETE":
+        # IoT hardwares: DELETE /admin/iot-hardwares/{id} — soft delete with
+        # side effects (unpair + timeline entry), so it can't go through the
+        # generic `delete_resource` path.
+        if len(path_parts) == 2 and path_parts[0] == 'iot-hardwares':
+            try:
+                hardware_id = int(path_parts[1])
+            except ValueError:
+                raise NotFoundException(f"DELETE endpoint not found: {internal_path}")
+            return admin_handler.admin_service.soft_delete_iot_hardware(
+                hardware_id,
+                current_user=commonParams.get('current_user', {}),
+                query_params=commonParams.get('query_params', {}) or {},
+            )
+
         if len(path_parts) == 2:
             # DELETE /admin/{resource}/{id}
             resource = path_parts[0]
