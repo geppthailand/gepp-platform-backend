@@ -1108,6 +1108,13 @@ class OrganizationService:
                     hub_type=location_data.get('hub_type'),  # Hub type from hubData.type
                     members=location_data.get('users', []),  # Store user assignments in members column
                     address=location_data.get('address'),  # Address of the location
+                    # จังหวัด / เขต-อำเภอ / แขวง-ตำบล picked in Location Setup before the node
+                    # existed in the database. Without these three the address entered on a
+                    # brand-new node would survive the org-chart save but its administrative
+                    # area would silently not.
+                    province_id=location_data.get('province_id'),
+                    district_id=location_data.get('district_id'),
+                    subdistrict_id=location_data.get('subdistrict_id'),
                     materials=location_data.get('materials') or [],  # Material IDs assigned to this location
                 )
 

@@ -190,6 +190,12 @@ def handle_user_routes(event: Dict[str, Any], data: Dict[str, Any], **params) ->
         # Get user locations (is_location = True)
         return handle_get_locations(db_session, user_service, query_params, current_user, headers)
 
+    elif '/api/locations/geo/' in path and method == 'GET':
+        # Thai address reference data: /api/locations/geo/{provinces|districts|subdistricts}
+        # Must stay above the /api/locations/{id}/... branches — "geo" is not a location id.
+        geo_level = path.split('/geo/')[1].strip('/')
+        return handle_get_geo_options(db_session, geo_level, query_params)
+
     elif '/api/locations/' in path and '/check-dependencies' in path and method == 'GET':
         # Check location dependencies: /api/locations/{location_id}/check-dependencies
         location_id = path.split('/locations/')[1].split('/')[0]
@@ -1222,6 +1228,186 @@ def _validate_waste_room_location(
     return waste_room_id
 
 
+def handle_get_geo_options(
+    db_session,
+    level: str,
+    query_params: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    Handle GET /api/locations/geo/{provinces|districts|subdistricts}
+
+    Address reference data for the cascading จังหวัด → เขต/อำเภอ → แขวง/ตำบล picker,
+    one level per request.
+
+    Deliberately NOT one nested tree: Thailand alone has 10,231 subdistricts, so the
+    full hierarchy is a several-hundred-kilobyte response that no picker ever shows at
+    once. A province has ~15 districts and a district ~10 subdistricts, which is small
+    enough that the client can type-filter entirely in memory once a level is loaded.
+
+    These are global reference tables — nothing tenant-owned to leak — so there is no
+    organization filter, but the route still sits behind the same auth guard as every
+    other /api/locations call.
+    """
+    from GEPPPlatform.models.cores.locations import (
+        LocationProvince,
+        LocationDistrict,
+        LocationSubdistrict,
+    )
+
+    def _int_param(key: str) -> Optional[int]:
+        raw = (query_params or {}).get(key)
+        if raw in (None, ''):
+            return None
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            raise BadRequestException(f'{key} must be a number')
+
+    if level == 'provinces':
+        # The table holds provinces for several countries, so it must be scoped to one.
+        # 212 = Thailand, which is user_locations.country_id's default and the only
+        # country with districts/subdistricts populated underneath it.
+        country_id = _int_param('country_id') or 212
+        rows = db_session.query(LocationProvince).filter(
+            LocationProvince.country_id == country_id,
+            LocationProvince.deleted_date.is_(None)
+        ).order_by(LocationProvince.name_th).all()
+        options = [
+            {'id': row.id, 'name_th': row.name_th, 'name_en': row.name_en}
+            for row in rows
+        ]
+
+    elif level == 'districts':
+        province_id = _int_param('province_id')
+        if province_id is None:
+            raise BadRequestException('province_id is required')
+        rows = db_session.query(LocationDistrict).filter(
+            LocationDistrict.province_id == province_id,
+            LocationDistrict.deleted_date.is_(None)
+        ).order_by(LocationDistrict.name_th).all()
+        options = [
+            {'id': row.id, 'name_th': row.name_th, 'name_en': row.name_en}
+            for row in rows
+        ]
+
+    elif level == 'subdistricts':
+        district_id = _int_param('district_id')
+        if district_id is None:
+            raise BadRequestException('district_id is required')
+        rows = db_session.query(LocationSubdistrict).filter(
+            LocationSubdistrict.district_id == district_id,
+            LocationSubdistrict.deleted_date.is_(None)
+        ).order_by(LocationSubdistrict.name_th).all()
+        # postal_code rides along: it is a property of the subdistrict, so a caller that
+        # wants to show or prefill it never needs a second round trip.
+        options = [
+            {
+                'id': row.id,
+                'name_th': row.name_th,
+                'name_en': row.name_en,
+                'postal_code': row.postal_code,
+            }
+            for row in rows
+        ]
+
+    else:
+        raise NotFoundException(f'Unknown geo level: {level}')
+
+    return {
+        'success': True,
+        'level': level,
+        'options': options,
+        'total': len(options),
+    }
+
+
+def _resolve_location_geo(
+    db_session,
+    data: Dict[str, Any],
+    location
+) -> None:
+    """
+    Apply province/district/subdistrict from an update payload onto ``location``.
+
+    Every key is guarded by ``in data`` so a caller that never sends them — the
+    org-chart save, the setup importer — cannot wipe an existing address.
+
+    The three levels are validated as a *chain*, not independently: a district that
+    belongs to a different province, or a subdistrict under a different district, is
+    rejected rather than stored. Without that check the picker's cascade is the only
+    thing keeping the columns consistent, and any other client could write a
+    Bangkok district under Chiang Mai.
+    """
+    from GEPPPlatform.models.cores.locations import (
+        LocationProvince,
+        LocationDistrict,
+        LocationSubdistrict,
+    )
+
+    def _as_id(key: str) -> Optional[int]:
+        raw = data.get(key)
+        if raw is None or raw == '':
+            return None
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            raise BadRequestException(f'{key} must be a number')
+
+    # Start from what is stored so a payload that only moves one level is still
+    # validated against the levels it did not mention.
+    province_id = _as_id('province_id') if 'province_id' in data else location.province_id
+    district_id = _as_id('district_id') if 'district_id' in data else location.district_id
+    subdistrict_id = _as_id('subdistrict_id') if 'subdistrict_id' in data else location.subdistrict_id
+
+    # A cleared parent orphans its children — carrying them would leave a subdistrict
+    # with no province, which reads as corrupt data in every report that joins on it.
+    if province_id is None:
+        district_id = None
+        subdistrict_id = None
+    if district_id is None:
+        subdistrict_id = None
+
+    if province_id is not None:
+        province = db_session.query(LocationProvince).filter(
+            LocationProvince.id == province_id,
+            LocationProvince.deleted_date.is_(None)
+        ).first()
+        if not province:
+            raise BadRequestException(f'Unknown province_id: {province_id}')
+
+    if district_id is not None:
+        district = db_session.query(LocationDistrict).filter(
+            LocationDistrict.id == district_id,
+            LocationDistrict.deleted_date.is_(None)
+        ).first()
+        if not district:
+            raise BadRequestException(f'Unknown district_id: {district_id}')
+        if district.province_id != province_id:
+            raise BadRequestException(
+                f'district_id {district_id} does not belong to province_id {province_id}'
+            )
+
+    if subdistrict_id is not None:
+        subdistrict = db_session.query(LocationSubdistrict).filter(
+            LocationSubdistrict.id == subdistrict_id,
+            LocationSubdistrict.deleted_date.is_(None)
+        ).first()
+        if not subdistrict:
+            raise BadRequestException(f'Unknown subdistrict_id: {subdistrict_id}')
+        if subdistrict.district_id != district_id:
+            raise BadRequestException(
+                f'subdistrict_id {subdistrict_id} does not belong to district_id {district_id}'
+            )
+
+    location.province_id = province_id
+    location.district_id = district_id
+    location.subdistrict_id = subdistrict_id
+    # The address is in Thailand once any of these is set; country_id defaults to 212
+    # already, but a legacy row may carry NULL and the FK join then drops the row.
+    if province_id is not None and location.country_id is None:
+        location.country_id = 212
+
+
 def handle_update_location(
     db_session,
     location_id: str,
@@ -1255,6 +1441,10 @@ def handle_update_location(
             location.display_name = data['name']
         if 'address' in data:
             location.address = data['address']
+        # จังหวัด / เขต-อำเภอ / แขวง-ตำบล. Only touched when at least one key is present,
+        # and validated as a chain — see _resolve_location_geo.
+        if any(k in data for k in ('province_id', 'district_id', 'subdistrict_id')):
+            _resolve_location_geo(db_session, data, location)
         # ห้องขยะ. Guarded by `in data` so a caller that never sends the key — the
         # org-chart save, the setup importer — cannot clear an existing binding.
         if 'waste_room_location_id' in data:
@@ -1435,6 +1625,12 @@ def handle_update_location(
                 'id': location.id,
                 'name': location.display_name or location.name_en,
                 'address': getattr(location, 'address', None),
+                # Echoed back so the caller can refresh its tree node without a reload —
+                # and so a rejected/cascaded chain is visible as what was actually stored.
+                'province_id': location.province_id,
+                'district_id': location.district_id,
+                'subdistrict_id': location.subdistrict_id,
+                'headcount': location.headcount,
                 'waste_room_location_id': getattr(location, 'waste_room_location_id', None),
                 'default_disposal_method': getattr(location, 'default_disposal_method', None),
                 'members': location.members or [],
