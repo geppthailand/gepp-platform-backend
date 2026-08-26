@@ -1,9 +1,15 @@
 """
 Admin Transaction Export Service — XLSX export of v3 transactions for an
 organization. Column layout mirrors the GEPP-Business v2 "Export XLSX"
-output exactly: 13 columns, one row per transaction record, with the
-Transaction ID formatted as "{tx.id}-{n}" where n is the record's 1-based
-position in `transactions.transaction_records` (the on-DB array order).
+output, one row per transaction record, with the Transaction ID formatted
+as "{tx.id}-{n}" where n is the record's 1-based position in
+`transactions.transaction_records` (the on-DB array order).
+
+Three administrative-area columns (District / Subdistrict / Province) are
+appended AFTER Note — deliberately at the end rather than beside the
+Branch/Building/Floor/Room block, so the v2-compatible prefix keeps its
+exact column indices for anything already parsing this sheet. They are
+resolved nearest-first up the origin's ancestor chain; see `_collect_rows`.
 
 Status is derived from the records (mirrors ManualAuditService):
   - all records 'approved' → 'approved'
@@ -23,6 +29,11 @@ from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session, joinedload
 
 from GEPPPlatform.exceptions import BadRequestException, NotFoundException
+from GEPPPlatform.models.cores.locations import (
+    LocationDistrict,
+    LocationProvince,
+    LocationSubdistrict,
+)
 from GEPPPlatform.models.subscriptions.organizations import (
     Organization,
     OrganizationSetup,
@@ -112,6 +123,14 @@ def _loc_label(loc: Optional[UserLocation]) -> str:
     return loc.display_name or loc.name_en or loc.name_th or f'#{loc.id}'
 
 
+def _geo_label(name_th: Optional[str], name_en: Optional[str], row_id: int) -> str:
+    """Thai first for administrative areas — unlike the org's own node names
+    (which admins type themselves and the sheet renders via `name_en`), a Thai
+    address has a canonical Thai spelling and that is what a จังหวัด pivot,
+    a postal form, or a ONE Report expects. English is the fallback."""
+    return name_th or name_en or f'#{row_id}'
+
+
 # ── Service ───────────────────────────────────────────────────────────────
 
 class AdminTransactionExportService:
@@ -126,6 +145,10 @@ class AdminTransactionExportService:
         'Main Material', 'Sub Material',
         'Weight (Kg)', 'Price per Kg', 'Total Price (THB)',
         'Status', 'Note',
+        # Administrative area of the origin, appended AFTER Note rather than
+        # slotted next to the hierarchy columns: anything already reading this
+        # sheet by column index keeps working.
+        'District (เขต/อำเภอ)', 'Subdistrict (แขวง/ตำบล)', 'Province (จังหวัด)',
     ]
 
     # Sort fields exposed via the `sort` query param. Each maps to a
@@ -301,6 +324,55 @@ class AdminTransactionExportService:
             out[r.id] = r.display_name or r.name_en or r.name_th or f'#{r.id}'
         return out
 
+    def _build_geo_lookup(
+        self, location_ids: List[int]
+    ) -> 'tuple[Dict[int, tuple], Dict[int, str], Dict[int, str], Dict[int, str]]':
+        """Batch-resolve location IDs → their administrative-area ids, plus the
+        three id→name maps needed to render them.
+
+        Four queries total regardless of row count: one over `user_locations`
+        for the fk columns, then one per reference table for the distinct ids
+        actually referenced.
+        """
+        empty: Dict[int, str] = {}
+        if not location_ids:
+            return {}, empty, empty, empty
+
+        rows = (
+            self.db.query(
+                UserLocation.id,
+                UserLocation.province_id,
+                UserLocation.district_id,
+                UserLocation.subdistrict_id,
+            )
+            .filter(UserLocation.id.in_(set(location_ids)))
+            .all()
+        )
+        geo_by_location: Dict[int, tuple] = {
+            r.id: (r.province_id, r.district_id, r.subdistrict_id) for r in rows
+        }
+
+        province_ids = {r.province_id for r in rows if r.province_id}
+        district_ids = {r.district_id for r in rows if r.district_id}
+        subdistrict_ids = {r.subdistrict_id for r in rows if r.subdistrict_id}
+
+        def _names(model, ids: set) -> Dict[int, str]:
+            if not ids:
+                return {}
+            found = (
+                self.db.query(model.id, model.name_th, model.name_en)
+                .filter(model.id.in_(ids))
+                .all()
+            )
+            return {r.id: _geo_label(r.name_th, r.name_en, r.id) for r in found}
+
+        return (
+            geo_by_location,
+            _names(LocationProvince, province_ids),
+            _names(LocationDistrict, district_ids),
+            _names(LocationSubdistrict, subdistrict_ids),
+        )
+
     # ── Query ─────────────────────────────────────────────────────────
     def _collect_rows(
         self,
@@ -426,16 +498,30 @@ class AdminTransactionExportService:
         # Origins missing from the tree (orphan / hub-only / legacy) just
         # land in the Branch column as a best-effort label.
         all_lookup_ids: set = set()
+        # Geo needs a wider net than the name lookup: it also covers shared origins
+        # (whose hierarchy names stay hidden, but whose own address does not leak
+        # anything about the source org's tree shape).
+        geo_lookup_ids: set = set()
         for tx in transactions:
-            # Shared (cross-org) rows are labelled from the share meta, not this org's tree.
-            if tx.origin_id and tx.origin_id in share_meta_by_origin:
+            if not tx.origin_id:
                 continue
-            if tx.origin_id and tx.origin_id in path_by_node_id:
+            geo_lookup_ids.add(tx.origin_id)
+            # Shared (cross-org) rows are labelled from the share meta, not this org's tree.
+            if tx.origin_id in share_meta_by_origin:
+                continue
+            if tx.origin_id in path_by_node_id:
                 all_lookup_ids.update(path_by_node_id[tx.origin_id])
-            elif tx.origin_id:
+                geo_lookup_ids.update(path_by_node_id[tx.origin_id])
+            else:
                 all_lookup_ids.add(tx.origin_id)
 
         location_lookup = self._build_location_lookup(list(all_lookup_ids))
+        (
+            geo_by_location,
+            province_names,
+            district_names,
+            subdistrict_names,
+        ) = self._build_geo_lookup(list(geo_lookup_ids))
 
         out = []
         for tx in transactions:
@@ -467,7 +553,39 @@ class AdminTransactionExportService:
                         tx.origin_id, _loc_label(tx.origin)
                     )
 
-            out.append((tx, tx_records, derived, tag_label, level_columns))
+            # Administrative area, resolved NEAREST-FIRST up the origin's ancestor
+            # chain: the origin itself if it has one, else its parent, and so on up
+            # to the branch. Addresses are almost always entered once at branch or
+            # building level, so reading only the origin row would leave the columns
+            # blank for every Room-level weigh-in — while a Room that DOES carry its
+            # own address is more specific than its branch and should win.
+            #
+            # All three values come from the SAME node, never merged across levels:
+            # the ids are stored as a validated province → district → subdistrict
+            # chain, so mixing a room's subdistrict with a branch's province would
+            # emit an address that does not exist.
+            geo_columns: List[str] = ['', '', '']
+            if tx.origin_id:
+                if shared_meta:
+                    # No tree for the source org here, so the shared location's own row
+                    # is all there is. Blank when they never filled it in.
+                    geo_chain = [tx.origin_id]
+                else:
+                    geo_chain = list(reversed(path_by_node_id.get(tx.origin_id) or [tx.origin_id]))
+                for node_id in geo_chain:
+                    province_id, district_id, subdistrict_id = geo_by_location.get(
+                        node_id, (None, None, None)
+                    )
+                    if not province_id:
+                        continue
+                    geo_columns = [
+                        district_names.get(district_id, '') if district_id else '',
+                        subdistrict_names.get(subdistrict_id, '') if subdistrict_id else '',
+                        province_names.get(province_id, ''),
+                    ]
+                    break
+
+            out.append((tx, tx_records, derived, tag_label, level_columns, geo_columns))
         return out
 
     # ── Workbook ──────────────────────────────────────────────────────
@@ -496,7 +614,7 @@ class AdminTransactionExportService:
 
         row_idx = 2
         seq = 0
-        for tx, tx_records, derived, tag_label, level_columns in rows:
+        for tx, tx_records, derived, tag_label, level_columns, geo_columns in rows:
             tx_date_str = _fmt_bkk_date(tx.transaction_date)
 
             # `level_columns` is already in [branch, building, floor, room]
@@ -533,6 +651,8 @@ class AdminTransactionExportService:
                         derived,
                         rec.notes or tx.notes or '',
                     ]
+                    # [district, subdistrict, province] — same order as the headers.
+                    + list(geo_columns)
                 )
                 for col_idx, val in enumerate(values, 1):
                     ws.cell(row=row_idx, column=col_idx, value=val)

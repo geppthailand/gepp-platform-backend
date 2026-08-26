@@ -1,0 +1,34 @@
+# NOT NEEDED — the BMA Google-Sheet cron runs on the `platform` layer as-is.
+#
+# This file used to add `google-api-python-client` + `google-auth` for
+# GEPPV3BMAGsheetCron. It doesn't any more: talking to Sheets is two HTTPS calls
+# plus an RS256-signed JWT, and `GEPPPlatform/libs/google_sa_auth.py` does all
+# three with nothing but the standard library. Those two packages would have
+# pulled in httplib2, uritemplate, google-auth-httplib2, rsa, pyasn1,
+# pyasn1-modules and cachetools for no functional gain.
+#
+# The signer is not taken on trust — tests/test_google_sa_auth.py checks its
+# output is byte-identical to `cryptography`'s PKCS#1 v1.5 signature, that PyJWT
+# can decode the assertion it builds, and that the module imports nothing
+# outside the stdlib (so this decision can't rot silently).
+#
+# The cron needs: sqlalchemy + psycopg2-binary (already in `platform`) and
+# boto3 for Secrets Manager, which the Lambda runtime provides.
+#
+# So: build `platform.txt` and point the function at that layer. Keep this file
+# as a signpost rather than deleting it, so nobody re-adds the packages.
+#
+# If a future caller genuinely needs more of the Sheets API than
+# `values.update` / `values.clear` (batchUpdate, formatting, resumable
+# uploads), that is the point to reach for the real client — and then this file
+# becomes the starting point again:
+#
+# python3.13 -m pip install \
+#   --platform manylinux2014_x86_64 \
+#   --target=python \
+#   --implementation cp \
+#   --python-version 3.13 \
+#   --only-binary=:all: \
+#   --upgrade \
+#   pgvector psycopg2-binary bcrypt pyjwt sqlalchemy GeoAlchemy2 pillow \
+#   google-api-python-client google-auth

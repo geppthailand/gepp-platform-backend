@@ -1,0 +1,29 @@
+# Minimal layer for GEPPV3BMAGsheetCron — psycopg2 and nothing else.
+#
+# The cron was measured, not guessed: it was run with sqlalchemy, pgvector,
+# numpy, geoalchemy2, google*, cryptography, bcrypt, pyjwt and pillow all
+# blocked at import time, and it completed normally (189 rows). The only
+# third-party module that ends up in sys.modules is psycopg2.
+#
+# How it gets away with that:
+#   * raw SQL only — no ORM, so no models package, so no pgvector -> numpy and
+#     no geoalchemy2. The service takes a bare DBAPI connection; the entry point
+#     calls psycopg2.connect directly instead of libs.database (which imports
+#     every model at module scope).
+#   * SQL is written in psycopg2's %(name)s paramstyle, so the same statements
+#     also run under SQLAlchemy's exec_driver_sql when the platform Lambda calls
+#     the service with a Session. One string, both callers.
+#   * Google Sheets goes through libs/google_sa_auth.py — RS256 + REST on the
+#     standard library. See layers/bmagsheet.txt.
+#   * boto3 (Secrets Manager) ships with the Lambda runtime.
+#
+# ~12 MB against ~71 MB for the SDK-based build.
+
+python3.13 -m pip install \
+  --platform manylinux2014_x86_64 \
+  --target=python \
+  --implementation cp \
+  --python-version 3.13 \
+  --only-binary=:all: \
+  --upgrade \
+  psycopg2-binary
