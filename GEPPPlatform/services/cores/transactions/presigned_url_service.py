@@ -14,6 +14,9 @@ from sqlalchemy.orm import Session
 import logging
 
 from ....models.cores.files import File, FileType, FileStatus, FileSource
+from ...subscriptions.limits import (
+    DEFAULT_MAX_FILE_SIZE_MB, DEFAULT_MAX_IMAGE_DIMENSION_PX,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +115,40 @@ class TransactionPresignedUrlService:
             logger.info(f"Generating presigned URLs for bucket: {self.bucket_name}")
             logger.info(f"File names: {file_names}")
 
+            # The org's enforced per-file size cap. This is the ONLY place the
+            # web upload path can be policed: the browser POSTs straight to S3,
+            # so no application code ever sees the bytes. Baking the ceiling into
+            # the presigned POST's `content-length-range` makes S3 itself reject
+            # an oversized body — a patched client cannot get around it.
+            #
+            # Falls back to the previous hardcoded 50 MB when there is no session
+            # or the lookup fails, so a resolver problem cannot block uploads.
+            max_upload_bytes = int(DEFAULT_MAX_FILE_SIZE_MB * 1024 * 1024)
+            max_image_dimension_px = DEFAULT_MAX_IMAGE_DIMENSION_PX
+            if db is not None:
+                try:
+                    from ...subscriptions.limits import resolve_org_limits
+                    _limits = resolve_org_limits(db, organization_id)
+                    max_upload_bytes = _limits.max_file_size_bytes
+                    max_image_dimension_px = _limits.max_image_dimension_px
+                except Exception as e:
+                    logger.warning(
+                        "Could not resolve upload size limit for org %s, using "
+                        "default %s MB: %s",
+                        organization_id, DEFAULT_MAX_FILE_SIZE_MB, e)
+
+            # A 0 MB limit would make `content-length-range` invalid (min > max)
+            # and S3 would reject the presign call itself rather than the upload.
+            # Treat "no uploads allowed" as a refusal here, with a message the
+            # client can show, instead of an opaque S3 error.
+            if max_upload_bytes < 1:
+                return {
+                    'success': False,
+                    'message': ('File uploads are not permitted for this '
+                                'organization (size limit is set to 0).'),
+                    'error_code': 'UPLOAD_NOT_PERMITTED',
+                }
+
             presigned_data = []
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 
@@ -151,7 +188,8 @@ class TransactionPresignedUrlService:
                             {"bucket": self.bucket_name},
                             ["starts-with", "$key", s3_key],
                             {"Content-Type": content_type},
-                            ["content-length-range", 1, 50 * 1024 * 1024]  # 1 byte to 50MB
+                            # Enforced by S3, not by us — see max_upload_bytes above.
+                            ["content-length-range", 1, max_upload_bytes]
                         ],
                         ExpiresIn=expiration_seconds
                     )
@@ -249,7 +287,14 @@ class TransactionPresignedUrlService:
                 'message': f'Generated {len(presigned_data)} presigned URLs',
                 'presigned_urls': presigned_data,
                 'file_records': file_records_data,
-                'expires_in_seconds': expiration_seconds
+                'expires_in_seconds': expiration_seconds,
+                # Echoed back so the client can compress to fit and refuse
+                # locally with a useful message, instead of learning the ceiling
+                # from an opaque S3 EntityTooLarge after a long upload.
+                'max_file_size_bytes': max_upload_bytes,
+                'max_file_size_mb': round(max_upload_bytes / (1024 * 1024), 2),
+                # Longest-edge cap for re-encoding images to webp before upload.
+                'max_image_dimension_px': max_image_dimension_px,
             }
 
         except Exception as e:

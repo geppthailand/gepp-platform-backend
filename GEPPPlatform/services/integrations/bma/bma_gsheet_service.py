@@ -61,6 +61,7 @@ CREDENTIALS
 import json
 import logging
 import os
+import statistics
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
@@ -125,12 +126,15 @@ ORIGIN_COLUMNS = [
 ]
 ORIGIN_COL = {name: i for i, name in enumerate(ORIGIN_COLUMNS)}
 
-#: Columns this service owns on an EXISTING row. Everything else is left alone —
-#: `Baseline Data` and `Landfill Waste Reduction` are surveyed on site (the
-#: latter is baseline-minus-current and goes negative, so it cannot come from
-#: our transactions), and `Greenhouse Gas Reduction` on existing rows is pinned
-#: to the emission factors in force when the row was written, so the published
-#: series stays comparable.
+#: Columns this service owns on an EXISTING row. The rest are left alone:
+#: pre-existing `Baseline Data` / `Landfill Waste Reduction` were surveyed on
+#: site and cannot be reproduced (27 of those 80 rows are negative, and one has
+#: a reduction while every material reads zero), and `Greenhouse Gas Reduction`
+#: is pinned to the emission factors in force when the row was written so the
+#: published series stays comparable.
+#:
+#: Rows this service ADDS do get computed baseline/reduction — see
+#: `baseline_metrics` — because for those the definition is ours.
 ORIGIN_UPDATABLE_EXISTING = [
     'Recyclable Material\n(Monthly Average)',
     'Organic Material\n(Monthly Average)',
@@ -507,21 +511,32 @@ class BMAGSheetService:
         return edges
 
     def origin_metrics(self, org_id=ORG_ID, include_shared_history=False):
-        """Per-origin monthly averages, keyed by user_location id.
+        """Monthly averages per REPORTING SITE, keyed by that site's id.
+
+        A site is the node that carries the เขต — the topmost one in its branch.
+        Everything below it (floors, OT shifts, car parks) is rolled INTO it and
+        never gets a row of its own: "node ลูกไม่ได้ใช้สรุป". The sheet's own
+        86 populated rows confirm the shape — they are buildings and sites
+        (`CP Tower (สีลม)`, `Big C หนองแขม`), never floors.
+
+        Getting this wrong is not cosmetic. Attributing each floor separately
+        turned 3 UOB buildings into 109 rows of `ชั้น A12 (UOB ST)`.
 
         "Monthly average" is the sheet's own definition, recovered by matching
         71 of its rows against the database: the total divided by the number of
-        DISTINCT MONTHS that actually have data — not by the months elapsed. A
-        site that reported in 5 months is divided by 5.
+        DISTINCT MONTHS that actually have data — not by the months elapsed. It
+        is computed over the whole rolled-up subtree, so a building counts a
+        month once however many of its floors reported in it.
         """
-        district_of, _ = self.resolve_districts(org_id)
+        district_of, resolve_info = self.resolve_districts(org_id)
+        authority = resolve_info['authority']
         window_clause = '' if include_shared_history else self._SHARE_WINDOW_PREDICATE
         rows = self._rows(self._VISIBLE_ORIGINS_CTE + f"""
             SELECT t.origin_id,
                    COALESCE(ul.name_th, ul.name_en, ul.display_name,
                             ul.company_name)                        AS name,
                    ul.migration_id,
-                   COUNT(DISTINCT date_trunc('month', tr.transaction_date)) AS months,
+                   date_trunc('month', tr.transaction_date)          AS month,
                    SUM(CASE WHEN mc.code = 'RECYCLABLE' THEN tr.origin_weight_kg
                             ELSE 0 END)                             AS recyclable,
                    SUM(CASE WHEN mc.code = 'ORGANIC' THEN tr.origin_weight_kg
@@ -537,25 +552,218 @@ class BMAGSheetService:
               AND tr.deleted_date IS NULL
               AND tr.transaction_date IS NOT NULL
               {window_clause}
-            GROUP BY 1, 2, 3
+            GROUP BY 1, 2, 3, 4
         """, {'org': org_id})
 
-        out = {}
-        for origin_id, name, migration_id, months, rec, org, ghg in rows:
+        # Roll every origin up into the site that owns its เขต. Months are
+        # collected as a SET so a building that had three floors report in the
+        # same month counts that month once — dividing by a per-floor month
+        # count would inflate the average.
+        agg = {}
+        for origin_id, name, migration_id, month, rec, org, ghg in rows:
             county = district_of.get(origin_id)
             if not county:
-                # No เขต means the row cannot be placed in the sheet at all.
+                # No เขต anywhere up the chain: not reportable, and not guessed.
                 continue
-            months = int(months or 0) or 1
-            out[int(origin_id)] = {
-                'id': int(origin_id),
-                'migration_id': int(migration_id) if migration_id else None,
-                'name': (name or '').strip(),
-                'county': county,
-                'recyclable': float(rec or 0) / months,
-                'organic': float(org or 0) / months,
-                'ghg': float(ghg or 0) / months,
+            site_id = authority.get(origin_id) or int(origin_id)
+            a = agg.setdefault(site_id, {
+                'id': int(site_id), 'county': county, 'months': set(),
+                'recyclable': 0.0, 'organic': 0.0, 'ghg': 0.0,
+                'rolled_up': 0,
+            })
+            a['months'].add(month)
+            a['recyclable'] += float(rec or 0)
+            a['organic'] += float(org or 0)
+            a['ghg'] += float(ghg or 0)
+            if int(origin_id) != int(site_id):
+                a['rolled_up'] += 1
+
+        # The row is named after the SITE, not whichever descendant happened to
+        # carry the transaction.
+        site_ids = list(agg)
+        names = {}
+        if site_ids:
+            keys = []
+            params = {}
+            for i, sid in enumerate(site_ids):
+                keys.append(f'%(s{i})s')
+                params[f's{i}'] = sid
+            for sid, nm, mig in self._rows(f"""
+                SELECT id, COALESCE(name_th, name_en, display_name, company_name),
+                       migration_id
+                FROM user_locations WHERE id IN ({', '.join(keys)})
+            """, params):
+                names[int(sid)] = ((nm or '').strip(),
+                                   int(mig) if mig else None)
+
+        out = {}
+        for sid, a in agg.items():
+            nm, mig = names.get(sid, ('', None))
+            months = len(a['months']) or 1
+            out[sid] = {
+                'id': sid,
+                'migration_id': mig,
+                'name': nm,
+                'county': a['county'],
+                'recyclable': a['recyclable'] / months,
+                'organic': a['organic'] / months,
+                'ghg': a['ghg'] / months,
                 'months': months,
+                'rolled_up_children': a['rolled_up'],
+            }
+        return out
+
+    #: A candidate baseline month is rejected as "not a full month of
+    #: collection" when its general waste is below this fraction of the median
+    #: of the months AFTER it. Chosen from the data, not picked: `first/median`
+    #: across the
+    #: 23 sites with ≥2 months is sharply bimodal — six sites sit at 0.015–0.068
+    #: (RASA ONE reported 140 kg then 9,259; RASA TWO 347 then 22,370) and the
+    #: next one up is 0.382. Any floor in 0.10–0.37 selects exactly those six,
+    #: so 0.30 sits in the middle of an empty gap rather than being fitted.
+    BASELINE_MIN_RATIO_TO_MEDIAN = 0.30
+
+    #: The ratio test needs a median that means something. Below this many
+    #: months the first month is used as-is and flagged, because there is no
+    #: evidence to reject it with.
+    BASELINE_MIN_MONTHS_FOR_TEST = 3
+
+    @classmethod
+    def select_baseline(cls, by_month):
+        """Pick which month is the baseline. Pure — the rule, without the SQL.
+
+        Takes ``{date(YYYY, MM, 1): kg}`` for ONE site (general waste, current
+        month already dropped) and returns
+        ``(months, base_idx, skipped_iso, untested)`` where `months` is the
+        ascending list of months that actually carry weight.
+
+        The rule: walk forward past leading months that are clearly a partial
+        ramp-up rather than a month of normal operation, comparing each against
+        the site's own MEDIAN month.
+
+        Why the median and not a z-score, which is what was asked for: at these
+        sample sizes z cannot separate the cases. The lowest z attainable with n
+        observations is ``-(n-1)/sqrt(n)``, so at n=3 it bottoms out near -1.41
+        however extreme the value — RASA ONE (first month = 1.5% of its median)
+        and a healthy site at 39% both score exactly -1.41. A MAD-based modified
+        z is worse: two near-equal months drive MAD to ~0 and it explodes,
+        scoring -103 on a site that is fine. The ratio to the median separates
+        them cleanly because the population is bimodal, not because it is
+        fancier.
+
+        The last month is never skipped — something has to be the baseline.
+        """
+        months = [m for m in sorted(by_month) if by_month[m] > 0]
+        untested = len(months) < cls.BASELINE_MIN_MONTHS_FOR_TEST
+        base_idx, skipped = 0, []
+        if months and not untested:
+            # Each candidate is judged against the median of the months AFTER
+            # it, not against the median of the whole series. The question is
+            # "is this month small next to normal operation?", and normal
+            # operation is what followed. It also stays robust when the
+            # ramp-up is long: the median tolerates 50% contamination, and a
+            # site with three part-months out of five has its whole-series
+            # median sitting inside the ramp-up, which drops the floor far
+            # enough that nothing gets skipped at all.
+            while base_idx < len(months) - 1:
+                floor = (statistics.median(by_month[m]
+                                           for m in months[base_idx + 1:])
+                         * cls.BASELINE_MIN_RATIO_TO_MEDIAN)
+                if by_month[months[base_idx]] >= floor:
+                    break
+                skipped.append(months[base_idx].isoformat())
+                base_idx += 1
+        return months, base_idx, skipped, untested
+
+    def baseline_metrics(self, org_id=ORG_ID, include_shared_history=False,
+                         as_of=None):
+        """Baseline and landfill-reduction per site, **general waste only**.
+
+        These two columns were typed in by hand for the sites that predate this
+        cron (and cannot be reproduced — 27 of those 80 rows are negative, and
+        one has a reduction while every material reads zero). For sites v3 adds,
+        ops defined them as:
+
+          * `baseline` — the site's general waste in its FIRST month with data.
+            Not a fixed calendar month: a site whose data starts in May has a
+            May baseline.
+          * `reduction` — `baseline - mean(general waste of every later month
+            that has data)`. Gaps are skipped rather than counted as zero, so
+            months 5 and 7 average over 2, not 3.
+
+        Three rules that stop the number flattering — or libelling — the project:
+
+          * **the current month is excluded** — it is still accumulating, and a
+            part-month would read as a big reduction;
+          * **no data after the baseline month yields 0, not the baseline.** A
+            site that simply stopped reporting would otherwise show a 100%
+            reduction. That case is "nothing to say yet", and 0 says it;
+          * **leading part-months are skipped**, per `select_baseline` — a site
+            that logged 140 kg in its first month and ~9,000 thereafter is not
+            a site whose waste rose by 9,000 kg. Sites this fires on carry
+            `skipped_ramp_up_months`; sites with too few months to judge carry
+            `baseline_untested`.
+
+        The skip is deliberately ONE-SIDED: an abnormally LOW first month is
+        rejected, an abnormally high one is kept. That biases the published
+        reduction favourably (three sites open at ~2x their median), and is left
+        that way because the stated concern was under-collection at start-up.
+        Revisit if the number is ever audited.
+
+        Only `GENERAL` waste counts. This is a landfill figure; recyclables and
+        organics are diverted, not landfilled, and belong to other columns.
+        """
+        as_of = as_of or datetime.now(_BANGKOK_TZ).date()
+        current_month = as_of.replace(day=1)
+
+        district_of, resolve_info = self.resolve_districts(org_id)
+        authority = resolve_info['authority']
+        window_clause = '' if include_shared_history else self._SHARE_WINDOW_PREDICATE
+
+        rows = self._rows(self._VISIBLE_ORIGINS_CTE + f"""
+            SELECT t.origin_id,
+                   date_trunc('month', tr.transaction_date)::date AS month,
+                   SUM(tr.origin_weight_kg)                       AS kg
+            FROM visible v
+            JOIN transactions t ON t.origin_id = v.id
+            JOIN transaction_records tr ON tr.created_transaction_id = t.id
+            LEFT JOIN material_categories mc ON mc.id = tr.category_id
+            WHERE t.deleted_date  IS NULL
+              AND tr.deleted_date IS NULL
+              AND tr.transaction_date IS NOT NULL
+              AND mc.code = 'GENERAL'
+              {window_clause}
+            GROUP BY 1, 2
+        """, {'org': org_id})
+
+        per_site = defaultdict(dict)
+        for origin_id, month, kg in rows:
+            if origin_id not in district_of:
+                continue
+            if month >= current_month:      # still accumulating — not usable
+                continue
+            site = authority.get(origin_id) or int(origin_id)
+            per_site[site][month] = per_site[site].get(month, 0.0) + float(kg or 0)
+
+        out = {}
+        for site, by_month in per_site.items():
+            months, base_idx, skipped, untested = self.select_baseline(by_month)
+            if not months:
+                continue
+
+            base_month = months[base_idx]
+            baseline = by_month[base_month]
+            after = [by_month[m] for m in months[base_idx + 1:]]
+            reduction = (baseline - sum(after) / len(after)) if after else 0.0
+            out[site] = {
+                'baseline': baseline,
+                'reduction': reduction,
+                'baseline_month': base_month.isoformat(),
+                'months_after': len(after),
+                'skipped_ramp_up_months': skipped,
+                # True when the ratio test could not run, so the first month was
+                # taken on trust. Worth surfacing rather than implying rigour.
+                'baseline_untested': untested,
             }
         return out
 
@@ -570,6 +778,7 @@ class BMAGSheetService:
         """
         added_on = added_on or datetime.now(_BANGKOK_TZ).strftime('%Y-%m-%d')
         metrics = self.origin_metrics(org_id, include_shared_history)
+        baselines = self.baseline_metrics(org_id, include_shared_history)
         width = len(ORIGIN_COLUMNS)
 
         def pad(row):
@@ -577,6 +786,22 @@ class BMAGSheetService:
             return row + [''] * (width - len(row)) if len(row) < width else row[:width]
 
         rows = [pad(r) for r in existing]
+
+        # Self-heal rows this service added in an earlier, wrong-shaped run.
+        # A row is ours only if it carries `Added On`; if its id is no longer a
+        # reporting site, the definition changed under it and it must go. This
+        # is what removes the 109 `ชั้น A12 (UOB ST)` rows written before floors
+        # were rolled up into their building. Rows without `Added On` are the
+        # BMA-maintained master list and are never touched.
+        keep, dropped = [], []
+        for r in rows:
+            rid = str(r[ORIGIN_COL['GEPP Location ID']]).strip()
+            ours = bool(str(r[ORIGIN_COL['Added On']]).strip())
+            if ours and rid.isdigit() and int(rid) not in metrics:
+                dropped.append(r[ORIGIN_COL['Name']])
+                continue
+            keep.append(r)
+        rows = keep
 
         # Index the sheet: by id first (authoritative), then by name for rows
         # written before the ID column existed. First name wins — later
@@ -590,7 +815,7 @@ class BMAGSheetService:
             if key:
                 by_name.setdefault(key, i)
 
-        updated = appended = 0
+        updated = appended = ours_updated = 0
         for m in sorted(metrics.values(), key=lambda x: x['name'].lower()):
             idx = by_id.get(m['id'])
             if idx is None:
@@ -603,14 +828,35 @@ class BMAGSheetService:
                 row[ORIGIN_COL['County']] = m['county']
                 # Backfill the id so the next run matches on it, not on a name.
                 row[ORIGIN_COL['GEPP Location ID']] = m['id']
+
+                # A row THIS SERVICE created (it carries `Added On`) is ours to
+                # maintain in full, including baseline/reduction and GHG. Rows
+                # without `Added On` are the hand-curated originals: their
+                # baseline was surveyed on site and their GHG is pinned to the
+                # factors of its day, so those stay put. Without this branch a
+                # site added by an earlier run could never receive a baseline,
+                # because it is "existing" from the second run onwards.
+                if str(row[ORIGIN_COL['Added On']]).strip():
+                    bl = baselines.get(m['id'])
+                    row[ORIGIN_COL['Baseline Data']] = (
+                        round(bl['baseline'], 3) if bl else 0)
+                    row[ORIGIN_COL['Landfill Waste Reduction\n(Monthly Average)']] = (
+                        round(bl['reduction'], 3) if bl else 0)
+                    row[ORIGIN_COL['Greenhouse Gas Reduction\n(Monthly Average)']] = (
+                        round(m['ghg'], 5))
+                    ours_updated += 1
                 by_id.setdefault(m['id'], idx)
                 updated += 1
             else:
                 row = [''] * width
                 row[ORIGIN_COL['Name']] = m['name']
                 row[ORIGIN_COL['County']] = m['county']
-                # Baseline / Landfill are surveyed on site — left blank rather
-                # than zero, so a missing survey never reads as "no waste".
+                # From general waste only — see baseline_metrics. 0, not blank:
+                # ops asked for 0 to mean "no data yet".
+                bl = baselines.get(m['id'])
+                row[ORIGIN_COL['Baseline Data']] = round(bl['baseline'], 3) if bl else 0
+                row[ORIGIN_COL['Landfill Waste Reduction\n(Monthly Average)']] = (
+                    round(bl['reduction'], 3) if bl else 0)
                 row[ORIGIN_COL['Recyclable Material\n(Monthly Average)']] = round(m['recyclable'], 5)
                 row[ORIGIN_COL['Organic Material\n(Monthly Average)']] = round(m['organic'], 5)
                 row[ORIGIN_COL['Greenhouse Gas Reduction\n(Monthly Average)']] = round(m['ghg'], 5)
@@ -622,7 +868,9 @@ class BMAGSheetService:
 
         return rows, {'origins_with_county': len(metrics),
                       'origin_rows_updated': updated,
+                      'origin_rows_fully_owned': ours_updated,
                       'origin_rows_appended': appended,
+                      'origin_rows_removed': len(dropped),
                       'origin_rows_total': len(rows)}
 
     @staticmethod

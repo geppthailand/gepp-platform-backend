@@ -219,5 +219,9 @@ def test_module_imports_only_stdlib():
             roots.add(node.module.split('.')[0])
 
     stdlib = set(getattr(sys, 'stdlib_module_names', ()))
-    assert stdlib, 'need Python 3.10+ for sys.stdlib_module_names'
+    if not stdlib:
+        # Skip, not fail: on <3.10 there is no list to check against, and a red
+        # test here would read as "a third-party import crept in".
+        import pytest
+        pytest.skip('sys.stdlib_module_names needs Python 3.10+')
     assert roots <= stdlib, f'non-stdlib imports found: {sorted(roots - stdlib)}'

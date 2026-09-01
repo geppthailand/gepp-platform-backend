@@ -497,18 +497,64 @@ class AdminTransactionExportService:
         # that chain (0..3) selects the column (Branch/Building/Floor/Room).
         # Origins missing from the tree (orphan / hub-only / legacy) just
         # land in the Branch column as a best-effort label.
+        # A share covers a node AND its descendants, so a shared row's origin is often a
+        # deep child whose own row carries no address — the same reason own rows inherit
+        # from their ancestors. Index the SOURCE org's tree to give shared rows the same
+        # treatment, and record which node was actually shared so the walk can stop there.
+        shared_src_by_origin: Dict[int, tuple] = {}
+        for b in shared_branches:
+            for oid in b['src_ids']:
+                shared_src_by_origin[oid] = (
+                    b['source_org_id'], b.get('source_user_location_id')
+                )
+
+        path_by_source_org: Dict[int, Dict[int, List[int]]] = {}
+
+        def _shared_geo_chain(origin_id: int) -> List[int]:
+            """Nearest-first ancestor chain for a shared origin, truncated at the shared
+            node.
+
+            Ancestors ABOVE the shared node are deliberately excluded: they were never
+            shared, and this export already collapses the source org's hierarchy names
+            for exactly that reason — inheriting an unshared parent's address would put
+            back through the address column what the label column takes out. If the
+            source org set the address only above the shared node, the columns stay
+            blank until they set it on the node they actually shared.
+            """
+            src_org, shared_root = shared_src_by_origin.get(origin_id, (None, None))
+            if src_org is None:
+                return [origin_id]
+            if src_org not in path_by_source_org:
+                src_paths: Dict[int, List[int]] = {}
+                # Same DFS as this org's tree, over the source org's root_nodes.
+                self._index_node_paths(
+                    tx_service._active_root_nodes(src_org), [], src_paths
+                )
+                path_by_source_org[src_org] = src_paths
+            chain = path_by_source_org[src_org].get(origin_id) or [origin_id]
+            if shared_root in chain:
+                chain = chain[chain.index(shared_root):]
+            else:
+                # Origin missing from the source tree (orphan / legacy): its own row only.
+                chain = [origin_id]
+            return list(reversed(chain))
+
         all_lookup_ids: set = set()
-        # Geo needs a wider net than the name lookup: it also covers shared origins
-        # (whose hierarchy names stay hidden, but whose own address does not leak
-        # anything about the source org's tree shape).
+        # Geo needs a wider net than the name lookup: it also covers shared origins and
+        # their in-share ancestors. Only area ids come out of these rows — never a node
+        # name — so the source org's tree shape stays hidden either way.
         geo_lookup_ids: set = set()
+        shared_geo_chains: Dict[int, List[int]] = {}
         for tx in transactions:
             if not tx.origin_id:
                 continue
-            geo_lookup_ids.add(tx.origin_id)
             # Shared (cross-org) rows are labelled from the share meta, not this org's tree.
             if tx.origin_id in share_meta_by_origin:
+                if tx.origin_id not in shared_geo_chains:
+                    shared_geo_chains[tx.origin_id] = _shared_geo_chain(tx.origin_id)
+                geo_lookup_ids.update(shared_geo_chains[tx.origin_id])
                 continue
+            geo_lookup_ids.add(tx.origin_id)
             if tx.origin_id in path_by_node_id:
                 all_lookup_ids.update(path_by_node_id[tx.origin_id])
                 geo_lookup_ids.update(path_by_node_id[tx.origin_id])
@@ -567,9 +613,8 @@ class AdminTransactionExportService:
             geo_columns: List[str] = ['', '', '']
             if tx.origin_id:
                 if shared_meta:
-                    # No tree for the source org here, so the shared location's own row
-                    # is all there is. Blank when they never filled it in.
-                    geo_chain = [tx.origin_id]
+                    # Inside the shared subtree only — see _shared_geo_chain.
+                    geo_chain = shared_geo_chains.get(tx.origin_id) or [tx.origin_id]
                 else:
                     geo_chain = list(reversed(path_by_node_id.get(tx.origin_id) or [tx.origin_id]))
                 for node_id in geo_chain:

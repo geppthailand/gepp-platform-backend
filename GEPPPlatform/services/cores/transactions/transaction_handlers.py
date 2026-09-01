@@ -734,8 +734,15 @@ def handle_get_presigned_urls(
                 'message': result['message'],
                 'presigned_urls': result['presigned_urls'],
                 'file_records': result.get('file_records', []),  # Include file records with IDs
-                'expires_in_seconds': result.get('expires_in_seconds', 3600)
+                'expires_in_seconds': result.get('expires_in_seconds', 3600),
+                # The org's enforced per-file ceiling, so the client can shrink
+                # to fit and reject locally with a readable message.
+                'max_file_size_bytes': result.get('max_file_size_bytes'),
+                'max_file_size_mb': result.get('max_file_size_mb'),
             }
+        elif result.get('error_code') == 'UPLOAD_NOT_PERMITTED':
+            # A configured 0 MB limit is a policy decision, not a server fault.
+            raise BadRequestException(result['message'])
         else:
             raise APIException(result['message'])
 

@@ -347,6 +347,18 @@ def handle_admin_routes(path: str, data: dict, **commonParams):
                 finally:
                     if owns_session:
                         target_session.close()
+            # GET /admin/subscriptions/{id}/usage-export — XLSX for one period
+            if resource == 'subscriptions' and path_parts[2] == 'usage-export':
+                from ..subscriptions.usage_export_service import (
+                    SubscriptionUsageExportService,
+                )
+                try:
+                    return SubscriptionUsageExportService(db_session).export(
+                        int(path_parts[1]), query_params
+                    )
+                except ValueError as e:
+                    raise BadRequestException(str(e))
+
             # GET /admin/organizations/{id}/users or /organizations/{id}/locations
             resource_id = int(path_parts[1])
             sub_resource = path_parts[2]

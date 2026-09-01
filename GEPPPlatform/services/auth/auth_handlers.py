@@ -468,9 +468,9 @@ class AuthHandlers:
                     organization_id=organization.id,
                     plan_id=default_plan.id,
                     status='active',
-                    trial_ends_at=(now + timedelta(days=14)).isoformat(),
-                    current_period_starts_at=now.isoformat(),
-                    current_period_ends_at=(now + timedelta(days=30)).isoformat(),
+                    trial_ends_at=now + timedelta(days=14),
+                    current_period_starts_at=now,
+                    current_period_ends_at=now + timedelta(days=30),
                     users_count=1
                 )
                 session.add(subscription)

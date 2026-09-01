@@ -756,7 +756,35 @@ class InputChannelService:
             'enableUploadImagePerMaterial': bool(getattr(channel, 'enable_upload_image_per_material', False)),
             'requiredTag': channel.required_tag,
             'isDropOffPoint': channel.is_drop_off_point,
+            # Upload limits for the QR form. The public form has no auth, so it
+            # cannot call /api/organizations/upload-limits — the limits ride
+            # along with the channel it is already fetching. `maxFileSizeBytes`
+            # is compared against the DECODED image size, matching the
+            # server-side check in `create_transaction_from_channel`.
+            **self._channel_upload_limits(channel),
         }
+
+    def _channel_upload_limits(self, channel) -> Dict[str, Any]:
+        """Resolved upload limits for the channel's organization.
+
+        Returns {} on any failure: the QR form must keep working (falling back
+        to its own defaults) if limit resolution is unavailable, and the server
+        enforces the real ceiling regardless of what the client was told.
+        """
+        try:
+            from ...subscriptions.limits import resolve_org_limits
+            limits = resolve_org_limits(self.db, channel.organization_id)
+            return {
+                'maxFileSizeBytes': limits.max_file_size_bytes,
+                'maxFileSizeMb': limits.max_file_size_mb,
+                'maxImageDimensionPx': limits.max_image_dimension_px,
+            }
+        except Exception as e:
+            import logging
+            logging.warning(
+                'Could not resolve upload limits for channel %s (org %s): %s',
+                getattr(channel, 'id', '?'), getattr(channel, 'organization_id', '?'), e)
+            return {}
 
     def _get_materials_with_details(self, channel: UserInputChannel) -> List[Dict[str, Any]]:
         """Get materials with details for the channel"""
@@ -1405,8 +1433,30 @@ class InputChannelService:
             _s3_client = None
             _bucket_name = None
 
+            # The enforced per-file size cap for this org. Unlike the web upload
+            # path (where the browser POSTs straight to S3 and the presigned
+            # `content-length-range` does the policing), the QR channel sends
+            # base64 in the request body — so this is the only place it can be
+            # checked, and it has to be checked on the DECODED length.
+            _max_image_bytes = None
+            try:
+                from ...subscriptions.limits import resolve_org_limits
+                _max_image_bytes = resolve_org_limits(
+                    self.db, channel.organization_id).max_file_size_bytes
+            except Exception as e:
+                import logging
+                logging.warning(
+                    "Could not resolve upload size limit for org %s; QR image "
+                    "size will not be enforced on this request: %s",
+                    channel.organization_id, e)
+
             def upload_b64_images(b64_images, entity_type, entity_id, prefix):
-                """Upload base64 images to S3 and return list of File record IDs."""
+                """Upload base64 images to S3 and return list of File record IDs.
+
+                Raises ValueError when an image exceeds the org's size limit, so
+                the caller refuses the whole transaction rather than saving it
+                with images silently dropped.
+                """
                 nonlocal _presigned_service, _s3_client, _bucket_name
                 if not b64_images:
                     return []
@@ -1431,6 +1481,17 @@ class InputChannelService:
                         b64_image = b64_image.split(',')[1]
 
                     image_data = base64.b64decode(b64_image)
+
+                    # Enforce on the decoded size: base64 inflates by ~33%, so
+                    # measuring the string would reject files that are actually
+                    # within the limit.
+                    if _max_image_bytes is not None and len(image_data) > _max_image_bytes:
+                        raise ValueError(
+                            f'Image {i + 1} is {len(image_data) / (1024 * 1024):.1f} MB, '
+                            f'which exceeds the {_max_image_bytes / (1024 * 1024):.1f} MB '
+                            f'limit for this organization.'
+                        )
+
                     file_name = f"{prefix}_{entity_id}_{i}_{uuid_module.uuid4().hex[:8]}.jpg"
 
                     s3_key = f"org/{channel.organization_id}/transactions/{current_date.year}/{current_date.month:02d}/{file_name}"
@@ -1505,6 +1566,11 @@ class InputChannelService:
                         )
                         if record_file_ids:
                             record.images = record_file_ids
+                    except ValueError:
+                        # Over the org's file-size limit. Refuse the whole
+                        # transaction: saving it with the images silently
+                        # dropped is worse than an error the user can act on.
+                        raise
                     except Exception as e:
                         import logging
                         logging.error(f"Failed to upload record images: {str(e)}")
@@ -1521,6 +1587,8 @@ class InputChannelService:
                     )
                     if uploaded_file_ids:
                         transaction.images = uploaded_file_ids
+                except ValueError:
+                    raise    # size-limit refusal — see the per-record case above
                 except Exception as e:
                     import logging
                     logging.error(f"Failed to upload images: {str(e)}")
@@ -1533,6 +1601,16 @@ class InputChannelService:
                 'transaction_id': transaction.id,
             }
 
+        except ValueError as e:
+            # A rejected upload (over the org's file-size limit) is a policy
+            # decision the user can fix by retaking the photo — not a server
+            # fault, so it gets a clean message and no traceback.
+            self.db.rollback()
+            return {
+                'status': 'error',
+                'error_code': 'FILE_TOO_LARGE',
+                'message': str(e),
+            }
         except Exception as e:
             self.db.rollback()
             import traceback

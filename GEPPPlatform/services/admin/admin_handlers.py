@@ -263,6 +263,14 @@ class AdminHandlers:
                 return self.admin_service.list_organization_users(resource_id, query_params)
             elif sub_resource == 'locations':
                 return self.admin_service.list_organization_locations(resource_id, query_params)
+            elif sub_resource == 'subscription-periods':
+                return self.admin_service.list_organization_subscription_periods(
+                    resource_id, query_params)
+        if resource == 'subscriptions' and sub_resource == 'usage':
+            # Quota set vs quota used for one period — the detail modal reads
+            # this, and the XLSX export is generated from the same numbers so
+            # the two cannot disagree.
+            return self.admin_service.get_subscription_usage(resource_id, query_params)
         raise NotFoundException(f'Sub-resource {resource}/{sub_resource} not found')
 
     def assign_permissions(self, resource: str, resource_id: int, data: dict) -> Dict[str, Any]:

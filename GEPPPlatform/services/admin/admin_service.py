@@ -168,7 +168,7 @@ class AdminService:
                     'planId': sub.plan_id,
                     'planName': sub.plan.display_name if sub.plan else sub.plan_id,
                     'status': sub.status,
-                    'currentPeriodEndsAt': sub.current_period_ends_at,
+                    'currentPeriodEndsAt': sub.current_period_ends_at.isoformat() if sub.current_period_ends_at else None,
                 }
                 for sub in subscriptions
             ],
@@ -178,6 +178,12 @@ class AdminService:
                 getattr(org, 'auto_approve_scale_transactions', False)
             ),
             'maxOrgStructureNodes': org.max_org_structure_nodes if hasattr(org, 'max_org_structure_nodes') else 50,
+            # Usage-limit defaults. None = "not overridden", which the UI shows
+            # as the inherited system value rather than as 0.
+            'defaultTransactionLimitPerMonth': org.default_transaction_limit_per_month,
+            'defaultMaxFileSizeMb': (float(org.default_max_file_size_mb)
+                                     if org.default_max_file_size_mb is not None else None),
+            'maxImageDimensionPx': org.max_image_dimension_px,
             'isActive': org.is_active,
             'createdDate': org.created_date.isoformat() if org.created_date else None,
         }
@@ -288,8 +294,8 @@ class AdminService:
             organization_id=org.id,
             plan_id=plan.id,
             status='active',
-            current_period_starts_at=now.isoformat(),
-            current_period_ends_at=(now + timedelta(days=30)).isoformat(),
+            current_period_starts_at=now,
+            current_period_ends_at=now + timedelta(days=30),
             users_count=users_count or 0,
         )
         self.db_session.add(sub)
@@ -330,6 +336,21 @@ class AdminService:
             org.is_active = bool(data['isActive'])
         if 'maxOrgStructureNodes' in data:
             org.max_org_structure_nodes = int(data['maxOrgStructureNodes'])
+
+        # ── Usage-limit DEFAULTS (Configuration tab) ─────────────────
+        # Nullable on purpose: sending null CLEARS the override so the org falls
+        # back to the system default, which is a different state from a
+        # deliberate 0 ("none allowed"). `int(x) if x is not None else None`
+        # rather than `int(x or 0)` for exactly that reason.
+        if 'defaultTransactionLimitPerMonth' in data:
+            v = data['defaultTransactionLimitPerMonth']
+            org.default_transaction_limit_per_month = int(v) if v is not None else None
+        if 'defaultMaxFileSizeMb' in data:
+            v = data['defaultMaxFileSizeMb']
+            org.default_max_file_size_mb = float(v) if v is not None else None
+        if 'maxImageDimensionPx' in data:
+            v = data['maxImageDimensionPx']
+            org.max_image_dimension_px = int(v) if v is not None else None
 
         # ── Company info (OrganizationInfo row) ─────────────────────
         # Accept BOTH nested `{organizationInfo: {...}}` and flat
@@ -987,23 +1008,163 @@ class AdminService:
                 'status': sub.status,
                 'usersCount': sub.users_count,
                 'transactionsCountThisMonth': sub.transactions_count_this_month,
-                'currentPeriodEndsAt': sub.current_period_ends_at,
+                'currentPeriodEndsAt': sub.current_period_ends_at.isoformat() if sub.current_period_ends_at else None,
                 'createdDate': sub.created_date.isoformat() if sub.created_date else None,
             })
 
         return {'items': results, 'total': total, 'page': page, 'pageSize': page_size}
 
+    def list_organization_subscription_periods(self, org_id: int,
+                                              query_params: dict) -> Dict[str, Any]:
+        """Every subscription period for an org, newest first.
+
+        Each row carries its own EFFECTIVE limits (resolved through
+        `subscriptions.limits`, so a value inherited from the org default is
+        shown as the number that will actually apply) plus the derived period
+        total. Nothing is stored pre-multiplied — editing the dates cannot leave
+        a stale total behind.
+
+        `isCurrent` is computed from the dates, not from
+        `organizations.subscription_id`, so it stays right even when that
+        pointer was never updated.
+        """
+        from ..subscriptions.limits import (
+            find_period, period_transaction_allowance, resolve_org_limits,
+        )
+
+        org = self.db_session.query(Organization).filter(
+            Organization.id == org_id).first()
+        if not org:
+            raise NotFoundException(f'Organization {org_id} not found')
+
+        rows = (
+            self.db_session.query(Subscription)
+            .options(joinedload(Subscription.plan))
+            .filter(Subscription.organization_id == org_id,
+                    Subscription.deleted_date.is_(None))
+            .order_by(Subscription.current_period_starts_at.desc().nullslast(),
+                      Subscription.id.desc())
+            .all()
+        )
+
+        current = find_period(self.db_session, org_id)
+        current_id = current.id if current else None
+
+        items = []
+        for sub in rows:
+            limits = resolve_org_limits(self.db_session, org_id, period=sub)
+            items.append({
+                'id': sub.id,
+                'organizationId': org_id,
+                'planId': sub.plan_id,
+                'planName': sub.plan.display_name if sub.plan else None,
+                'status': sub.status,
+                'periodLabel': sub.period_label,
+                'notes': sub.notes,
+                'periodStartsAt': (sub.current_period_starts_at.isoformat()
+                                   if sub.current_period_starts_at else None),
+                'periodEndsAt': (sub.current_period_ends_at.isoformat()
+                                 if sub.current_period_ends_at else None),
+                'isOpenEnded': sub.current_period_ends_at is None,
+                'isCurrent': sub.id == current_id,
+                # Advisory — never blocks transaction creation.
+                'transactionsPerMonth': limits.transactions_per_month,
+                'transactionsPeriodTotal': period_transaction_allowance(
+                    sub, per_month=limits.transactions_per_month),
+                # Enforced at upload time.
+                'maxFileSizeMb': limits.max_file_size_mb,
+                'limitSources': {
+                    'transactions': limits.transactions_source,
+                    'fileSize': limits.file_size_source,
+                },
+                'createdDate': sub.created_date.isoformat() if sub.created_date else None,
+            })
+
+        return {'items': items, 'total': len(items)}
+
+    def get_subscription_usage(self, sub_id: int, query_params: dict) -> Dict[str, Any]:
+        """Quota set vs quota actually used, for the detail modal and the export.
+
+        Usage is recomputed from `transactions` — see
+        `subscriptions/usage_service.py` for why the existing counter column is
+        not trusted.
+        """
+        from ..subscriptions.usage_service import SubscriptionUsageService
+
+        as_of = None
+        raw = (query_params or {}).get('asOf')
+        if raw:
+            try:
+                as_of = datetime.fromisoformat(str(raw)[:10]).date()
+            except ValueError:
+                raise BadRequestException(f'Invalid asOf {raw!r}: expected YYYY-MM-DD')
+
+        result = SubscriptionUsageService(self.db_session).period_usage(
+            sub_id, as_of=as_of)
+        if not result.get('success'):
+            raise NotFoundException(result.get('message', 'Subscription not found'))
+        return result
+
     def create_subscription(self, data: dict) -> Dict[str, Any]:
+        """Create a SUBSCRIPTION PERIOD for an organization.
+
+        An org may have many: this is the row the backoffice `Subscription` tab
+        creates, one per contracted period. `createTransactionLimit` is the
+        per-MONTH allowance and is advisory (never blocks); `maxFileSizeMb` is
+        enforced at upload time.
+
+        Not set here: `organizations.subscription_id`. Which period is "current"
+        is resolved from the dates by `subscriptions.limits.find_period`, so
+        creating a period cannot leave a stale pointer behind.
+        """
+        org_id = data.get('organizationId')
+        if not org_id:
+            raise BadRequestException('organizationId is required')
+        if not data.get('planId'):
+            raise BadRequestException('planId is required')
+
+        starts_at = self._parse_period_date(data.get('periodStartsAt'))
+        ends_at = self._parse_period_date(data.get('periodEndsAt'))
+        if starts_at and ends_at and ends_at < starts_at:
+            raise BadRequestException('periodEndsAt cannot be before periodStartsAt')
+
         sub = Subscription(
-            organization_id=data.get('organizationId'),
+            organization_id=org_id,
             plan_id=data.get('planId'),
             status=data.get('status', 'active'),
             create_transaction_limit=data.get('createTransactionLimit', 100),
             ai_audit_limit=data.get('aiAuditLimit', 10),
+            current_period_starts_at=starts_at,
+            current_period_ends_at=ends_at,
+            period_label=(data.get('periodLabel') or None),
+            notes=(data.get('notes') or None),
+            max_file_size_mb=data.get('maxFileSizeMb'),
         )
         self.db_session.add(sub)
         self.db_session.flush()
-        return {'id': sub.id, 'message': 'Subscription created'}
+        return {'id': sub.id, 'message': 'Subscription period created'}
+
+    @staticmethod
+    def _parse_period_date(value):
+        """Accept 'YYYY-MM-DD' or a full ISO timestamp; return an aware datetime.
+
+        The column is TIMESTAMPTZ. A naive value would be interpreted in the
+        server's zone, which silently shifts a period boundary by hours — enough
+        to move a transaction into the wrong month on a billing report.
+        """
+        if not value:
+            return None
+        if isinstance(value, datetime):
+            return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace('Z', '+00:00'))
+        except ValueError:
+            raise BadRequestException(
+                f'Invalid date {value!r}: expected YYYY-MM-DD or an ISO timestamp')
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
     def update_subscription(self, sub_id: int, data: dict) -> Dict[str, Any]:
         sub = self.db_session.query(Subscription).filter(
@@ -1013,13 +1174,24 @@ class AdminService:
             raise NotFoundException(f'Subscription {sub_id} not found')
 
         for field in ['plan_id', 'status', 'create_transaction_limit', 'ai_audit_limit',
-                      'allow_ai_audit_exceed_quota', 'duration_type']:
+                      'allow_ai_audit_exceed_quota', 'duration_type',
+                      'period_label', 'notes', 'max_file_size_mb']:
             camel = self._to_camel(field)
             if camel in data:
                 setattr(sub, field, data[camel])
 
+        # Dates go through the parser so a bare 'YYYY-MM-DD' does not land as a
+        # naive timestamp in the server's zone (see _parse_period_date).
+        if 'periodStartsAt' in data:
+            sub.current_period_starts_at = self._parse_period_date(data['periodStartsAt'])
+        if 'periodEndsAt' in data:
+            sub.current_period_ends_at = self._parse_period_date(data['periodEndsAt'])
+        if (sub.current_period_starts_at and sub.current_period_ends_at
+                and sub.current_period_ends_at < sub.current_period_starts_at):
+            raise BadRequestException('periodEndsAt cannot be before periodStartsAt')
+
         self.db_session.flush()
-        return {'id': sub.id, 'message': 'Subscription updated'}
+        return {'id': sub.id, 'message': 'Subscription period updated'}
 
     def delete_subscription(self, sub_id: int) -> Dict[str, Any]:
         sub = self.db_session.query(Subscription).filter(Subscription.id == sub_id).first()

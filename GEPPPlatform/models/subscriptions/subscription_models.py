@@ -2,7 +2,10 @@
 Subscription and permission models
 """
 
-from sqlalchemy import Column, String, Text, ForeignKey, BigInteger, Boolean, Integer, JSON, Table
+from sqlalchemy import (
+    Column, String, Text, ForeignKey, BigInteger, Boolean, Integer, JSON, Table,
+    DateTime, Numeric,
+)
 from sqlalchemy.orm import relationship
 from ..base import Base, BaseModel
 from ..cores.roles import subscription_permissions
@@ -50,17 +53,42 @@ class SubscriptionPlan(Base, BaseModel):
     subscriptions = relationship("Subscription", back_populates="plan")
     
 class Subscription(Base, BaseModel):
-    """Active subscriptions for organizations"""
+    """One SUBSCRIPTION PERIOD for an organization.
+
+    Despite the ``current_period_*`` column names, an org has MANY of these —
+    one per contracted period — and `organizations.subscription_id` names the
+    one ops considers current. The backoffice `Subscription` tab creates and
+    lists them; `services/subscriptions/limits.py` resolves which one covers a
+    given date.
+
+    Two limits live here and they behave in opposite ways:
+
+      * ``create_transaction_limit`` — transactions allowed per MONTH. Purely
+        advisory: nothing blocks on it, it feeds billing. The period total is
+        derived (allowance x months covered), never stored.
+      * ``max_file_size_mb`` — enforced. Over-limit uploads are refused.
+    """
     __tablename__ = 'subscriptions'
-    
+
     organization_id = Column(BigInteger, ForeignKey('organizations.id'), nullable=False)
     plan_id = Column(BigInteger, ForeignKey('subscription_plans.id'), nullable=False)
-    
+
     status = Column(String(50), default='active')  # active, suspended, cancelled, expired
-    trial_ends_at = Column(String(50))
-    current_period_starts_at = Column(String(50))
-    current_period_ends_at = Column(String(50))
-    
+
+    # These three are TIMESTAMPTZ in the schema, not text — migration 063 writes
+    # NOW() / NOW() + INTERVAL into them. They were declared String(50) here,
+    # which made SQLAlchemy hand back whatever str() it could and silently broke
+    # any date comparison done in Python.
+    trial_ends_at = Column(DateTime(timezone=True))
+    current_period_starts_at = Column(DateTime(timezone=True))
+    current_period_ends_at = Column(DateTime(timezone=True))
+
+    # Period metadata (migration 088)
+    period_label = Column(String(120))
+    notes = Column(Text)
+    #: Max size of ONE uploaded file, MB. NULL -> org default -> system default.
+    max_file_size_mb = Column(Numeric(8, 2))
+
     # Usage tracking
     users_count = Column(Integer, default=1)
     transactions_count_this_month = Column(Integer, default=0)
