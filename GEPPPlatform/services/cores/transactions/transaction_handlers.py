@@ -647,14 +647,30 @@ def handle_upload_transaction_images(
 
         # Import S3 service for direct upload
         from ...file_upload_service import S3FileUploadService
+        from ...subscriptions.upload_guard import (
+            FileTooLargeError, resolve_max_upload_bytes,
+        )
+
+        # This endpoint carries the file bytes in the request body, so the
+        # presigned `content-length-range` that guards the browser->S3 path
+        # never applies here — the ceiling has to be enforced in-process.
+        max_upload_bytes = resolve_max_upload_bytes(
+            transaction_service.db, current_user_organization_id)
 
         # Upload files directly to S3
         s3_service = S3FileUploadService()
-        uploaded_files = s3_service.upload_transaction_files(
-            files=data['files'],
-            transaction_record_id=transaction_id,
-            upload_type='transaction'
-        )
+        try:
+            uploaded_files = s3_service.upload_transaction_files(
+                files=data['files'],
+                transaction_record_id=transaction_id,
+                max_file_size_bytes=max_upload_bytes,
+                upload_type='transaction'
+            )
+        except FileTooLargeError as e:
+            # A policy refusal the user can act on (retake/resize the photo),
+            # not a server fault — so 400 with the offending filenames rather
+            # than a 500.
+            raise BadRequestException(str(e))
 
         if uploaded_files:
             # Update transaction's images JSONB field

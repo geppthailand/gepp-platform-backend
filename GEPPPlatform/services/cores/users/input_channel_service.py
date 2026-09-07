@@ -1438,17 +1438,14 @@ class InputChannelService:
             # `content-length-range` does the policing), the QR channel sends
             # base64 in the request body — so this is the only place it can be
             # checked, and it has to be checked on the DECODED length.
-            _max_image_bytes = None
-            try:
-                from ...subscriptions.limits import resolve_org_limits
-                _max_image_bytes = resolve_org_limits(
-                    self.db, channel.organization_id).max_file_size_bytes
-            except Exception as e:
-                import logging
-                logging.warning(
-                    "Could not resolve upload size limit for org %s; QR image "
-                    "size will not be enforced on this request: %s",
-                    channel.organization_id, e)
+            #
+            # Same guard as the other two byte-carrying paths, deliberately: a
+            # second copy of "is this file too big" is how the three drift apart.
+            from ...subscriptions.upload_guard import (
+                check_b64_images, resolve_max_upload_bytes,
+            )
+            _max_image_bytes = resolve_max_upload_bytes(
+                self.db, channel.organization_id)
 
             def upload_b64_images(b64_images, entity_type, entity_id, prefix):
                 """Upload base64 images to S3 and return list of File record IDs.
@@ -1460,6 +1457,11 @@ class InputChannelService:
                 nonlocal _presigned_service, _s3_client, _bucket_name
                 if not b64_images:
                     return []
+
+                # Measure the whole batch up-front. Checking inside the upload
+                # loop would leave the images before the offender already in S3,
+                # paid for and referenced by nothing.
+                check_b64_images(b64_images, _max_image_bytes)
 
                 from GEPPPlatform.services.cores.transactions.presigned_url_service import TransactionPresignedUrlService
                 from GEPPPlatform.models.cores.files import File, FileType, FileStatus
@@ -1481,16 +1483,6 @@ class InputChannelService:
                         b64_image = b64_image.split(',')[1]
 
                     image_data = base64.b64decode(b64_image)
-
-                    # Enforce on the decoded size: base64 inflates by ~33%, so
-                    # measuring the string would reject files that are actually
-                    # within the limit.
-                    if _max_image_bytes is not None and len(image_data) > _max_image_bytes:
-                        raise ValueError(
-                            f'Image {i + 1} is {len(image_data) / (1024 * 1024):.1f} MB, '
-                            f'which exceeds the {_max_image_bytes / (1024 * 1024):.1f} MB '
-                            f'limit for this organization.'
-                        )
 
                     file_name = f"{prefix}_{entity_id}_{i}_{uuid_module.uuid4().hex[:8]}.jpg"
 

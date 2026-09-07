@@ -2385,6 +2385,29 @@ class UserService:
             }
             content_type = content_types.get(file_extension.lower(), 'image/jpeg')
 
+            # Per-file ceiling from the org's subscription period / org default
+            # / system default, rather than the 10 MB that used to be hardcoded
+            # here. Enforced by S3 itself via `content-length-range`, so a
+            # patched client cannot exceed it.
+            #
+            # `organization_id` is `user.organization_id or 0` above; a user with
+            # no org resolves to None and keeps the historical 10 MB, because an
+            # org-scoped limit means nothing without an org.
+            from ...subscriptions.upload_guard import resolve_max_upload_bytes
+            max_upload_bytes = resolve_max_upload_bytes(self.db, organization_id) \
+                or (10 * 1024 * 1024)
+
+            if max_upload_bytes < 1:
+                # A deliberate 0 MB limit. `content-length-range` with max < min
+                # is invalid and S3 would reject the PRESIGN call with an opaque
+                # error, so refuse here with something the client can show.
+                return {
+                    'success': False,
+                    'message': ('Image uploads are not permitted for this '
+                                'organization (size limit is set to 0).'),
+                    'error_code': 'UPLOAD_NOT_PERMITTED',
+                }
+
             # Generate presigned POST URL
             response = s3_client.generate_presigned_post(
                 Bucket=bucket_name,
@@ -2396,7 +2419,7 @@ class UserService:
                     {"bucket": bucket_name},
                     ["starts-with", "$key", s3_key],
                     {"Content-Type": content_type},
-                    ["content-length-range", 1, 10 * 1024 * 1024]  # 1 byte to 10MB
+                    ["content-length-range", 1, max_upload_bytes]
                 ],
                 ExpiresIn=3600
             )
@@ -2415,7 +2438,11 @@ class UserService:
                     'final_s3_url': final_url,
                     's3_key': s3_key,
                     'content_type': content_type,
-                    'expires_at': (datetime.now() + timedelta(seconds=3600)).isoformat()
+                    'expires_at': (datetime.now() + timedelta(seconds=3600)).isoformat(),
+                    # So the client can shrink to fit and refuse locally with a
+                    # readable message instead of an opaque S3 EntityTooLarge.
+                    'max_file_size_bytes': max_upload_bytes,
+                    'max_file_size_mb': round(max_upload_bytes / (1024 * 1024), 2),
                 }
             }
 

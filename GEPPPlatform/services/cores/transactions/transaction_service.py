@@ -207,12 +207,21 @@ class TransactionService:
 
             # Handle file uploads if provided
             if transaction_data.get('file_uploads') and transaction.id:
+                from ...subscriptions.upload_guard import (
+                    FileTooLargeError, resolve_max_upload_bytes,
+                )
+                # The bytes arrive in this request, so the presigned
+                # `content-length-range` guarding the browser->S3 path does not
+                # apply — enforce the org's per-file ceiling here.
+                max_upload_bytes = resolve_max_upload_bytes(
+                    self.db, getattr(transaction, 'organization_id', None))
                 try:
                     # Upload directly to S3 and store URLs in JSONB field
                     s3_service = S3FileUploadService()
                     uploaded_files = s3_service.upload_transaction_files(
                         files=transaction_data['file_uploads'],
                         transaction_record_id=transaction.id,
+                        max_file_size_bytes=max_upload_bytes,
                         upload_type='transaction'
                     )
 
@@ -225,6 +234,26 @@ class TransactionService:
                     else:
                         logger.warning(f"No files were uploaded for transaction {transaction.id}")
 
+                except FileTooLargeError as e:
+                    # An oversized attachment must PREVENT the transaction, not
+                    # be swallowed like the errors below. The whole point of the
+                    # limit is that such a transaction is never created — and
+                    # silently saving it without its evidence would be worse
+                    # than either outcome the user expects.
+                    logger.info(
+                        "Refusing transaction %s: %s", transaction.id, e)
+                    self.db.rollback()
+                    return {
+                        'success': False,
+                        'message': str(e),
+                        'error_code': 'FILE_TOO_LARGE',
+                        'errors': [
+                            {'filename': o['filename'],
+                             'sizeBytes': o['size_bytes'],
+                             'maxBytes': e.max_bytes}
+                            for o in e.offenders
+                        ],
+                    }
                 except Exception as e:
                     logger.error(f"Error handling file uploads for transaction {transaction.id}: {str(e)}")
                     # Continue without failing the transaction creation

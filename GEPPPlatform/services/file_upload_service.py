@@ -109,6 +109,7 @@ class S3FileUploadService:
         self,
         files: List[Dict[str, Any]],
         transaction_record_id: int,
+        max_file_size_bytes: Optional[int],
         upload_type: str = 'transaction'
     ) -> List[Dict[str, Any]]:
         """
@@ -117,11 +118,33 @@ class S3FileUploadService:
         Args:
             files: List of file objects with 'data', 'filename', 'content_type'
             transaction_record_id: ID of the transaction record
+            max_file_size_bytes: the organization's enforced PER-FILE ceiling,
+                from `subscriptions.upload_guard.resolve_max_upload_bytes`.
+                `None` means it could not be resolved and skips the check; `0`
+                is a real value meaning "no uploads allowed".
             upload_type: Type of upload ('transaction' or 'transaction_record')
 
         Returns:
             List of uploaded file info with S3 URLs
+
+        Raises:
+            FileTooLargeError: if any file exceeds the limit. Raised BEFORE
+                anything is uploaded, so a rejected batch leaves no orphan
+                objects in S3 and the caller can fail the whole transaction.
+
+        `max_file_size_bytes` is positional and has NO DEFAULT on purpose. This
+        method is the only server-side path that accepts transaction file bytes,
+        and it previously had no size ceiling at all — a default would let the
+        next caller reintroduce that hole without noticing. Making it required
+        forces every call site to decide.
         """
+        from .subscriptions.upload_guard import check_files
+
+        # Measure and reject up-front: partially uploading a batch that is going
+        # to be refused would leave paid-for objects in S3 with no transaction
+        # referencing them.
+        check_files(files or [], max_file_size_bytes)
+
         uploaded_files = []
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
