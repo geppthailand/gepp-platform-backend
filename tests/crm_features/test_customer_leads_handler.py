@@ -158,6 +158,35 @@ class TestCustomerLeadCapture(unittest.TestCase):
         self.assertIn("gepp-me-contact", email_kwargs["tags"])
         self.assertEqual(email_kwargs["metadata"]["source_site"], "gepp.me")
 
+    def test_phone_is_persisted_on_the_lead_and_activity(self):
+        body = _good_body()
+        body["phone"] = "081-234-5678"
+
+        handler.handle_customer_lead_capture(body, MagicMock(), {})
+
+        _, kwargs = _lead_svc_stub.create_lead.call_args
+        self.assertEqual(kwargs["data"]["phone"], "081-234-5678")
+        activity_kwargs = _lead_svc_stub.add_activity.call_args.kwargs
+        self.assertEqual(activity_kwargs["properties"]["phone"], "081-234-5678")
+
+    def test_phone_is_optional(self):
+        body = _good_body()
+        body.pop("phone", None)
+
+        result = handler.handle_customer_lead_capture(body, MagicMock(), {})
+
+        self.assertTrue(result["ok"])
+        _, kwargs = _lead_svc_stub.create_lead.call_args
+        self.assertIsNone(kwargs["data"]["phone"])
+
+    def test_malformed_phone_raises_bad_request(self):
+        for bad in ("12345", "call me maybe", "+66 <script>"):
+            body = _good_body()
+            body["phone"] = bad
+            with self.subTest(phone=bad):
+                with self.assertRaises(_BadRequestException):
+                    handler.handle_customer_lead_capture(body, MagicMock(), {})
+
     def test_invalid_type_raises_bad_request(self):
         body = _good_body()
         body["type"] = "partner"

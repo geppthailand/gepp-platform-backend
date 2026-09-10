@@ -3,6 +3,7 @@ Transaction API handlers for CRUD operations
 """
 
 from typing import Dict, Any, Optional
+from datetime import datetime, timezone
 import logging
 import traceback
 
@@ -93,6 +94,20 @@ def handle_transaction_routes(event: Dict[str, Any], data: Dict[str, Any], **par
                 data,
                 current_user_id,
                 current_user_organization_id
+            )
+
+        elif '/api/transactions/files/' in path and method == 'DELETE':
+            # DELETE /api/transactions/files/{file_id} — discard an attachment
+            # that was uploaded but is not yet saved onto a transaction.
+            #
+            # MUST stay above the generic `/api/transactions/` DELETE below:
+            # that branch matches this path too and would parse "files/123" as
+            # a transaction id.
+            file_id = path.rstrip('/').rsplit('/', 1)[-1]
+            return handle_delete_transaction_file(
+                file_id,
+                current_user_organization_id,
+                db_session
             )
 
         elif '/api/transactions/' in path and method == 'DELETE':
@@ -733,6 +748,26 @@ def handle_get_presigned_urls(
         presigned_service = TransactionPresignedUrlService()
 
         # Generate presigned URLs with file record creation
+        # Sizes and the transaction's existing attachments, so the SERVER
+        # decides whether to hand out a URL rather than letting an upload start
+        # and fail. Both optional: an older client that sends neither still
+        # works, and is still caught by the per-object `content-length-range`
+        # and by the total re-check at transaction-create.
+        file_sizes = data.get('file_sizes')
+        if file_sizes is not None:
+            if not isinstance(file_sizes, list) or len(file_sizes) != len(file_names):
+                raise BadRequestException(
+                    'file_sizes must be a list the same length as file_names')
+            for sz in file_sizes:
+                if sz is not None and (not isinstance(sz, (int, float)) or sz < 0):
+                    raise BadRequestException('file_sizes must be non-negative numbers')
+
+        existing_file_ids = data.get('existing_file_ids') or []
+        if not isinstance(existing_file_ids, list):
+            raise BadRequestException('existing_file_ids must be a list')
+        existing_file_ids = [int(i) for i in existing_file_ids
+                             if isinstance(i, int) and not isinstance(i, bool)]
+
         result = presigned_service.get_transaction_file_upload_presigned_urls(
             file_names=file_names,
             organization_id=current_user_organization_id,
@@ -741,7 +776,9 @@ def handle_get_presigned_urls(
             file_type=data.get('file_type', 'transaction_image'),
             related_entity_type=data.get('related_entity_type'),
             related_entity_id=data.get('related_entity_id'),
-            expiration_seconds=data.get('expiration_seconds', 3600)
+            expiration_seconds=data.get('expiration_seconds', 3600),
+            file_sizes=file_sizes,
+            existing_file_ids=existing_file_ids,
         )
 
         if result['success']:
@@ -755,9 +792,14 @@ def handle_get_presigned_urls(
                 # to fit and reject locally with a readable message.
                 'max_file_size_bytes': result.get('max_file_size_bytes'),
                 'max_file_size_mb': result.get('max_file_size_mb'),
+                'max_image_dimension_px': result.get('max_image_dimension_px'),
+                'already_used_bytes': result.get('already_used_bytes'),
+                'remaining_bytes': result.get('remaining_bytes'),
             }
-        elif result.get('error_code') == 'UPLOAD_NOT_PERMITTED':
-            # A configured 0 MB limit is a policy decision, not a server fault.
+        elif result.get('error_code') in ('UPLOAD_NOT_PERMITTED', 'FILE_TOO_LARGE'):
+            # Both are policy refusals the user can act on, not server faults:
+            # a configured 0 MB limit, or files that do not fit the remaining
+            # budget. 400 with the reason, and no presigned URL is issued.
             raise BadRequestException(result['message'])
         else:
             raise APIException(result['message'])
@@ -891,3 +933,109 @@ def _extract_transaction_id_from_path(path: str) -> int:
         raise BadRequestException('Invalid transaction ID in URL path')
 
 
+def handle_delete_transaction_file(
+    file_id,
+    current_user_organization_id: int,
+    db_session
+) -> Dict[str, Any]:
+    """DELETE /api/transactions/files/{file_id} — really remove an attachment.
+
+    Exists because attachments are uploaded to S3 the moment the user picks
+    them, before the transaction is saved. Un-picking one used to just drop the
+    id from a local array: the object stayed in S3 forever, paid for and
+    referenced by nothing, and it still counted toward the transaction's
+    size limit on the next attempt.
+
+    **Refuses to delete a file that a saved transaction still references.**
+    Removing an attachment in the UI is not the same act as saving that removal
+    — the user may cancel — so deleting the bytes at click time would leave a
+    live transaction pointing at a missing object. In that case the file is left
+    alone and `detached: true` is returned: the caller drops it from its list,
+    and the transaction update is what actually unlinks it.
+    """
+    try:
+        try:
+            fid = int(str(file_id).strip())
+        except (TypeError, ValueError):
+            raise BadRequestException(f'Invalid file id {file_id!r}')
+
+        from ....models.cores.files import File
+
+        record = db_session.query(File).filter(File.id == fid).first()
+        if not record:
+            # Idempotent: a double-click, or a retry after a successful delete,
+            # is not an error the user should see.
+            return {'success': True, 'message': 'File already gone',
+                    'fileId': fid, 'deleted': False}
+
+        if record.organization_id != current_user_organization_id:
+            raise UnauthorizedException('Access denied: file belongs to a different organization')
+
+        if _file_is_referenced(db_session, fid):
+            return {
+                'success': True,
+                'fileId': fid,
+                'deleted': False,
+                'detached': True,
+                'message': ('File is attached to a saved transaction; it was '
+                            'not deleted from storage. Save the transaction to '
+                            'unlink it.'),
+            }
+
+        s3_deleted = False
+        if record.s3_key:
+            from ...file_upload_service import S3FileUploadService
+            try:
+                s3 = S3FileUploadService()
+                # Honour the bucket the object was actually written to rather
+                # than today's default, or a bucket rename orphans old objects.
+                if record.s3_bucket:
+                    s3.bucket_name = record.s3_bucket
+                s3_deleted = s3.delete_file(record.s3_key)
+            except Exception as e:
+                logger.warning('S3 delete failed for file %s (%s): %s',
+                               fid, record.s3_key, e)
+
+        # The row goes regardless. A stale File row pointing at an object that
+        # may or may not exist is worse than no row: it keeps counting toward
+        # the transaction size limit and can never be cleaned up by the user.
+        record.deleted_date = datetime.now(timezone.utc)
+        record.is_active = False
+        db_session.commit()
+
+        return {
+            'success': True,
+            'fileId': fid,
+            'deleted': True,
+            's3Deleted': s3_deleted,
+            'message': 'File deleted',
+        }
+
+    except Exception as e:
+        if isinstance(e, (BadRequestException, UnauthorizedException, NotFoundException, APIException)):
+            raise
+        logger.exception('Failed to delete transaction file %s', file_id)
+        raise APIException(f'Failed to delete file: {str(e)}')
+
+
+def _file_is_referenced(db_session, file_id: int) -> bool:
+    """Is `file_id` listed in the `images` of any live transaction or record?
+
+    `images` is a JSONB array of file ids, so containment (`@>`) answers it
+    directly and uses an index if one exists. Checked on both tables because an
+    attachment can hang off the transaction or off one of its material rows.
+    """
+    from sqlalchemy import text
+
+    row = db_session.execute(text("""
+        SELECT EXISTS (
+            SELECT 1 FROM transactions
+             WHERE deleted_date IS NULL
+               AND images @> CAST(:needle AS jsonb)
+        ) OR EXISTS (
+            SELECT 1 FROM transaction_records
+             WHERE deleted_date IS NULL
+               AND images @> CAST(:needle AS jsonb)
+        )
+    """), {'needle': f'[{int(file_id)}]'}).scalar()
+    return bool(row)

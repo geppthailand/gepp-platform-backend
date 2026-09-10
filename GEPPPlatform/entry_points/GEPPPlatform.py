@@ -16,6 +16,7 @@ import json
 from decimal import Decimal
 
 from GEPPPlatform.libs.http_response import maybe_gzip
+from GEPPPlatform.services.subscriptions import access as access_mod
 
 
 class DateTimeEncoder(json.JSONEncoder):
@@ -604,6 +605,34 @@ def main(event, context):
 
                 input_service = InputChannelService(session)
 
+                # ── Subscription gate (public QR channel) ────────────
+                # The form is unauthenticated, but the channel row carries
+                # `organization_id` — so a QR belonging to a lapsed org must
+                # stop working like every other way into that org, or it is a
+                # hole straight past the gate.
+                #
+                # The person scanning is site staff, not the org's admin, so
+                # the message points them at the organization rather than at
+                # GEPP. Fails open on an unknown hash; the routes below return
+                # their own 404/401 for that.
+                _chan_access = access_mod.channel_subscription_access(
+                    session, hash_value)
+                if not _chan_access['allowed']:
+                    logger.info("Blocked QR channel %s (org %s): subscription %s",
+                                hash_value, _chan_access.get('organization_id'),
+                                _chan_access['reason'])
+                    return {
+                        "statusCode": 403,
+                        "headers": headers,
+                        "body": json.dumps({
+                            'success': False,
+                            'error_code': access_mod.BLOCKED_ERROR_CODE,
+                            'reason': _chan_access['reason'],
+                            'message': access_mod.blocked_message(
+                                _chan_access, audience='channel'),
+                        })
+                    }
+
                 if is_location_materials and http_method == 'GET':
                     # Get allowed materials for a specific location (hierarchy-based filtering)
                     qr_name = query_params.get('qr_name', '')
@@ -713,6 +742,24 @@ def main(event, context):
                     channel_data = input_service.get_input_channel_by_hash(channel_hash, qr_name)
 
                     if channel_data and channel_data.get('subUser', {}).get('isValid'):
+                        # Same gate as the /api/input-channel/ routes: this is
+                        # the other door channel auth opens, and it resolves an
+                        # organization_id just the same.
+                        _mat_access = access_mod.subscription_access(
+                            session, channel_data.get('organization_id'))
+                        if not _mat_access['allowed']:
+                            return {
+                                "statusCode": 403,
+                                "headers": headers,
+                                "body": json.dumps({
+                                    'success': False,
+                                    'error_code': access_mod.BLOCKED_ERROR_CODE,
+                                    'reason': _mat_access['reason'],
+                                    'message': access_mod.blocked_message(
+                                        _mat_access, audience='channel'),
+                                })
+                            }
+
                         # Valid channel access - serve materials data without token
                         from GEPPPlatform.services.cores.materials.materials_handlers import handle_materials_routes
                         materials_result = handle_materials_routes(
@@ -852,6 +899,42 @@ def main(event, context):
                         'token_data': token_data  # Include full token data for future use
                     }
                     commonParams['current_user'] = current_user
+
+                # ── Subscription gate ────────────────────────────────
+                # No period covering today means no access: a token issued
+                # yesterday must not outlive the subscription. Placed here, once,
+                # after the JWT is resolved and before ANY handler runs — a
+                # per-handler check would be a list of places to forget.
+                #
+                # `/api/admin/*` and `/api/auth/*` are exempt, or the system
+                # deadlocks: the backoffice is where the period gets created,
+                # and a blocked user still has to be able to log out. See
+                # `services/subscriptions/access.py`.
+                #
+                # Fails OPEN — a broken check must not take every customer
+                # offline.
+                if not access_mod.path_is_always_allowed(path):
+                    _org_id = (commonParams.get('current_user') or {}).get('organization_id')
+                    _access = access_mod.subscription_access(
+                        commonParams.get('db_session'), _org_id)
+                    if not _access['allowed']:
+                        logger.info(
+                            "Blocked %s for org %s: subscription %s",
+                            path, _org_id, _access['reason'])
+                        return {
+                            "statusCode": 403,
+                            "headers": headers,
+                            "body": json.dumps({
+                                'success': False,
+                                'error_code': access_mod.BLOCKED_ERROR_CODE,
+                                'reason': _access['reason'],
+                                'message': access_mod.blocked_message(_access),
+                                'subscription': {
+                                    'endedAt': _access.get('ended_at'),
+                                    'startsAt': _access.get('starts_at'),
+                                },
+                            })
+                        }
 
                 # Route to appropriate handler (all handlers can assume user is authenticated)
                 try:

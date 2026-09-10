@@ -13,8 +13,13 @@
 --     entering data; the overage becomes a line on an invoice. So nothing here
 --     is a constraint, and usage is recomputed from `transactions` rather than
 --     counted (see below).
---   * max file size — DOES block. An upload above it is refused, after the
---     client has been given a chance to shrink the image.
+--   * max file size — DOES block, and it is a TOTAL: the COMBINED size of every
+--     file attached to one transaction. Over it, the transaction is refused
+--     outright — after the client has been given a chance to shrink the images.
+--     Enforced at transaction-create against the real S3 object sizes: the web
+--     path uploads each file directly to S3 before the transaction exists, so a
+--     presigned `content-length-range` can only ever bound ONE object and could
+--     never see a total.
 --
 -- `subscriptions` is EXTENDED rather than joined by a new `subscription_periods`
 -- table. That row already IS a period: organization_id, plan_id, status,
@@ -81,7 +86,7 @@ ALTER TABLE organizations
 -- ── 3. Documentation the next reader will actually see ────────────────
 
 COMMENT ON COLUMN subscriptions.max_file_size_mb IS
-    'Max size of a single uploaded file, in MB, for this period. ENFORCED (S3 content-length-range at presign + decoded-length check on the base64/QR path). NULL -> organizations.default_max_file_size_mb -> system default.';
+    'Max COMBINED size of all files attached to ONE transaction, in MB, for this period. ENFORCED: the transaction is refused if its attachments total more. Checked at transaction-create from the real S3 object sizes, because the web path uploads each file straight to S3 before the transaction exists and content-length-range can only bound a single object. NULL -> organizations.default_max_file_size_mb -> system default.';
 COMMENT ON COLUMN subscriptions.create_transaction_limit IS
     'Transactions allowed per MONTH during this period. ADVISORY: never blocks creation, used for billing only. Period total = this x months covered.';
 COMMENT ON COLUMN subscriptions.period_label IS
@@ -92,6 +97,6 @@ COMMENT ON COLUMN subscriptions.current_period_starts_at IS
 COMMENT ON COLUMN organizations.default_transaction_limit_per_month IS
     'Org default used when no subscription period covers the date. Advisory. NULL -> system default.';
 COMMENT ON COLUMN organizations.default_max_file_size_mb IS
-    'Org default max upload size in MB, used when no subscription period covers the date. NULL -> system default.';
+    'Org default for the max COMBINED attachment size per transaction, in MB, used when no subscription period covers the date. NULL -> system default.';
 COMMENT ON COLUMN organizations.max_image_dimension_px IS
     'Longest-edge cap for uploaded images, re-encoded to webp client-side. Config only, never per-period. NULL -> system default.';

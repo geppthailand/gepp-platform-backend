@@ -53,7 +53,7 @@ class Organization(Base, BaseModel):
 
     #: Transactions per month. ADVISORY — never blocks creation, feeds billing.
     default_transaction_limit_per_month = Column(Integer)
-    #: Max size of ONE uploaded file, MB. ENFORCED at upload time.
+    #: Max COMBINED attachment size per transaction, MB. ENFORCED.
     default_max_file_size_mb = Column(Numeric(8, 2))
     #: Longest-edge cap for uploaded images, re-encoded to webp client-side.
     #: Config only — deliberately has no per-period equivalent.

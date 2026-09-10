@@ -2,6 +2,7 @@
 Admin service for backoffice business logic
 """
 
+import logging
 import secrets
 import string
 from datetime import datetime, timedelta, timezone
@@ -30,6 +31,25 @@ from GEPPPlatform.exceptions import (
     ValidationException,
     ConflictException,
 )
+
+
+logger = logging.getLogger(__name__)
+
+
+def _period_date_state(sub, today) -> str:
+    """'in_force' | 'expired' | 'scheduled' | 'undated', from the dates alone."""
+    start = sub.current_period_starts_at
+    end = sub.current_period_ends_at
+    if start is None:
+        return 'undated'
+    start_d = start.date() if hasattr(start, 'date') else start
+    if start_d > today:
+        return 'scheduled'
+    if end is not None:
+        end_d = end.date() if hasattr(end, 'date') else end
+        if end_d < today:
+            return 'expired'
+    return 'in_force'
 
 
 class AdminService:
@@ -1028,6 +1048,7 @@ class AdminService:
         `organizations.subscription_id`, so it stays right even when that
         pointer was never updated.
         """
+        from ..subscriptions.access import gate_enabled
         from ..subscriptions.limits import (
             find_period, period_transaction_allowance, resolve_org_limits,
         )
@@ -1050,6 +1071,39 @@ class AdminService:
         current = find_period(self.db_session, org_id)
         current_id = current.id if current else None
 
+        # What is ACTUALLY in force today, and where each number comes from.
+        #
+        # Returned alongside the rows because the list on its own is genuinely
+        # misleading: `status` is a hand-set field, so an expired period still
+        # reads "active", and someone who edits the limit on a period whose
+        # dates have passed sees their new value on screen while uploads keep
+        # using the org/system default. That happened.
+        today = datetime.now(timezone.utc).date()
+        eff = resolve_org_limits(self.db_session, org_id, at=today)
+        effective = {
+            'asOf': today.isoformat(),
+            'subscriptionId': eff.subscription_id,
+            'transactionsPerMonth': eff.transactions_per_month,
+            'maxFileSizeMb': eff.max_file_size_mb,
+            'maxImageDimensionPx': eff.max_image_dimension_px,
+            'sources': {
+                'transactions': eff.transactions_source,
+                'fileSize': eff.file_size_source,
+                'imageDimension': eff.image_dimension_source,
+            },
+            # True when no period covers today, so the org/system defaults are
+            # what upload enforcement is really using.
+            'noPeriodInForce': current is None,
+            # Whether "no period, no access" is switched on globally. Without
+            # it the banner cannot tell the operator whether this org is
+            # actually locked out or merely lapsed — and those need very
+            # different reactions.
+            'gateEnabled': gate_enabled(self.db_session),
+            # True when the limits above were inherited from a period that has
+            # already ended (gate off — see limits.resolve_org_limits).
+            'fromExpiredPeriod': eff.from_expired_period,
+        }
+
         items = []
         for sub in rows:
             limits = resolve_org_limits(self.db_session, org_id, period=sub)
@@ -1067,6 +1121,11 @@ class AdminService:
                                  if sub.current_period_ends_at else None),
                 'isOpenEnded': sub.current_period_ends_at is None,
                 'isCurrent': sub.id == current_id,
+                # Derived from the dates. `status` is typed in by hand and says
+                # 'active' on periods that ended months ago, which is exactly
+                # how a 0.1 MB limit appeared to be in force while uploads were
+                # still being checked against the 50 MB system default.
+                'dateState': _period_date_state(sub, today),
                 # Advisory — never blocks transaction creation.
                 'transactionsPerMonth': limits.transactions_per_month,
                 'transactionsPeriodTotal': period_transaction_allowance(
@@ -1080,7 +1139,7 @@ class AdminService:
                 'createdDate': sub.created_date.isoformat() if sub.created_date else None,
             })
 
-        return {'items': items, 'total': len(items)}
+        return {'items': items, 'total': len(items), 'effective': effective}
 
     def get_subscription_usage(self, sub_id: int, query_params: dict) -> Dict[str, Any]:
         """Quota set vs quota actually used, for the detail modal and the export.
@@ -1104,6 +1163,101 @@ class AdminService:
         if not result.get('success'):
             raise NotFoundException(result.get('message', 'Subscription not found'))
         return result
+
+    # ── Global settings ────────────────────────────────────────────────
+
+    def get_global_settings(self, query_params: dict = None) -> Dict[str, Any]:
+        """Every global setting, grouped into the sections the UI tabs render.
+
+        The subscription section carries an `impact` block: how many orgs,
+        users and QR forms the access gate would cut off if it were switched on
+        right now. That number is the whole reason this page exists — the gate
+        is a lockout, and an operator about to flip it deserves to see the blast
+        radius on the same screen as the switch rather than being asked to
+        trust that someone ran a query once.
+        """
+        from ..settings import describe
+
+        payload = describe(self.db_session)
+        payload['impact'] = {'subscription': self._subscription_gate_impact()}
+        return payload
+
+    def _subscription_gate_impact(self) -> Dict[str, Any]:
+        """Who the subscription gate would block right now.
+
+        One pass over `organizations`, so it is safe to run on page load.
+        Returns zeros (with `available: False`) rather than raising if it
+        cannot be computed: a settings page that will not render because a
+        count failed is worse than one that renders without the count.
+        """
+        from sqlalchemy import text
+
+        try:
+            row = self.db_session.execute(text("""
+                WITH cov AS (
+                    SELECT o.id,
+                           EXISTS (
+                               SELECT 1 FROM subscriptions s
+                                WHERE s.organization_id = o.id
+                                  AND s.deleted_date IS NULL
+                                  AND s.current_period_starts_at IS NOT NULL
+                                  AND s.current_period_starts_at <= NOW()
+                                  AND (s.current_period_ends_at IS NULL
+                                       OR s.current_period_ends_at >= NOW())
+                           ) AS covered
+                      FROM organizations o
+                     WHERE o.deleted_date IS NULL
+                )
+                SELECT COUNT(*) FILTER (WHERE covered)          AS ok_orgs,
+                       COUNT(*) FILTER (WHERE NOT covered)      AS blocked_orgs,
+                       (SELECT COUNT(*) FROM user_locations u
+                          JOIN cov ON cov.id = u.organization_id
+                         WHERE u.is_user AND u.is_active
+                           AND NOT cov.covered)                 AS blocked_users,
+                       (SELECT COUNT(*) FROM user_input_channels c
+                          JOIN cov ON cov.id = c.organization_id
+                         WHERE c.deleted_date IS NULL
+                           AND NOT cov.covered)                 AS blocked_channels
+                  FROM cov
+            """)).fetchone()
+
+            return {
+                'available': True,
+                'organizationsWithPeriod': int(row[0] or 0),
+                'organizationsBlocked': int(row[1] or 0),
+                'usersBlocked': int(row[2] or 0),
+                'qrFormsBlocked': int(row[3] or 0),
+            }
+        except Exception:
+            logger.warning('Could not compute subscription gate impact',
+                           exc_info=True)
+            return {'available': False}
+
+    def update_global_settings(self, data: dict,
+                               current_user: dict = None) -> Dict[str, Any]:
+        """Write one or more global settings.
+
+        Body is `{"values": {key: value}}` — or a bare `{key: value}` map,
+        which is what a form submits. Unknown keys are rejected outright and
+        nothing is written: a settings form that silently drops a key it does
+        not recognise is indistinguishable from one that saved.
+        """
+        from ..settings import set_many
+
+        values = (data or {}).get('values')
+        if not isinstance(values, dict):
+            values = {k: v for k, v in (data or {}).items() if k != 'values'}
+        if not values:
+            raise BadRequestException('No settings provided')
+
+        try:
+            set_many(self.db_session, values,
+                     updated_by=(current_user or {}).get('user_id'))
+        except ValueError as e:
+            raise BadRequestException(str(e))
+
+        self.db_session.commit()
+        return self.get_global_settings()
 
     def create_subscription(self, data: dict) -> Dict[str, Any]:
         """Create a SUBSCRIPTION PERIOD for an organization.
@@ -1167,11 +1321,34 @@ class AdminService:
         return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
     def update_subscription(self, sub_id: int, data: dict) -> Dict[str, Any]:
+        # Matched on `deleted_date IS NULL`, the same predicate
+        # `list_organization_subscription_periods` and `find_period` use. It was
+        # `is_active == True`, which is a different set: a period with
+        # is_active=false still appears in the backoffice list and still resolves
+        # limits, but saving an edit to it returned "not found".
         sub = self.db_session.query(Subscription).filter(
-            Subscription.id == sub_id, Subscription.is_active == True
+            Subscription.id == sub_id,
+            Subscription.deleted_date.is_(None),
         ).first()
         if not sub:
-            raise NotFoundException(f'Subscription {sub_id} not found')
+            raise NotFoundException(f'Subscription period {sub_id} not found')
+
+        # ── Validate BEFORE mutating ─────────────────────────────────
+        # Dates go through the parser so a bare 'YYYY-MM-DD' does not land as a
+        # naive timestamp in the server's zone (see _parse_period_date). Only
+        # keys actually present are touched, so a partial PATCH is validated
+        # against the row's existing value for the other end of the range.
+        #
+        # Assigning first and checking after left the ORM object dirty with the
+        # rejected dates: SQLAlchemy's autoflush would then push them on the
+        # next query in the same session, and every later edit to that row
+        # failed the same validation even when it never mentioned the dates.
+        new_start = (self._parse_period_date(data['periodStartsAt'])
+                     if 'periodStartsAt' in data else sub.current_period_starts_at)
+        new_end = (self._parse_period_date(data['periodEndsAt'])
+                   if 'periodEndsAt' in data else sub.current_period_ends_at)
+        if new_start and new_end and new_end < new_start:
+            raise BadRequestException('periodEndsAt cannot be before periodStartsAt')
 
         for field in ['plan_id', 'status', 'create_transaction_limit', 'ai_audit_limit',
                       'allow_ai_audit_exceed_quota', 'duration_type',
@@ -1180,15 +1357,10 @@ class AdminService:
             if camel in data:
                 setattr(sub, field, data[camel])
 
-        # Dates go through the parser so a bare 'YYYY-MM-DD' does not land as a
-        # naive timestamp in the server's zone (see _parse_period_date).
         if 'periodStartsAt' in data:
-            sub.current_period_starts_at = self._parse_period_date(data['periodStartsAt'])
+            sub.current_period_starts_at = new_start
         if 'periodEndsAt' in data:
-            sub.current_period_ends_at = self._parse_period_date(data['periodEndsAt'])
-        if (sub.current_period_starts_at and sub.current_period_ends_at
-                and sub.current_period_ends_at < sub.current_period_starts_at):
-            raise BadRequestException('periodEndsAt cannot be before periodStartsAt')
+            sub.current_period_ends_at = new_end
 
         self.db_session.flush()
         return {'id': sub.id, 'message': 'Subscription period updated'}

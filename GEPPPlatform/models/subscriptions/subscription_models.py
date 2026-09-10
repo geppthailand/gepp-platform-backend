@@ -66,7 +66,9 @@ class Subscription(Base, BaseModel):
       * ``create_transaction_limit`` — transactions allowed per MONTH. Purely
         advisory: nothing blocks on it, it feeds billing. The period total is
         derived (allowance x months covered), never stored.
-      * ``max_file_size_mb`` — enforced. Over-limit uploads are refused.
+      * ``max_file_size_mb`` — enforced, and it is a TOTAL: the combined size
+        of all files attached to one transaction. A transaction over it is
+        refused outright.
     """
     __tablename__ = 'subscriptions'
 
@@ -86,7 +88,8 @@ class Subscription(Base, BaseModel):
     # Period metadata (migration 088)
     period_label = Column(String(120))
     notes = Column(Text)
-    #: Max size of ONE uploaded file, MB. NULL -> org default -> system default.
+    #: Max COMBINED attachment size for ONE transaction, MB.
+    #: NULL -> org default -> system default.
     max_file_size_mb = Column(Numeric(8, 2))
 
     # Usage tracking

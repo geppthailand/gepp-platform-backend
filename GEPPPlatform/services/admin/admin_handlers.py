@@ -159,6 +159,10 @@ class AdminHandlers:
             'crm-leads': lambda qp: crm_leads.list_crm_leads(self.db_session, qp, current_user=self.current_user),
             'crm-drip-sequences': lambda qp: crm_drip.list_crm_drip_sequences(self.db_session, qp, current_user=self.current_user),
             'crm-conversations': lambda qp: crm_inbox.list_crm_conversations(self.db_session, qp, current_user=self.current_user),
+            # Platform-wide switches (Global Settings page). Not a collection —
+            # it returns one document of sections — but it lives on the list
+            # route so the page needs no bespoke endpoint shape.
+            'global-settings': self.admin_service.get_global_settings,
         }
         handler = handler_map.get(resource)
         if not handler:

@@ -36,7 +36,12 @@ _SOURCE_PROFILES = {
 }
 
 _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+# Phone is free-form (Thai landline/mobile, sometimes with country code or extension),
+# so we only enforce the separator alphabet plus a minimum digit count.
+_PHONE_RE = re.compile(r"^[0-9+\-\s()]{6,32}$")
 _MAX_TEXT_LEN = 1000
+# crm_leads.phone is VARCHAR(64); keep the cap below it.
+_MAX_PHONE_LEN = 32
 _MAX_MESSAGE_LEN = 5000
 _DEFAULT_NOTIFY_EMAIL = "hello@gepp.me"
 
@@ -67,7 +72,8 @@ def handle_customer_lead_capture(
 
     Body:
       name (required), email (required), company (required),
-      type ('existing' | 'new'), message, source (default 'landing-page'),
+      phone (optional), type ('existing' | 'new'), message,
+      source (default 'landing-page'),
       metadata (object — page URL, referrer, UTM, and other attribution)
     """
     if not isinstance(data, dict):
@@ -85,6 +91,13 @@ def handle_customer_lead_capture(
         raise BadRequestException("email is not a valid address")
     if not company:
         raise BadRequestException("company is required")
+
+    # Optional — reject only clearly malformed values so we never lose a lead
+    # over formatting.
+    phone = _clean(data.get("phone") or data.get("phoneNumber"), max_len=_MAX_PHONE_LEN)
+    if phone:
+        if not _PHONE_RE.match(phone) or len(re.sub(r"\D", "", phone)) < 6:
+            raise BadRequestException("phone is not a valid contact number")
 
     lead_type = _clean(data.get("type") or data.get("lead_type"), max_len=64) or "new"
     if lead_type not in {"existing", "new"}:
@@ -131,6 +144,7 @@ def handle_customer_lead_capture(
             "first_name": first_name,
             "last_name": last_name,
             "company": company,
+            "phone": phone,
             "notes": message,
             "tags": list(dict.fromkeys([profile["tag"], "contact_form", lead_type])),
         },
@@ -147,6 +161,7 @@ def handle_customer_lead_capture(
             properties={
                 "name": name,
                 "company": company,
+                "phone": phone,
                 "message": message,
                 "lead_type": lead_type,
                 "source_metadata": source_metadata,
@@ -158,6 +173,7 @@ def handle_customer_lead_capture(
         lead_id=lead_id,
         name=name,
         email=email,
+        phone=phone,
         company=company,
         lead_type=lead_type,
         message=message,
@@ -197,6 +213,7 @@ def _send_internal_notification(
     lead_id: Optional[int],
     name: str,
     email: str,
+    phone: Optional[str],
     company: str,
     lead_type: str,
     message: Optional[str],
@@ -213,6 +230,7 @@ def _send_internal_notification(
     safe = {
         "name": html.escape(name),
         "email": html.escape(email),
+        "phone": html.escape(phone or "-"),
         "company": html.escape(company),
         "lead_type": html.escape(lead_type),
         "message": html.escape(message or "-").replace("\n", "<br />"),
@@ -224,6 +242,7 @@ def _send_internal_notification(
         <h2>New GEPP.me contact request</h2>
         <p><strong>Name:</strong> {safe["name"]}</p>
         <p><strong>Email:</strong> {safe["email"]}</p>
+        <p><strong>Phone:</strong> {safe["phone"]}</p>
         <p><strong>Company:</strong> {safe["company"]}</p>
         <p><strong>Type:</strong> {safe["lead_type"]}</p>
         <p><strong>CRM Lead ID:</strong> {safe["lead_id"]}</p>
@@ -235,6 +254,7 @@ def _send_internal_notification(
         "New GEPP.me contact request\n"
         f"Name: {name}\n"
         f"Email: {email}\n"
+        f"Phone: {phone or '-'}\n"
         f"Company: {company}\n"
         f"Type: {lead_type}\n"
         f"CRM Lead ID: {lead_id or '-'}\n"

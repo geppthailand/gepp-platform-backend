@@ -135,6 +135,43 @@ class TransactionService:
                     'errors': validation_errors
                 }
 
+            # ── Attachment size limit, per TRANSACTION ───────────────
+            # Checked here, before a single row is inserted, so an over-limit
+            # transaction is never created — which is the whole point of the
+            # limit and exactly what used to fail: the web path uploads each
+            # file straight to S3 as the user picks it, so by the time we got
+            # here the files already existed and the transaction was created
+            # regardless.
+            #
+            # The presigned `content-length-range` cannot cover this: it bounds
+            # ONE object, and S3 has no notion of "these files together".
+            from ...subscriptions.upload_guard import (
+                FileTooLargeError, check_uploaded_file_ids, collect_file_ids,
+                resolve_max_upload_bytes,
+            )
+            attachment_ids = collect_file_ids(
+                transaction_data.get('images'),
+                *[(r or {}).get('images') for r in (transaction_records_data or [])],
+            )
+            if attachment_ids:
+                max_upload_bytes = resolve_max_upload_bytes(
+                    self.db, transaction_data.get('organization_id'))
+                try:
+                    check_uploaded_file_ids(
+                        self.db, attachment_ids, max_upload_bytes)
+                except FileTooLargeError as e:
+                    logger.info('Refusing transaction create: %s', e)
+                    return {
+                        'success': False,
+                        'message': str(e),
+                        'error_code': 'FILE_TOO_LARGE',
+                        'errors': [
+                            {'filename': f['filename'],
+                             'sizeBytes': f['size_bytes']}
+                            for f in e.files
+                        ],
+                    }
+
             # Create transaction (tag_id / tenant_id from request map to location_tag_id / tenant_id)
             location_tag_id = transaction_data.get('tag_id') or transaction_data.get('location_tag_id')
             tenant_id = transaction_data.get('tenant_id')

@@ -367,6 +367,14 @@ def handle_admin_routes(path: str, data: dict, **commonParams):
             raise NotFoundException(f"GET endpoint not found: {internal_path}")
 
     elif method == "PUT":
+        # PUT /admin/global-settings — a bulk write with no resource id, because
+        # the page saves whatever the operator changed in one go. Matched before
+        # the generic `{resource}/{id}` shape, which would try to int() the key.
+        if len(path_parts) == 1 and path_parts[0] == 'global-settings':
+            return admin_handler.admin_service.update_global_settings(
+                data, current_user=commonParams.get('current_user', {}) or {},
+            )
+
         if len(path_parts) == 2:
             # PUT /admin/{resource}/{id}
             resource = path_parts[0]

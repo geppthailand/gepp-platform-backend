@@ -1,13 +1,16 @@
-"""The per-file size guard for byte-carrying upload paths.
+"""The attachment-size guard. The limit is a TOTAL, per transaction.
 
-Three server-side paths accept transaction file bytes and none of them had a
-ceiling before: `POST /transactions/{id}/images`, `file_uploads` on create, and
-the QR channel's `b64image`. They now share `upload_guard`.
+Not per file: three 40 KB photos against a 100 KB limit is a refusal even
+though no single file is over. A per-file rule would let an unbounded number of
+just-under-the-limit files through, which is the opposite of a storage limit.
 
-The dangerous failure here is measuring the WRONG size — base64 inflates by
-~33%, so a check on the encoded string rejects files that are within the limit,
-and a check on a decoded blob that was never encoded under-counts. Those cases
-come first.
+Two failure modes drive these tests:
+
+  * measuring the WRONG size — base64 inflates ~33%, so a check on the encoded
+    string refuses files that fit, while a decoded measurement of something that
+    was never encoded under-counts;
+  * checking the wrong QUANTITY — the bug that shipped: a 2.3 MB PDF against a
+    0.1 MB limit was let through and the transaction was created anyway.
 """
 
 import base64
@@ -94,33 +97,53 @@ class TestCheckFiles:
         measured = check_files(files, 5 * MB)
         assert measured[0]['size_bytes'] == 1 * MB
 
-    def test_raises_when_over(self):
+    def test_raises_when_a_single_file_is_over(self):
         files = [{'data': data_url(6 * MB), 'filename': 'big.webp'}]
         with pytest.raises(FileTooLargeError) as ei:
             check_files(files, 5 * MB)
         assert 'big.webp' in str(ei.value)
-        assert '6.0 MB' in str(ei.value)
-        assert '5.0 MB' in str(ei.value)
+        assert '6.00 MB' in str(ei.value)
+        assert '5.00 MB' in str(ei.value)
 
-    def test_reports_EVERY_offender_not_just_the_first(self):
-        # So the user fixes one upload instead of rediscovering the limit file
-        # by file.
+    def test_the_TOTAL_is_what_counts(self):
+        # The case the shipped bug got wrong. Every file is comfortably under
+        # the limit; together they are not.
+        files = [{'data': data_url(40 * 1024), 'filename': f'p{i}.webp'}
+                 for i in range(3)]
+        with pytest.raises(FileTooLargeError) as ei:
+            check_files(files, 100 * 1024)
+        assert ei.value.total_bytes == 120 * 1024
+        # The message has to show the breakdown, or "too large" is unactionable
+        # when no individual file looks too large.
+        assert 'p0.webp' in str(ei.value) and 'p2.webp' in str(ei.value)
+        assert '3 files total' in str(ei.value)
+
+    def test_reports_every_file_not_just_the_big_ones(self):
+        # With a total limit, a small file is still part of the reason it failed.
         files = [
-            {'data': data_url(1 * MB), 'filename': 'ok.webp'},
-            {'data': data_url(6 * MB), 'filename': 'big1.webp'},
-            {'data': data_url(7 * MB), 'filename': 'big2.webp'},
+            {'data': data_url(1 * MB), 'filename': 'small.webp'},
+            {'data': data_url(6 * MB), 'filename': 'big.webp'},
         ]
         with pytest.raises(FileTooLargeError) as ei:
             check_files(files, 5 * MB)
-        assert {o['filename'] for o in ei.value.offenders} == {'big1.webp', 'big2.webp'}
-        assert 'ok.webp' not in str(ei.value)
+        assert {f['filename'] for f in ei.value.files} == {'small.webp', 'big.webp'}
+
+    def test_a_0_1_mb_limit_is_not_rounded_to_zero_in_the_message(self):
+        # The reported case used 0.1 MB. Formatting at one decimal would print
+        # the limit and a 0.05 MB file as the same number.
+        with pytest.raises(FileTooLargeError) as ei:
+            check_files([{'data': b'x' * (300 * 1024), 'filename': 'doc.pdf'}],
+                        int(0.1 * MB))
+        assert '0.10 MB' in str(ei.value)
+        assert '0.29 MB' in str(ei.value)
 
     def test_exactly_at_the_limit_is_allowed(self):
         check_files([{'data': b'x' * (5 * MB), 'filename': 'edge'}], 5 * MB)
 
-    def test_one_byte_over_is_refused(self):
+    def test_one_byte_over_the_total_is_refused(self):
         with pytest.raises(FileTooLargeError):
-            check_files([{'data': b'x' * (5 * MB + 1), 'filename': 'edge'}], 5 * MB)
+            check_files([{'data': b'x' * (3 * MB), 'filename': 'a'},
+                         {'data': b'x' * (2 * MB + 1), 'filename': 'b'}], 5 * MB)
 
     def test_none_limit_skips_the_check(self):
         # None = "could not resolve the limit". A lookup failure must not block
@@ -161,6 +184,11 @@ class TestCheckB64Images:
             check_b64_images([data_url(1 * MB), data_url(9 * MB)], 5 * MB)
         assert 'Photo 2' in str(ei.value)
 
+    def test_qr_photos_are_totalled_too(self):
+        with pytest.raises(FileTooLargeError) as ei:
+            check_b64_images([data_url(40 * 1024)] * 3, 100 * 1024)
+        assert ei.value.total_bytes == 120 * 1024
+
     def test_within_limit(self):
         measured = check_b64_images([data_url(MB)], 5 * MB)
         assert measured[0]['size_bytes'] == MB
@@ -179,10 +207,132 @@ class TestTransactionTotal:
             10 * MB)
         assert transaction_total_bytes(measured) == 3 * MB
 
-    def test_total_is_reported_not_enforced(self):
-        # Three 4 MB files pass a 5 MB PER-FILE limit even though they total
-        # 12 MB. `max_file_size_mb` is documented as per-file; capping the total
-        # here would enforce a limit nobody configured a value for.
+    def test_the_total_is_enforced(self):
+        # Three 4 MB files against a 5 MB limit: each fits, the transaction does
+        # not. This assertion used to say the opposite — it encoded the per-file
+        # reading of the rule, which was wrong.
         files = [{'data': b'x' * (4 * MB), 'filename': f'f{i}'} for i in range(3)]
-        measured = check_files(files, 5 * MB)          # must not raise
-        assert transaction_total_bytes(measured) == 12 * MB
+        with pytest.raises(FileTooLargeError) as ei:
+            check_files(files, 5 * MB)
+        assert ei.value.total_bytes == 12 * MB
+        assert transaction_total_bytes(ei.value.files) == 12 * MB
+
+
+class TestCollectFileIds:
+    """Attachments live in two places on a transaction and the limit covers the
+    transaction, so both have to be gathered before anything is measured."""
+
+    def test_gathers_transaction_and_record_ids(self):
+        from GEPPPlatform.services.subscriptions.upload_guard import collect_file_ids
+        assert collect_file_ids([1, 2], [3], [4, 5]) == [1, 2, 3, 4, 5]
+
+    def test_deduplicates(self):
+        # The same file referenced by the transaction AND one of its records is
+        # one object in S3 and must be counted once.
+        from GEPPPlatform.services.subscriptions.upload_guard import collect_file_ids
+        assert collect_file_ids([1, 2], [2, 3]) == [1, 2, 3]
+
+    def test_skips_legacy_urls(self):
+        # Old rows keep S3 URLs in the same field; there is no id to size those
+        # by, so they are ignored rather than crashing the check.
+        from GEPPPlatform.services.subscriptions.upload_guard import collect_file_ids
+        assert collect_file_ids(
+            [1, 'https://bucket.s3.amazonaws.com/a.jpg', 2]) == [1, 2]
+
+    def test_accepts_numeric_strings(self):
+        from GEPPPlatform.services.subscriptions.upload_guard import collect_file_ids
+        assert collect_file_ids(['7', 8]) == [7, 8]
+
+    def test_ignores_booleans(self):
+        # bool is an int subclass in Python; True would otherwise become id 1.
+        from GEPPPlatform.services.subscriptions.upload_guard import collect_file_ids
+        assert collect_file_ids([True, False, 5]) == [5]
+
+    def test_tolerates_none_and_non_lists(self):
+        from GEPPPlatform.services.subscriptions.upload_guard import collect_file_ids
+        assert collect_file_ids(None, 'nope', 42, [9]) == [9]
+
+    def test_no_sources(self):
+        from GEPPPlatform.services.subscriptions.upload_guard import collect_file_ids
+        assert collect_file_ids() == []
+
+
+class TestCheckUploadedFileIds:
+    """The web path's real enforcement: files are already in S3 when the
+    transaction is created, so their sizes come from S3, not from the client."""
+
+    class _File:
+        def __init__(self, fid, size=None, key=None, name=None):
+            self.id = fid
+            self.file_size = size
+            self.s3_key = key
+            self.s3_bucket = 'b'
+            self.original_filename = name or f'f{fid}'
+
+    class _DB:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def query(self, _m):
+            return self
+
+        def filter(self, *_a, **_k):
+            return self
+
+        def all(self):
+            return self._rows
+
+    def _check(self, rows, max_bytes, head=None):
+        from GEPPPlatform.services.subscriptions.upload_guard import (
+            check_uploaded_file_ids,
+        )
+
+        class FakeS3:
+            def head_object(self, Bucket, Key):
+                if head is None:
+                    raise RuntimeError('no S3')
+                return {'ContentLength': head[Key]}
+
+        return check_uploaded_file_ids(
+            self._DB(rows), [r.id for r in rows], max_bytes, s3_client=FakeS3())
+
+    def test_uses_stored_size_when_present(self):
+        rows = [self._File(1, size=30 * 1024), self._File(2, size=40 * 1024)]
+        assert self._check(rows, 100 * 1024) == 70 * 1024
+
+    def test_totals_across_files_and_refuses(self):
+        rows = [self._File(i, size=40 * 1024) for i in (1, 2, 3)]
+        with pytest.raises(FileTooLargeError) as ei:
+            self._check(rows, 100 * 1024)
+        assert ei.value.total_bytes == 120 * 1024
+
+    def test_falls_back_to_s3_head_when_size_is_null(self):
+        # The real situation: `mark_uploaded` has no callers, so file_size is
+        # always NULL for presigned uploads and S3 is the only source of truth.
+        rows = [self._File(1, size=None, key='k1'),
+                self._File(2, size=None, key='k2')]
+        total = self._check(rows, 10 * MB, head={'k1': 2 * MB, 'k2': 1 * MB})
+        assert total == 3 * MB
+
+    def test_unreadable_size_counts_as_zero_not_a_block(self):
+        # Under-counting is the safe direction: an S3 hiccup must not refuse
+        # legitimate work.
+        rows = [self._File(1, size=None, key='k1')]
+        assert self._check(rows, 1024, head=None) == 0
+
+    def test_none_limit_skips_entirely(self):
+        from GEPPPlatform.services.subscriptions.upload_guard import (
+            check_uploaded_file_ids,
+        )
+        rows = [self._File(1, size=999 * MB)]
+        assert check_uploaded_file_ids(self._DB(rows), [1], None) == 0
+
+    def test_no_ids_is_zero(self):
+        from GEPPPlatform.services.subscriptions.upload_guard import (
+            check_uploaded_file_ids,
+        )
+        assert check_uploaded_file_ids(self._DB([]), [], 1024) == 0
+
+    def test_ids_with_no_matching_rows(self):
+        # Stale ids must not fail the transaction.
+        assert self._check([], 1024) == 0

@@ -8,6 +8,12 @@ came out wrong.
 Precedence, most specific first:
 
     1. the subscription period covering the date  (the contract)
+    1b. its most recent period that has ended     (only when the global access
+                                                   gate is OFF — a lapsed org
+                                                   that is still allowed to work
+                                                   keeps its last agreed terms
+                                                   instead of gaining the more
+                                                   permissive defaults)
     2. the organization's default                 (house standard)
     3. the system default                         (last resort)
 
@@ -18,7 +24,9 @@ rather than defaulted in the schema.
 The two limits are not symmetric, and callers must not treat them alike:
 
     transactions_per_month   ADVISORY. Never blocks. Feeds billing.
-    max_file_size_mb         ENFORCED. Over-limit uploads are refused.
+    max_file_size_mb         ENFORCED, and a TOTAL: the combined size of all
+                             files on one transaction. Over it, the whole
+                             transaction is refused.
 
 `max_image_dimension_px` has no period layer by design — it is a storage
 concern, not a billed one, and per-period values would mean the same photo is
@@ -36,7 +44,9 @@ from sqlalchemy import or_
 # Chosen to be permissive: this feature must not tighten anything for an org
 # nobody has configured yet. The file-size default matches the 50 MB that
 # `presigned_url_service` hardcoded before this existed, so behaviour for
-# unconfigured orgs is unchanged rather than newly restricted.
+# unconfigured orgs is unchanged rather than newly restricted (it was a
+# per-object cap there and is a per-transaction total now, which is
+# stricter in principle but not for any org at the default).
 
 DEFAULT_TRANSACTIONS_PER_MONTH = 100
 DEFAULT_MAX_FILE_SIZE_MB = 50.0
@@ -54,7 +64,7 @@ class OrgLimits:
     organization_id: int
     #: Transactions allowed per month. ADVISORY — see module docstring.
     transactions_per_month: int
-    #: Max size of a single uploaded file, MB. ENFORCED.
+    #: Max COMBINED attachment size for one transaction, MB. ENFORCED.
     max_file_size_mb: float
     #: Longest-edge cap for re-encoded images, px.
     max_image_dimension_px: int
@@ -63,11 +73,15 @@ class OrgLimits:
     #: date, so the org/system defaults are in force.
     subscription_id: Optional[int] = None
     plan_id: Optional[int] = None
-    #: 'period' | 'organization' | 'system', per limit. Ops asks "why is this
-    #: number what it is?" often enough that guessing is not good enough.
+    #: 'period' | 'last_period' | 'organization' | 'system', per limit. Ops asks
+    #: "why is this number what it is?" often enough that guessing is not good
+    #: enough. `last_period` means no period covers the date and the global
+    #: access gate is off, so the org is running on its most recent terms.
     transactions_source: str = 'system'
     file_size_source: str = 'system'
     image_dimension_source: str = 'system'
+    #: True when the values above came from a period that has already ended.
+    from_expired_period: bool = False
 
     @property
     def max_file_size_bytes(self) -> int:
@@ -129,6 +143,41 @@ def find_period(db, organization_id: int, at: Optional[date] = None):
     )
 
 
+def latest_started_period(db, organization_id: int, at: Optional[date] = None):
+    """The most recent period that has BEGUN by `at`, expired or not.
+
+    Used when no period covers the date and the global subscription gate is
+    switched off: the org keeps working, and this is whose terms it works
+    under. Falling through to the org/system defaults instead would silently
+    *loosen* the limits of a lapsed customer — the system file-size default is
+    50 MB, so an org contracted to 5 MB would gain ten times the allowance by
+    letting its subscription expire. That is the wrong direction for a lapse.
+
+    Deliberately ignores periods that start in the FUTURE, even though they may
+    be the latest by start date: a scheduled contract has not been agreed to
+    take effect yet, and applying its terms early is the same class of mistake
+    as inventing them.
+    """
+    from ...models.subscriptions.subscription_models import Subscription
+
+    at = at or datetime.now(timezone.utc).date()
+
+    return (
+        db.query(Subscription)
+        .filter(
+            Subscription.organization_id == organization_id,
+            Subscription.deleted_date.is_(None),
+            Subscription.current_period_starts_at.isnot(None),
+            Subscription.current_period_starts_at <= _end_of_day(at),
+        )
+        .order_by(
+            Subscription.current_period_starts_at.desc(),
+            Subscription.id.desc(),
+        )
+        .first()
+    )
+
+
 def _start_of_day(d: date) -> datetime:
     return datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
 
@@ -138,11 +187,25 @@ def _end_of_day(d: date) -> datetime:
 
 
 def resolve_org_limits(db, organization_id: int, at: Optional[date] = None,
-                       period=None) -> OrgLimits:
+                       period=None,
+                       fall_back_to_last_period: Optional[bool] = None) -> OrgLimits:
     """Effective limits for `organization_id` on `at`.
 
     Pass `period` when the caller already has the row (the backoffice detail
     view does) to skip the lookup; it is not re-validated against `at`.
+
+    `fall_back_to_last_period` decides what happens when NO period covers `at`:
+
+        None   read the global subscription gate — fall back whenever the gate
+               is OFF, because then a lapsed org is still working and has to
+               work under *some* agreed terms. This is the default and the only
+               value any production call site passes.
+        True   force the fallback.
+        False  no fallback: the org/system defaults apply.
+
+    Tied to the gate rather than being its own switch on purpose — one operator
+    decision ("do lapsed orgs keep working?") should not need a second one
+    ("...and under which limits?") to be coherent.
     """
     from ...models.subscriptions.organizations import Organization
 
@@ -151,16 +214,31 @@ def resolve_org_limits(db, organization_id: int, at: Optional[date] = None,
         .filter(Organization.id == organization_id)
         .first()
     )
+
+    period_source = 'period'
+    from_expired = False
+
     if period is None:
         period = find_period(db, organization_id, at)
 
+        if period is None:
+            if fall_back_to_last_period is None:
+                from .access import gate_enabled
+                fall_back_to_last_period = not gate_enabled(db)
+
+            if fall_back_to_last_period:
+                period = latest_started_period(db, organization_id, at)
+                if period is not None:
+                    period_source = 'last_period'
+                    from_expired = True
+
     txn, txn_src = _first_not_none(
-        (getattr(period, 'create_transaction_limit', None), 'period'),
+        (getattr(period, 'create_transaction_limit', None), period_source),
         (getattr(org, 'default_transaction_limit_per_month', None), 'organization'),
         (DEFAULT_TRANSACTIONS_PER_MONTH, 'system'),
     )
     size, size_src = _first_not_none(
-        (getattr(period, 'max_file_size_mb', None), 'period'),
+        (getattr(period, 'max_file_size_mb', None), period_source),
         (getattr(org, 'default_max_file_size_mb', None), 'organization'),
         (DEFAULT_MAX_FILE_SIZE_MB, 'system'),
     )
@@ -179,6 +257,10 @@ def resolve_org_limits(db, organization_id: int, at: Optional[date] = None,
         transactions_source=txn_src,
         file_size_source=size_src,
         image_dimension_source=dim_src,
+        # Only true if a limit actually came from that row: a period with both
+        # limits NULL contributes nothing, so flagging it would misreport where
+        # the numbers came from.
+        from_expired_period=from_expired and 'last_period' in (txn_src, size_src),
     )
 
 

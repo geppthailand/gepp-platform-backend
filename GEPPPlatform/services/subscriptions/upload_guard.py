@@ -19,13 +19,16 @@ The limit itself always comes from `limits.resolve_org_limits` — never a
 hardcoded number — so a period's value, an org default and the system default
 all reach every upload path identically.
 
-**Scope of the rule.** The configured value is the maximum for a SINGLE file
-(`subscriptions.max_file_size_mb`). It is enforced per file, but a violation
-fails the WHOLE transaction rather than dropping the offending attachment,
-because a transaction saved with some of its evidence missing is worse than one
-the user retries. `check_files` therefore reports every offender at once, not
-just the first, so the user fixes one upload instead of discovering the files
-one at a time.
+**Scope of the rule.** `subscriptions.max_file_size_mb` is the maximum COMBINED
+size of every file on ONE transaction — not a per-file cap. Three 40 KB photos
+against a 100 KB limit is a refusal. A per-file rule would let an unbounded
+number of just-under-the-limit files through, which is the opposite of a storage
+limit.
+
+A violation fails the WHOLE transaction rather than dropping the offending
+attachment, because a transaction saved with some of its evidence missing is
+worse than one the user retries. The error therefore lists every file with its
+size, since with a total limit no individual file need look too large.
 """
 
 import base64
@@ -38,26 +41,40 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 _DATA_URL_RE = re.compile(r'^data:([^;,]*);base64,', re.IGNORECASE)
 
 
+def _mb(n: float) -> str:
+    """MB to 2dp — the limit can legitimately be 0.1 MB, and '0.1' rendered at
+    one decimal from a 0.05 value would read as the same number as the limit."""
+    return f'{n / (1024 * 1024):.2f}'
+
+
 class FileTooLargeError(ValueError):
-    """One or more files exceed the org's per-file limit.
+    """A transaction's attachments exceed the org's total-size limit.
 
     Subclasses ValueError so the QR channel's existing `except ValueError` —
     which already turns a size refusal into a clean `FILE_TOO_LARGE` response —
     keeps working unchanged.
     """
 
-    def __init__(self, offenders: Sequence[Dict[str, Any]], max_bytes: int):
-        self.offenders = list(offenders)
+    def __init__(self, files: Sequence[Dict[str, Any]], max_bytes: int,
+                 total: Optional[int] = None):
+        self.files = list(files)
+        #: Kept as `offenders` for callers that report a per-file breakdown.
+        self.offenders = self.files
         self.max_bytes = max_bytes
-        limit_mb = max_bytes / (1024 * 1024)
-        parts = [
-            f"{o['filename']} ({o['size_bytes'] / (1024 * 1024):.1f} MB)"
-            for o in self.offenders
-        ]
+        self.total_bytes = (total if total is not None
+                            else sum(f['size_bytes'] for f in self.files))
+
+        if len(self.files) == 1:
+            f = self.files[0]
+            detail = f"{f['filename']} is {_mb(f['size_bytes'])} MB"
+        else:
+            breakdown = ', '.join(
+                f"{f['filename']} {_mb(f['size_bytes'])} MB" for f in self.files)
+            detail = (f"{len(self.files)} files total "
+                      f"{_mb(self.total_bytes)} MB ({breakdown})")
         super().__init__(
-            f"{'File' if len(parts) == 1 else 'Files'} too large for this "
-            f"organization's {limit_mb:.1f} MB per-file limit: "
-            f"{', '.join(parts)}."
+            f"Attachments exceed this organization's {_mb(max_bytes)} MB limit "
+            f"per transaction: {detail}."
         )
 
 
@@ -132,10 +149,15 @@ def payload_size_bytes(data: Any) -> int:
 def check_files(files: Sequence[Dict[str, Any]], max_bytes: Optional[int],
                 data_key: str = 'data',
                 name_key: str = 'filename') -> List[Dict[str, Any]]:
-    """Raise `FileTooLargeError` if any file exceeds `max_bytes`.
+    """Raise `FileTooLargeError` if the files' COMBINED size exceeds `max_bytes`.
 
-    Returns the per-file sizes it measured, so callers can log or report the
-    transaction total without measuring twice.
+    The limit is per TRANSACTION, not per file: three 40 KB photos against a
+    100 KB limit is a refusal, even though no single file is over. A per-file
+    rule would let an unbounded number of just-under-the-limit files through,
+    which is the opposite of a storage limit.
+
+    Returns the per-file sizes it measured, so callers can report the breakdown
+    without measuring twice.
 
     `max_bytes=None` means "limit could not be resolved" and skips the check —
     a lookup failure must not block uploads. `max_bytes=0` is a real,
@@ -153,12 +175,12 @@ def check_files(files: Sequence[Dict[str, Any]], max_bytes: Optional[int],
             'size_bytes': size,
         })
 
-    if max_bytes is None:
+    if max_bytes is None or not measured:
         return measured
 
-    offenders = [m for m in measured if m['size_bytes'] > max_bytes]
-    if offenders:
-        raise FileTooLargeError(offenders, max_bytes)
+    total = sum(m['size_bytes'] for m in measured)
+    if total > max_bytes:
+        raise FileTooLargeError(measured, max_bytes, total=total)
     return measured
 
 
@@ -184,6 +206,10 @@ def resolve_max_upload_bytes(db, organization_id: Optional[int]) -> Optional[int
         return None
     try:
         from .limits import resolve_org_limits
+        # No auto-renewal here on purpose. A lapsed period used to be rolled
+        # forward automatically so the limit stayed the agreed one; that is now
+        # handled by refusing access outright (see `access.py`), so an org that
+        # reaches this code has a live period by definition.
         return resolve_org_limits(db, organization_id).max_file_size_bytes
     except Exception:      # pragma: no cover - defensive
         import logging
@@ -194,12 +220,131 @@ def resolve_max_upload_bytes(db, organization_id: Optional[int]) -> Optional[int
         return None
 
 
-def transaction_total_bytes(measured: Sequence[Dict[str, Any]]) -> int:
-    """Sum of the measured files — the size of the whole transaction's evidence.
+def collect_file_ids(*sources) -> List[int]:
+    """Every integer file id found across `images`-style lists.
 
-    Reported rather than enforced: `max_file_size_mb` is documented and
-    configured as a PER-FILE maximum, so capping the total here would apply a
-    limit nobody set a value for. Surfacing it means the number exists for
-    whoever decides whether a per-transaction total is also wanted.
+    A transaction carries attachments in two places — the transaction's own
+    `images` and each record's `images` — and the limit is on the transaction as
+    a whole, so both have to be gathered before anything is measured.
+
+    Legacy rows put S3 URLs in the same field; those are strings and are skipped
+    (there is no id to look a size up by). Duplicates are collapsed: the same
+    file referenced by the transaction and by one of its records is one object in
+    S3 and must be counted once.
     """
+    seen, out = set(), []
+    for source in sources:
+        if not isinstance(source, (list, tuple)):
+            continue
+        for item in source:
+            if isinstance(item, bool):
+                continue
+            if isinstance(item, int):
+                fid = item
+            elif isinstance(item, str) and item.strip().isdigit():
+                fid = int(item.strip())
+            else:
+                continue          # a URL (legacy) — nothing to measure
+            if fid not in seen:
+                seen.add(fid)
+                out.append(fid)
+    return out
+
+
+def check_uploaded_file_ids(db, file_ids: Sequence[int],
+                            max_bytes: Optional[int],
+                            s3_client=None) -> int:
+    """Total the real sizes of already-uploaded files; raise if over the limit.
+
+    This is the check that makes the limit true for the WEB path. There the
+    browser POSTs each file straight to S3 before the transaction exists, so:
+
+      * the presigned `content-length-range` can only bound ONE object — S3 has
+        no notion of "these five uploads together";
+      * `File.file_size` is never populated (`mark_uploaded` has no callers), so
+        the database cannot answer it either.
+
+    So the sizes come from S3 itself via HEAD, which is authoritative and cannot
+    be spoofed by a patched client. A handful of HEADs per transaction is a few
+    milliseconds and only happens when attachments are present.
+
+    Returns the measured total. Raises `FileTooLargeError` when it exceeds
+    `max_bytes`. A file whose size cannot be determined contributes 0 rather
+    than blocking the transaction — under-counting is the safe direction for a
+    check that can otherwise refuse legitimate work over an S3 hiccup.
+    """
+    if max_bytes is None or not file_ids:
+        return 0
+
+    measured = measure_uploaded_file_ids(db, file_ids, s3_client=s3_client)
+    if not measured:
+        return 0
+
+    total = sum(m['size_bytes'] for m in measured)
+    if total > max_bytes:
+        raise FileTooLargeError(measured, max_bytes, total=total)
+    return total
+
+
+def measure_uploaded_file_ids(db, file_ids: Sequence[int],
+                              s3_client=None) -> List[Dict[str, Any]]:
+    """Sizes of already-uploaded files, measured but NOT judged.
+
+    Split out from `check_uploaded_file_ids` because presign needs the running
+    total to work out the REMAINING budget, and raising there would be wrong —
+    it has to answer "may I issue a URL for this new file", which needs the
+    existing total as a number, not an exception.
+    """
+    from ...models.cores.files import File
+
+    if not file_ids:
+        return []
+
+    rows = (
+        db.query(File)
+        .filter(File.id.in_(list(file_ids)),
+                File.deleted_date.is_(None))
+        .all()
+    )
+
+    measured = []
+    for row in rows:
+        size = row.file_size or 0
+        if not size and row.s3_key:
+            size = _head_object_size(s3_client, row.s3_bucket, row.s3_key)
+        measured.append({
+            'index': row.id,
+            'filename': row.original_filename or f'file #{row.id}',
+            'size_bytes': int(size or 0),
+        })
+    return measured
+
+
+def sum_uploaded_file_ids(db, file_ids: Sequence[int], s3_client=None) -> int:
+    """Total bytes already attached, for computing the remaining budget."""
+    return sum(m['size_bytes']
+               for m in measure_uploaded_file_ids(db, file_ids, s3_client))
+
+
+def _head_object_size(s3_client, bucket: Optional[str], key: str) -> int:
+    """ContentLength of one S3 object, or 0 if it cannot be read."""
+    try:
+        if s3_client is None:
+            import boto3
+            from botocore.config import Config as BotoConfig
+            s3_client = boto3.client(
+                's3', config=BotoConfig(signature_version='s3v4'))
+        import os
+        bucket = bucket or os.getenv('S3_BUCKET_NAME', 'prod-gepp-platform-assets')
+        return int(s3_client.head_object(Bucket=bucket, Key=key)['ContentLength'])
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning(
+            'Could not HEAD s3://%s/%s for size; counting it as 0', bucket, key)
+        return 0
+
+
+def transaction_total_bytes(measured: Sequence[Dict[str, Any]]) -> int:
+    """Sum of the measured files — the size of the whole transaction's evidence,
+    and the quantity the limit is enforced against."""
     return sum(m['size_bytes'] for m in measured)
