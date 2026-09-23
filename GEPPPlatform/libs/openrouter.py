@@ -375,7 +375,11 @@ def call_llm(
     model: str = DEFAULT_MODEL,
     temperature: float = DEFAULT_TEMPERATURE,
     max_tokens: int = DEFAULT_MAX_TOKENS,
+    extra_body: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    """extra_body passes OpenRouter-specific options straight through, e.g.
+    {"reasoning": {"effort": "low"}} to stop a thinking model spending most of
+    the wall clock — and most of the token budget — on reasoning."""
     client = get_openrouter_client()
 
     content: List[Dict[str, Any]] = [{"type": "text", "text": prompt}]
@@ -388,6 +392,7 @@ def call_llm(
         messages=[{"role": "user", "content": content}],
         temperature=temperature,
         max_tokens=max_tokens,
+        extra_body=extra_body or None,
     )
 
     usage = {}
