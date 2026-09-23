@@ -17,6 +17,13 @@ from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy import and_
 
+from . import integrity
+
+# An unreadable REQUIRED field means we could not read the document, not that
+# the transaction is wrong. True sends those to a person (status 'no_action');
+# False restores the old behaviour of rejecting them outright.
+REVIEW_UNREADABLE = True
+
 logger = logging.getLogger(__name__)
 
 # Version marker for deployment verification
@@ -398,7 +405,7 @@ def _process_single_audit_history(
 
             # Update quota usage: count actually processed records (not failed)
             if has_subscription and quota_id:
-                processed_tx_ids = [r['transaction_id'] for r in tx_results if r.get('status') in ('approved', 'rejected')]
+                processed_tx_ids = [r['transaction_id'] for r in tx_results if r.get('status') in ('approved', 'rejected', 'no_action')]
                 if processed_tx_ids:
                     processed_record_count = db.query(TransactionRecord).filter(
                         TransactionRecord.created_transaction_id.in_(processed_tx_ids),
@@ -424,6 +431,7 @@ def _process_single_audit_history(
             'processed_count': len(tx_results),
             'approved': sum(1 for r in tx_results if r.get('status') == 'approved'),
             'rejected': sum(1 for r in tx_results if r.get('status') == 'rejected'),
+            'needs_review': sum(1 for r in tx_results if r.get('status') == 'no_action'),
             'failed': sum(1 for r in tx_results if r.get('status') == 'failed'),
         }
 
@@ -1018,6 +1026,13 @@ def _step6_classify_evidence(
             logger.error(f"Failed to commit File.observation updates: {str(e)}")
 
     logger.info(f"Classified {len(classified)} evidence files")
+    # What each identified type PROMISED to contain. A blank extraction only
+    # means "unreadable" if its type declared the field in the first place —
+    # integrity.check needs both halves to tell those apart.
+    extract_by_type = {dt['id']: dt.get('extract_list') or {} for dt in doc_type_specs}
+    for ev in classified:
+        ev['extract_list'] = extract_by_type.get(ev.get('document_type_id')) or {}
+
     return classified
 
 
@@ -1113,14 +1128,64 @@ def _resolve_names_batch(tx: Any, records: List[Any], db: Session) -> Dict[str, 
         dest_map = {d.id: (d.name_en or '') for d in dests}
 
     origin_name = ''
+    origin_country_id = None
     if tx.origin_id:
         origin_loc = db.query(UserLocation).filter(UserLocation.id == tx.origin_id).first()
-        origin_name = (origin_loc.name_en or '') if origin_loc else ''
+        if origin_loc:
+            origin_name = origin_loc.name_en or ''
+            origin_country_id = origin_loc.country_id
 
-    return {'mat_map': mat_map, 'dest_map': dest_map, 'origin_name': origin_name}
+    return {
+        'mat_map': mat_map,
+        'dest_map': dest_map,
+        'origin_name': origin_name,
+        'tz': _resolve_timezone(origin_country_id, db),
+    }
 
 
-_BANGKOK_TZ = timezone(timedelta(hours=7))
+# Country code -> UTC offset in hours.
+#
+# location_countries HAS a timezone column, but it is NULL on every row, so the
+# ISO code is the only usable source until someone backfills it. Fixed offsets
+# are exact for these three because none of them observes DST; a country that
+# does would need zoneinfo, and tzdata present on the Lambda image.
+_COUNTRY_UTC_OFFSET = {
+    'TH': 7, 'TH_DEFAULT': 7,   # Thailand (id 212 is the "Thailand (Default)" row)
+    'MY': 8,                    # Malaysia
+    'PH': 8,                    # Philippines
+}
+_DEFAULT_UTC_OFFSET = 7         # Thailand — what this code always assumed
+_BANGKOK_TZ = timezone(timedelta(hours=_DEFAULT_UTC_OFFSET))
+
+
+def _resolve_timezone(country_id: Optional[int], db: Session) -> timezone:
+    """The transaction's local timezone, from its origin location's country.
+
+    transaction_date is midnight LOCAL written as UTC (17:00:00 for UTC+7,
+    16:00:00 for UTC+8), so formatting it in the wrong zone moves the date by a
+    day. This was hardcoded to Bangkok, which put every Malaysian and Philippine
+    record — both UTC+8 — one day earlier than the date printed on the document,
+    and the audit LLM was then asked to match evidence against that wrong date.
+
+    Unknown or missing country falls back to Thailand, the previous behaviour,
+    so nothing that works today changes.
+    """
+    if not country_id:
+        return _BANGKOK_TZ
+    from GEPPPlatform.models.cores.locations import LocationCountry
+
+    code = db.query(LocationCountry.code).filter(
+        LocationCountry.id == country_id
+    ).scalar()
+    key = (code or '').strip().upper()
+    if key not in _COUNTRY_UTC_OFFSET:
+        logger.warning(
+            'audit: no UTC offset mapped for country_id=%s code=%r — '
+            'defaulting to UTC+%d. Add it to _COUNTRY_UTC_OFFSET.',
+            country_id, code, _DEFAULT_UTC_OFFSET,
+        )
+        return _BANGKOK_TZ
+    return timezone(timedelta(hours=_COUNTRY_UTC_OFFSET[key]))
 
 
 def _build_record_data(record: Any, names: Dict[str, Any]) -> Dict[str, Any]:
@@ -1128,15 +1193,16 @@ def _build_record_data(record: Any, names: Dict[str, Any]) -> Dict[str, Any]:
     mat_name = names['mat_map'].get(record.material_id, '') if record.material_id else ''
     dest_name = names['dest_map'].get(record.destination_id, '') if record.destination_id else ''
 
-    # Convert transaction_date to Bangkok time (UTC+7) before formatting
+    # Format transaction_date in the transaction's OWN timezone, not Bangkok's
+    tz = names.get('tz') or _BANGKOK_TZ
     tx_date_str = None
     if record.transaction_date:
         dt = record.transaction_date
         if dt.tzinfo is not None:
-            dt = dt.astimezone(_BANGKOK_TZ)
+            dt = dt.astimezone(tz)
         else:
             # Assume UTC if naive
-            dt = dt.replace(tzinfo=timezone.utc).astimezone(_BANGKOK_TZ)
+            dt = dt.replace(tzinfo=timezone.utc).astimezone(tz)
         tx_date_str = dt.strftime('%Y-%m-%d')
 
     return {
@@ -1150,6 +1216,61 @@ def _build_record_data(record: Any, names: Dict[str, Any]) -> Dict[str, Any]:
         'total_amount': float(record.total_amount) if record.total_amount else 0,
         'transaction_date': tx_date_str,
     }
+
+
+def _deterministic_pass(
+    checklist_columns: List[str],
+    all_records_data: List[Dict[str, Any]],
+    evidence: List[Dict[str, Any]],
+    checklist: Dict[str, Dict],
+) -> set:
+    """Settle machine-checkable columns in Python. Returns the columns settled.
+
+    A column passes only if EVERY record's value is backed by evidence, which
+    is the same AND-across-records rule the LLM prompt states. Anything left
+    unsettled — a name column, or a number the evidence does not carry — is
+    handed to the LLM exactly as before, so this can only remove work.
+    """
+    settled = set()
+    for col in checklist_columns:
+        if col not in integrity.DETERMINISTIC_COLUMNS or col not in checklist:
+            continue
+
+        outcomes = []
+        for rec in all_records_data:
+            if col not in rec:
+                outcomes = []
+                break
+            outcomes.append(integrity.check(col, rec.get(col), evidence)['outcome'])
+        if not outcomes:
+            continue
+
+        if all(o == integrity.MATCH for o in outcomes):
+            checklist[col].update(match=True, found=True, error=None,
+                                  outcome=integrity.MATCH, source='deterministic')
+            settled.add(col)
+        elif integrity.MISMATCH in outcomes:
+            # A number that is on the document but different is a real finding,
+            # and the LLM cannot talk us out of it.
+            checklist[col].update(
+                match=False, found=True, outcome=integrity.MISMATCH, source='deterministic',
+                error=checklist[col].get('error') or _mismatch_error(col),
+            )
+            settled.add(col)
+        elif all(o == integrity.NOT_EXPECTED for o in outcomes):
+            # No attached document type even claims to carry this. Not a fault
+            # of the transaction — leave it for record-level evidence to answer.
+            checklist[col].setdefault('outcome', integrity.NOT_EXPECTED)
+        else:
+            # UNREADABLE somewhere: a document that should show it yielded
+            # nothing. Do not settle — but remember it, so the final decision
+            # can route to review instead of rejecting.
+            checklist[col]['outcome'] = integrity.UNREADABLE
+    return settled
+
+
+def _mismatch_error(col: str) -> str:
+    return f"ข้อมูล {_get_column_description(col)} ในเอกสารไม่ตรงกับรายการ"
 
 
 def _step8a_transaction_level_check(
@@ -1181,12 +1302,31 @@ def _step8a_transaction_level_check(
             'file_id': ev['file_id'],
             'document_type_name': ev.get('document_type_name', 'unknown'),
             'extracted_data': ev.get('extracted_data', {}),
+            'extract_list': ev.get('extract_list', {}),
         }
         for ev in classified_evidence
         if ev['file_id'] in tx_file_ids and ev.get('extracted_data')
     ]
 
-    if not tx_evidence or not all_records_data:
+    # Files that yielded NOTHING still matter: their document type declares what
+    # they were supposed to print, which is how an unreadable required document
+    # is told apart from one that never carried the field.
+    blank_evidence = [
+        {'file_id': ev['file_id'], 'extracted_data': {},
+         'extract_list': ev.get('extract_list', {})}
+        for ev in classified_evidence
+        if ev['file_id'] in tx_file_ids and not ev.get('extracted_data')
+    ]
+
+    if not all_records_data or not (tx_evidence or blank_evidence):
+        return tx_checklist
+
+    # Settle numbers and dates in Python before spending a token on them.
+    settled = _deterministic_pass(
+        checklist_columns, all_records_data, tx_evidence + blank_evidence, tx_checklist,
+    )
+    checklist_columns = [c for c in checklist_columns if c not in settled]
+    if not checklist_columns or not tx_evidence:
         return tx_checklist
 
     def _check_single_evidence(ev):
@@ -1275,12 +1415,21 @@ def _step8b_record_level_check(
 
     # Build classified evidence lookup by file_id
     ev_by_id = {}
+    blank_by_id = {}
     for ev in classified_evidence:
         if ev.get('extracted_data'):
             ev_by_id[ev['file_id']] = {
                 'file_id': ev['file_id'],
                 'document_type_name': ev.get('document_type_name', 'unknown'),
                 'extracted_data': ev.get('extracted_data', {}),
+                'extract_list': ev.get('extract_list', {}),
+            }
+        else:
+            # Kept, not dropped: its document type still declares what it was
+            # meant to print, which is how unreadable is told from absent.
+            blank_by_id[ev['file_id']] = {
+                'file_id': ev['file_id'], 'extracted_data': {},
+                'extract_list': ev.get('extract_list', {}),
             }
 
     # Pre-build tx-level evidence list (reusable for all records)
@@ -1310,12 +1459,23 @@ def _step8b_record_level_check(
 
         total_usage = {}
         record_data = _build_record_data(record, names)
+
+        # Settle this record's numbers and dates in Python first. Blank-extraction
+        # files join the pool here so an unreadable weighing sheet is recorded as
+        # unreadable rather than silently missing.
+        rec_blanks = [blank_by_id[fid] for fid in rec_fids if fid in blank_by_id]
+        settled = _deterministic_pass(
+            unmatched_columns, [record_data], rec_evidence + rec_blanks, rec_checklist,
+        )
+        remaining = [c for c in unmatched_columns if c not in settled]
+        if not remaining:
+            return record.id, rec_checklist, total_usage
         print(f"[AUDIT-DEBUG] Phase B record #{record.id}: evidence_count={len(rec_evidence)}, evidence_file_ids={[e['file_id'] for e in rec_evidence]}, unmatched_columns={unmatched_columns}")
         print(f"[AUDIT-DEBUG] Phase B record #{record.id}: record_data={json.dumps(record_data, ensure_ascii=False)}")
         prompt = build_record_checklist_prompt(
             record_data=record_data,
             record_evidence_list=rec_evidence,
-            unmatched_columns=unmatched_columns,
+            unmatched_columns=remaining,
         )
 
         for attempt in range(3):
@@ -1331,11 +1491,15 @@ def _step8b_record_level_check(
                 errors_result = parsed.get('errors', {})
                 print(f"[AUDIT-DEBUG] Phase B record #{record.id}: LLM response match={match_result}, found={found_result}, errors={errors_result}")
 
-                for col in unmatched_columns:
+                # `remaining` only — a column already settled in Python must not
+                # be overwritten by the model's opinion of it.
+                for col in remaining:
                     rec_checklist[col] = {
                         'match': bool(match_result.get(col, False)),
                         'found': bool(found_result.get(col, False)),
                         'error': errors_result.get(col),
+                        'outcome': rec_checklist.get(col, {}).get('outcome'),
+                        'source': 'llm',
                     }
 
                 return record.id, rec_checklist, total_usage
@@ -1414,10 +1578,15 @@ def _determine_final_status(
                     first_error = err
                     break
 
+        # Carry UNREADABLE forward: if any record could not be read for this
+        # column, the final decision needs to know that, or it falls back to
+        # "missing evidence" and rejects.
+        outcomes = [per_record_results[rid].get(col, {}).get('outcome') for rid in record_ids]
         record_aggregate[col] = {
             'match': all_match,
             'found': all_found,
             'error': first_error if not all_match else None,
+            'outcome': integrity.UNREADABLE if integrity.UNREADABLE in outcomes else None,
         }
 
     # Step 2: OR tx_checklist with record_aggregate → final_checklist
@@ -1435,24 +1604,34 @@ def _determine_final_status(
             'match': final_match,
             'found': final_found,
             'error': final_error,
+            'outcome': tx.get('outcome') or rec.get('outcome'),
         }
 
     # Step 3: Collect rejection errors
     rejection_errors = []
+    review_reasons = []
     is_rejected = False
 
     for col in checklist_columns:
         fc = final_checklist[col]
+        col_desc = _get_column_description(col)
         if fc['found'] and not fc['match']:
             # Evidence exists but data doesn't match → REJECT
             is_rejected = True
             if fc['error']:
                 rejection_errors.append(fc['error'])
         elif not fc['found'] and col in required_columns:
-            # Missing required evidence → REJECT
-            is_rejected = True
-            col_desc = _get_column_description(col)
-            rejection_errors.append(f"ไม่พบข้อมูล {col_desc} ในเอกสารแนบ")
+            if fc.get('outcome') == integrity.UNREADABLE:
+                # A document that SHOULD carry this yielded nothing. That is a
+                # failure to READ, not a failure of the transaction — a blurry
+                # photo is not fraud. Send it to a person instead of rejecting.
+                review_reasons.append(
+                    f"อ่านค่า {col_desc} จากเอกสารไม่ได้ ต้องให้เจ้าหน้าที่ตรวจสอบ"
+                )
+            else:
+                # Missing required evidence → REJECT
+                is_rejected = True
+                rejection_errors.append(f"ไม่พบข้อมูล {col_desc} ในเอกสารแนบ")
 
     # Also check missing docs — only reject records whose column checks also failed.
     # If a record's columns all pass (data verified from evidence), missing doc type is informational.
@@ -1480,11 +1659,21 @@ def _determine_final_status(
                     doc_name = doc_info.get('name_th', doc_info.get('name_en', '')) if isinstance(doc_info, dict) else str(doc_info)
                     rejection_errors.append(f"ไม่พบเอกสาร '{doc_name}' สำหรับรายการ #{rec_id}")
 
-    status = 'rejected' if is_rejected else 'approved'
+    # ponytail: a rejection is evidence that actively disagrees, and it wins
+    # over "could not read". Unreadable alone goes to a human — flip
+    # REVIEW_UNREADABLE to False to make unreadable required fields reject
+    # again, which is what this code did before.
+    if is_rejected:
+        status = 'rejected'
+    elif review_reasons and REVIEW_UNREADABLE:
+        status = 'no_action'
+    else:
+        status = 'approved'
 
     return {
         'final_checklist': final_checklist,
         'rejection_errors': rejection_errors,
+        'review_reasons': review_reasons,
         'status': status,
     }
 
@@ -1619,6 +1808,11 @@ def _step9_compose_and_save(
     # Update transaction
     if final_status == 'approved':
         tx.ai_audit_status = AIAuditStatus.approved
+    elif final_status == 'no_action':
+        # Could not READ a required field. Not approved, not rejected — a
+        # person decides. Without this branch it falls through to rejected,
+        # which is the behaviour this change exists to stop.
+        tx.ai_audit_status = AIAuditStatus.no_action
     else:
         tx.ai_audit_status = AIAuditStatus.rejected
 

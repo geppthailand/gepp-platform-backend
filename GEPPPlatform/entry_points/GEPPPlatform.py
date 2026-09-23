@@ -77,6 +77,13 @@ _EXPOSED_HEADER_NAMES = ", ".join(_VERSION_HEADERS.keys())
 
 def main(event, context):
     try:
+        # Async self-invocation, not an HTTP request. Must be handled before
+        # anything touches requestContext — a fire-and-forget invoke event has
+        # no such key, so falling through would KeyError.
+        if isinstance(event, dict) and event.get("async_task") == "epr_ocr_job":
+            from GEPPPlatform.services.cores.epr_ai_audit.api.ocr_jobs import run_job
+            return run_job(event["job_id"])
+
         # Get HTTP method
         http_method = event['requestContext']['http'].get("method", "POST")
         raw_path = event.get("rawPath")
