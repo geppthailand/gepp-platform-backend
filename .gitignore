@@ -10,3 +10,6 @@ migrations/.env
 migrations/.env.local
 .venv/
 .DS_Store
+
+# OCR accuracy benchmark output (real document URLs + business figures)
+ocr_bench/
