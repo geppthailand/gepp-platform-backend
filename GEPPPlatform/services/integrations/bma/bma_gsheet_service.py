@@ -65,6 +65,8 @@ import statistics
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
+from GEPPPlatform.libs.google_sa_auth import column_letter
+
 _logger = logging.getLogger(__name__)
 
 #: Reporting is on Bangkok dates — matches `_BANGKOK_TZ` in audit_scripts.py.
@@ -111,7 +113,13 @@ DEFAULT_START_ROW = 3
 ORIGIN_TAB = 'Origin'
 OVERALL_TAB = 'Overall Project'
 
-#: `Origin`'s existing columns A–J, then the two we add.
+#: `Origin`'s columns as this service FIRST created them. It is a seed for an
+#: empty tab and the source of the two names below — **not** a layout. The live
+#: tab is edited by hand and has since grown `Display (On/Off)` at K and
+#: `Phasing` at N, which shifted `GEPP Location ID` from K to L. Anything that
+#: addressed these by position wrote the location id into the `Display` column
+#: and the date over the ids, so positions are now read from the sheet's own
+#: English header row — see `origin_column_map`.
 ORIGIN_COLUMNS = [
     'Name', 'County', 'Baseline Data',
     'Landfill Waste Reduction\n(Monthly Average)',
@@ -124,7 +132,54 @@ ORIGIN_COLUMNS = [
     # append duplicates on every run.
     'GEPP Location ID', 'Added On',
 ]
+
+#: The seed layout's own positions. Used ONLY when a caller supplies no
+#: column map (an empty tab, or a unit test); the live tab always supplies one.
 ORIGIN_COL = {name: i for i, name in enumerate(ORIGIN_COLUMNS)}
+
+#: Columns this service reads or writes. Every other column on the tab —
+#: `Display (On/Off)`, `Phasing`, `Latitude`, `Longitude`, `Google Map Link` —
+#: is echoed back exactly as read and never computed.
+ORIGIN_NAME = 'Name'
+ORIGIN_COUNTY = 'County'
+ORIGIN_BASELINE = 'Baseline Data'
+ORIGIN_REDUCTION = 'Landfill Waste Reduction\n(Monthly Average)'
+ORIGIN_RECYCLABLE = 'Recyclable Material\n(Monthly Average)'
+ORIGIN_ORGANIC = 'Organic Material\n(Monthly Average)'
+ORIGIN_GHG = 'Greenhouse Gas Reduction\n(Monthly Average)'
+ORIGIN_LOCATION_ID = 'GEPP Location ID'
+ORIGIN_ADDED_ON = 'Added On'
+
+#: Header row carrying the English column names (row 1 is Thai).
+ORIGIN_HEADER_ROW = 2
+
+
+def _norm_header(text):
+    """Compare header cells without tripping over whitespace.
+
+    The real header cells carry embedded newlines
+    (`'Recyclable Material\\n(Monthly Average)'`) and the sheet renders them
+    with the line break wherever the column width falls, so an exact string
+    match is a coin toss after anyone edits the tab.
+    """
+    return ' '.join(str(text or '').split()).strip().lower()
+
+
+def origin_column_map(header_row):
+    """``{column name: 0-based index}`` read from the tab's own header.
+
+    Positions on this tab are not ours to assume: it is a shared surface that
+    BMA edits, and a column inserted at K silently shifts everything after it.
+    Reading the header turns that from corruption into a no-op.
+    """
+    by_header = {}
+    for idx, cell in enumerate(header_row or []):
+        key = _norm_header(cell)
+        if key:
+            by_header.setdefault(key, idx)
+    return {name: by_header[_norm_header(name)]
+            for name in ORIGIN_COLUMNS
+            if _norm_header(name) in by_header}
 
 #: Columns this service owns on an EXISTING row. The rest are left alone:
 #: pre-existing `Baseline Data` / `Landfill Waste Reduction` were surveyed on
@@ -213,6 +268,13 @@ class BMAGSheetService:
 
     def __init__(self, db):
         self.db = db
+        # `resolve_districts` is called by `build_rows`, `origin_metrics` and
+        # `baseline_metrics`, and each call re-ran the visible-origins CTE, the
+        # org-chart JSON parse and the share walk. Memoised per instance and per
+        # org: the three answers cannot change inside one run, and a cron that
+        # asks the database the same question nine times is nine chances for the
+        # three callers to disagree with each other.
+        self._cache = {}
 
     # ── Which origins belong to this report ──────────────────────────────
 
@@ -281,9 +343,78 @@ class BMAGSheetService:
             cur.execute(sql, params)
             return cur.fetchall()
 
+    # ── Shared subtrees ──────────────────────────────────────────────────
+
+    #: Every node inside a shared subtree, tagged with the root that was
+    #: actually shared. A share names ONE location; the recursive descent in
+    #: `_VISIBLE_ORIGINS_CTE` then makes its children visible too, which is
+    #: right for "may we see this data" and wrong for "whose row is it".
+    _SHARED_SUBTREE_SQL = """
+        WITH RECURSIVE shared_tree AS (
+            SELECT s.source_user_location_id AS root,
+                   s.source_user_location_id AS id,
+                   0 AS depth
+            FROM shared_user_locations s
+            WHERE s.deleted_date IS NULL
+              AND s.target_organization_id = %(org)s
+              AND s.is_active
+              AND s.is_valid
+              AND NOT s.is_rejected
+            UNION ALL
+            SELECT st.root, c.id, st.depth + 1
+            FROM shared_tree st
+            JOIN user_locations c ON c.parent_location_id = st.id
+            WHERE st.depth < 6 AND c.deleted_date IS NULL
+        )
+        SELECT root, id, depth FROM shared_tree
+    """
+
+    def _memo(self, key, build):
+        if key not in self._cache:
+            self._cache[key] = build()
+        return self._cache[key]
+
+    def shared_root_map(self, org_id=ORG_ID):
+        """``(collapse, roots)`` for locations shared in from another org.
+
+        `collapse` maps every DESCENDANT of a shared location to that shared
+        location; `roots` is the set of shared locations themselves.
+
+        The rule ops stated: a share of `A` that happens to have children
+        `B, C, D` reports as **A alone** — everything underneath is summed into
+        it and `B, C, D` never get a row, a เขต or a mention of their own. The
+        other organization's internal structure is not ours to publish, and the
+        share was granted on one node, not on a subtree.
+
+        This is not a rounding detail: UOB shares three buildings, and those
+        carry **115 floors between them** (`ชั้น A12 (UOB ST)` and friends).
+        Left uncollapsed they contribute 525 of the 1,259 ids in the
+        `All data-GEPP` provenance column — more than the rest of the project
+        put together.
+
+        Own-org locations are untouched: the collapse applies only where the
+        data crossed an organization boundary.
+        """
+        return self._memo(('shared', org_id),
+                          lambda: self._shared_root_map(org_id))
+
+    def _shared_root_map(self, org_id):
+        collapse, roots = {}, set()
+        for root, loc_id, _depth in self._rows(self._SHARED_SUBTREE_SQL,
+                                               {'org': org_id}):
+            root, loc_id = int(root), int(loc_id)
+            roots.add(root)
+            if loc_id != root:
+                collapse[loc_id] = root
+        return collapse, roots
+
     # ── County resolution ────────────────────────────────────────────────
 
     def resolve_districts(self, org_id=ORG_ID):
+        return self._memo(('districts', org_id),
+                          lambda: self._resolve_districts(org_id))
+
+    def _resolve_districts(self, org_id=ORG_ID):
         """location_id -> CountyNN for every location in the org.
 
         Returns ``(resolved, info)``. `info['overridden_by_ancestor']` names
@@ -360,8 +491,28 @@ class BMAGSheetService:
             if loc_id in own and src != loc_id and own[loc_id] != code:
                 overridden[loc_id] = (own[loc_id], code)
 
+        # A shared subtree answers to the node that was actually shared, not
+        # to whichever of its own nodes happens to carry a เขต. Applied after
+        # the walk rather than inside it so the rule is visible in one place:
+        # the root decides, and if the root has no เขต nothing under it is
+        # reportable — we do not fall back to a floor's own tag, because that
+        # would publish the other organization's internal breakdown.
+        collapse, _roots = self.shared_root_map(org_id)
+        for child, root in collapse.items():
+            if child not in parent:
+                continue                      # not visible; nothing to fix
+            if root in resolved:
+                resolved[child] = resolved[root]
+                authority[child] = root
+                overridden.pop(child, None)
+            else:
+                resolved.pop(child, None)
+                authority.pop(child, None)
+
         return resolved, {'overridden_by_ancestor': overridden,
-                          'authority': authority}
+                          'authority': authority,
+                          'shared_collapse': collapse,
+                          'shared_roots': _roots}
 
     # ── Extraction ───────────────────────────────────────────────────────
 
@@ -405,6 +556,9 @@ class BMAGSheetService:
                    include_shared_history=False):
         """Return ``(rows, stats)`` ready for the sheet."""
         district_of, resolve_info = self.resolve_districts(org_id)
+        # Shared subtrees are published under the node that was shared — see
+        # `shared_root_map`. Own-org locations keep their own id.
+        collapse = resolve_info['shared_collapse']
         raw = self.fetch_raw(org_id, year_from, include_shared_history)
 
         buckets = defaultdict(lambda: {c: 0.0 for c in SHEET_COLUMNS[3:19]})
@@ -424,7 +578,7 @@ class BMAGSheetService:
             buckets[key][CATEGORY_TO_COLUMN.get(cat_code, UNMAPPED_CATEGORIES_GO_TO)] += kg
             buckets[key]['Reduce greenhouse gas emissions'] += ghg
             if origin_id is not None:
-                origins[key].add(int(origin_id))
+                origins[key].add(collapse.get(int(origin_id), int(origin_id)))
 
         rows = []
         for (month, year, county), vals in sorted(buckets.items()):
@@ -471,6 +625,9 @@ class BMAGSheetService:
     # ── Origin tab ───────────────────────────────────────────────────────
 
     def _chart_edges(self, org_id=ORG_ID):
+        return self._memo(('chart', org_id), lambda: self._chart_edges_uncached(org_id))
+
+    def _chart_edges_uncached(self, org_id=ORG_ID):
         """child id -> parent id, from the active org chart JSON.
 
         `organization_setup` keeps one row per saved revision — 904 of them for
@@ -768,7 +925,7 @@ class BMAGSheetService:
         return out
 
     def build_origin_rows(self, existing, org_id=ORG_ID, added_on=None,
-                          include_shared_history=False):
+                          include_shared_history=False, colmap=None, width=None):
         """Merge computed metrics into the tab's rows.
 
         Returns ``(rows, stats)``. Existing rows keep every column this service
@@ -779,7 +936,19 @@ class BMAGSheetService:
         added_on = added_on or datetime.now(_BANGKOK_TZ).strftime('%Y-%m-%d')
         metrics = self.origin_metrics(org_id, include_shared_history)
         baselines = self.baseline_metrics(org_id, include_shared_history)
-        width = len(ORIGIN_COLUMNS)
+        # Positions come from the live header; the constant is only a seed for
+        # a tab that does not exist yet. `width` covers columns this service
+        # does not own (Display, Phasing, ...) so they are padded, echoed back
+        # untouched, and never truncated off the end of the row.
+        colmap = dict(ORIGIN_COL if colmap is None else colmap)
+        missing = [c for c in (ORIGIN_NAME, ORIGIN_LOCATION_ID, ORIGIN_ADDED_ON)
+                   if c not in colmap]
+        if missing:
+            raise RuntimeError(
+                f'`{ORIGIN_TAB}` header is missing required column(s): {missing}. '
+                'Refusing to write by position — that is what put location ids '
+                'in the Display column.')
+        width = max(width or 0, max(colmap.values()) + 1)
 
         def pad(row):
             row = list(row)
@@ -794,11 +963,17 @@ class BMAGSheetService:
         # were rolled up into their building. Rows without `Added On` are the
         # BMA-maintained master list and are never touched.
         keep, dropped = [], []
+        first_removed = None
         for r in rows:
-            rid = str(r[ORIGIN_COL['GEPP Location ID']]).strip()
-            ours = bool(str(r[ORIGIN_COL['Added On']]).strip())
+            rid = str(r[colmap['GEPP Location ID']]).strip()
+            ours = bool(str(r[colmap['Added On']]).strip())
             if ours and rid.isdigit() and int(rid) not in metrics:
-                dropped.append(r[ORIGIN_COL['Name']])
+                dropped.append(r[colmap['Name']])
+                # Where the rows below start shifting up. The writer needs the
+                # position, not the count: everything above it is still aligned
+                # and must not be resent.
+                if first_removed is None:
+                    first_removed = len(keep)
                 continue
             keep.append(r)
         rows = keep
@@ -808,10 +983,10 @@ class BMAGSheetService:
         # duplicates are left alone rather than being fought over.
         by_id, by_name = {}, {}
         for i, r in enumerate(rows):
-            rid = str(r[ORIGIN_COL['GEPP Location ID']]).strip()
+            rid = str(r[colmap['GEPP Location ID']]).strip()
             if rid.isdigit():
                 by_id.setdefault(int(rid), i)
-            key = str(r[ORIGIN_COL['Name']]).strip().lower()
+            key = str(r[colmap['Name']]).strip().lower()
             if key:
                 by_name.setdefault(key, i)
 
@@ -824,10 +999,10 @@ class BMAGSheetService:
                 row = rows[idx]
                 for col in ORIGIN_UPDATABLE_EXISTING:
                     key = 'recyclable' if col.startswith('Recyclable') else 'organic'
-                    row[ORIGIN_COL[col]] = round(m[key], 5)
-                row[ORIGIN_COL['County']] = m['county']
+                    row[colmap[col]] = round(m[key], 5)
+                row[colmap['County']] = m['county']
                 # Backfill the id so the next run matches on it, not on a name.
-                row[ORIGIN_COL['GEPP Location ID']] = m['id']
+                row[colmap['GEPP Location ID']] = m['id']
 
                 # A row THIS SERVICE created (it carries `Added On`) is ours to
                 # maintain in full, including baseline/reduction and GHG. Rows
@@ -836,37 +1011,38 @@ class BMAGSheetService:
                 # factors of its day, so those stay put. Without this branch a
                 # site added by an earlier run could never receive a baseline,
                 # because it is "existing" from the second run onwards.
-                if str(row[ORIGIN_COL['Added On']]).strip():
+                if str(row[colmap['Added On']]).strip():
                     bl = baselines.get(m['id'])
-                    row[ORIGIN_COL['Baseline Data']] = (
+                    row[colmap['Baseline Data']] = (
                         round(bl['baseline'], 3) if bl else 0)
-                    row[ORIGIN_COL['Landfill Waste Reduction\n(Monthly Average)']] = (
+                    row[colmap['Landfill Waste Reduction\n(Monthly Average)']] = (
                         round(bl['reduction'], 3) if bl else 0)
-                    row[ORIGIN_COL['Greenhouse Gas Reduction\n(Monthly Average)']] = (
+                    row[colmap['Greenhouse Gas Reduction\n(Monthly Average)']] = (
                         round(m['ghg'], 5))
                     ours_updated += 1
                 by_id.setdefault(m['id'], idx)
                 updated += 1
             else:
                 row = [''] * width
-                row[ORIGIN_COL['Name']] = m['name']
-                row[ORIGIN_COL['County']] = m['county']
+                row[colmap['Name']] = m['name']
+                row[colmap['County']] = m['county']
                 # From general waste only — see baseline_metrics. 0, not blank:
                 # ops asked for 0 to mean "no data yet".
                 bl = baselines.get(m['id'])
-                row[ORIGIN_COL['Baseline Data']] = round(bl['baseline'], 3) if bl else 0
-                row[ORIGIN_COL['Landfill Waste Reduction\n(Monthly Average)']] = (
+                row[colmap['Baseline Data']] = round(bl['baseline'], 3) if bl else 0
+                row[colmap['Landfill Waste Reduction\n(Monthly Average)']] = (
                     round(bl['reduction'], 3) if bl else 0)
-                row[ORIGIN_COL['Recyclable Material\n(Monthly Average)']] = round(m['recyclable'], 5)
-                row[ORIGIN_COL['Organic Material\n(Monthly Average)']] = round(m['organic'], 5)
-                row[ORIGIN_COL['Greenhouse Gas Reduction\n(Monthly Average)']] = round(m['ghg'], 5)
-                row[ORIGIN_COL['GEPP Location ID']] = m['id']
-                row[ORIGIN_COL['Added On']] = added_on
+                row[colmap['Recyclable Material\n(Monthly Average)']] = round(m['recyclable'], 5)
+                row[colmap['Organic Material\n(Monthly Average)']] = round(m['organic'], 5)
+                row[colmap['Greenhouse Gas Reduction\n(Monthly Average)']] = round(m['ghg'], 5)
+                row[colmap['GEPP Location ID']] = m['id']
+                row[colmap['Added On']] = added_on
                 rows.append(row)
                 by_id[m['id']] = len(rows) - 1
                 appended += 1
 
-        return rows, {'origins_with_county': len(metrics),
+        return rows, {'origin_first_removed_index': first_removed,
+                      'origins_with_county': len(metrics),
                       'origin_rows_updated': updated,
                       'origin_rows_fully_owned': ours_updated,
                       'origin_rows_appended': appended,
@@ -874,7 +1050,76 @@ class BMAGSheetService:
                       'origin_rows_total': len(rows)}
 
     @staticmethod
-    def overall_from_origin(rows):
+    def plan_origin_writes(existing, rows, width, shifted_from=None,
+                           tab=ORIGIN_TAB, start_row=DEFAULT_START_ROW):
+        """The ranges that turn `existing` into `rows`. Pure — no network.
+
+        `Origin` is 3,855 rows by 14 columns and this service owns about 154 of
+        those rows. Rewriting all 54,000 cells every week — which is what a
+        `clear()` plus a full `update` did — spends the whole budget restating
+        BMA's master list back to itself. Only the rows that actually differ are
+        sent, grouped into contiguous runs so a handful of changes become a
+        handful of ranges.
+
+        When a row is **removed** the rows below it shift up, so a positional
+        diff is meaningless *from that row down* — but only from there. Rows
+        above the first removal are still aligned and are still diffed. That
+        distinction is worth the few lines: the self-heal removes rows near the
+        bottom of a 3,855-row tab (the first real case was row 3,839), so the
+        difference is rewriting 17 rows instead of all of them. The vacated tail
+        is blanked inside the same rectangle rather than by a `clear()`.
+        """
+        def pad(row):
+            row = list(row)
+            return (row + [''] * (width - len(row))) if len(row) < width else row[:width]
+
+        old = [pad(r) for r in (existing or [])]
+        new = [pad(r) for r in rows]
+
+        def norm(row):
+            return ['' if c is None else str(c).strip() for c in row]
+
+        if shifted_from is None and len(new) < len(old):
+            # A shrink with no reported position: fall back to restating the
+            # block, because we cannot tell an edit from a shift by value.
+            shifted_from = 0
+
+        if shifted_from is not None:
+            head = [i for i in range(shifted_from) if norm(new[i]) != norm(old[i])]
+            tail = new[shifted_from:] + [[''] * width
+                                         for _ in range(max(0, len(old) - len(new)))]
+            writes = []
+            for i in head:                       # still-aligned rows above it
+                writes.append((f"'{tab}'!A{start_row + i}:"
+                               f"{column_letter(width)}{start_row + i}", [new[i]]))
+            if tail:
+                top = start_row + shifted_from
+                writes.append((f"'{tab}'!A{top}:"
+                               f"{column_letter(width)}{top + len(tail) - 1}", tail))
+            return writes, {'origin_rows_rewritten': len(head) + len(tail),
+                            'origin_write_ranges': len(writes),
+                            'origin_write_mode': 'shift',
+                            'origin_shift_from_row': start_row + shifted_from}
+
+        changed = [i for i in range(len(new))
+                   if i >= len(old) or norm(new[i]) != norm(old[i])]
+        writes, runs = [], []
+        for i in changed:
+            if runs and i == runs[-1][-1] + 1:
+                runs[-1].append(i)
+            else:
+                runs.append([i])
+        for run in runs:
+            top = start_row + run[0]
+            bottom = start_row + run[-1]
+            writes.append((f"'{tab}'!A{top}:{column_letter(width)}{bottom}",
+                           [new[i] for i in run]))
+        return writes, {'origin_rows_rewritten': len(changed),
+                        'origin_write_ranges': len(writes),
+                        'origin_write_mode': 'diff'}
+
+    @staticmethod
+    def overall_from_origin(rows, colmap=None):
         """`Overall Project` = Σ(Origin) / 1000, in tonnes.
 
         Proven against the published values: the tab's Baseline of 829.540 and
@@ -884,7 +1129,7 @@ class BMAGSheetService:
         def total(col):
             s = 0.0
             for r in rows:
-                i = ORIGIN_COL[col]
+                i = (ORIGIN_COL if colmap is None else colmap)[col]
                 if len(r) > i:
                     try:
                         s += float(str(r[i]).replace(',', '') or 0)
@@ -897,29 +1142,67 @@ class BMAGSheetService:
     def sync_origin_and_overall(self, org_id=ORG_ID, sheet_id=None, dry_run=False,
                                 include_shared_history=False):
         """Update the `Origin` tab, then re-total `Overall Project` from it."""
-        from GEPPPlatform.libs.google_sa_auth import SheetsClient
+        from GEPPPlatform.libs.google_sa_auth import SheetsClient, column_letter
 
         sheet_id = sheet_id or os.environ.get('BMA_GSHEET_ID', DEFAULT_SHEET_ID)
         client = SheetsClient(self._load_service_account())
         start = DEFAULT_START_ROW
 
+        # A Sheets grid is finite, so ranges are clamped to the tab's real
+        # width. `Origin` is 24 columns; asking for `ZZ` is rejected outright
+        # with "exceeds grid limits" rather than treated as empty space.
+        grid = client.tab_properties(sheet_id).get(ORIGIN_TAB) or {}
+        grid_col = column_letter(max(grid.get('cols') or len(ORIGIN_COLUMNS), 1))
+
+        # Read the English header first: this tab is edited by hand and has
+        # gained columns since the service was written, so positions must come
+        # from it rather than from a constant.
+        head = client.get(
+            sheet_id,
+            f"'{ORIGIN_TAB}'!A{ORIGIN_HEADER_ROW}:{grid_col}{ORIGIN_HEADER_ROW}"
+        ).get('values', []) or []
+        header = head[0] if head else []
+        colmap = origin_column_map(header)
+
+        # A tab that predates the id column gets it appended rather than
+        # overwriting whatever now sits where it used to live.
+        appended_header = []
+        next_col = len(header)
+        for name in (ORIGIN_LOCATION_ID, ORIGIN_ADDED_ON):
+            if name not in colmap:
+                colmap[name] = next_col
+                appended_header.append((next_col, name))
+                next_col += 1
+        width = max(len(header), next_col)
+
         raw = client.get(
-            sheet_id, f"'{ORIGIN_TAB}'!A{start}:Z100000").get('values', []) or []
+            sheet_id,
+            f"'{ORIGIN_TAB}'!A{start}:{grid_col}{grid.get('rows') or 100000}"
+        ).get('values', []) or []
         existing = [r for r in raw if r and str(r[0]).strip()]
         rows, stats = self.build_origin_rows(
-            existing, org_id, include_shared_history=include_shared_history)
-        baseline_t, landfill_t = self.overall_from_origin(rows)
+            existing, org_id, include_shared_history=include_shared_history,
+            colmap=colmap, width=width)
+        baseline_t, landfill_t = self.overall_from_origin(rows, colmap)
         stats.update({'overall_baseline_tonne': baseline_t,
-                      'overall_landfill_reduction_tonne': landfill_t})
+                      'overall_landfill_reduction_tonne': landfill_t,
+                      'origin_columns': width,
+                      'origin_location_id_column': column_letter(
+                          colmap[ORIGIN_LOCATION_ID] + 1)})
         if dry_run:
             return {'dry_run': True, **stats}
 
-        end_col = 'L'      # 12 columns
+        for idx, name in appended_header:
+            client.update(sheet_id,
+                          f"'{ORIGIN_TAB}'!{column_letter(idx + 1)}{ORIGIN_HEADER_ROW}",
+                          [[name]])
+
+        # Clear exactly as wide as we are about to write. Columns this service
+        # does not own are inside that range but were read back above and are
+        # rewritten unchanged, so `Display (On/Off)` and `Phasing` survive.
+        end_col = column_letter(width)
         client.clear(sheet_id, f"'{ORIGIN_TAB}'!A{start}:{end_col}100000")
         client.update(sheet_id, f"'{ORIGIN_TAB}'!A{start}", rows)
-        # Label the two columns we added, on the English header row.
-        client.update(sheet_id, f"'{ORIGIN_TAB}'!K2",
-                      [[ORIGIN_COLUMNS[10], ORIGIN_COLUMNS[11]]])
         # `Overall Project` data sits on its single row 3.
         client.update(sheet_id, f"'{OVERALL_TAB}'!A{start}",
                       [[baseline_t, landfill_t]])
@@ -961,35 +1244,38 @@ class BMAGSheetService:
         except (TypeError, ValueError):
             return None
 
-    def push(self, rows, sheet_id=None, tab=DEFAULT_TAB,
-             start_row=DEFAULT_START_ROW, replace_years=None):
-        """Write rows into the tab, leaving its two header rows intact.
+    def plan_all_data(self, rows, existing, tab=DEFAULT_TAB,
+                      start_row=DEFAULT_START_ROW, replace_years=None):
+        """Decide what `All data-GEPP` should contain. Pure — no network.
 
-        `replace_years` scopes the write: only rows for those years are touched,
-        and every other existing row is read back and rewritten unchanged. That
-        matters here because this tab carries a second data set we cannot
-        reproduce — 'general waste'-only rows for all 50 เขต, sourced from BMA
-        rather than from our transactions. A blanket overwrite would silently
-        delete ~450 tonnes of it. Pass None to replace the whole tab.
+        `existing` is the tab as read. `replace_years` scopes the write: only
+        rows for those years are regenerated, and every other existing row is
+        carried over unchanged. That matters because this tab carries a second
+        data set we cannot reproduce — 'general waste'-only rows covering all
+        50 เขต, sourced from BMA rather than from our transactions. A blanket
+        overwrite silently deletes ~450 tonnes of it. Pass None for the lot.
+
+        Returns ``(writes, summary)`` with `writes` as ``[(a1_range, values)]``.
+
+        **The tail is blanked by writing blanks, not by `clear()`.** A clear is
+        a second round trip, and on this workbook a round trip costs far more
+        than the cells do: `Master-GEPP`, `Master-District` and `Master-BMA`
+        hold ~450,000 formula cells that Sheets recalculates before it answers,
+        and a single one-row read has been measured at 203 s. Padding the
+        shrinkage into the same rectangle removes that call entirely while
+        still stopping stale rows being double-counted by those pivots.
         """
-        from GEPPPlatform.libs.google_sa_auth import SheetsClient
-
-        sheet_id = sheet_id or os.environ.get('BMA_GSHEET_ID', DEFAULT_SHEET_ID)
-        client = SheetsClient(self._load_service_account())
         ncols = len(SHEET_COLUMNS)
+        existing = [r for r in (existing or []) if r and any(str(c).strip() for c in r)]
 
         if replace_years:
             years = {int(y) for y in replace_years}
-            existing = client.get(
-                sheet_id, f"'{tab}'!A{start_row}:T100000").get('values', []) or []
-            kept = [r for r in existing
-                    if r and any(str(c).strip() for c in r)
-                    and self._row_year(r) not in years]
+            kept = [r for r in existing if self._row_year(r) not in years]
             fresh = [[r[c] for c in SHEET_COLUMNS]
                      for r in rows if r['Year'] in years]
-            # Pad the rows we read back: the API right-trims empty trailing
-            # cells, and a short row would shift nothing but reads as ragged.
-            kept = [list(r) + [''] * (ncols - len(r)) if len(r) < ncols else list(r)
+            # Pad rows read back: the API right-trims empty trailing cells, and
+            # a short row reads as ragged even though it shifts nothing.
+            kept = [list(r) + [''] * (ncols - len(r)) if len(r) < ncols else list(r)[:ncols]
                     for r in kept]
             values = kept + fresh
             summary = {'rows_kept': len(kept), 'rows_written': len(fresh),
@@ -999,13 +1285,31 @@ class BMAGSheetService:
             summary = {'rows_kept': 0, 'rows_written': len(values),
                        'replaced_years': 'all'}
 
-        # Clear before writing: a shorter dataset must not leave stale rows
-        # below it, which would be double-counted by the Master-* pivots.
-        client.clear(sheet_id, f"'{tab}'!A{start_row}:T100000")
-        if values:
-            client.update(sheet_id, f"'{tab}'!A{start_row}", values)
-        return {'sheet_id': sheet_id, 'tab': tab,
-                'total_rows_in_tab': len(values), **summary}
+        blanks = max(0, len(existing) - len(values))
+        payload = values + [[''] * ncols for _ in range(blanks)]
+        end = start_row + len(payload) - 1
+        writes = ([(f"'{tab}'!A{start_row}:T{end}", payload)] if payload else [])
+        summary['rows_blanked'] = blanks
+        summary['total_rows_in_tab'] = len(values)
+        summary['tab'] = tab
+        return writes, summary
+
+    def push(self, rows, sheet_id=None, tab=DEFAULT_TAB,
+             start_row=DEFAULT_START_ROW, replace_years=None):
+        """`plan_all_data` plus the two calls that carry it. Kept for targeted
+        re-runs; the cron goes through `BMASheetSync`, which batches every tab
+        into one read and one write."""
+        from GEPPPlatform.libs.google_sa_auth import SheetsClient
+
+        sheet_id = sheet_id or os.environ.get('BMA_GSHEET_ID', DEFAULT_SHEET_ID)
+        client = SheetsClient(self._load_service_account())
+        existing = client.get(
+            sheet_id, f"'{tab}'!A{start_row}:T100000").get('values', []) or []
+        writes, summary = self.plan_all_data(rows, existing, tab, start_row,
+                                             replace_years)
+        if writes:
+            client.batch_update_values(sheet_id, writes)
+        return {'sheet_id': sheet_id, **summary}
 
     # ── Orchestration ────────────────────────────────────────────────────
 

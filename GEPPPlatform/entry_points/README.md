@@ -43,6 +43,42 @@ Weekly rather than monthly because every one of those recomputes history rather
 than appending to it — records get back-dated, corrected and soft-deleted long
 after the month they belong to.
 
+#### Why it is one read and one write
+
+`BMASheetSync` does the whole job in ~3 round trips. That is not tidiness — it
+is the difference between finishing and hitting the Lambda timeout.
+
+**A `values.get` of ONE ROW of this workbook was measured at 203 s**, while
+`spreadsheets.get` for tab metadata — which serves no cell values — answered in
+0.56 s. `Master-GEPP`, `Master-District` and `Master-BMA` hold on the order of
+450,000 formula cells wired to the tabs this cron writes, and Sheets brings them
+up to date before serving any value. The cost is per call and barely moves with
+payload size; every write re-dirties the pivots, so the next call pays again.
+
+| | before | after |
+| --- | --- | --- |
+| `values` round trips | ~25 | **2** (one batchGet, one batchUpdate) |
+| grid create/resize | per tab, at the end | one call, **first** — see below |
+| `clear()` calls | 2 | **0** — a shrinking block is blanked inside the rectangle it is written to |
+| `Origin` cells written | ~54,000 every run | only the rows that changed (~154 of 3,855) |
+| database queries | ~13 | ~5 (district/chart/share maps memoised per run) |
+
+**Run `{"prepare_tabs": true}` once first.** Growing a tab's grid is *not* cheap despite serving
+no cell values: widening the seven `[Origin]` tabs from their hand-made 26 columns to the 49 the
+months need was measured at **622 s**, and when it ran at the end of the job it burned the 172 s read
+that preceded it. It now runs before anything expensive, and it is a no-op on every subsequent run.
+
+Progress is printed, not logged — see `progress.py`. A run that is about to blow
+the timeout is exactly the run whose summary never arrives, so every step prints
+with `flush=True` as it *starts*, and CloudWatch shows which step it is sitting
+on. Output looks like:
+
+```
+[BMA     0.9s] db.all-data            216 rows, coverage 100.0%
+[BMA     1.5s] db.origin-monthly      178 origins x 45 months, 115 shared children folded
+[BMA     2.3s] sheets.read            values.batchGet, 17 ranges
+```
+
 #### The seven `[Origin] <category>` tabs
 
 One tab per category column of `All data-GEPP`, each laid out as:
@@ -64,6 +100,30 @@ and both are enforced by `tests/test_bma_origin_monthly.py`:
 
 Nothing is cleared: the block only grows (a column per month, a row per new
 origin), so `values.update` on the exact rectangle leaves the rest alone.
+
+#### Locations shared in from another organization
+
+A share names **one** location. The recursive visibility walk then makes its
+children visible too, which is right for "may we read this" and wrong for
+"whose row is it". Ops' rule, now enforced in `shared_root_map`:
+
+* a share of `A` reports as **`A` alone** — `B, C, D` are summed into it and
+  never get a row, a เขต or a mention in any id column;
+* the เขต comes from `A`. If `A` has none, nothing under it is reportable — a
+  child's own tag is never used, because that publishes the other
+  organization's internal breakdown under a เขต we were not given;
+* `A` is shown with an empty parent path, for the same reason.
+
+Concretely: UOB shares three buildings carrying **115 floors** between them.
+
+#### `Origin` column positions come from the sheet
+
+`Origin` is a shared surface that BMA edits, and it has gained `Display
+(On/Off)` at K and `Phasing` at N since this service was written — which moved
+`GEPP Location ID` from K to L. `origin_column_map` reads the English header
+row (row 2) and maps by name, so an inserted column is a no-op instead of
+silently writing location ids into the `Display` column. Columns the service
+does not own are read back and rewritten unchanged.
 
 Totals reconcile with `All data-GEPP` to the cent — summing a tab over the
 origins of one เขต reproduces that เขต's column, and `CONSTRUCTION`/`RUBBER`

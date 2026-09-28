@@ -29,6 +29,9 @@ SCOPE
 import base64
 import hashlib
 import json
+import os
+import random
+import socket
 import time
 import urllib.error
 import urllib.parse
@@ -41,7 +44,27 @@ SHEETS_BASE = 'https://sheets.googleapis.com/v4/spreadsheets'
 #: SEQUENCE { SEQUENCE { OID 2.16.840.1.101.3.4.2.1, NULL }, OCTET STRING }
 _SHA256_DIGEST_INFO_PREFIX = bytes.fromhex('3031300d060960864801650304020105000420')
 
-_HTTP_TIMEOUT = 30
+#: Measured on the BMA workbook, whose `Master-*` tabs hold ~450,000 formula
+#: cells that Sheets recalculates before serving any cell value:
+#:
+#:     values.get of 1 cell   530 s
+#:     values.get of 1 row    601 s
+#:     spreadsheets.get       0.6 s   (metadata; serves no values)
+#:
+#: So a timeout is not a safety net here, it is a policy decision about how long
+#: a legitimate call may take. Set it BELOW the real distribution and every call
+#: fails, is retried, and fails again — burning the budget without ever
+#: succeeding. 120 s looked generous and was well inside the normal range.
+_HTTP_TIMEOUT = int(os.environ.get('GOOGLE_HTTP_TIMEOUT', '540'))
+
+#: Deliberately low, for the same reason. When the p50 is minutes, a retry is
+#: not a cheap second chance — it is another several minutes against a hard
+#: Lambda ceiling, and a call that timed out has usually not failed so much as
+#: not finished yet. One retry covers a genuine blip; four turns a slow run into
+#: a failed one. Retried on timeout, on 5xx and on 429.
+_HTTP_RETRIES = int(os.environ.get('GOOGLE_HTTP_RETRIES', '1'))
+_HTTP_BACKOFF = 2.0
+_RETRY_STATUS = frozenset({429, 500, 502, 503, 504})
 
 
 # ── minimal DER reader ────────────────────────────────────────────────────
@@ -217,7 +240,14 @@ class GoogleApiError(RuntimeError):
         return 'has not been used in project' in m or 'is disabled' in m
 
 
-def _request(url, method='GET', body=None, headers=None):
+def _request(url, method='GET', body=None, headers=None, retries=None):
+    """One call, retried through the failures Google actually produces.
+
+    A PUT is retried too. `values.update` and `values.clear` address an exact
+    A1 range and set it to an exact content, so repeating one converges on the
+    same cells — unlike an append, which would duplicate. If that ever stops
+    being true for a caller, that caller must pass ``retries=0``.
+    """
     data = None
     headers = dict(headers or {})
     if body is not None:
@@ -226,20 +256,37 @@ def _request(url, method='GET', body=None, headers=None):
             headers.setdefault('Content-Type', 'application/json; charset=UTF-8')
         else:
             data = body
-    req = urllib.request.Request(url, data=data, headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT) as resp:
-            raw = resp.read().decode()
-    except urllib.error.HTTPError as e:
+    attempts = (_HTTP_RETRIES if retries is None else retries) + 1
+    last = None
+    for attempt in range(attempts):
+        req = urllib.request.Request(url, data=data, headers=headers,
+                                     method=method)
         try:
-            detail = e.read().decode()
-        except Exception:
-            detail = ''
-        # Google's error bodies say exactly what is wrong and often carry the
-        # console URL that fixes it — truncating them turns a 5-second fix into
-        # an afternoon, so the whole body is kept on the exception.
-        raise GoogleApiError(method, url, e.code, detail) from None
-    return json.loads(raw) if raw else {}
+            with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT) as resp:
+                raw = resp.read().decode()
+            return json.loads(raw) if raw else {}
+        except urllib.error.HTTPError as e:
+            try:
+                detail = e.read().decode()
+            except Exception:
+                detail = ''
+            # Google's error bodies say exactly what is wrong and often carry
+            # the console URL that fixes it — truncating them turns a 5-second
+            # fix into an afternoon, so the whole body is kept on the exception.
+            err = GoogleApiError(method, url, e.code, detail)
+            if e.code not in _RETRY_STATUS or attempt == attempts - 1:
+                raise err from None
+            last = err
+        except (socket.timeout, TimeoutError, urllib.error.URLError,
+                ConnectionError) as e:
+            if attempt == attempts - 1:
+                raise
+            last = e
+        # Full jitter: several tabs are synced in a loop, and a fixed backoff
+        # would line their retries up on the same second.
+        delay = _HTTP_BACKOFF * (2 ** attempt)
+        time.sleep(random.uniform(delay / 2, delay))
+    raise last
 
 
 def get_access_token(sa_info, scope='https://www.googleapis.com/auth/spreadsheets'):

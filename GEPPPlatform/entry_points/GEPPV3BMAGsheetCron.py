@@ -72,6 +72,11 @@ Event payload (all optional):
     {"skip_origin_monthly": true} leave the seven `[Origin] <category>` tabs alone
     {"origin_monthly_columns": ["general waste"]}
                                   refresh only some of those seven
+    {"prepare_tabs": true}        ONLY create/widen the seven tabs' grids, then
+                                  stop. Run this once before the first real run:
+                                  growing a grid dirties the Master-* pivots and
+                                  has been measured at 622 s for seven tabs, and
+                                  it is a no-op on every run after it.
 
 If a year in scope produces no rows the write is skipped rather than clearing
 that year, so a month whose data has not landed yet cannot blank the report.
@@ -112,6 +117,7 @@ def lambda_handler(event, context):
     """EventBridge cron entrypoint. Returns the service's stats dict."""
     logger = logging.getLogger(__name__)
     logger.info("Starting GEPPV3BMAGsheetCron")
+    print('GEPPV3BMAGsheetCron starting', flush=True)
 
     event = event or {}
     # EventBridge can deliver the payload as a JSON string when the rule uses a
@@ -124,13 +130,15 @@ def lambda_handler(event, context):
 
     try:
         from GEPPPlatform.services.integrations.bma.bma_gsheet_service import (
-            BMAGSheetService, ORG_ID,
+            ORG_ID,
+        )
+        from GEPPPlatform.services.integrations.bma.bma_sync_service import (
+            BMASheetSync,
         )
 
         with _db_connection() as conn:
-            svc = BMAGSheetService(conn)
-            # Absent -> the service defaults to the current year only.
-            # "all" is the explicit opt-in to a full, destructive rebuild.
+            # Absent -> this year and last. "all" is the explicit opt-in to a
+            # full, destructive rebuild.
             replace_years = event.get('replace_years')
             if isinstance(replace_years, str) and replace_years.lower() != 'all':
                 replace_years = [replace_years]
@@ -139,42 +147,28 @@ def lambda_handler(event, context):
             elif isinstance(replace_years, str):
                 replace_years = replace_years.lower()   # 'all'
 
-            org_id = int(event.get('org_id') or ORG_ID)
-            dry_run = bool(event.get('dry_run'))
-            sheet_id = event.get('sheet_id')
-
-            result = svc.run(
-                org_id=org_id,
+            # Everything lands in ONE read and ONE write — see
+            # `bma_sync_service`. Splitting it per tab cost ~25 round trips on a
+            # workbook where a single one-row read has been measured at 203 s.
+            result = BMASheetSync(conn, event.get('sheet_id')).run(
+                org_id=int(event.get('org_id') or ORG_ID),
                 year_from=event.get('year_from'),
-                dry_run=dry_run,
-                sheet_id=sheet_id,
-                tab=event.get('tab') or 'All data-GEPP',
                 replace_years=replace_years,
+                dry_run=bool(event.get('dry_run')),
+                skip_origin=bool(event.get('skip_origin')),
+                skip_origin_monthly=bool(event.get('skip_origin_monthly')),
+                origin_monthly_columns=event.get('origin_monthly_columns'),
+                prepare_only=bool(event.get('prepare_tabs')),
             )
 
-            # `Origin` (and the `Overall Project` totals derived from it) are
-            # master data, not a monthly series, so they are refreshed on the
-            # same run unless explicitly skipped.
-            if not event.get('skip_origin'):
-                result['origin'] = svc.sync_origin_and_overall(
-                    org_id=org_id, sheet_id=sheet_id, dry_run=dry_run)
-
-            # The per-origin category tabs are their own service: same source
-            # data, different grain (origin × month rather than เขต × month),
-            # and an append-only write that must not disturb the `baseline`
-            # column ops keeps formulas in.
-            if not event.get('skip_origin_monthly'):
-                from GEPPPlatform.services.integrations.bma.bma_origin_monthly_service import (
-                    BMAOriginMonthlyService,
-                )
-                result['origin_monthly'] = BMAOriginMonthlyService(conn).sync(
-                    org_id=org_id, sheet_id=sheet_id, dry_run=dry_run,
-                    columns=event.get('origin_monthly_columns'))
-
-        logger.info("GEPPV3BMAGsheetCron done: %s", json.dumps(result, default=str))
+        print(f"GEPPV3BMAGsheetCron done: {json.dumps(result, default=str)}",
+              flush=True)
         return {'success': True, **result}
 
     except Exception as e:
+        # Printed as well as logged: the progress trail above is on stdout, and
+        # a failure is only readable next to the step it failed on.
+        print(f'GEPPV3BMAGsheetCron FAILED: {e!r}', flush=True)
         logger.exception("GEPPV3BMAGsheetCron failed")
         return {'success': False, 'error': str(e)}
 

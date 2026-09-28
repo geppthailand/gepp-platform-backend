@@ -56,7 +56,11 @@ def make_session():
     )
     from GEPPPlatform.models.rewards.points import RewardPointTransaction
     from GEPPPlatform.models.rewards.catalog import RewardStock, RewardCatalog
-    from GEPPPlatform.models.rewards.management import RewardCampaign, RewardCampaignCatalog
+    from GEPPPlatform.models.rewards.management import (
+        RewardCampaign,
+        RewardCampaignCatalog,
+        RewardSetup,
+    )
 
     tables = [
         RewardUser.__table__,
@@ -70,6 +74,8 @@ def make_session():
         RewardCampaign.__table__,
         RewardCampaignCatalog.__table__,
         RewardCatalog.__table__,
+        # Registration QR resolves reward_setup.hash -> organization_id.
+        RewardSetup.__table__,
     ]
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine, tables=tables)
