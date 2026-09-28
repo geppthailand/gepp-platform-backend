@@ -23,6 +23,7 @@ from .crm import brand_assets as crm_brand
 from .crm import lead_handlers as crm_leads
 from .crm import drip_handlers as crm_drip
 from .crm import inbox_handlers as crm_inbox
+from .crm import cookie_consent_handlers as crm_cookies
 
 
 def _list_crm_brand_assets(db_session, query_params, current_user):
@@ -159,6 +160,11 @@ class AdminHandlers:
             'crm-leads': lambda qp: crm_leads.list_crm_leads(self.db_session, qp, current_user=self.current_user),
             'crm-drip-sequences': lambda qp: crm_drip.list_crm_drip_sequences(self.db_session, qp, current_user=self.current_user),
             'crm-conversations': lambda qp: crm_inbox.list_crm_conversations(self.db_session, qp, current_user=self.current_user),
+            'crm-cookie-consent': lambda qp: crm_cookies.list_crm_cookie_consents(self.db_session, qp),
+            # Platform-wide switches (Global Settings page). Not a collection —
+            # it returns one document of sections — but it lives on the list
+            # route so the page needs no bespoke endpoint shape.
+            'global-settings': self.admin_service.get_global_settings,
         }
         handler = handler_map.get(resource)
         if not handler:
@@ -184,6 +190,7 @@ class AdminHandlers:
             'crm-leads': lambda rid: crm_leads.get_crm_lead(self.db_session, rid, current_user=self.current_user),
             'crm-drip-sequences': lambda rid: crm_drip.get_crm_drip_sequence(self.db_session, rid, current_user=self.current_user),
             'crm-conversations': lambda rid: crm_inbox.get_crm_conversation(self.db_session, rid, current_user=self.current_user),
+            'crm-cookie-consent': lambda rid: crm_cookies.get_crm_cookie_consent(self.db_session, rid),
         }
         handler = handler_map.get(resource)
         if not handler:
@@ -263,6 +270,14 @@ class AdminHandlers:
                 return self.admin_service.list_organization_users(resource_id, query_params)
             elif sub_resource == 'locations':
                 return self.admin_service.list_organization_locations(resource_id, query_params)
+            elif sub_resource == 'subscription-periods':
+                return self.admin_service.list_organization_subscription_periods(
+                    resource_id, query_params)
+        if resource == 'subscriptions' and sub_resource == 'usage':
+            # Quota set vs quota used for one period — the detail modal reads
+            # this, and the XLSX export is generated from the same numbers so
+            # the two cannot disagree.
+            return self.admin_service.get_subscription_usage(resource_id, query_params)
         raise NotFoundException(f'Sub-resource {resource}/{sub_resource} not found')
 
     def assign_permissions(self, resource: str, resource_id: int, data: dict) -> Dict[str, Any]:

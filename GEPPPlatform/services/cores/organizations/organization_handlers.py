@@ -102,6 +102,11 @@ def organization_routes(event: Dict[str, Any], context: Any, **params) -> Dict[s
         body = json.loads(event.get('body', '{}'))
         return handle_update_ai_audit_permission(org_service, user_id, user_organization_id, body, headers)
 
+    # Upload / usage limits — read by the business app before it compresses and
+    # uploads a transaction attachment.
+    elif method == 'GET' and '/api/organizations/upload-limits' in path:
+        return handle_get_upload_limits(org_service, user_id, headers)
+
     # Notification settings
     elif method == 'GET' and '/api/organizations/notification-settings' in path:
         return handle_get_notification_settings(org_service, user_id, headers)
@@ -591,3 +596,44 @@ def handle_update_ai_audit_permission(
         raise
     except Exception as e:
         raise APIException(f'Error updating AI audit permission: {str(e)}')
+
+
+def handle_get_upload_limits(
+    org_service: OrganizationService,
+    user_id: int,
+    headers: Dict[str, str]
+) -> Dict[str, Any]:
+    """GET /api/organizations/upload-limits — the caller's effective limits.
+
+    The business app needs these BEFORE it asks for a presigned URL, not after:
+    compression re-encodes a photo to webp, which changes the filename extension
+    and therefore the Content-Type baked into the presigned POST. Presigning
+    first and compressing second would invalidate the signature.
+
+    `transactionsPerMonth` is included for display only — it is advisory and
+    nothing in the client blocks on it.
+    """
+    from ...subscriptions.limits import resolve_org_limits
+
+    organization = org_service.get_user_organization(user_id)
+    if not organization:
+        raise NotFoundException('User is not part of any organization')
+
+    limits = resolve_org_limits(org_service.db, organization.id)
+    return {
+        'success': True,
+        'data': {
+            'maxFileSizeBytes': limits.max_file_size_bytes,
+            'maxFileSizeMb': limits.max_file_size_mb,
+            'maxImageDimensionPx': limits.max_image_dimension_px,
+            # Advisory. Shown, never enforced.
+            'transactionsPerMonth': limits.transactions_per_month,
+            'transactionsLimitIsAdvisory': True,
+            'sources': {
+                'fileSize': limits.file_size_source,
+                'imageDimension': limits.image_dimension_source,
+                'transactions': limits.transactions_source,
+            },
+        },
+        'message': 'Upload limits resolved',
+    }

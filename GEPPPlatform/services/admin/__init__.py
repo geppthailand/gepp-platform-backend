@@ -301,9 +301,10 @@ def handle_admin_routes(path: str, data: dict, **commonParams):
             resource = path_parts[0]
             return admin_handler.list_resource(resource, query_params)
         elif len(path_parts) == 2:
-            # GET /admin/{resource}/{id} — except 'fields' which is a crm sub-path
+            # GET /admin/{resource}/{id} — except named crm sub-paths, which must be
+            # matched here: the fall-through does int(path_parts[1]) and would raise.
             resource = path_parts[0]
-            if resource.startswith('crm-') and path_parts[1] in ('fields',):
+            if resource.startswith('crm-') and path_parts[1] in ('fields', 'summary'):
                 from .crm import handle_crm_admin_subroute
                 return handle_crm_admin_subroute(
                     resource=resource, resource_id=None, sub_path=path_parts[1],
@@ -347,6 +348,18 @@ def handle_admin_routes(path: str, data: dict, **commonParams):
                 finally:
                     if owns_session:
                         target_session.close()
+            # GET /admin/subscriptions/{id}/usage-export — XLSX for one period
+            if resource == 'subscriptions' and path_parts[2] == 'usage-export':
+                from ..subscriptions.usage_export_service import (
+                    SubscriptionUsageExportService,
+                )
+                try:
+                    return SubscriptionUsageExportService(db_session).export(
+                        int(path_parts[1]), query_params
+                    )
+                except ValueError as e:
+                    raise BadRequestException(str(e))
+
             # GET /admin/organizations/{id}/users or /organizations/{id}/locations
             resource_id = int(path_parts[1])
             sub_resource = path_parts[2]
@@ -355,6 +368,14 @@ def handle_admin_routes(path: str, data: dict, **commonParams):
             raise NotFoundException(f"GET endpoint not found: {internal_path}")
 
     elif method == "PUT":
+        # PUT /admin/global-settings — a bulk write with no resource id, because
+        # the page saves whatever the operator changed in one go. Matched before
+        # the generic `{resource}/{id}` shape, which would try to int() the key.
+        if len(path_parts) == 1 and path_parts[0] == 'global-settings':
+            return admin_handler.admin_service.update_global_settings(
+                data, current_user=commonParams.get('current_user', {}) or {},
+            )
+
         if len(path_parts) == 2:
             # PUT /admin/{resource}/{id}
             resource = path_parts[0]

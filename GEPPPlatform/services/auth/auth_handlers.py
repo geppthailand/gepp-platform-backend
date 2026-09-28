@@ -468,9 +468,9 @@ class AuthHandlers:
                     organization_id=organization.id,
                     plan_id=default_plan.id,
                     status='active',
-                    trial_ends_at=(now + timedelta(days=14)).isoformat(),
-                    current_period_starts_at=now.isoformat(),
-                    current_period_ends_at=(now + timedelta(days=30)).isoformat(),
+                    trial_ends_at=now + timedelta(days=14),
+                    current_period_starts_at=now,
+                    current_period_ends_at=now + timedelta(days=30),
                     users_count=1
                 )
                 session.add(subscription)
@@ -611,6 +611,31 @@ class AuthHandlers:
                     _emit_auth_event(session, 'user_first_login', user=user)
             except Exception as _cex:
                 print(f"[CRM] non-fatal login event error: {_cex}")
+
+            # ── Subscription gate ────────────────────────────────────
+            # Refuse the login outright rather than handing out a token that
+            # every subsequent request would reject. The request-level gate in
+            # the entry point still exists — it catches tokens issued before the
+            # period lapsed — but a user whose org has no subscription should be
+            # told at the door, not after the app loads and everything 403s.
+            #
+            # Checked AFTER the password, deliberately: "your subscription
+            # ended" must not become a way to probe which emails exist.
+            from ..subscriptions.access import (
+                BLOCKED_ERROR_CODE, blocked_message, subscription_access,
+            )
+            access = subscription_access(session, user.organization_id)
+            if not access['allowed']:
+                return {
+                    'success': False,
+                    'error_code': BLOCKED_ERROR_CODE,
+                    'reason': access['reason'],
+                    'message': blocked_message(access),
+                    'subscription': {
+                        'endedAt': access.get('ended_at'),
+                        'startsAt': access.get('starts_at'),
+                    },
+                }
 
             return {
                 'success': True,

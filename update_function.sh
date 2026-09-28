@@ -28,6 +28,7 @@ Aliases:
   export, report-export        -> <ENV>-GEPPGenerateV3Report
   iot, iot-health-cron         -> <ENV>-GEPPPlatform-IOTHEALTHCRON
   audit, audit-cron            -> <ENV>-GEPPPlatform-AUDITCRON
+  bma, bma-gsheet-cron         -> <ENV>-GEPPV3BMAGsheetCron
 EOF
 }
 
@@ -74,6 +75,10 @@ case "$lower_name" in
   audit|audit-cron|geppplatform-auditcron)
     FUNCTION_NAME="${ENV_NAME}-GEPPPlatform-AUDITCRON"
     HANDLER="GEPPPlatform.entry_points.audit_cron.cron_process_audits"
+    ;;
+  bma|bma-gsheet|bma-gsheet-cron|geppv3bmagsheetcron)
+    FUNCTION_NAME="${ENV_NAME}-GEPPV3BMAGsheetCron"
+    HANDLER="GEPPPlatform.entry_points.GEPPV3BMAGsheetCron.lambda_handler"
     ;;
   *)
     if [[ "$FUNCTION_INPUT" == "${ENV_NAME}-"* ]]; then

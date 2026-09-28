@@ -28,17 +28,24 @@ WHAT IT WRITES
     v2 (`src/report/report.utils.ts`), which is a useful independent confirmation
     that the recovered constants are the real ones and not a curve fit.
 
-COUNTY (เขต) — THE ONE UNSOLVED JOIN
-    v3 does not know which เขต a location sits in: `user_locations.district_id`
-    is NULL for all 862 org-67 locations, the 28 เขต rows in
-    `user_location_tags` are attached to almost nothing, and
-    `transactions.location_tag_id` is set on 1 record out of 7322.
+COUNTY (เขต) — RESOLUTION ORDER
+    Primary source is `user_locations.district_id`, populated by the Location
+    Setup panel. District names join to the sheet's `CountyNN` codes through the
+    `Index` tab (29/29 of the districts org 67 uses match cleanly).
 
-    So County is resolved by name against the sheet's own `Origin` tab, which is
-    maintained by the BMA side and does carry Name -> County. That covers 79.2%
-    of the weight; the rest is reported in the `_unmapped` output for a human to
-    map once. Ancestor-chain fallback was tried and adds nothing — the
-    unmatched locations are all top-level with generic names ("อาคาร A").
+    Resolution per origin, first hit wins:
+      1. the origin's own district_id
+      2. the nearest ancestor that has one   (a floor inside a mapped building)
+      3. its descendants, but ONLY if every mapped descendant agrees on one
+         district — the "A is just a grouping of B, C, D" case. When the
+         children straddle two districts the weight is genuinely unsplittable,
+         so it is reported as ambiguous rather than guessed at.
+      4. name lookup against the sheet's `Origin` tab (legacy fallback; that tab
+         is BMA-maintained and has not been updated since ~2025, so it rescues
+         history but nothing onboarded recently)
+
+    Aggregation is by the resolved district, never by the tree root, so a
+    grouping node never absorbs its children's weight into one row.
 
 SAFETY
     The DB session is opened read-only. This script never writes to Postgres.
@@ -123,7 +130,100 @@ def build_county_map(origin_xlsx):
     return out
 
 
-def fetch_rows(kv, county_map, year_from=None):
+def build_district_code_map(origin_xlsx):
+    """District name -> `CountyNN`, from the sheet's `Index` tab.
+
+    The sheet writes "เขตพระนคร" while `location_districts.name_th` holds
+    "พระนคร", so both spellings are registered.
+    """
+    import pandas as pd
+    df = pd.read_excel(origin_xlsx, sheet_name='Index', header=0)
+    df = df[df.iloc[:, 2].notna()]
+    out = {}
+    for row in df.itertuples(index=False):
+        code, name = str(row[2]).strip(), str(row[3]).strip()
+        if not code or not name:
+            continue
+        out[name] = code
+        out[name.replace('เขต', '', 1)] = code   # bare form
+        out[f'เขต{name}'] = code                  # prefixed form
+    return out
+
+
+def resolve_districts(cu, county_code_map):
+    """location_id -> CountyNN for every org-67 location.
+
+    Implements the 3-step tree resolution described in the module docstring.
+    Returns (mapping, ambiguous) where `ambiguous` lists grouping nodes whose
+    children straddle more than one district.
+    """
+    cu.execute("""
+        SELECT ul.id, ul.parent_location_id, d.name_th
+        FROM user_locations ul
+        LEFT JOIN location_districts d ON d.id = ul.district_id
+        WHERE ul.organization_id = %s AND ul.deleted_date IS NULL
+    """, (ORG_ID,))
+    rows = cu.fetchall()
+
+    parent, own = {}, {}
+    children = defaultdict(list)
+    for loc_id, parent_id, dname in rows:
+        parent[loc_id] = parent_id
+        if parent_id is not None:
+            children[parent_id].append(loc_id)
+        if dname:
+            code = county_code_map.get(str(dname).strip())
+            if code:
+                own[loc_id] = code
+
+    resolved = dict(own)
+    ambiguous = {}
+
+    def climb(loc_id):
+        """Nearest ancestor with a district. Depth-capped against cycles."""
+        seen, cur, depth = {loc_id}, parent.get(loc_id), 0
+        while cur is not None and depth < 10 and cur not in seen:
+            if cur in own:
+                return own[cur]
+            seen.add(cur)
+            cur, depth = parent.get(cur), depth + 1
+        return None
+
+    def descend(loc_id):
+        """One district shared by every mapped descendant, else None."""
+        found, stack, seen, depth = set(), list(children.get(loc_id, [])), set(), 0
+        while stack and depth < 5000:
+            node = stack.pop()
+            if node in seen:
+                continue
+            seen.add(node)
+            depth += 1
+            if node in own:
+                found.add(own[node])
+                # Two distinct districts below one node means the parent's own
+                # weight cannot be attributed — stop and report it.
+                if len(found) > 1:
+                    return None, found
+            stack.extend(children.get(node, []))
+        return (next(iter(found)) if len(found) == 1 else None), found
+
+    for loc_id in parent:
+        if loc_id in resolved:
+            continue
+        code = climb(loc_id)
+        if code:
+            resolved[loc_id] = code
+            continue
+        code, found = descend(loc_id)
+        if code:
+            resolved[loc_id] = code
+        elif len(found) > 1:
+            ambiguous[loc_id] = sorted(found)
+
+    return resolved, ambiguous
+
+
+def fetch_rows(kv, county_code_map, year_from=None):
     import psycopg2
     cn = psycopg2.connect(
         host=kv['DB_HOST'], port=kv['DB_PORT'], dbname=kv['DB_NAME'],
@@ -132,6 +232,8 @@ def fetch_rows(kv, county_map, year_from=None):
     # Belt and braces: this script must never mutate production.
     cn.set_session(readonly=True)
     cu = cn.cursor()
+
+    district_of, ambiguous = resolve_districts(cu, county_code_map)
 
     where_year = ''
     params = {'org': ORG_ID}
@@ -167,22 +269,35 @@ def fetch_rows(kv, county_map, year_from=None):
     raw = cu.fetchall()
     cu.close()
     cn.close()
-    return raw
+    return raw, district_of, ambiguous
 
 
-def aggregate(raw, county_map):
-    """Fold the per-origin rows into one row per (month, year, county)."""
+def aggregate(raw, district_of, county_map, ambiguous):
+    """Fold the per-origin rows into one row per (month, year, county).
+
+    Grouping is by the RESOLVED district, so a grouping node never absorbs its
+    children into a single row — each physical location lands in its own เขต.
+    """
     buckets = defaultdict(lambda: {c: 0.0 for c in SHEET_COLUMNS[3:19]})
     origins = defaultdict(set)
     unmapped = defaultdict(float)
+    source_kg = defaultdict(float)   # which rule resolved the weight
 
     for month, year, origin_id, origin_name, cat_code, kg, ghg in raw:
         kg = float(kg or 0)
         ghg = float(ghg or 0)
-        key_name = str(origin_name).strip().lower() if origin_name else ''
-        county = county_map.get(key_name)
+        county = district_of.get(origin_id)
+        if county:
+            source_kg['district_id'] += kg
+        else:
+            key_name = str(origin_name).strip().lower() if origin_name else ''
+            county = county_map.get(key_name)
+            if county:
+                source_kg['origin_sheet_name'] += kg
         if not county:
-            unmapped[(origin_id, origin_name)] += kg
+            reason = 'ambiguous_children' if origin_id in ambiguous else 'no_district'
+            unmapped[(origin_id, origin_name, reason)] += kg
+            source_kg['unmapped'] += kg
             continue
 
         key = (month, year, county)
@@ -221,7 +336,7 @@ def aggregate(raw, county_map):
             'food waste management': organic,
             'origin': ','.join(str(i) for i in sorted(origins[(month, year, county)])),
         })
-    return rows, unmapped
+    return rows, unmapped, source_kg
 
 
 def write_csv(rows, path):
@@ -289,21 +404,29 @@ def main():
     print(f'DB   : {kv["DB_USER"]}@{kv["DB_HOST"]}/{kv["DB_NAME"]} (read-only)')
     print(f'Org  : {ORG_ID} — account {ACCOUNT_EMAIL}')
 
+    county_code_map = build_district_code_map(args.origin_xlsx)
     county_map = build_county_map(args.origin_xlsx)
-    print(f'County map from `Origin` tab: {len(county_map)} names')
+    print(f'District->CountyNN from `Index` tab: {len(county_code_map)} spellings')
+    print(f'Legacy name map from `Origin` tab : {len(county_map)} names')
 
-    raw = fetch_rows(kv, county_map, args.year_from)
+    raw, district_of, ambiguous = fetch_rows(kv, county_code_map, args.year_from)
+    print(f'Locations with a resolved district: {len(district_of)}'
+          + (f'  ({len(ambiguous)} ambiguous)' if ambiguous else ''))
     print(f'DB rows fetched: {len(raw)}')
 
-    rows, unmapped = aggregate(raw, county_map)
+    rows, unmapped, source_kg = aggregate(raw, district_of, county_map, ambiguous)
     mapped_kg = sum(r['all waste'] for r in rows)
     unmapped_kg = sum(unmapped.values())
     total = mapped_kg + unmapped_kg
     print(f'Output rows: {len(rows)}  '
           f'(months {min(r["Year"] for r in rows) if rows else "-"}'
           f'..{max(r["Year"] for r in rows) if rows else "-"})')
-    print(f'Weight mapped to a County: {mapped_kg:,.0f} / {total:,.0f} kg '
-          f'({mapped_kg / total * 100:.1f}%)' if total else 'no weight')
+    if total:
+        print(f'Weight mapped to a County: {mapped_kg:,.0f} / {total:,.0f} kg '
+              f'({mapped_kg / total * 100:.1f}%)')
+        print('  by source: ' + ' | '.join(
+            f'{k}={v:,.0f} kg ({v / total * 100:.1f}%)'
+            for k, v in sorted(source_kg.items(), key=lambda x: -x[1])))
 
     write_csv(rows, f'{args.out_prefix}.csv')
     write_xlsx(rows, f'{args.out_prefix}.xlsx')
@@ -313,9 +436,9 @@ def main():
         with open(f'{args.out_prefix}_unmapped.csv', 'w', newline='',
                   encoding='utf-8-sig') as fh:
             w = csv.writer(fh)
-            w.writerow(['origin_id', 'origin_name', 'kg_excluded'])
-            for (oid, nm), kg in sorted(unmapped.items(), key=lambda x: -x[1]):
-                w.writerow([oid, nm, round(kg, 2)])
+            w.writerow(['origin_id', 'origin_name', 'reason', 'kg_excluded'])
+            for (oid, nm, reason), kg in sorted(unmapped.items(), key=lambda x: -x[1]):
+                w.writerow([oid, nm, reason, round(kg, 2)])
         print(f'Wrote {args.out_prefix}_unmapped.csv '
               f'({len(unmapped)} origins, {unmapped_kg:,.0f} kg with no County)')
 

@@ -2,6 +2,7 @@
 Admin service for backoffice business logic
 """
 
+import logging
 import secrets
 import string
 from datetime import datetime, timedelta, timezone
@@ -30,6 +31,25 @@ from GEPPPlatform.exceptions import (
     ValidationException,
     ConflictException,
 )
+
+
+logger = logging.getLogger(__name__)
+
+
+def _period_date_state(sub, today) -> str:
+    """'in_force' | 'expired' | 'scheduled' | 'undated', from the dates alone."""
+    start = sub.current_period_starts_at
+    end = sub.current_period_ends_at
+    if start is None:
+        return 'undated'
+    start_d = start.date() if hasattr(start, 'date') else start
+    if start_d > today:
+        return 'scheduled'
+    if end is not None:
+        end_d = end.date() if hasattr(end, 'date') else end
+        if end_d < today:
+            return 'expired'
+    return 'in_force'
 
 
 class AdminService:
@@ -168,7 +188,7 @@ class AdminService:
                     'planId': sub.plan_id,
                     'planName': sub.plan.display_name if sub.plan else sub.plan_id,
                     'status': sub.status,
-                    'currentPeriodEndsAt': sub.current_period_ends_at,
+                    'currentPeriodEndsAt': sub.current_period_ends_at.isoformat() if sub.current_period_ends_at else None,
                 }
                 for sub in subscriptions
             ],
@@ -178,6 +198,12 @@ class AdminService:
                 getattr(org, 'auto_approve_scale_transactions', False)
             ),
             'maxOrgStructureNodes': org.max_org_structure_nodes if hasattr(org, 'max_org_structure_nodes') else 50,
+            # Usage-limit defaults. None = "not overridden", which the UI shows
+            # as the inherited system value rather than as 0.
+            'defaultTransactionLimitPerMonth': org.default_transaction_limit_per_month,
+            'defaultMaxFileSizeMb': (float(org.default_max_file_size_mb)
+                                     if org.default_max_file_size_mb is not None else None),
+            'maxImageDimensionPx': org.max_image_dimension_px,
             'isActive': org.is_active,
             'createdDate': org.created_date.isoformat() if org.created_date else None,
         }
@@ -288,8 +314,8 @@ class AdminService:
             organization_id=org.id,
             plan_id=plan.id,
             status='active',
-            current_period_starts_at=now.isoformat(),
-            current_period_ends_at=(now + timedelta(days=30)).isoformat(),
+            current_period_starts_at=now,
+            current_period_ends_at=now + timedelta(days=30),
             users_count=users_count or 0,
         )
         self.db_session.add(sub)
@@ -330,6 +356,21 @@ class AdminService:
             org.is_active = bool(data['isActive'])
         if 'maxOrgStructureNodes' in data:
             org.max_org_structure_nodes = int(data['maxOrgStructureNodes'])
+
+        # ── Usage-limit DEFAULTS (Configuration tab) ─────────────────
+        # Nullable on purpose: sending null CLEARS the override so the org falls
+        # back to the system default, which is a different state from a
+        # deliberate 0 ("none allowed"). `int(x) if x is not None else None`
+        # rather than `int(x or 0)` for exactly that reason.
+        if 'defaultTransactionLimitPerMonth' in data:
+            v = data['defaultTransactionLimitPerMonth']
+            org.default_transaction_limit_per_month = int(v) if v is not None else None
+        if 'defaultMaxFileSizeMb' in data:
+            v = data['defaultMaxFileSizeMb']
+            org.default_max_file_size_mb = float(v) if v is not None else None
+        if 'maxImageDimensionPx' in data:
+            v = data['maxImageDimensionPx']
+            org.max_image_dimension_px = int(v) if v is not None else None
 
         # ── Company info (OrganizationInfo row) ─────────────────────
         # Accept BOTH nested `{organizationInfo: {...}}` and flat
@@ -987,39 +1028,342 @@ class AdminService:
                 'status': sub.status,
                 'usersCount': sub.users_count,
                 'transactionsCountThisMonth': sub.transactions_count_this_month,
-                'currentPeriodEndsAt': sub.current_period_ends_at,
+                'currentPeriodEndsAt': sub.current_period_ends_at.isoformat() if sub.current_period_ends_at else None,
                 'createdDate': sub.created_date.isoformat() if sub.created_date else None,
             })
 
         return {'items': results, 'total': total, 'page': page, 'pageSize': page_size}
 
+    def list_organization_subscription_periods(self, org_id: int,
+                                              query_params: dict) -> Dict[str, Any]:
+        """Every subscription period for an org, newest first.
+
+        Each row carries its own EFFECTIVE limits (resolved through
+        `subscriptions.limits`, so a value inherited from the org default is
+        shown as the number that will actually apply) plus the derived period
+        total. Nothing is stored pre-multiplied — editing the dates cannot leave
+        a stale total behind.
+
+        `isCurrent` is computed from the dates, not from
+        `organizations.subscription_id`, so it stays right even when that
+        pointer was never updated.
+        """
+        from ..subscriptions.access import gate_enabled
+        from ..subscriptions.limits import (
+            find_period, period_transaction_allowance, resolve_org_limits,
+        )
+
+        org = self.db_session.query(Organization).filter(
+            Organization.id == org_id).first()
+        if not org:
+            raise NotFoundException(f'Organization {org_id} not found')
+
+        rows = (
+            self.db_session.query(Subscription)
+            .options(joinedload(Subscription.plan))
+            .filter(Subscription.organization_id == org_id,
+                    Subscription.deleted_date.is_(None))
+            .order_by(Subscription.current_period_starts_at.desc().nullslast(),
+                      Subscription.id.desc())
+            .all()
+        )
+
+        current = find_period(self.db_session, org_id)
+        current_id = current.id if current else None
+
+        # What is ACTUALLY in force today, and where each number comes from.
+        #
+        # Returned alongside the rows because the list on its own is genuinely
+        # misleading: `status` is a hand-set field, so an expired period still
+        # reads "active", and someone who edits the limit on a period whose
+        # dates have passed sees their new value on screen while uploads keep
+        # using the org/system default. That happened.
+        today = datetime.now(timezone.utc).date()
+        eff = resolve_org_limits(self.db_session, org_id, at=today)
+        effective = {
+            'asOf': today.isoformat(),
+            'subscriptionId': eff.subscription_id,
+            'transactionsPerMonth': eff.transactions_per_month,
+            'maxFileSizeMb': eff.max_file_size_mb,
+            'maxImageDimensionPx': eff.max_image_dimension_px,
+            'sources': {
+                'transactions': eff.transactions_source,
+                'fileSize': eff.file_size_source,
+                'imageDimension': eff.image_dimension_source,
+            },
+            # True when no period covers today, so the org/system defaults are
+            # what upload enforcement is really using.
+            'noPeriodInForce': current is None,
+            # Whether "no period, no access" is switched on globally. Without
+            # it the banner cannot tell the operator whether this org is
+            # actually locked out or merely lapsed — and those need very
+            # different reactions.
+            'gateEnabled': gate_enabled(self.db_session),
+            # True when the limits above were inherited from a period that has
+            # already ended (gate off — see limits.resolve_org_limits).
+            'fromExpiredPeriod': eff.from_expired_period,
+        }
+
+        items = []
+        for sub in rows:
+            limits = resolve_org_limits(self.db_session, org_id, period=sub)
+            items.append({
+                'id': sub.id,
+                'organizationId': org_id,
+                'planId': sub.plan_id,
+                'planName': sub.plan.display_name if sub.plan else None,
+                'status': sub.status,
+                'periodLabel': sub.period_label,
+                'notes': sub.notes,
+                'periodStartsAt': (sub.current_period_starts_at.isoformat()
+                                   if sub.current_period_starts_at else None),
+                'periodEndsAt': (sub.current_period_ends_at.isoformat()
+                                 if sub.current_period_ends_at else None),
+                'isOpenEnded': sub.current_period_ends_at is None,
+                'isCurrent': sub.id == current_id,
+                # Derived from the dates. `status` is typed in by hand and says
+                # 'active' on periods that ended months ago, which is exactly
+                # how a 0.1 MB limit appeared to be in force while uploads were
+                # still being checked against the 50 MB system default.
+                'dateState': _period_date_state(sub, today),
+                # Advisory — never blocks transaction creation.
+                'transactionsPerMonth': limits.transactions_per_month,
+                'transactionsPeriodTotal': period_transaction_allowance(
+                    sub, per_month=limits.transactions_per_month),
+                # Enforced at upload time.
+                'maxFileSizeMb': limits.max_file_size_mb,
+                'limitSources': {
+                    'transactions': limits.transactions_source,
+                    'fileSize': limits.file_size_source,
+                },
+                'createdDate': sub.created_date.isoformat() if sub.created_date else None,
+            })
+
+        return {'items': items, 'total': len(items), 'effective': effective}
+
+    def get_subscription_usage(self, sub_id: int, query_params: dict) -> Dict[str, Any]:
+        """Quota set vs quota actually used, for the detail modal and the export.
+
+        Usage is recomputed from `transactions` — see
+        `subscriptions/usage_service.py` for why the existing counter column is
+        not trusted.
+        """
+        from ..subscriptions.usage_service import SubscriptionUsageService
+
+        as_of = None
+        raw = (query_params or {}).get('asOf')
+        if raw:
+            try:
+                as_of = datetime.fromisoformat(str(raw)[:10]).date()
+            except ValueError:
+                raise BadRequestException(f'Invalid asOf {raw!r}: expected YYYY-MM-DD')
+
+        result = SubscriptionUsageService(self.db_session).period_usage(
+            sub_id, as_of=as_of)
+        if not result.get('success'):
+            raise NotFoundException(result.get('message', 'Subscription not found'))
+        return result
+
+    # ── Global settings ────────────────────────────────────────────────
+
+    def get_global_settings(self, query_params: dict = None) -> Dict[str, Any]:
+        """Every global setting, grouped into the sections the UI tabs render.
+
+        The subscription section carries an `impact` block: how many orgs,
+        users and QR forms the access gate would cut off if it were switched on
+        right now. That number is the whole reason this page exists — the gate
+        is a lockout, and an operator about to flip it deserves to see the blast
+        radius on the same screen as the switch rather than being asked to
+        trust that someone ran a query once.
+        """
+        from ..settings import describe
+
+        payload = describe(self.db_session)
+        payload['impact'] = {'subscription': self._subscription_gate_impact()}
+        return payload
+
+    def _subscription_gate_impact(self) -> Dict[str, Any]:
+        """Who the subscription gate would block right now.
+
+        One pass over `organizations`, so it is safe to run on page load.
+        Returns zeros (with `available: False`) rather than raising if it
+        cannot be computed: a settings page that will not render because a
+        count failed is worse than one that renders without the count.
+        """
+        from sqlalchemy import text
+
+        try:
+            row = self.db_session.execute(text("""
+                WITH cov AS (
+                    SELECT o.id,
+                           EXISTS (
+                               SELECT 1 FROM subscriptions s
+                                WHERE s.organization_id = o.id
+                                  AND s.deleted_date IS NULL
+                                  AND s.current_period_starts_at IS NOT NULL
+                                  AND s.current_period_starts_at <= NOW()
+                                  AND (s.current_period_ends_at IS NULL
+                                       OR s.current_period_ends_at >= NOW())
+                           ) AS covered
+                      FROM organizations o
+                     WHERE o.deleted_date IS NULL
+                )
+                SELECT COUNT(*) FILTER (WHERE covered)          AS ok_orgs,
+                       COUNT(*) FILTER (WHERE NOT covered)      AS blocked_orgs,
+                       (SELECT COUNT(*) FROM user_locations u
+                          JOIN cov ON cov.id = u.organization_id
+                         WHERE u.is_user AND u.is_active
+                           AND NOT cov.covered)                 AS blocked_users,
+                       (SELECT COUNT(*) FROM user_input_channels c
+                          JOIN cov ON cov.id = c.organization_id
+                         WHERE c.deleted_date IS NULL
+                           AND NOT cov.covered)                 AS blocked_channels
+                  FROM cov
+            """)).fetchone()
+
+            return {
+                'available': True,
+                'organizationsWithPeriod': int(row[0] or 0),
+                'organizationsBlocked': int(row[1] or 0),
+                'usersBlocked': int(row[2] or 0),
+                'qrFormsBlocked': int(row[3] or 0),
+            }
+        except Exception:
+            logger.warning('Could not compute subscription gate impact',
+                           exc_info=True)
+            return {'available': False}
+
+    def update_global_settings(self, data: dict,
+                               current_user: dict = None) -> Dict[str, Any]:
+        """Write one or more global settings.
+
+        Body is `{"values": {key: value}}` — or a bare `{key: value}` map,
+        which is what a form submits. Unknown keys are rejected outright and
+        nothing is written: a settings form that silently drops a key it does
+        not recognise is indistinguishable from one that saved.
+        """
+        from ..settings import set_many
+
+        values = (data or {}).get('values')
+        if not isinstance(values, dict):
+            values = {k: v for k, v in (data or {}).items() if k != 'values'}
+        if not values:
+            raise BadRequestException('No settings provided')
+
+        try:
+            set_many(self.db_session, values,
+                     updated_by=(current_user or {}).get('user_id'))
+        except ValueError as e:
+            raise BadRequestException(str(e))
+
+        self.db_session.commit()
+        return self.get_global_settings()
+
     def create_subscription(self, data: dict) -> Dict[str, Any]:
+        """Create a SUBSCRIPTION PERIOD for an organization.
+
+        An org may have many: this is the row the backoffice `Subscription` tab
+        creates, one per contracted period. `createTransactionLimit` is the
+        per-MONTH allowance and is advisory (never blocks); `maxFileSizeMb` is
+        enforced at upload time.
+
+        Not set here: `organizations.subscription_id`. Which period is "current"
+        is resolved from the dates by `subscriptions.limits.find_period`, so
+        creating a period cannot leave a stale pointer behind.
+        """
+        org_id = data.get('organizationId')
+        if not org_id:
+            raise BadRequestException('organizationId is required')
+        if not data.get('planId'):
+            raise BadRequestException('planId is required')
+
+        starts_at = self._parse_period_date(data.get('periodStartsAt'))
+        ends_at = self._parse_period_date(data.get('periodEndsAt'))
+        if starts_at and ends_at and ends_at < starts_at:
+            raise BadRequestException('periodEndsAt cannot be before periodStartsAt')
+
         sub = Subscription(
-            organization_id=data.get('organizationId'),
+            organization_id=org_id,
             plan_id=data.get('planId'),
             status=data.get('status', 'active'),
             create_transaction_limit=data.get('createTransactionLimit', 100),
             ai_audit_limit=data.get('aiAuditLimit', 10),
+            current_period_starts_at=starts_at,
+            current_period_ends_at=ends_at,
+            period_label=(data.get('periodLabel') or None),
+            notes=(data.get('notes') or None),
+            max_file_size_mb=data.get('maxFileSizeMb'),
         )
         self.db_session.add(sub)
         self.db_session.flush()
-        return {'id': sub.id, 'message': 'Subscription created'}
+        return {'id': sub.id, 'message': 'Subscription period created'}
+
+    @staticmethod
+    def _parse_period_date(value):
+        """Accept 'YYYY-MM-DD' or a full ISO timestamp; return an aware datetime.
+
+        The column is TIMESTAMPTZ. A naive value would be interpreted in the
+        server's zone, which silently shifts a period boundary by hours — enough
+        to move a transaction into the wrong month on a billing report.
+        """
+        if not value:
+            return None
+        if isinstance(value, datetime):
+            return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace('Z', '+00:00'))
+        except ValueError:
+            raise BadRequestException(
+                f'Invalid date {value!r}: expected YYYY-MM-DD or an ISO timestamp')
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
     def update_subscription(self, sub_id: int, data: dict) -> Dict[str, Any]:
+        # Matched on `deleted_date IS NULL`, the same predicate
+        # `list_organization_subscription_periods` and `find_period` use. It was
+        # `is_active == True`, which is a different set: a period with
+        # is_active=false still appears in the backoffice list and still resolves
+        # limits, but saving an edit to it returned "not found".
         sub = self.db_session.query(Subscription).filter(
-            Subscription.id == sub_id, Subscription.is_active == True
+            Subscription.id == sub_id,
+            Subscription.deleted_date.is_(None),
         ).first()
         if not sub:
-            raise NotFoundException(f'Subscription {sub_id} not found')
+            raise NotFoundException(f'Subscription period {sub_id} not found')
+
+        # ── Validate BEFORE mutating ─────────────────────────────────
+        # Dates go through the parser so a bare 'YYYY-MM-DD' does not land as a
+        # naive timestamp in the server's zone (see _parse_period_date). Only
+        # keys actually present are touched, so a partial PATCH is validated
+        # against the row's existing value for the other end of the range.
+        #
+        # Assigning first and checking after left the ORM object dirty with the
+        # rejected dates: SQLAlchemy's autoflush would then push them on the
+        # next query in the same session, and every later edit to that row
+        # failed the same validation even when it never mentioned the dates.
+        new_start = (self._parse_period_date(data['periodStartsAt'])
+                     if 'periodStartsAt' in data else sub.current_period_starts_at)
+        new_end = (self._parse_period_date(data['periodEndsAt'])
+                   if 'periodEndsAt' in data else sub.current_period_ends_at)
+        if new_start and new_end and new_end < new_start:
+            raise BadRequestException('periodEndsAt cannot be before periodStartsAt')
 
         for field in ['plan_id', 'status', 'create_transaction_limit', 'ai_audit_limit',
-                      'allow_ai_audit_exceed_quota', 'duration_type']:
+                      'allow_ai_audit_exceed_quota', 'duration_type',
+                      'period_label', 'notes', 'max_file_size_mb']:
             camel = self._to_camel(field)
             if camel in data:
                 setattr(sub, field, data[camel])
 
+        if 'periodStartsAt' in data:
+            sub.current_period_starts_at = new_start
+        if 'periodEndsAt' in data:
+            sub.current_period_ends_at = new_end
+
         self.db_session.flush()
-        return {'id': sub.id, 'message': 'Subscription updated'}
+        return {'id': sub.id, 'message': 'Subscription period updated'}
 
     def delete_subscription(self, sub_id: int) -> Dict[str, Any]:
         sub = self.db_session.query(Subscription).filter(Subscription.id == sub_id).first()

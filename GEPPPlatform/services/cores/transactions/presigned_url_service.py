@@ -14,6 +14,9 @@ from sqlalchemy.orm import Session
 import logging
 
 from ....models.cores.files import File, FileType, FileStatus, FileSource
+from ...subscriptions.limits import (
+    DEFAULT_MAX_FILE_SIZE_MB, DEFAULT_MAX_IMAGE_DIMENSION_PX,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +84,9 @@ class TransactionPresignedUrlService:
         file_type: str = 'transaction_image',
         related_entity_type: Optional[str] = None,
         related_entity_id: Optional[int] = None,
-        expiration_seconds: int = 3600
+        expiration_seconds: int = 3600,
+        file_sizes: Optional[List[Optional[int]]] = None,
+        existing_file_ids: Optional[List[int]] = None,
     ) -> Dict[str, Any]:
         """
         Generate presigned URLs for transaction file uploads and create file records
@@ -95,6 +100,13 @@ class TransactionPresignedUrlService:
             related_entity_type: Optional entity type this file relates to
             related_entity_id: Optional entity ID this file relates to
             expiration_seconds: URL expiration time (default: 1 hour)
+            file_sizes: byte size of each file, aligned with `file_names`. Lets
+                the SERVER decide whether to hand out a URL at all instead of
+                letting the upload start and fail. Client-declared, so it is
+                cross-checked two ways below.
+            existing_file_ids: attachments already on this transaction. The limit
+                is a per-transaction TOTAL, so the remaining budget depends on
+                them — and their sizes come from the database/S3, not the client.
 
         Returns:
             Dict with presigned URLs, file IDs, and metadata
@@ -112,10 +124,110 @@ class TransactionPresignedUrlService:
             logger.info(f"Generating presigned URLs for bucket: {self.bucket_name}")
             logger.info(f"File names: {file_names}")
 
+            # The org's enforced per-file size cap. This is the ONLY place the
+            # web upload path can be policed: the browser POSTs straight to S3,
+            # so no application code ever sees the bytes. Baking the ceiling into
+            # the presigned POST's `content-length-range` makes S3 itself reject
+            # an oversized body — a patched client cannot get around it.
+            #
+            # Falls back to the previous hardcoded 50 MB when there is no session
+            # or the lookup fails, so a resolver problem cannot block uploads.
+            max_upload_bytes = int(DEFAULT_MAX_FILE_SIZE_MB * 1024 * 1024)
+            max_image_dimension_px = DEFAULT_MAX_IMAGE_DIMENSION_PX
+            if db is not None:
+                try:
+                    from ...subscriptions.limits import resolve_org_limits
+                    _limits = resolve_org_limits(db, organization_id)
+                    max_upload_bytes = _limits.max_file_size_bytes
+                    max_image_dimension_px = _limits.max_image_dimension_px
+                except Exception as e:
+                    logger.warning(
+                        "Could not resolve upload size limit for org %s, using "
+                        "default %s MB: %s",
+                        organization_id, DEFAULT_MAX_FILE_SIZE_MB, e)
+
+            # A 0 MB limit would make `content-length-range` invalid (min > max)
+            # and S3 would reject the presign call itself rather than the upload.
+            # Treat "no uploads allowed" as a refusal here, with a message the
+            # client can show, instead of an opaque S3 error.
+            if max_upload_bytes < 1:
+                return {
+                    'success': False,
+                    'message': ('File uploads are not permitted for this '
+                                'organization (size limit is set to 0).'),
+                    'error_code': 'UPLOAD_NOT_PERMITTED',
+                }
+
+            # ── Decide HERE whether these files may be uploaded at all ──────
+            #
+            # The limit is a per-transaction TOTAL, so the budget left for the
+            # new files depends on what is already attached — and those sizes
+            # are read from the DB/S3, never taken from the client.
+            #
+            # Declared sizes ARE client-supplied, so they are not trusted on
+            # their own; they are what lets the server refuse up-front instead
+            # of issuing a URL and letting the upload fail. Two things catch a
+            # client that lies: the per-object `content-length-range` below is
+            # narrowed to the remaining budget and enforced by S3, and
+            # transaction-create re-totals every attachment from real S3 sizes.
+            already_used = 0
+            if db is not None and existing_file_ids:
+                try:
+                    from ...subscriptions.upload_guard import sum_uploaded_file_ids
+                    already_used = sum_uploaded_file_ids(
+                        db, existing_file_ids, s3_client=self.s3_client)
+                except Exception as e:
+                    logger.warning('Could not total existing attachments for '
+                                   'org %s: %s', organization_id, e)
+
+            remaining_bytes = max(0, max_upload_bytes - already_used)
+
+            declared_total = 0
+            if file_sizes:
+                declared_total = sum(int(sz or 0) for sz in file_sizes)
+
+            if declared_total > remaining_bytes:
+                mb = lambda n: f'{n / (1024 * 1024):.2f}'
+                detail = ', '.join(
+                    f'{n} {mb(int(sz or 0))} MB'
+                    for n, sz in zip(file_names, file_sizes or []))
+                return {
+                    'success': False,
+                    'error_code': 'FILE_TOO_LARGE',
+                    'message': (
+                        f'Attachments exceed this organization\'s '
+                        f'{mb(max_upload_bytes)} MB limit per transaction: '
+                        f'{detail}'
+                        + (f' ({mb(already_used)} MB already attached, '
+                           f'{mb(remaining_bytes)} MB left).'
+                           if already_used else '.')),
+                    'max_file_size_bytes': max_upload_bytes,
+                    'already_used_bytes': already_used,
+                    'remaining_bytes': remaining_bytes,
+                }
+
+            def _length_range(index: int):
+                """(min, max) bytes S3 will accept for file `index`.
+
+                A declared size pins the range to itself so the declaration the
+                server based its decision on is the one enforced. Undeclared
+                falls back to the remaining budget.
+                """
+                declared = None
+                if file_sizes and index < len(file_sizes):
+                    raw = file_sizes[index]
+                    declared = int(raw) if raw is not None else None
+                if declared is None:
+                    return (1, max(1, remaining_bytes))
+                # A 0-byte file is not worth an upload slot, and S3 rejects a
+                # range of (0, 0) as a body anyway.
+                exact = max(1, declared)
+                return (exact, exact)
+
             presigned_data = []
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 
-            for file_name in file_names:
+            for _idx, file_name in enumerate(file_names):
                 # Generate unique filename
                 file_extension = self._get_file_extension(file_name)
                 unique_filename = f"{timestamp}_{uuid.uuid4().hex[:8]}_{self._sanitize_filename(file_name)}"
@@ -151,7 +263,18 @@ class TransactionPresignedUrlService:
                             {"bucket": self.bucket_name},
                             ["starts-with", "$key", s3_key],
                             {"Content-Type": content_type},
-                            ["content-length-range", 1, 50 * 1024 * 1024]  # 1 byte to 50MB
+                            # Enforced by S3, not by us.
+                            #
+                            # When the client declared a size, the range is
+                            # pinned to EXACTLY that many bytes: the declaration
+                            # becomes binding, so a client cannot say 10 KB to
+                            # pass the check above and then upload 300 KB. S3
+                            # rejects any other body length outright.
+                            #
+                            # With no declared size (older client) it falls back
+                            # to the remaining budget, which still caps the
+                            # object even though it does not pin it.
+                            ["content-length-range", *_length_range(_idx)]
                         ],
                         ExpiresIn=expiration_seconds
                     )
@@ -249,7 +372,16 @@ class TransactionPresignedUrlService:
                 'message': f'Generated {len(presigned_data)} presigned URLs',
                 'presigned_urls': presigned_data,
                 'file_records': file_records_data,
-                'expires_in_seconds': expiration_seconds
+                'expires_in_seconds': expiration_seconds,
+                # Echoed back so the client can compress to fit and refuse
+                # locally with a useful message, instead of learning the ceiling
+                # from an opaque S3 EntityTooLarge after a long upload.
+                'max_file_size_bytes': max_upload_bytes,
+                'max_file_size_mb': round(max_upload_bytes / (1024 * 1024), 2),
+                # Longest-edge cap for re-encoding images to webp before upload.
+                'max_image_dimension_px': max_image_dimension_px,
+                'already_used_bytes': already_used,
+                'remaining_bytes': remaining_bytes,
             }
 
         except Exception as e:

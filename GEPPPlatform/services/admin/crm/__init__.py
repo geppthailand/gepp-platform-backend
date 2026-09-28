@@ -74,6 +74,12 @@ def handle_crm_admin_subroute(
             resource_id, sub_path, method, db_session, data, query_params, current_user
         )
 
+    if resource == 'crm-cookie-consent':
+        from .cookie_consent_handlers import dispatch_cookie_consent_subroute
+        return dispatch_cookie_consent_subroute(
+            resource_id, sub_path, method, db_session, query_params
+        )
+
     if resource == 'crm-conversations':
         from .inbox_handlers import dispatch_inbox_subroute
         return dispatch_inbox_subroute(

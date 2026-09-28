@@ -109,6 +109,9 @@ class TestCustomerLeadCapture(unittest.TestCase):
         _crm_svc_stub.reset_mock()
         _lead_svc_stub.create_lead.return_value = {"id": 321}
         _lead_svc_stub.add_activity.return_value = 654
+        # reset_mock() does not clear side_effect — it would leak across tests.
+        _lead_svc_stub.update_lead.side_effect = None
+        _lead_svc_stub.update_lead.return_value = {"id": 321}
         _crm_svc_stub.send_via_email_lambda.return_value = {
             "success": True,
             "mandrill_message_id": "abc123",
@@ -157,6 +160,68 @@ class TestCustomerLeadCapture(unittest.TestCase):
         self.assertEqual(email_kwargs["to_email"], "sales@example.com")
         self.assertIn("gepp-me-contact", email_kwargs["tags"])
         self.assertEqual(email_kwargs["metadata"]["source_site"], "gepp.me")
+
+    def test_phone_is_persisted_on_the_lead_and_activity(self):
+        body = _good_body()
+        body["phone"] = "081-234-5678"
+
+        handler.handle_customer_lead_capture(body, MagicMock(), {})
+
+        _, kwargs = _lead_svc_stub.create_lead.call_args
+        self.assertEqual(kwargs["data"]["phone"], "081-234-5678")
+        activity_kwargs = _lead_svc_stub.add_activity.call_args.kwargs
+        self.assertEqual(activity_kwargs["properties"]["phone"], "081-234-5678")
+
+    def test_repeat_submission_backfills_phone_on_existing_lead(self):
+        # create_lead is idempotent on email: it returns the existing row untouched.
+        _lead_svc_stub.create_lead.return_value = {"id": 321}  # no phone stored yet
+        body = _good_body()
+        body["phone"] = "081-234-5678"
+
+        handler.handle_customer_lead_capture(body, MagicMock(), {})
+
+        _lead_svc_stub.update_lead.assert_called_once()
+        args = _lead_svc_stub.update_lead.call_args.args
+        self.assertEqual(args[1], 321)
+        self.assertEqual(args[3], {"phone": "081-234-5678"})
+
+    def test_existing_phone_is_never_overwritten(self):
+        _lead_svc_stub.create_lead.return_value = {"id": 321, "phone": "02-111-2222"}
+        body = _good_body()
+        body["phone"] = "081-234-5678"
+
+        handler.handle_customer_lead_capture(body, MagicMock(), {})
+
+        _lead_svc_stub.update_lead.assert_not_called()
+
+    def test_backfill_failure_does_not_drop_the_lead(self):
+        _lead_svc_stub.create_lead.return_value = {"id": 321}
+        _lead_svc_stub.update_lead.side_effect = RuntimeError("lead was soft-deleted")
+        body = _good_body()
+        body["phone"] = "081-234-5678"
+
+        result = handler.handle_customer_lead_capture(body, MagicMock(), {})
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["id"], 321)
+
+    def test_phone_is_optional(self):
+        body = _good_body()
+        body.pop("phone", None)
+
+        result = handler.handle_customer_lead_capture(body, MagicMock(), {})
+
+        self.assertTrue(result["ok"])
+        _, kwargs = _lead_svc_stub.create_lead.call_args
+        self.assertIsNone(kwargs["data"]["phone"])
+
+    def test_malformed_phone_raises_bad_request(self):
+        for bad in ("12345", "call me maybe", "+66 <script>"):
+            body = _good_body()
+            body["phone"] = bad
+            with self.subTest(phone=bad):
+                with self.assertRaises(_BadRequestException):
+                    handler.handle_customer_lead_capture(body, MagicMock(), {})
 
     def test_invalid_type_raises_bad_request(self):
         body = _good_body()
