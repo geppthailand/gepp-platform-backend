@@ -196,9 +196,20 @@ class BMAOriginMonthlyService(BMAGSheetService):
             if child_id in name and child_id not in parent:
                 parent[child_id] = parent_id
 
+        # A location shared in from another organization is shown as a root.
+        # Its real parents live in THAT organization's chart — publishing them
+        # would leak a structure we were given one node of, and the ancestors
+        # are not even visible to us, so the names would come out as bare ids.
+        _collapse, shared_roots = self.shared_root_map(org_id)
+
         def path(loc_id):
+            if loc_id in shared_roots:
+                return ''
             chain, seen, cur, depth = [], set(), parent.get(loc_id), 0
             while cur is not None and cur not in seen and depth < 20:
+                if cur in shared_roots:
+                    chain.append(name.get(cur) or str(cur))
+                    break
                 chain.append(name.get(cur) or str(cur))
                 seen.add(cur)
                 cur, depth = parent.get(cur), depth + 1
@@ -231,6 +242,12 @@ class BMAOriginMonthlyService(BMAGSheetService):
 
         raw = self.fetch_origin_month_category(org_id, start, include_shared_history)
         directory = self.location_directory(org_id)
+        # A location shared in from another organization reports as the node
+        # that was shared. Its children are summed into it and never get rows
+        # of their own — see `BMAGSheetService.shared_root_map`. Without this,
+        # UOB's 115 floors would each become a row here, publishing another
+        # organization's internal breakdown.
+        collapse, _shared_roots = self.shared_root_map(org_id)
 
         totals = {col: defaultdict(lambda: defaultdict(float))
                   for col in CATEGORY_COLUMNS}
@@ -242,7 +259,7 @@ class BMAOriginMonthlyService(BMAGSheetService):
                 # Only possible for a record dated in the future.
                 dropped_months += 1
                 continue
-            origin_id = int(origin_id)
+            origin_id = collapse.get(int(origin_id), int(origin_id))
             column = CATEGORY_TO_COLUMN.get(cat_code, UNMAPPED_CATEGORIES_GO_TO)
             totals[column][origin_id][label] += float(kg or 0)
             seen_ids.add(origin_id)
@@ -269,6 +286,7 @@ class BMAOriginMonthlyService(BMAGSheetService):
                                   for by_month in col.values()
                                   for v in by_month.values()), 2),
             'origins_missing_from_directory': len(unknown_ids),
+            'shared_descendants_folded': len(collapse),
             'records_outside_month_window': dropped_months,
         }
         return months, origins, totals, stats

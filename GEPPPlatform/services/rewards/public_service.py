@@ -13,7 +13,11 @@ from ...models.rewards.redemptions import (
     Droppoint,
 )
 from ...models.rewards.points import RewardPointTransaction
-from ...models.rewards.management import RewardCampaign, RewardCampaignDroppoint
+from ...models.rewards.management import (
+    RewardCampaign,
+    RewardCampaignDroppoint,
+    RewardSetup,
+)
 from ...exceptions import NotFoundException, BadRequestException, UnauthorizedException
 from ._phone import normalize_thai_phone, is_valid_thai_mobile, normalize_and_validate_thai_mobile
 
@@ -71,8 +75,49 @@ class PublicRewardService:
             raise NotFoundException("Campaign not found")
         return self.resolve_staff_by_line_id(line_user_id, campaign.organization_id)
 
+    def _join_program_by_hash(self, reward_user_id: int,
+                              program_hash: str | None) -> dict | None:
+        """Bind a member to the organization behind a registration QR.
+
+        The backoffice QR encodes ``reward_setup.hash``, which is the only thing a
+        brand-new member carries that says WHICH organization recruited them.
+        Without this the hash was decoration: membership was created lazily on the
+        member's first claim, so anyone who scanned the QR and stopped there did
+        not exist for the org that invited them.
+
+        An unknown or stale hash is NOT an error. This endpoint is also the plain
+        login path for every returning member, so a regenerated QR must never be
+        able to lock someone out of the app — a hash that resolves to nothing is
+        ignored and reported as ``None``.
+        """
+        if not program_hash:
+            return None
+        setup = (
+            self.db.query(RewardSetup)
+            .filter(
+                RewardSetup.hash == program_hash,
+                RewardSetup.deleted_date.is_(None),
+            )
+            .first()
+        )
+        if not setup:
+            return None
+        # `_ensure_membership` is idempotent and deliberately does not reactivate
+        # a membership an admin deactivated, so re-scanning the QR is safe and
+        # cannot undo an admin's decision.
+        self._ensure_membership(reward_user_id, setup.organization_id)
+        return {
+            "organization_id": setup.organization_id,
+            "program_name": setup.program_name_local or setup.program_name,
+        }
+
     def register_user(self, line_data: dict) -> dict:
-        """Register or update a reward user from LINE profile data."""
+        """Register or update a reward user from LINE profile data.
+
+        Optional ``program_hash`` (``reward_setup.hash``, from the registration
+        QR) also joins the member to that organization — see
+        ``_join_program_by_hash``.
+        """
         line_user_id = line_data.get("line_user_id")
         if not line_user_id:
             raise BadRequestException("line_user_id is required")
@@ -116,6 +161,9 @@ class PublicRewardService:
             self.db.add(user)
             self.db.flush()
 
+        joined_program = self._join_program_by_hash(
+            user.id, line_data.get("program_hash"))
+
         return {
             "id": user.id,
             "line_user_id": user.line_user_id,
@@ -129,6 +177,10 @@ class PublicRewardService:
             # phone and PDPA consent (existing LINE-only members are auto-created
             # without either, so they will be prompted on next open).
             "needs_profile": not (user.phone_number and user.pdpa_consent_at),
+            # `{organization_id, program_name}` when a registration QR's hash
+            # resolved, `None` when no hash was sent or it no longer exists. The
+            # LIFF uses it to open on the recruiting org's card.
+            "joined_program": joined_program,
             "created_date": user.created_date.isoformat() if user.created_date else None,
         }
 
