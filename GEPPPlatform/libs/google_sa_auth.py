@@ -305,21 +305,99 @@ class SheetsClient:
             f'{SHEETS_BASE}/{sheet_id}/values/{self._range(rng)}?{qs}',
             'PUT', {'values': values}, self._headers)
 
-    def tab_grid(self, sheet_id):
-        """{tab title: (row_count, column_count)} for every tab.
+    def batch_update_values(self, sheet_id, writes, value_input_option='RAW'):
+        """PUT several disjoint ranges in one request.
+
+        `writes` is ``[(a1_range, values), …]``. One call rather than one per
+        range matters when a caller deliberately writes around a column it must
+        not touch: the ranges land together, so the sheet is never briefly half
+        updated.
+        """
+        if not writes:
+            return {}
+        body = {
+            'valueInputOption': value_input_option,
+            'data': [{'range': rng, 'values': values} for rng, values in writes],
+        }
+        return _request(f'{SHEETS_BASE}/{sheet_id}/values:batchUpdate',
+                        'POST', body, self._headers)
+
+    def batch_get(self, sheet_id, ranges):
+        """Several ranges in one GET; returns one value-grid per range, in order."""
+        if not ranges:
+            return []
+        qs = '&'.join(['majorDimension=ROWS']
+                      + [f'ranges={self._range(r)}' for r in ranges])
+        data = _request(f'{SHEETS_BASE}/{sheet_id}/values:batchGet?{qs}',
+                        'GET', None, self._headers)
+        return [vr.get('values', []) or []
+                for vr in (data.get('valueRanges') or [])]
+
+    def column_values(self, sheet_id, tab, column, start_row=1):
+        """One column, top to bottom, as a flat list of strings.
+
+        Short rows come back from the API as missing rather than empty, so the
+        result is padded to the last non-empty cell and no further — the length
+        is the number of rows that actually carry something.
+        """
+        rng = f"'{tab}'!{column}{start_row}:{column}"
+        values = self.get(sheet_id, rng).get('values', []) or []
+        return [(row[0] if row else '') for row in values]
+
+    def tab_properties(self, sheet_id):
+        """``{title: {'sheet_id': int, 'rows': int, 'cols': int}}``.
 
         A Sheets grid is finite — the `All data-GEPP` tab is 28 columns wide, so
         a range like `ZZ9999` is rejected with "exceeds grid limits" rather than
-        being treated as empty space. Anything that needs a scratch cell has to
-        ask for the real dimensions first.
+        being treated as empty space. Anything that writes past the current
+        edge has to ask for the real dimensions first, and `sheet_id` is what
+        `resize_tab` and every other structural call address a tab by.
         """
         qs = urllib.parse.urlencode(
-            {'fields': 'sheets.properties(title,gridProperties)'})
+            {'fields': 'sheets.properties(sheetId,title,gridProperties)'})
         data = _request(f'{SHEETS_BASE}/{sheet_id}?{qs}', 'GET', None, self._headers)
         out = {}
         for sheet in data.get('sheets') or []:
             props = sheet.get('properties') or {}
             grid = props.get('gridProperties') or {}
-            out[props.get('title')] = (grid.get('rowCount', 0),
-                                       grid.get('columnCount', 0))
+            out[props.get('title')] = {
+                'sheet_id': props.get('sheetId'),
+                'rows': grid.get('rowCount', 0),
+                'cols': grid.get('columnCount', 0),
+            }
         return out
+
+    def tab_grid(self, sheet_id):
+        """{tab title: (row_count, column_count)} for every tab."""
+        return {title: (p['rows'], p['cols'])
+                for title, p in self.tab_properties(sheet_id).items()}
+
+    def batch_update(self, sheet_id, requests):
+        """The structural API (`spreadsheets.batchUpdate`) — tabs, not cells."""
+        return _request(f'{SHEETS_BASE}/{sheet_id}:batchUpdate',
+                        'POST', {'requests': requests}, self._headers)
+
+    def add_tab(self, sheet_id, title, rows=1000, cols=26):
+        """Create a tab and return its properties dict.
+
+        Sized up front rather than grown later: a new sheet defaults to 26
+        columns, which a few years of monthly columns walks straight past.
+        """
+        resp = self.batch_update(sheet_id, [{'addSheet': {'properties': {
+            'title': title,
+            'gridProperties': {'rowCount': rows, 'columnCount': cols},
+        }}}])
+        props = (resp.get('replies') or [{}])[0].get('addSheet', {}).get('properties', {})
+        grid = props.get('gridProperties') or {}
+        return {'sheet_id': props.get('sheetId'),
+                'rows': grid.get('rowCount', rows),
+                'cols': grid.get('columnCount', cols)}
+
+    def resize_tab(self, sheet_id, tab_sheet_id, rows, cols):
+        """Grow a tab's grid. Only ever called to enlarge."""
+        return self.batch_update(sheet_id, [{'updateSheetProperties': {
+            'properties': {'sheetId': tab_sheet_id,
+                           'gridProperties': {'rowCount': rows,
+                                              'columnCount': cols}},
+            'fields': 'gridProperties.rowCount,gridProperties.columnCount',
+        }}])

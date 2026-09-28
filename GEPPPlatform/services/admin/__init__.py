@@ -301,9 +301,10 @@ def handle_admin_routes(path: str, data: dict, **commonParams):
             resource = path_parts[0]
             return admin_handler.list_resource(resource, query_params)
         elif len(path_parts) == 2:
-            # GET /admin/{resource}/{id} — except 'fields' which is a crm sub-path
+            # GET /admin/{resource}/{id} — except named crm sub-paths, which must be
+            # matched here: the fall-through does int(path_parts[1]) and would raise.
             resource = path_parts[0]
-            if resource.startswith('crm-') and path_parts[1] in ('fields',):
+            if resource.startswith('crm-') and path_parts[1] in ('fields', 'summary'):
                 from .crm import handle_crm_admin_subroute
                 return handle_crm_admin_subroute(
                     resource=resource, resource_id=None, sub_path=path_parts[1],

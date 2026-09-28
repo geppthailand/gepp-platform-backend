@@ -153,6 +153,16 @@ def handle_customer_lead_capture(
     )
     lead_id = lead.get("id")
 
+    # create_lead is idempotent on email — a repeat submission returns the existing row
+    # untouched, so a phone supplied on a later visit is silently dropped. Backfill it
+    # when the CRM record has none. Never overwrite an existing number: sales may have
+    # corrected it, and the newly submitted value is still captured on the activity below.
+    if lead_id and phone and not lead.get("phone"):
+        try:
+            lead = lead_service.update_lead(db, lead_id, None, {"phone": phone})
+        except Exception as exc:  # soft-deleted lead, etc. — never fail the submission
+            logger.warning("customer_lead phone backfill failed lead_id=%s: %s", lead_id, exc)
+
     if lead_id:
         lead_service.add_activity(
             db,

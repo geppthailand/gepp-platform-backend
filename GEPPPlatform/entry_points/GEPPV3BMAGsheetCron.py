@@ -1,18 +1,31 @@
-"""BMA Google-Sheet cron — pushes ไม่เทรวม (BKK Zero Waste) figures monthly.
+"""BMA Google-Sheet cron — pushes ไม่เทรวม (BKK Zero Waste) figures weekly.
 
 Wire this as a Lambda fired by an EventBridge rule:
 
     Function:    {ENV}-GEPPV3BMAGsheetCron
-    Schedule:    cron(0 1 2 * ? *)      02:00 UTC+7 on the 2nd of each month
+    Schedule:    cron(0 19 ? * SUN *)   02:00 UTC+7 every Monday
     Handler:     GEPPPlatform.entry_points.GEPPV3BMAGsheetCron.lambda_handler
-    Memory:      512 MB     (one grouped query + a Sheets write)
+    Memory:      512 MB     (a few grouped queries + Sheets writes)
     Timeout:     300 s
     Env:         BMA_GSHEET_SA_SECRET_ID  (or BMA_GSHEET_SA_JSON)
                  BMA_GSHEET_ID            (optional; defaults to the live sheet)
 
+Three things are refreshed on every run:
+
+  * `All data-GEPP` — (month × เขต) totals for this year and last;
+  * `Origin` + `Overall Project` — per-site monthly averages and their totals;
+  * `[Origin] <category>` × 7 — per-origin monthly kg from 2023-01 onwards.
+
+Weekly rather than monthly because all three recompute history rather than
+appending to it: records get back-dated, corrected and soft-deleted long after
+the month they belong to, so "was last month still right?" is a question worth
+asking more than once.
+
 The body stays thin on purpose — everything real lives in
-`services/integrations/bma/bma_gsheet_service.py`, which also documents the
-recovered column formulas and how เขต is resolved from `user_locations`.
+`services/integrations/bma/bma_gsheet_service.py` (which documents the recovered
+column formulas and how เขต is resolved) and `bma_origin_monthly_service.py`
+(which documents why the per-origin tabs are append-only and never touch their
+`baseline` column).
 
 LAYER
     This function needs **psycopg2-binary only**. It connects with psycopg2
@@ -55,6 +68,10 @@ Event payload (all optional):
     {"year_from": 2025}           limit which years are BUILT
     {"sheet_id": "..."}           target a copy instead of the live sheet
     {"tab": "..."}                target a different tab
+    {"skip_origin": true}         leave `Origin` / `Overall Project` alone
+    {"skip_origin_monthly": true} leave the seven `[Origin] <category>` tabs alone
+    {"origin_monthly_columns": ["general waste"]}
+                                  refresh only some of those seven
 
 If a year in scope produces no rows the write is skipped rather than clearing
 that year, so a month whose data has not landed yet cannot blank the report.
@@ -141,6 +158,18 @@ def lambda_handler(event, context):
             if not event.get('skip_origin'):
                 result['origin'] = svc.sync_origin_and_overall(
                     org_id=org_id, sheet_id=sheet_id, dry_run=dry_run)
+
+            # The per-origin category tabs are their own service: same source
+            # data, different grain (origin × month rather than เขต × month),
+            # and an append-only write that must not disturb the `baseline`
+            # column ops keeps formulas in.
+            if not event.get('skip_origin_monthly'):
+                from GEPPPlatform.services.integrations.bma.bma_origin_monthly_service import (
+                    BMAOriginMonthlyService,
+                )
+                result['origin_monthly'] = BMAOriginMonthlyService(conn).sync(
+                    org_id=org_id, sheet_id=sheet_id, dry_run=dry_run,
+                    columns=event.get('origin_monthly_columns'))
 
         logger.info("GEPPV3BMAGsheetCron done: %s", json.dumps(result, default=str))
         return {'success': True, **result}
