@@ -10,9 +10,14 @@ At most one live row per user (see the partial unique index in migration 076). W
 has no row, the app uses the system defaults (input_destination=False, show_all=True).
 
 See migration 20260720_120000_076_create_user_locations_settings.sql.
+
+Also carries per-user UI preferences as JSON (migration 091):
+  - report_preferences       report mode / chart granularity / comparison mode
+  - transaction_preferences  transaction-list and record-table column visibility + order
 """
 
-from sqlalchemy import Column, Boolean, BigInteger, DateTime, ForeignKey
+from sqlalchemy import Column, Boolean, BigInteger, DateTime, ForeignKey, text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.sql import func
 
 from ..base import Base
@@ -29,6 +34,9 @@ class UserLocationSettings(Base):
 
     input_destination = Column(Boolean, nullable=False, default=False)
     show_all_location_options = Column(Boolean, nullable=False, default=True)
+
+    report_preferences = Column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
+    transaction_preferences = Column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
 
     created_date = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_date = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
