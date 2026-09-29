@@ -494,6 +494,8 @@ class ReportsService:
                 TransactionRecord.status.label('record_status'),  # 17
                 TransactionRecord.traceability_group_id,        # 18
                 TransactionRecord.id.label('record_id'),        # 19
+                literal(None).label('location_tag_id'),     # 20 — tags/tenants belong to the source org
+                literal(None).label('tenant_id'),           # 21
             ).join(
                 Transaction, TransactionRecord.created_transaction_id == Transaction.id
             ).outerjoin(
@@ -572,6 +574,8 @@ class ReportsService:
                 TransactionRecord.status.label('record_status'),  # 17
                 TransactionRecord.traceability_group_id,        # 18
                 TransactionRecord.id.label('record_id'),        # 19
+                Transaction.location_tag_id,                # 20 — report mode "tag"
+                Transaction.tenant_id,                      # 21 — report mode "tenant"
             ).join(
                 Transaction,
                 TransactionRecord.created_transaction_id == Transaction.id
@@ -728,6 +732,8 @@ class ReportsService:
             TransactionRecord.status.label('record_status'),  # 17
             TransactionRecord.traceability_group_id,        # 18
             TransactionRecord.id.label('record_id'),        # 19
+            Transaction.location_tag_id,                # 20 — report mode "tag"
+            Transaction.tenant_id,                      # 21 — report mode "tenant"
         ).join(
             Transaction,
             TransactionRecord.created_transaction_id == Transaction.id
@@ -1349,11 +1355,20 @@ class ReportsService:
                     UserTenant.is_active == True,
                     UserTenant.deleted_date.is_(None)
                 ).all()
+                try:
+                    _uid = int(current_user_id) if current_user_id is not None else None
+                except (TypeError, ValueError):
+                    _uid = None
                 for t in tenants_db:
                     tenant_entry: Dict[str, Any] = {
                         'id': t.id,
                         'name': t.name or f"Tenant {t.id}",
-                        'location_ids': [oid for oid in origin_ids if t.id in tenants_by_origin.get(oid, set())]
+                        'location_ids': [oid for oid in origin_ids if t.id in tenants_by_origin.get(oid, set())],
+                        # The /reports page pre-selects the tenant filter for a user who belongs
+                        # to exactly one tenant.
+                        'is_member': _uid is not None and _uid in {
+                            int(m) for m in (t.members or []) if str(m).lstrip('-').isdigit()
+                        },
                     }
                     if t.start_date is not None or t.end_date is not None:
                         tenant_entry['start_date'] = t.start_date.isoformat() if t.start_date else None

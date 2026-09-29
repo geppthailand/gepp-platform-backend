@@ -3003,11 +3003,29 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
             logger.info("Converting transactions to dict format...")
             # Machine approvals for this page, resolved in one query up front.
             auto_approved_ids = self._auto_approved_ids([t.id for t in transactions])
+            # Tag / tenant names for the list's Tags and Tenants columns — one query each per
+            # page. Inactive or deleted ones still resolve, so older rows keep their label.
+            tag_names: Dict[int, str] = {}
+            tenant_names: Dict[int, str] = {}
+            try:
+                _tag_ids = {t.location_tag_id for t in transactions if t.location_tag_id}
+                _tenant_ids = {t.tenant_id for t in transactions if t.tenant_id}
+                if _tag_ids:
+                    tag_names = {tid: (name or f"Tag {tid}") for tid, name in self.db.query(
+                        UserLocationTag.id, UserLocationTag.name).filter(UserLocationTag.id.in_(_tag_ids)).all()}
+                if _tenant_ids:
+                    tenant_names = {tid: (name or f"Tenant {tid}") for tid, name in self.db.query(
+                        UserTenant.id, UserTenant.name).filter(UserTenant.id.in_(_tenant_ids)).all()}
+            except Exception as e:  # noqa: BLE001 — names are decorative; never fail the list
+                logger.warning("Failed to resolve tag/tenant names: %s", str(e))
             transactions_list = []
             for i, transaction in enumerate(transactions):
                 try:
                     logger.info(f"Processing transaction {i+1}/{len(transactions)}: ID={transaction.id}")
                     transaction_dict = self._transaction_to_dict(transaction)
+                    # None when the id doesn't point at a tag (some older rows hold a location id).
+                    transaction_dict['location_tag_name'] = tag_names.get(transaction.location_tag_id)
+                    transaction_dict['tenant_name'] = tenant_names.get(transaction.tenant_id)
                     transaction_dict['approval_source'] = self._approval_source(
                         transaction, transaction.id in auto_approved_ids
                     )

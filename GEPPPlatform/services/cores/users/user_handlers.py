@@ -64,6 +64,24 @@ def handle_user_routes(event: Dict[str, Any], data: Dict[str, Any], **params) ->
         # Update current user's profile: /api/users/profile
         return handle_update_user_profile(user_service, data, current_user_id)
 
+    elif '/api/users/preferences' in path and method == 'GET':
+        # Current user's UI preferences (report mode/charts, transaction columns)
+        from .user_preferences_service import UserPreferencesService
+        return {'success': True, 'data': UserPreferencesService(db_session).get(current_user_id)}
+
+    elif '/api/users/preferences' in path and method == 'PUT':
+        from .user_preferences_service import UserPreferencesService
+        if not current_user_id:
+            raise UnauthorizedException('Authentication required')
+        if not isinstance(data, dict):
+            raise ValidationException('Request body must be a JSON object')
+        return {
+            'success': True,
+            'data': UserPreferencesService(db_session).update(
+                int(current_user_id), current_user_organization_id, data
+            ),
+        }
+
     elif '/api/users/check-email' in path and method == 'POST':
         return handle_check_email_availability(user_service, data)
 

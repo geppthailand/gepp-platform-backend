@@ -19,6 +19,45 @@ from ..file_upload_service import ascii_metadata, safe_ascii_filename
 logger = logging.getLogger(__name__)
 
 
+# Render modules the PDF Lambda routes to, by export_type. Used in-process when the platform
+# runs locally (run_local.sh), where there is no render Lambda to call.
+_LOCAL_RENDERERS = {
+    "reports": "GEPPPlatform.services.cores.reports.pdf_export",
+    "traceability": "GEPPPlatform.services.cores.traceability.pdf_export",
+    "gri": "GEPPPlatform.services.cores.gri.gri_pdf_generator",
+}
+
+
+def _render_locally() -> bool:
+    """True when PDFs should be rendered in this process instead of by the render Lambda.
+
+    PDF_EXPORT_LOCAL=1 / 0 forces either way; otherwise render locally whenever we are not
+    inside AWS Lambda (AWS sets AWS_LAMBDA_FUNCTION_NAME there), i.e. the local dev server.
+    """
+    flag = (os.getenv("PDF_EXPORT_LOCAL") or "").strip().lower()
+    if flag in ("1", "true", "yes"):
+        return True
+    if flag in ("0", "false", "no"):
+        return False
+    return not os.getenv("AWS_LAMBDA_FUNCTION_NAME")
+
+
+def _render_pdf_locally(payload: Dict[str, Any], export_type: str) -> Dict[str, Any]:
+    """Same result shape as the Lambda: {success, pdf_base64, filename} or {success: False, error}."""
+    import importlib
+    module_name = _LOCAL_RENDERERS.get(export_type)
+    if not module_name:
+        return {"success": False, "error": f"No local PDF renderer for export_type '{export_type}'"}
+    try:
+        module = importlib.import_module(module_name)
+        pdf_bytes = module.generate_pdf_bytes(payload)
+    except Exception as e:
+        logger.error("Local PDF render failed (%s): %s", export_type, e, exc_info=True)
+        return {"success": False, "error": f"Local PDF render failed: {e}"}
+    print(f"[PDF_HUB] Rendered {export_type} PDF locally ({len(pdf_bytes)} bytes)")
+    return {"success": True, "pdf_base64": base64.b64encode(pdf_bytes).decode("ascii"), "filename": None}
+
+
 def _invoke_pdf_lambda(payload: Dict[str, Any], export_type: str = "reports") -> Dict[str, Any]:
     """
     Invoke the PDF export Lambda with the aggregated payload and export type.
@@ -31,6 +70,9 @@ def _invoke_pdf_lambda(payload: Dict[str, Any], export_type: str = "reports") ->
     Returns:
         Dict with at least {success: bool, pdf_base64?: str, filename?: str, error?: str}
     """
+    if _render_locally():
+        return _render_pdf_locally(payload, export_type)
+
     fn_name = os.getenv("PDF_EXPORT_FUNCTION", "DEV-GEPPGenerateV3Report")
     client = boto3.client("lambda")
     

@@ -238,6 +238,14 @@ def _build_filters_from_query_params(query_params: Dict[str, Any], timezone_name
     except Exception:
         pass
 
+    # Report presentation settings (not data filters): only whitelisted values pass.
+    if query_params.get('report_mode') in REPORT_MODES:
+        filters['report_mode'] = query_params['report_mode']
+    if query_params.get('overview_chart') in ('yearly', 'monthly', 'daily'):
+        filters['overview_chart'] = query_params['overview_chart']
+    if query_params.get('compare_mode') in ('yearly', 'monthly'):
+        filters['compare_mode'] = query_params['compare_mode']
+
     return filters
 
 
@@ -271,6 +279,74 @@ def _calculate_weight(record: Dict[str, Any], material: Dict[str, Any]) -> float
 
 _GENERAL_WASTE_CAT_ID = 4  # Material category ID for General Waste
 _WASTE_TO_ENERGY_CAT_ID = 9  # Material category ID for Waste To Energy
+
+# Report modes: the same report regrouped by location (default), tag (event / tagged
+# area) or tenant. Rows from get_overview_data carry location_tag_id at 20, tenant_id at 21.
+REPORT_MODES = ('location', 'tag', 'tenant')
+_GROUP_ROW_INDEX = {'tag': 20, 'tenant': 21}
+
+
+def _report_mode(filters: Optional[Dict[str, Any]]) -> str:
+    mode = (filters or {}).get('report_mode') or 'location'
+    return mode if mode in REPORT_MODES else 'location'
+
+
+def _row_group_id(row, mode: str) -> Optional[int]:
+    idx = _GROUP_ROW_INDEX.get(mode)
+    if idx is None or len(row) <= idx:
+        return None
+    return row[idx]
+
+
+def _comparison_out_of_range(filters: Dict[str, Any], tz_name: str) -> Dict[str, Any]:
+    """Why the selected range can't be compared, plus ranges that can, for the PDF page.
+
+    Suggestions stay inside what the user picked: yearly → the selected days of the end
+    date's year; monthly → the selected days of the end date's month. `yearly_ok` says
+    whether the same range would work in the other mode, so the page can offer the switch.
+    """
+    from .report_insights import range_label
+    try:
+        tz = ZoneInfo(tz_name or 'Asia/Bangkok')
+    except Exception:
+        tz = ZoneInfo('Asia/Bangkok')
+    mode = filters.get('compare_mode') if filters.get('compare_mode') in ('yearly', 'monthly') else 'yearly'
+    out: Dict[str, Any] = {'compare_mode': mode}
+    f_dt = _parse_datetime(filters.get('date_from')) if filters.get('date_from') else None
+    t_dt = _parse_datetime(filters.get('date_to')) if filters.get('date_to') else None
+    if not f_dt or not t_dt:
+        return out
+    f = (f_dt if f_dt.tzinfo else f_dt.replace(tzinfo=timezone.utc)).astimezone(tz).date()
+    t = (t_dt if t_dt.tzinfo else t_dt.replace(tzinfo=timezone.utc)).astimezone(tz).date()
+    month_from = max(f, t.replace(day=1))
+    year_from = max(f, t.replace(month=1, day=1))
+    s_from = month_from if mode == 'monthly' else year_from
+    out.update({
+        'from': f.isoformat(), 'to': t.isoformat(),
+        'selected_th': range_label(f, t, 'th'), 'selected_en': range_label(f, t, 'en'),
+        'suggest_th': range_label(s_from, t, 'th'), 'suggest_en': range_label(s_from, t, 'en'),
+        'suggest_month_th': range_label(month_from, t, 'th'), 'suggest_month_en': range_label(month_from, t, 'en'),
+        'yearly_ok': f.year == t.year and (t - f).days <= 365,
+    })
+    return out
+
+
+def _fetch_group_names(db_session, mode: str, ids: set) -> Dict[int, str]:
+    """Tag or tenant names by id (inactive/deleted ones still resolve, so old data keeps a name).
+
+    Ids missing from the result don't point at a tag/tenant at all — some older transactions
+    carry a user_locations id in location_tag_id — so callers treat them as "no tag"."""
+    if not ids or mode not in _GROUP_ROW_INDEX:
+        return {}
+    try:
+        from GEPPPlatform.models.users.user_related import UserLocationTag, UserTenant
+        model = UserLocationTag if mode == 'tag' else UserTenant
+        rows = db_session.query(model.id, model.name).filter(model.id.in_(list(ids))).all()
+        prefix = 'Tag' if mode == 'tag' else 'Tenant'
+        return {rid: (name or f"{prefix} {rid}") for rid, name in rows}
+    except Exception as e:  # names are decoration; the numbers must still render
+        logger.warning("[reports] group name lookup failed: %s", e)
+        return {}
 
 
 def _get_general_waste_mm_id(db) -> Optional[int]:
@@ -576,6 +652,10 @@ def _handle_overview_report(
     # Collect per-record data for 3-tier recycling rate calculation
     record_weights = []  # (weight, calc_ghg, cat_id, group_id)
     record_tx_ids = []   # parallel to record_weights: the weighing each came from
+    record_months = []   # parallel to record_weights: (year, month) in Bangkok, or None
+    record_days = []     # parallel to record_weights: 'YYYY-MM-DD' in Bangkok, or None
+    record_groups = []   # parallel to record_weights: tag/tenant id for the report mode
+    report_mode = _report_mode(filters)
     record_origins = []  # (origin_id, weight, calc_ghg, cat_id, group_id) for origin_waste_map
     all_record_ids = []  # collect record IDs for group mapping
 
@@ -613,6 +693,8 @@ def _handle_overview_report(
         # (= 2025-11-01 01:00 Bangkok) lands in October here while the SQL
         # date-range filter (converted to Bangkok) includes it in November,
         # causing an Oct/Nov split on the chart.
+        record_ym = None
+        record_day = None
         if tx_date:
             try:
                 dt = tx_date if isinstance(tx_date, datetime) else datetime.fromisoformat(str(tx_date))
@@ -620,6 +702,8 @@ def _handle_overview_report(
                     dt = dt.replace(tzinfo=timezone.utc)
                 dt_local = dt.astimezone(ZoneInfo('Asia/Bangkok'))
                 y, m = dt_local.year, dt_local.month
+                record_ym = (y, m)
+                record_day = dt_local.strftime('%Y-%m-%d')
                 if y not in month_totals_by_year:
                     month_totals_by_year[y] = {}
                 month_totals_by_year[y][m] = month_totals_by_year[y].get(m, 0.0) + weight
@@ -636,6 +720,9 @@ def _handle_overview_report(
         # the collection-point markers (keyed by transaction) can be attributed
         # back to individual records.
         record_tx_ids.append(tx_id)
+        record_months.append(record_ym)
+        record_days.append(record_day)
+        record_groups.append(_row_group_id(row, report_mode))
         if origin_id is not None:
             record_origins.append((origin_id, weight, calc_ghg, cat_id, record_id))
         all_record_ids.append(record_id)
@@ -784,9 +871,26 @@ def _handle_overview_report(
         if recyclable_w > 0:
             origin_waste_map[origin_id] = origin_waste_map.get(origin_id, 0.0) + recyclable_w
 
-    # Top 5 recyclable origins — fetch origin names with member filtering
+    # Top 5 recyclable origins — fetch origin names with member filtering.
+    # Tag / tenant mode ranks those groups instead (records without one are left out: the
+    # list answers "which event / which tenant recycles most", and "none" is neither).
     top_origin_ids = sorted(origin_waste_map.items(), key=lambda kv: kv[1], reverse=True)[:5]
     top_recyclables = []
+    if report_mode != 'location':
+        group_names = _fetch_group_names(reports_service.db, report_mode, {g for g in record_groups if g is not None})
+        group_waste_map: Dict[int, float] = {}
+        for (w, _ghg, cat, gid), grp in zip(record_weights, record_groups):
+            if grp is None or grp not in group_names:
+                continue
+            rw = is_record_recyclable(w, cat, gid, group_leaf_data, group_completion)
+            if rw > 0:
+                group_waste_map[grp] = group_waste_map.get(grp, 0.0) + rw
+        top_groups = sorted(group_waste_map.items(), key=lambda kv: kv[1], reverse=True)[:5]
+        top_recyclables = [
+            {'origin_id': g, 'origin_name': group_names.get(g, str(g)), 'path': '', 'total_waste': w}
+            for g, w in top_groups
+        ]
+        top_origin_ids = []
     if top_origin_ids:
         origin_names_map = {}
         origin_path_map = {}
@@ -809,12 +913,45 @@ def _handle_overview_report(
             for oid, w in top_origin_ids
         ]
 
+    # Recycled kg per month, for the stacked "recycled vs the rest" chart. Same
+    # per-record basis as top_recyclables (the generation set, traced outcome where a
+    # chain exists, category otherwise); the headline rate may be outcome-measured at
+    # org scope, so the monthly split is an honest breakdown, not a second rate.
+    month_recycled_by_year: Dict[int, Dict[int, float]] = {}
+    for (w, _ghg, cat, gid), ym in zip(record_weights, record_months):
+        if ym is None:
+            continue
+        rw = is_record_recyclable(w, cat, gid, group_leaf_data, group_completion)
+        if rw > 0:
+            yb = month_recycled_by_year.setdefault(ym[0], {})
+            yb[ym[1]] = yb.get(ym[1], 0.0) + rw
+
+    # Per-day totals for the "daily" chart granularity (same recycled basis as monthly).
+    day_totals: Dict[str, list] = {}
+    for (w, _ghg, cat, gid), day in zip(record_weights, record_days):
+        if day is None:
+            continue
+        bucket = day_totals.setdefault(day, [0.0, 0.0])
+        bucket[0] += w
+        rw = is_record_recyclable(w, cat, gid, group_leaf_data, group_completion)
+        if rw > 0:
+            bucket[1] += rw
+    daily_data = [
+        {'date': d, 'value': round(v[0], 2), 'recycled': round(min(v[1], v[0]), 2)}
+        for d, v in sorted(day_totals.items())
+    ]
+
     # Chart data by year/month
     chart_data = {}
     for year in sorted(month_totals_by_year.keys()):
         monthly = month_totals_by_year[year]
+        recycled = month_recycled_by_year.get(year, {})
         chart_data[str(year)] = [
-            {'month': datetime(2000, m, 1).strftime('%b'), 'value': round(monthly[m], 2)}
+            {
+                'month': datetime(2000, m, 1).strftime('%b'),
+                'value': round(monthly[m], 2),
+                'recycled': round(min(recycled.get(m, 0.0), monthly[m]), 2),
+            }
             for m in sorted(monthly.keys())
         ]
 
@@ -956,8 +1093,10 @@ def _handle_overview_report(
                 # denominator instead of repeating it.
                 {'title': 'Waste per Head', 'value': waste_per_head, 'headcount': headcount},
             ],
-            'chart_data': chart_data
+            'chart_data': chart_data,
+            'daily_data': daily_data,
         },
+        'report_mode': report_mode,
         'waste_type_proportions': waste_type_proportions,
         'material_summary': [],
         'traceability_fully_managed': traceability_fully_managed,
@@ -1473,14 +1612,16 @@ def _handle_performance_report(
     )
 
     setup_data = organization_setup.get('data')
-    if not setup_data or not setup_data.get('root_nodes'):
+    report_mode = _report_mode(filters)
+    # Tag / tenant mode groups by those ids, not by the location tree, so it doesn't need one.
+    if report_mode == 'location' and (not setup_data or not setup_data.get('root_nodes')):
         return {
             'success': True,
             'data': [],
             'message': 'No organization setup found'
         }
 
-    root_nodes = setup_data.get('root_nodes', [])
+    root_nodes = (setup_data or {}).get('root_nodes', [])
 
     # Use optimized single-query path (same as overview)
     result = reports_service.get_overview_data(
@@ -1489,6 +1630,7 @@ def _handle_performance_report(
         current_user_id=current_user_id
     )
     rows = result.get('rows', [])
+    group_records_map: Dict[Any, list] = {}   # tag/tenant id (None = unassigned) → record tuples
 
     from .recycling_rate_helper import compute_recycling_rate, fetch_group_leaf_data
 
@@ -1498,12 +1640,12 @@ def _handle_performance_report(
     location_records_map: Dict[int, list] = {}
     perf_record_ids = []
     for row in rows:
-        # Unpack all 20 columns from get_overview_data query
+        # Unpack the first 20 columns from get_overview_data (20/21 = tag/tenant ids)
         (origin_qty, txn_date, txn_id, origin_id, status,
          unit_weight, calc_ghg, mat_category_id, mat_main_material_id, material_tags,
          origin_weight_kg, record_category_id, record_main_material_id,
          _mat_id, _mat_name_en, _mat_name_th,
-         _disposal_method, _record_status, _traceability_group_id, record_id) = row
+         _disposal_method, _record_status, _traceability_group_id, record_id) = row[:20]
 
         # Use Material category as primary source (matches old reportUtils logic)
         category_id = mat_category_id or record_category_id
@@ -1511,6 +1653,16 @@ def _handle_performance_report(
 
         if status == TransactionStatus.rejected:
             continue
+        if report_mode != 'location':
+            group_records_map.setdefault(_row_group_id(row, report_mode), []).append((
+                float(origin_qty or 0),
+                float(unit_weight or 0),
+                int(category_id) if category_id is not None else None,
+                int(main_material_id) if main_material_id is not None else None,
+                float(calc_ghg or 0),
+                record_id,
+            ))
+            perf_record_ids.append(record_id)
         if origin_id:
             if origin_id not in location_records_map:
                 location_records_map[origin_id] = []
@@ -1551,9 +1703,14 @@ def _handle_performance_report(
             (qty, uw, cat, mm, ghg, perf_record_to_group.get(rid))
             for qty, uw, cat, mm, ghg, rid in location_records_map[loc_id]
         ]
+    for grp in group_records_map:
+        group_records_map[grp] = [
+            (qty, uw, cat, mm, ghg, perf_record_to_group.get(rid))
+            for qty, uw, cat, mm, ghg, rid in group_records_map[grp]
+        ]
     all_group_ids = {
         group_id
-        for records in location_records_map.values()
+        for records in list(location_records_map.values()) + list(group_records_map.values())
         for *_prefix, group_id in records
         if group_id is not None
     }
@@ -1636,6 +1793,53 @@ def _handle_performance_report(
             'recyclingRatePercent': round(recycling_rate, 2),
             'recyclable_weight': round(recyclable_weight, 2),
             'general_weight': round(general_weight, 2)
+        }
+
+    if report_mode != 'location':
+        # One summary row for the whole scope + one row per tag/tenant, in the same shape
+        # the location view uses (branch with `buildings`), so the web tab and the PDF
+        # render it with the same components. Unassigned records stay in as their own row
+        # (flagged) so the rows add up to the summary.
+        names = _fetch_group_names(reports_service.db, report_mode, {g for g in group_records_map if g is not None})
+        for gid in [g for g in group_records_map if g is not None and g not in names]:
+            group_records_map.setdefault(None, []).extend(group_records_map.pop(gid))
+        groups = []
+        for gid, recs in group_records_map.items():
+            calc = calculate_metrics(recs)
+            if calc['totalWasteKg'] == 0:
+                continue
+            groups.append({
+                'id': str(gid) if gid is not None else 'none',
+                'unassigned': gid is None,
+                'buildingName': names.get(gid, str(gid)) if gid is not None else None,
+                'branchName': names.get(gid, str(gid)) if gid is not None else None,
+                'totalWasteKg': calc['totalWasteKg'],
+                'metrics': calc['metrics'],
+                'recyclingRatePercent': calc['recyclingRatePercent'],
+                'recyclable_weight': calc['recyclable_weight'],
+                'general_weight': calc['general_weight'],
+            })
+        groups.sort(key=lambda g: (g['unassigned'], -g['totalWasteKg']))
+        summary = calculate_metrics([r for recs in group_records_map.values() for r in recs])
+        data = []
+        if summary['totalWasteKg'] > 0:
+            data = [{
+                'id': 'all',
+                'branchName': None,          # label comes from the mode ("all tenants" / "all tags")
+                'totalWasteKg': summary['totalWasteKg'],
+                'metrics': summary['metrics'],
+                'recyclingRatePercent': summary['recyclingRatePercent'],
+                'recyclable_weight': summary['recyclable_weight'],
+                'general_weight': summary['general_weight'],
+                'buildings': groups,
+            }]
+        return {
+            'success': True,
+            'data': data,
+            'groups': groups,
+            'report_mode': report_mode,
+            'message': 'Performance report generated successfully',
+            'traceability_fully_managed': perf_all_fully_traced,
         }
 
     # Determine the maximum depth of the hierarchy
@@ -1763,6 +1967,7 @@ def _handle_performance_report(
     return {
         'success': True,
         'data': performance_data,
+        'report_mode': 'location',
         'message': 'Performance report generated successfully',
         'traceability_fully_managed': perf_all_fully_traced,
     }
@@ -1775,11 +1980,12 @@ def _handle_comparison_report(
     client_timezone: Optional[str] = None
 ) -> Dict[str, Any]:
     """Handle /api/reports/comparison endpoint
-    
-    Uses date_from and date_to from filters to define the period.
-    Left side: same period but in the previous year (last_year)
-    Right side: the selected period (date_from to date_to)
-    The period will never exceed 1 year and will never cross years.
+
+    compare_mode "yearly": the selected range vs the same range one year earlier
+    (range within one calendar year, ≤ 365 days). compare_mode "monthly": the selected
+    days vs the same days one month earlier (range within one month). Both sides are
+    clamped to today. left = the earlier period, right = the selected one. Also returns
+    the Risks / Opportunities / Quick wins cards for the report mode (report_rules.json).
     """
     
     # Get date range from filters (required for comparison)
@@ -1823,79 +2029,44 @@ def _handle_comparison_report(
     from_date = from_local.date()
     to_date = to_local.date()
     
-    # Validate period doesn't exceed 1 year
-    delta_days = (to_date - from_date).days
-    if delta_days > 365:
-        raise ValidationException("Comparison period cannot exceed 1 year")
-    
-    # Check if dates are in the same calendar year (in client timezone)
-    if from_date.year != to_date.year:
-        raise ValidationException("Comparison period cannot cross years")
-    
-    # Calculate left period: same period but in the previous year
-    # Handle leap year edge cases:
-    #   - Feb 29 in leap year -> Feb 28 in non-leap year
-    #   - Feb 28 (end of Feb in non-leap year) -> Feb 29 if previous year is leap year
-    #
-    # CRITICAL: do calendar arithmetic on the **client-locale** representation, not
-    # on the UTC-shifted one. A user picking "March 1 Bangkok" stores as
-    # "2026-02-28T17:00:00+00:00" in UTC; extracting .month from UTC yields 2 and
-    # would falsely trigger the Feb-29 branch.
-    import calendar
+    compare_mode = filters.get('compare_mode') if filters.get('compare_mode') in ('yearly', 'monthly') else 'yearly'
+    report_mode = _report_mode(filters)
 
-    def subtract_year(dt: datetime, is_end_date: bool = False) -> datetime:
-        # Project the UTC instant into client TZ for calendar reasoning, then
-        # rebuild the equivalent UTC instant for the previous year.
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        local = dt.astimezone(client_tz)
-        prev_year = local.year - 1
-        if local.month == 2 and local.day == 29:
-            adjusted_local = local.replace(year=prev_year, day=28)
-        elif is_end_date and local.month == 2 and local.day == 28 \
-                and not calendar.isleap(local.year) and calendar.isleap(prev_year):
-            adjusted_local = local.replace(year=prev_year, day=29)
-        else:
-            adjusted_local = local.replace(year=prev_year)
-        return adjusted_local.astimezone(timezone.utc)
+    if compare_mode == 'monthly':
+        # Same days one month earlier, so the range has to sit inside one calendar month.
+        if (from_date.year, from_date.month) != (to_date.year, to_date.month):
+            raise ValidationException("Monthly comparison needs a date range within one month")
+    else:
+        # Validate period doesn't exceed 1 year
+        delta_days = (to_date - from_date).days
+        if delta_days > 365:
+            raise ValidationException("Comparison period cannot exceed 1 year")
+        # Check if dates are in the same calendar year (in client timezone)
+        if from_date.year != to_date.year:
+            raise ValidationException("Comparison period cannot cross years")
 
-    left_from_dt = subtract_year(right_from_dt)
-    left_to_dt = subtract_year(right_to_dt, is_end_date=True)
-    
-    # Ensure timezone is UTC for left dates
-    if left_from_dt.tzinfo is None:
-        left_from_dt = left_from_dt.replace(tzinfo=timezone.utc)
-    else:
-        left_from_dt = left_from_dt.astimezone(timezone.utc)
-    if left_to_dt.tzinfo is None:
-        left_to_dt = left_to_dt.replace(tzinfo=timezone.utc)
-    else:
-        left_to_dt = left_to_dt.astimezone(timezone.utc)
-    
-    # Convert back to ISO strings in consistent UTC format (+00:00)
-    left_from = left_from_dt.strftime('%Y-%m-%dT%H:%M:%S.%f') + '+00:00'
-    left_to = left_to_dt.strftime('%Y-%m-%dT%H:%M:%S.%f') + '+00:00'
-    # Right dates should already be in UTC format from filters, but ensure consistency
-    right_from = date_from
-    right_to = date_to
+    from .report_insights import build_report_insights, comparison_periods, range_label, MONTHS_EN, MONTHS_TH
+
+    # Both periods are clamped to today: "this year so far" against the same days last
+    # year, never against the whole previous year.
+    today_local = datetime.now(client_tz).date()
+    cur_start, cur_end, prev_start, prev_end = comparison_periods(from_date, to_date, today_local, compare_mode)
+
+    def _utc_bounds(start, end):
+        s = datetime(start.year, start.month, start.day, tzinfo=client_tz).astimezone(timezone.utc)
+        e = datetime(end.year, end.month, end.day, 23, 59, 59, 999000, tzinfo=client_tz).astimezone(timezone.utc)
+        fmt = lambda d: d.strftime('%Y-%m-%dT%H:%M:%S.%f') + '+00:00'
+        return fmt(s), fmt(e)
 
     _comparison_user_id = (current_user or {}).get('user_id') or (current_user or {}).get('id')
 
-    def fetch_side_fast(side_date_from: str, side_date_to: str) -> Dict[str, Any]:
-        """Fetch one side using the lightweight get_overview_data query."""
-        side_filters: Dict[str, Any] = {
-            'date_from': side_date_from,
-            'date_to': side_date_to,
-        }
-        if filters.get('material_ids'):
-            side_filters['material_ids'] = filters['material_ids']
-        # New multi-select location/tag/tenant filters (same convention as the other tabs).
-        if filters.get('location_ids'):
-            side_filters['location_ids'] = filters['location_ids']
-        if filters.get('filter_tag_ids'):
-            side_filters['filter_tag_ids'] = filters['filter_tag_ids']
-        if filters.get('filter_tenant_ids'):
-            side_filters['filter_tenant_ids'] = filters['filter_tenant_ids']
+    def fetch_rows(start, end):
+        d_from, d_to = _utc_bounds(start, end)
+        side_filters: Dict[str, Any] = {'date_from': d_from, 'date_to': d_to}
+        # Same location/tag/tenant/material conventions as the other tabs.
+        for key in ('material_ids', 'location_ids', 'filter_tag_ids', 'filter_tenant_ids', 'destination_ids'):
+            if filters.get(key):
+                side_filters[key] = filters[key]
         if filters.get('origin_combos'):
             side_filters['origin_combos'] = filters['origin_combos']
         elif filters.get('origin_ids'):
@@ -1904,628 +2075,142 @@ def _handle_comparison_report(
                 side_filters['location_tag_id'] = filters['location_tag_id']
             if filters.get('tenant_id') is not None:
                 side_filters['tenant_id'] = filters['tenant_id']
-
         return reports_service.get_overview_data(
             organization_id=organization_id,
             filters=side_filters,
             current_user_id=_comparison_user_id,
             report_type='comparison'
-        )
+        ).get('rows', [])
 
-    left_result = fetch_side_fast(left_from, left_to)
-    right_result = fetch_side_fast(right_from, right_to)
+    cur_rows = fetch_rows(cur_start, cur_end)
+    prev_rows = fetch_rows(prev_start, prev_end)
 
-    # Look up GENERAL_WASTE main_material_id once for waste-to-energy splitting
-    _gw_mm_id = _get_general_waste_mm_id(reports_service.db)
+    # Tuple: (origin_qty, txn_date, txn_id, origin_id, status, unit_weight, calc_ghg,
+    #         mat_cat_id, mat_mm_id, material_tags, origin_weight_kg, rec_cat_id,
+    #         rec_mm_id, material_id, material_name_en, material_name_th, ..., tag_id, tenant_id)
+    cat_ids: set = set()
+    mm_ids: set = set()
+    group_ids: set = set()
+    for row in list(cur_rows) + list(prev_rows):
+        if row[7] or row[11]:
+            cat_ids.add(int(row[7] or row[11]))
+        if row[8] or row[12]:
+            mm_ids.add(int(row[8] or row[12]))
+        gid = _row_group_id(row, report_mode)
+        if gid is not None:
+            group_ids.add(gid)
+    cat_names = _fetch_category_names_bilingual(reports_service.db, cat_ids)
+    mm_names = _fetch_main_material_names_bilingual(reports_service.db, mm_ids)
+    group_names = _fetch_group_names(reports_service.db, report_mode, group_ids)
 
-    def _month_labels_in_range(start_iso: Optional[str], end_iso: Optional[str]) -> Optional[list]:
-        start_dt = _parse_datetime(start_iso)
-        end_dt = _parse_datetime(end_iso)
-        if not start_dt or not end_dt:
-            return None
-        # Convert to Bangkok so labels reflect the user-visible range, not UTC.
-        bkk = ZoneInfo('Asia/Bangkok')
-        if start_dt.tzinfo is None:
-            start_dt = start_dt.replace(tzinfo=timezone.utc)
-        if end_dt.tzinfo is None:
-            end_dt = end_dt.replace(tzinfo=timezone.utc)
-        start_local = start_dt.astimezone(bkk)
-        end_local = end_dt.astimezone(bkk)
-        labels = []
-        y, m = start_local.year, start_local.month
-        while (y < end_local.year) or (y == end_local.year and m <= end_local.month):
-            labels.append(datetime(2000, m, 1).strftime('%b'))
-            m += 1
-            if m > 12:
-                m = 1
-                y += 1
-        return labels
-
-    def build_grouped_fast(result: Dict[str, Any], start_iso: Optional[str], end_iso: Optional[str]) -> Dict[str, Any]:
-        """Aggregate lightweight tuples from get_overview_data into comparison grouped data."""
-        rows = result.get('rows', [])
-
-        material_map: Dict[str, float] = {}
-        month_map: Dict[str, float] = {}
-        cat_mm_map: Dict[Tuple[int, int], float] = {}
-        total_waste = 0.0
-        category_ids: set = set()
-
-        # Single pass: aggregate weights and collect category IDs
+    def to_records(rows) -> list:
+        out = []
         for row in rows:
-            # Tuple: (origin_qty, txn_date, txn_id, origin_id, status,
-            #         unit_weight, calc_ghg, mat_cat_id, mat_mm_id, material_tags,
-            #         origin_weight_kg, rec_cat_id, rec_mm_id, material_id,
-            #         material_name_en, material_name_th, disposal_method, record_status)
+            if row[4] == TransactionStatus.rejected:
+                continue
             origin_qty = float(row[0] or 0)
-            txn_date = row[1]
-            status = row[4]
             unit_weight = float(row[5] or 0)
-            origin_weight_kg = float(row[10] or 0)
-            cat_id = row[7] or row[11]
-            mm_id = row[8] or row[12]
-
-            if status == TransactionStatus.rejected:
+            weight = origin_qty * unit_weight if unit_weight > 0 else float(row[10] or 0)
+            txn_date = row[1]
+            if not txn_date or weight <= 0:
                 continue
-
-            weight = origin_qty * unit_weight if unit_weight > 0 else origin_weight_kg
-            if not txn_date:
-                continue
-
             dt = txn_date if isinstance(txn_date, datetime) else _parse_datetime(str(txn_date))
             if not dt:
                 continue
-
-            # Bucket by Bangkok month to match the SQL date-range filter
-            # (otherwise UTC month can split data across adjacent months).
             if dt.tzinfo is None:
-                dt_local = dt.replace(tzinfo=timezone.utc).astimezone(ZoneInfo('Asia/Bangkok'))
-            else:
-                dt_local = dt.astimezone(ZoneInfo('Asia/Bangkok'))
+                dt = dt.replace(tzinfo=timezone.utc)
+            cat_id = row[7] or row[11]
+            mm_id = row[8] or row[12]
+            cat_en = (cat_names.get(int(cat_id)) or {}).get('name_en') if cat_id else None
+            if cat_id and int(cat_id) == _WASTE_TO_ENERGY_CAT_ID:
+                cat_en = 'Waste To Energy'   # one display name, whatever the DB row says
+            gid = _row_group_id(row, report_mode)
+            if gid not in group_names:
+                gid = None
+            out.append({
+                'date': dt.astimezone(client_tz).date(),
+                'kg': weight,
+                'category_en': cat_en or 'Other',
+                'main_material_en': (mm_names.get(int(mm_id)) or {}).get('name_en') if mm_id else '',
+                'material_en': row[14] or '',
+                'material_th': row[15] or '',
+                'tx_id': row[2],
+                'group_id': gid,
+                'group_name': group_names.get(gid) if gid is not None else None,
+            })
+        return out
 
-            if cat_id is not None:
-                try:
-                    cat_id_int = int(cat_id)
-                except Exception:
-                    continue
-                category_ids.add(cat_id_int)
+    cur_records = [r for r in to_records(cur_rows) if cur_start <= r['date'] <= cur_end]
+    prev_records = [r for r in to_records(prev_rows) if prev_start <= r['date'] <= prev_end]
 
-                month_label = datetime(2000, dt_local.month, 1).strftime('%b')
-                total_waste += weight
-                month_map[month_label] = month_map.get(month_label, 0.0) + weight
+    # Buckets for the quantity chart / table, aligned between the two periods:
+    # yearly → calendar months of the selected range; monthly → day numbers of the range.
+    # Both stop at the clamped end, so a range running into the future has no empty columns.
+    bucket_end = cur_end if cur_end >= from_date else to_date
+    if compare_mode == 'yearly':
+        bucket_keys = list(range(from_date.month, bucket_end.month + 1))
+        key_of = lambda d: d.month
+        bucket_label = lambda k, lang: (MONTHS_TH if lang == 'th' else MONTHS_EN)[k - 1]
+    else:
+        bucket_keys = list(range(from_date.day, bucket_end.day + 1))
+        key_of = lambda d: d.day
+        bucket_label = lambda k, lang: str(k)
 
-                # Will be resolved to name below
-                material_map[cat_id_int] = material_map.get(cat_id_int, 0.0) + weight
-
-                if mm_id is not None:
-                    try:
-                        key = (cat_id_int, int(mm_id))
-                        cat_mm_map[key] = cat_mm_map.get(key, 0.0) + weight
-                    except Exception:
-                        pass
-
-        # Fetch category names and resolve material_map keys to names
-        category_names = _fetch_category_names(reports_service.db, category_ids)
-        named_map: Dict[str, float] = {}
-        for cid, w in material_map.items():
-            name = category_names.get(cid, f"Category {cid}")
-            named_map[name] = named_map.get(name, 0.0) + w
-
-        # Split Waste to Energy out of General Waste
-        _split_waste_to_energy(named_map, cat_mm_map, _gw_mm_id, category_names)
-
-        # Order months chronologically
-        ordered_month_map: Dict[str, float] = {}
-        month_labels = _month_labels_in_range(start_iso, end_iso)
-        if month_labels is None:
-            for m in ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']:
-                if m in month_map:
-                    ordered_month_map[m] = month_map[m]
-        else:
-            for m in month_labels:
-                ordered_month_map[m] = month_map.get(m, 0.0)
-
-        # Sort materials desc
-        ordered_material_map: Dict[str, float] = dict(sorted(named_map.items(), key=lambda kv: kv[1], reverse=True))
-
-        # Round values
-        EPS = 1e-6
-        def clamp_round(x: float) -> float:
-            return 0.0 if -EPS < x < EPS else round(x, 2)
-
-        ordered_material_map = {k: clamp_round(v) for k, v in ordered_material_map.items()}
-        ordered_month_map = {k: clamp_round(v) for k, v in ordered_month_map.items()}
-        total_waste = clamp_round(total_waste)
-
-        return {
-            'material': ordered_material_map,
-            'month': ordered_month_map,
-            'total_waste_kg': total_waste,
-        }
-
-    left_grouped = build_grouped_fast(left_result, left_from, left_to)
-    right_grouped = build_grouped_fast(right_result, right_from, right_to)
-
-    # === Compute comparison scores from CSV (c = current/right, l = last/left) ===
-    def _sum_categories(material_map: Dict[str, float], patterns: list[str]) -> float:
-        if not material_map:
-            return 0.0
+    def side(records, start, end) -> Dict[str, Any]:
+        material: Dict[str, float] = {}
+        buckets = {k: 0.0 for k in bucket_keys}
         total = 0.0
-        for name, val in material_map.items():
-            n = (name or "").lower()
-            for p in patterns:
-                if p in n:
-                    total += float(val or 0)
-                    break
-        return total
-
-    def _build_variables(left_map: Dict[str, float], right_map: Dict[str, float]) -> Dict[str, float]:
-        # Define category match patterns (case-insensitive substrings)
-        patterns = {
-            'recyclable': ['recycl'],
-            'general': ['general'],
-            'hazardous': ['hazardous'],
-            'bio_hazardous': ['bio-hazard', 'biohazard', 'bio_hazard'],
-            'organic': ['organic'],
-            'waste_to_energy': ['waste to energy', 'waste-to-energy', 'waste_to_energy'],
-            'construction': ['construction'],
-            'electronic': ['electronic', 'e-waste', 'ewaste']
+        for r in records:
+            material[r['category_en']] = material.get(r['category_en'], 0.0) + r['kg']
+            k = key_of(r['date'])
+            if k in buckets:
+                buckets[k] += r['kg']
+            total += r['kg']
+        return {
+            'from': start.isoformat(),
+            'to': end.isoformat(),
+            'label_th': range_label(start, end, 'th'),
+            'label_en': range_label(start, end, 'en'),
+            'year': start.year,
+            'material': {k: round(v, 2) for k, v in sorted(material.items(), key=lambda kv: kv[1], reverse=True)},
+            # Legacy key the month chart read ('Jan' → kg); day numbers in monthly mode.
+            'month': {(MONTHS_EN[k - 1] if compare_mode == 'yearly' else str(k)): round(buckets[k], 2) for k in bucket_keys},
+            'total_waste_kg': round(total, 2),
         }
-        # Ensure hazardous doesn't double-count bio-hazardous
-        # We will subtract bio-hazardous portion from hazardous if both match
-        def compute_side(side_map: Dict[str, float]) -> Dict[str, float]:
-            vals: Dict[str, float] = {}
-            for key, pats in patterns.items():
-                vals[key] = _sum_categories(side_map, pats)
-            # Adjust hazardous to exclude bio_hazardous if both were matched
-            if vals['hazardous'] and vals['bio_hazardous']:
-                # Try to exclude if names overlap; conservative approach keeps as-is to avoid over-subtraction
-                pass
-            return vals
 
-        l_vals = compute_side(left_map or {})
-        c_vals = compute_side(right_map or {})
-
-        variables: Dict[str, float] = {}
-        for k, v in l_vals.items():
-            variables[f'l_{k}'] = float(v or 0)
-        for k, v in c_vals.items():
-            variables[f'c_{k}'] = float(v or 0)
-        return variables
-
-    def _safe_eval_formula(formula: str, variables: Dict[str, float]) -> float:
-        # Allow only names, numbers, + - * / ( ) and unary +/-
-        allowed_nodes = (
-            ast.Expression, ast.BinOp, ast.UnaryOp, ast.Num, ast.Constant, ast.Name,
-            ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow, ast.USub, ast.UAdd, ast.Load,
-            ast.Call  # disallow; we'll block below
-        )
-
-        class SafeVisitor(ast.NodeVisitor):
-            def visit(self, node):
-                if not isinstance(node, allowed_nodes):
-                    raise ValueError('Disallowed expression in formula')
-                # Disallow any function calls explicitly
-                if isinstance(node, ast.Call):
-                    raise ValueError('Function calls are not allowed in formula')
-                # Only permit variable names present in variables map
-                if isinstance(node, ast.Name) and node.id not in variables:
-                    # Treat unknown names as zero to make formulas resilient
-                    # Alternatively, raise ValueError
-                    pass
-                self.generic_visit(node)
-
-        try:
-            tree = ast.parse(formula, mode='eval')
-            SafeVisitor().visit(tree)
-            code = compile(tree, '<formula>', 'eval')
-            # Unknown names default to 0 via dict subclass
-            class ZeroDict(dict):
-                def __missing__(self, key):
-                    return 0.0
-            return float(eval(code, {"__builtins__": {}}, ZeroDict(variables)))
-        except Exception:
-            return 0.0
-
-    def _load_scores_csv() -> list[Dict[str, Any]]:
-        # Resolve CSV path relative to project root
-        base_dir = os.path.dirname(__file__)  # .../GEPPPlatform/services/cores/reports
-        csv_candidates = [
-            os.path.normpath(os.path.join(base_dir, '../../../../GEPPCriteria/compairingScore.csv')),
-            os.path.normpath(os.path.join(base_dir, '../../../GEPPCriteria/compairingScore.csv')),
-            'GEPPCriteria/compairingScore.csv'
-        ]
-        path = None
-        for p in csv_candidates:
-            if os.path.exists(p):
-                path = p
-                break
-        rows: list[Dict[str, Any]] = []
-        if not path:
-            return rows
-        try:
-            with open(path, newline='', encoding='utf-8') as f:
-                reader = csv.DictReader(f)
-                for r in reader:
-                    rows.append(r)
-        except Exception:
-            return []
-        return rows
-
-    variables = _build_variables(left_grouped.get('material'), right_grouped.get('material'))
-    score_rows = _load_scores_csv()
-    computed_scores: list[Dict[str, Any]] = []
-    raw_computations: list[Dict[str, Any]] = []
-
-    # Build a lookup from score_name -> set of material categories referenced in its formula
-    def _extract_categories_from_formula(formula: str) -> set[str]:
-        try:
-            tree = ast.parse(formula or '0', mode='eval')
-        except Exception:
-            return set()
-        categories: set[str] = set()
-        allowed_keys = {
-            'recyclable', 'general', 'hazardous', 'bio_hazardous',
-            'organic', 'waste_to_energy', 'construction', 'electronic'
-        }
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Name):
-                name = node.id or ''
-                # Expect variables like l_recyclable, c_general, etc.
-                if name.startswith('l_') or name.startswith('c_'):
-                    base = name.split('_', 1)[1] if '_' in name else ''
-                    if base in allowed_keys:
-                        categories.add(base)
-        return categories
-
-    score_to_categories: Dict[str, set[str]] = {}
-
-    # Evaluate all formulas first so we can normalize using dataset-aware scaling.
-    for r in score_rows:
-        try:
-            score_id = int(r.get('id') or 0)
-        except Exception:
-            score_id = 0
-        score_name = (r.get('score_name') or '').strip()
-        description = (r.get('description') or '').strip()
-        reason = (r.get('reason') or '').strip()
-        formula = (r.get('formula') or '').strip()
-        value = _safe_eval_formula(formula, variables)
-        try:
-            raw_value = float(value)
-        except Exception:
-            raw_value = 0.0
-        raw_computations.append({
-            'id': score_id,
-            'score_name': score_name,
-            'description': description,
-            'formula': formula,
-            'raw_value': raw_value,
-            'reason': reason
-        })
-        if score_name:
-            score_to_categories[score_name] = _extract_categories_from_formula(formula)
-
-    finite_raw_values = [v['raw_value'] for v in raw_computations if math.isfinite(v['raw_value'])]
-    min_raw_value = min(finite_raw_values) if finite_raw_values else 0.0
-    max_raw_value = max(finite_raw_values) if finite_raw_values else 0.0
-
-    # Hyperbolic/Logistic normalization with range awareness mapping to [0..10]
-    def _normalize_score_to_ten(
-        raw_value: float,
-        min_value: float,
-        max_value: float,
-        *,
-        method: str = 'tanh',
-        steepness: float = 3.0
-    ) -> float:
-        if not math.isfinite(raw_value):
-            return 5.0
-        if not math.isfinite(min_value):
-            min_value = raw_value
-        if not math.isfinite(max_value):
-            max_value = raw_value
-        if max_value <= min_value:
-            return 5.0
-
-        span = max_value - min_value
-        scaled = (raw_value - min_value) / span  # may exceed 0..1 if value is outside observed range
-        centered = (scaled - 0.5) * 2.0
-        factor = max(min(steepness * centered, 60.0), -60.0)
-
-        if method == 'sigmoid':
-            transformed = 1.0 / (1.0 + math.exp(-factor))
-            normalized = transformed * 10.0
-        else:
-            transformed = math.tanh(factor)
-            normalized = (transformed + 1.0) * 5.0
-
-        return round(normalized, 2)
-
-    for entry in raw_computations:
-        raw_value = entry['raw_value']
-        normalized_value = _normalize_score_to_ten(raw_value, min_raw_value, max_raw_value)
-        computed_scores.append({
-            'id': entry['id'],
-            'score_name': entry['score_name'],
-            'description': entry['description'],
-            'formula': entry['formula'],
-            # Use normalized 0..10 scale for 'value' (lower is worse)
-            'value': normalized_value,
-            # Preserve raw value for debugging/analytics
-            'raw_value': round(float(raw_value), 2) if math.isfinite(raw_value) else 0.0,
-            'reason': entry['reason']
+    left = side(prev_records, prev_start, prev_end)
+    right = side(cur_records, cur_start, cur_end)
+    lb = left['month']
+    rb = right['month']
+    buckets_out = []
+    for k in bucket_keys:
+        key = MONTHS_EN[k - 1] if compare_mode == 'yearly' else str(k)
+        lv, rv = lb.get(key, 0.0), rb.get(key, 0.0)
+        buckets_out.append({
+            'key': key,
+            'label_th': bucket_label(k, 'th'),
+            'label_en': bucket_label(k, 'en'),
+            'left_kg': lv,
+            'right_kg': rv,
+            'change_kg': round(rv - lv, 2),
+            'change_pct': round((rv - lv) / lv * 100.0, 2) if lv > 0 else None,
         })
 
-    # Prepare score values for recommendation evaluation
-    # Use RAW values (0..1000) for conditions in recommendation CSVs
-    score_values: Dict[str, float] = { (s.get('score_name') or '').strip(): float(s.get('raw_value') or 0.0) for s in computed_scores }
-
-    # Evaluate recommendations from CSVs (opportunity, quickwin, riskAssessment)
-    def _safe_eval_condition(expr: str, values: Dict[str, float]) -> bool:
-        normalized = (expr or '').replace('AND', 'and').replace('OR', 'or')
-        allowed_nodes = (
-            ast.Expression, ast.BoolOp, ast.BinOp, ast.UnaryOp, ast.Compare,
-            ast.Name, ast.Load, ast.Constant, ast.Num,
-            ast.And, ast.Or,
-            ast.Add, ast.Sub, ast.Mult, ast.Div, ast.USub, ast.UAdd,
-            ast.Gt, ast.Lt, ast.GtE, ast.LtE, ast.Eq, ast.NotEq
-        )
-
-        class SafeVisitor(ast.NodeVisitor):
-            def visit(self, node):
-                if not isinstance(node, allowed_nodes):
-                    raise ValueError('Disallowed expression in condition')
-                if isinstance(node, ast.Name) and node.id not in values:
-                    # Unknown names default to 0 at eval-time
-                    pass
-                self.generic_visit(node)
-
-        try:
-            tree = ast.parse(normalized, mode='eval')
-            SafeVisitor().visit(tree)
-            code = compile(tree, '<condition>', 'eval')
-            class ZeroDict(dict):
-                def __missing__(self, key):
-                    return 0.0
-            return bool(eval(code, {"__builtins__": {}}, ZeroDict(values)))
-        except Exception:
-            return False
-
-    def _load_recommendations_csv(file_name: str) -> list[Dict[str, Any]]:
-        base_dir = os.path.dirname(__file__)
-        candidates = [
-            os.path.normpath(os.path.join(base_dir, '../../../../GEPPCriteria/recommendations/' + file_name)),
-            os.path.normpath(os.path.join(base_dir, '../../../GEPPCriteria/recommendations/' + file_name)),
-            'GEPPCriteria/recommendations/' + file_name
-        ]
-        path = None
-        for p in candidates:
-            if os.path.exists(p):
-                path = p
-                break
-        rows: list[Dict[str, Any]] = []
-        if not path:
-            return rows
-        try:
-            with open(path, newline='', encoding='utf-8') as f:
-                reader = csv.DictReader(f)
-                for r in reader:
-                    rows.append(r)
-        except Exception:
-            return []
-        return rows
-
-    def _evaluate_recommendations(rows: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
-        # Compute a numeric urgency score for matched conditions, based on how far
-        # actual values exceed their threshold(s) within the condition expression.
-        # Higher score = more urgent.
-        def _eval_numeric_node(node: ast.AST, values: Dict[str, float]) -> float:
-            if isinstance(node, (ast.Num, ast.Constant)):
-                try:
-                    return float(getattr(node, 'n', getattr(node, 'value', 0.0)) or 0.0)
-                except Exception:
-                    return 0.0
-            if isinstance(node, ast.Name):
-                try:
-                    return float(values.get(node.id, 0.0))
-                except Exception:
-                    return 0.0
-            if isinstance(node, ast.UnaryOp):
-                operand_val = _eval_numeric_node(node.operand, values)
-                if isinstance(node.op, ast.USub):
-                    return -operand_val
-                if isinstance(node.op, ast.UAdd):
-                    return +operand_val
-                return 0.0
-            if isinstance(node, ast.BinOp):
-                left_val = _eval_numeric_node(node.left, values)
-                right_val = _eval_numeric_node(node.right, values)
-                if isinstance(node.op, ast.Add):
-                    return left_val + right_val
-                if isinstance(node.op, ast.Sub):
-                    return left_val - right_val
-                if isinstance(node.op, ast.Mult):
-                    return left_val * right_val
-                if isinstance(node.op, ast.Div):
-                    try:
-                        return left_val / right_val if right_val != 0 else 0.0
-                    except Exception:
-                        return 0.0
-                return 0.0
-            return 0.0
-
-        def _compare_severity(left_val: float, op: ast.AST, right_val: float) -> float:
-            # Distance beyond threshold when the comparison is true
-            try:
-                if isinstance(op, ast.Gt):
-                    return max(0.0, left_val - right_val)
-                if isinstance(op, ast.GtE):
-                    return max(0.0, left_val - right_val)
-                if isinstance(op, ast.Lt):
-                    return max(0.0, right_val - left_val)
-                if isinstance(op, ast.LtE):
-                    return max(0.0, right_val - left_val)
-                if isinstance(op, ast.Eq):
-                    # Exact match implies no urgency
-                    return 0.0
-                if isinstance(op, ast.NotEq):
-                    # Not equal matched; minimal urgency unit
-                    return 1.0
-            except Exception:
-                return 0.0
-            return 0.0
-
-        def _severity_from_ast(node: ast.AST, values: Dict[str, float]) -> float:
-            # AND: sum severities; OR: max severities
-            if isinstance(node, ast.BoolOp):
-                child_severities = [_severity_from_ast(v, values) for v in node.values]
-                if isinstance(node.op, ast.And):
-                    return sum(child_severities)
-                if isinstance(node.op, ast.Or):
-                    return max(child_severities) if child_severities else 0.0
-                return 0.0
-            if isinstance(node, ast.Compare):
-                # Handle chained comparisons: a < b < c
-                total = 0.0
-                left_val = _eval_numeric_node(node.left, values)
-                for op, comp in zip(node.ops, node.comparators):
-                    right_val = _eval_numeric_node(comp, values)
-                    total += _compare_severity(left_val, op, right_val)
-                    left_val = right_val
-                return total
-            # Allow nested expressions
-            if isinstance(node, (ast.BinOp, ast.UnaryOp, ast.Name, ast.Num, ast.Constant)):
-                # Not a comparison by itself -> severity 0
-                return 0.0
-            return 0.0
-
-        def _compute_condition_severity(expr: str, values: Dict[str, float]) -> float:
-            try:
-                normalized = (expr or '').replace('AND', 'and').replace('OR', 'or')
-                tree = ast.parse(normalized, mode='eval')
-                return float(_severity_from_ast(tree.body, values))
-            except Exception:
-                return 0.0
-
-        results: list[Dict[str, Any]] = []
-        for r in rows:
-            criterior = (r.get('criterior') or '').strip()
-            if not criterior:
-                continue
-            # Collect variables used in the criterior for transparency
-            used_vars: set[str] = set()
-            try:
-                expr_tree = ast.parse(criterior.replace('AND', 'and').replace('OR', 'or'), mode='eval')
-                for node in ast.walk(expr_tree):
-                    if isinstance(node, ast.Name):
-                        used_vars.add(node.id)
-            except Exception:
-                used_vars = set()
-
-            var_values: Dict[str, float] = {name: float(score_values.get(name, 0.0)) for name in used_vars}
-            matched = _safe_eval_condition(criterior, score_values)
-            urgency_score = _compute_condition_severity(criterior, score_values) if matched else 0.0
-            try:
-                rid = int(r.get('id') or 0)
-            except Exception:
-                rid = 0
-            # Determine which material categories are involved based on referenced scores in the criterior
-            materials_used: list[str] = sorted({
-                cat
-                for var in used_vars
-                for cat in (score_to_categories.get(var) or set())
-            })
-            results.append({
-                'id': rid,
-                'condition_name': (r.get('condition_name') or '').strip(),
-                'condition_name_en': (r.get('condition_name_en') or '').strip(),
-                'condition_name_th': (r.get('condition_name_th') or '').strip(),
-                'criterior': criterior,
-                'matched': bool(matched),
-                'urgency_score': round(float(urgency_score), 2),
-                'variables': var_values,
-                'materials_used': materials_used,
-                'risk_problems': (r.get('risk_problems') or '').strip(),
-                'recommendation': (r.get('recommendation') or '').strip(),
-                'risk_bullets_th': (r.get('risk_bullets_th') or '').strip(),
-                'recommendation_bullets_th': (r.get('recommendation_bullets_th') or '').strip(),
-                'risk_bullets_en': (r.get('risk_bullets_en') or '').strip(),
-                'recommendation_bullets_en': (r.get('recommendation_bullets_en') or '').strip()
-            })
-        # Sort: matched first, then by urgency_score desc, stable otherwise
-        results.sort(key=lambda x: (not x.get('matched', False), -float(x.get('urgency_score', 0.0))))
-        return results
-
-    opportunity_rows = _load_recommendations_csv('opportunity.csv')
-    quickwin_rows = _load_recommendations_csv('quickwin.csv')
-    risk_rows = _load_recommendations_csv('riskAssessment.csv')
-
-    opportunities = _evaluate_recommendations(opportunity_rows)
-    quickwins = _evaluate_recommendations(quickwin_rows)
-    risks = _evaluate_recommendations(risk_rows)
-
-    # Normalize urgency across categories so they are directly comparable
-    def _normalize_global_urgency() -> None:
-        # Optional category weights if needed in future customizations
-        category_weights: Dict[str, float] = {
-            'opportunities': 1.0,
-            'quickwins': 1.0,
-            'risks': 1.0
-        }
-        grouped = [
-            ('opportunities', opportunities),
-            ('quickwins', quickwins),
-            ('risks', risks)
-        ]
-        # Compute weighted urgency (currently equal weights)
-        for cat_name, items in grouped:
-            weight = float(category_weights.get(cat_name, 1.0))
-            for it in items:
-                base = float(it.get('urgency_score', 0.0))
-                it['weighted_urgency'] = base * weight if it.get('matched') else 0.0
-        # Find global max among matched items for normalization
-        try:
-            global_max = max(
-                (float(it.get('weighted_urgency', 0.0)) for cat, items in grouped for it in items if it.get('matched')),
-                default=0.0
-            )
-        except Exception:
-            global_max = 0.0
-        # Assign normalized urgency [0..100] and priority bands
-        for _, items in grouped:
-            for it in items:
-                wu = float(it.get('weighted_urgency', 0.0))
-                norm = (wu / global_max * 100.0) if global_max > 0 else 0.0
-                it['urgency_normalized'] = round(norm, 2)
-                s = it['urgency_normalized']
-                if s >= 80.0:
-                    priority = 'high'
-                elif s >= 50.0:
-                    priority = 'medium'
-                elif s >= 20.0:
-                    priority = 'low'
-                else:
-                    priority = 'info'
-                it['priority'] = priority
-        # Re-sort each list by matched first, then normalized urgency desc
-        for _, items in grouped:
-            items.sort(key=lambda x: (not x.get('matched', False), -float(x.get('urgency_normalized', 0.0))))
-            # Return only the top 2 items by urgency_normalized
-            items[:] = items[:2]
-
-    _normalize_global_urgency()
+    insights = build_report_insights(
+        cur_records, prev_records, cur_start, cur_end, prev_start, prev_end,
+        today_local, mode=report_mode, compare_mode=compare_mode,
+    )
 
     return {
         'success': True,
-        'left': left_grouped,
-        'right': right_grouped,
-        'scores': {
-            'metrics': computed_scores,
-            'opportunities': opportunities,
-            'quickwins': quickwins,
-            'risks': risks
-        },
+        'mode': compare_mode,
+        'compare_mode': compare_mode,
+        'report_mode': report_mode,
+        'clamped': cur_end < to_date,
+        'left': left,
+        'right': right,
+        'buckets': buckets_out,
+        'scores': insights['scores'],
         'message': 'Comparison report generated successfully'
     }
 
@@ -2727,10 +2412,38 @@ def _handle_export_pdf_report(
         diversion = None
         comparison = None
     
+    # 0) Report presentation settings: what the page sent, else the user's saved
+    #    preferences (scheduled exports have no page), else the defaults.
+    try:
+        from ..users.user_preferences_service import UserPreferencesService
+        _uid = (current_user or {}).get('id') or (current_user or {}).get('user_id')
+        _prefs = UserPreferencesService(reports_service.db).get(_uid)['report_preferences'] if _uid else {}
+    except Exception as e:  # preferences are a convenience; never fail an export over them
+        logger.warning("[export] could not read report preferences: %s", e)
+        _prefs = {}
+    filters = dict(filters or {})
+    filters.setdefault('report_mode', _prefs.get('mode', 'location'))
+    filters.setdefault('overview_chart', _prefs.get('overview_chart', 'monthly'))
+    filters.setdefault('compare_mode', _prefs.get('compare_mode', 'yearly'))
+    report_mode = _report_mode(filters)
+
     # 1) Pull data from the existing handlers/services
     overview = _handle_overview_report(reports_service, organization_id, filters, current_user)
     performance = _handle_performance_report(reports_service, organization_id, filters, current_user)
     materials = _handle_materials_report(reports_service, organization_id, filters, current_user)
+
+    # Impact figures read by title BEFORE the titles are translated below.
+    _stats = (overview.get('overall_charts', {}) or {}).get('chart_stat_data', []) or []
+    _stat_by_title = {st.get('title'): st.get('value') for st in _stats}
+    _per_head = next((st for st in _stats if st.get('title') == 'Waste per Head'), {}) or {}
+    overview_impact = {
+        'recycled_kg': _stat_by_title.get('Total Recyclables') or 0,
+        'trees': _stat_by_title.get('Number of Trees') or 0,
+        'plastic_saved_kg': _stat_by_title.get('Plastic Saved') or 0,
+        # None = nobody in scope has a headcount → "—", never a believable 0
+        'waste_per_head': _per_head.get('value'),
+        'headcount': _per_head.get('headcount'),
+    }
 
     # Translate overview data based on language
     if language == 'th':
@@ -2777,11 +2490,22 @@ def _handle_export_pdf_report(
             diversion = {'error': 'Please select valid date range. The date range must be within a single year and not exceed 365 days'}
     
     export_tz = current_user.get('timezone') or 'Asia/Bangkok'
-    if comparison is None:
+    if comparison is None or filters.get('compare_mode') == 'monthly':
         try:
             comparison = _handle_comparison_report(reports_service, organization_id, filters, current_user=current_user, client_timezone=export_tz)
         except ValidationException as e:
-            comparison = {'error': 'Please select valid date range. The date range must be within a single year and not exceed 365 days'}
+            # The export still goes out: the comparison pages explain that the range can't be
+            # compared and suggest one that can (the other pages use the full range as usual).
+            if filters.get('compare_mode') == 'monthly':
+                comparison = {'error': ('โหมดเปรียบเทียบรายเดือน: กรุณาเลือกช่วงวันที่ภายในเดือนเดียวกัน'
+                                        if language == 'th' else
+                                        'Monthly comparison: please select a date range within one month')}
+            else:
+                comparison = {'error': 'Please select valid date range. The date range must be within a single year and not exceed 365 days'}
+    if comparison.get('error') and not comparison.get('out_of_range'):
+        # Whichever check rejected the range (the early year check above or the handler's
+        # own), the comparison pages explain it and suggest a range that can be compared.
+        comparison['out_of_range'] = _comparison_out_of_range(filters, export_tz)
 
     # 2) Format display dates like "01 Jan 2025" in client timezone
     _TH_MONTHS_SHORT = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.']
@@ -2902,6 +2626,20 @@ def _handle_export_pdf_report(
 
     location_disp = _resolve_locations_from_filters(filters or {})
 
+    # 4b) Tenant line for the header: exactly the tenant filter the user had on the Reports
+    # page (the page pre-selects it for a single-tenant member), so the PDF says what the
+    # screen said.
+    def _resolve_tenant_names(_filters: Dict[str, Any]) -> list[str]:
+        ids = list(_filters.get('filter_tenant_ids') or [])
+        if _filters.get('tenant_id') is not None:
+            ids.append(_filters['tenant_id'])
+        if not ids:
+            return []
+        names = _fetch_group_names(reports_service.db, 'tenant', set(ids))
+        return [names[i] for i in dict.fromkeys(ids) if names.get(i)]
+
+    tenant_disp = _resolve_tenant_names(filters or {})
+
     # 5) Map materials handler keys to the generator's expected keys
     main_materials_data = {
         # keep original typo 'porportions' to match generator
@@ -2935,73 +2673,29 @@ def _handle_export_pdf_report(
     # 6) Build the unified payload
     # Handle comparison data - check for errors first
     if comparison.get('error'):
-        # If there's an error, create error structure for PDF rendering
         comparison_data = {
             'error': comparison.get('error'),
+            'out_of_range': comparison.get('out_of_range'),
             'left': {},
             'right': {},
+            'buckets': [],
+            'compare_mode': filters.get('compare_mode', 'yearly'),
             'scores': {}
         }
     else:
-        # Build comparison data with date ranges instead of periods
+        # Monthly: left = the month before the latest month with data, right = that month.
+        _lbl = 'label_th' if language == 'th' else 'label_en'
         _left_dict = comparison.get('left', {}) or {}
         _right_dict = comparison.get('right', {}) or {}
-        
-        # Calculate date ranges for left (last year) and right (current period)
-        date_from = filters.get('date_from')
-        date_to = filters.get('date_to')
-        
-        # Format date ranges for display
-        if date_from and date_to:
-            right_from_dt = _parse_datetime(date_from)
-            right_to_dt = _parse_datetime(date_to)
-            
-            if right_from_dt and right_to_dt:
-                # Convert to client timezone for display
-                export_tz = current_user.get('timezone') or 'Asia/Bangkok'
-                try:
-                    client_tz = ZoneInfo(export_tz)
-                except Exception:
-                    client_tz = ZoneInfo('UTC')
-                
-                # Right period dates (current)
-                right_from_local = right_from_dt.astimezone(client_tz)
-                right_to_local = right_to_dt.astimezone(client_tz)
-                _right_period = f"{right_from_local.strftime('%d %b %Y')} - {right_to_local.strftime('%d %b %Y')}"
-                
-                # Left period dates (last year - same calendar dates).
-                # Do the year shift in client TZ to keep "same calendar date for
-                # the user" semantics (and to avoid Feb-29 ambiguity that bites
-                # when the UTC representation lands on a different date).
-                def _shift_year_local(dt_utc: datetime, delta: int) -> datetime:
-                    local = dt_utc.astimezone(client_tz)
-                    target_year = local.year + delta
-                    try:
-                        shifted = local.replace(year=target_year)
-                    except ValueError:
-                        # Feb 29 -> Feb 28 in non-leap year
-                        shifted = local.replace(year=target_year, day=28)
-                    return shifted.astimezone(timezone.utc)
-                left_from_dt = _shift_year_local(right_from_dt, -1)
-                left_to_dt = _shift_year_local(right_to_dt, -1)
-                left_from_local = left_from_dt.astimezone(client_tz)
-                left_to_local = left_to_dt.astimezone(client_tz)
-                _left_period = f"{left_from_local.strftime('%d %b %Y')} - {left_to_local.strftime('%d %b %Y')}"
-            else:
-                _left_period = "Last Year"
-                _right_period = "Current Period"
-        else:
-            _left_period = "Last Year"
-            _right_period = "Current Period"
-        
-        _left_with_period = dict(_left_dict, period=_left_period)
-        _right_with_period = dict(_right_dict, period=_right_period)
         comparison_data = {
-            'left': _left_with_period,
-            'right': _right_with_period,
+            'left': dict(_left_dict, period=_left_dict.get(_lbl, '')),
+            'right': dict(_right_dict, period=_right_dict.get(_lbl, '')),
+            'buckets': comparison.get('buckets', []) or [],
+            'compare_mode': comparison.get('compare_mode', 'yearly'),
+            'clamped': bool(comparison.get('clamped')),
             'scores': comparison.get('scores', {}),
         }
-    
+
     # Handle diversion data - check for errors
     if diversion.get('error'):
         diversion_data = {
@@ -3081,6 +2775,11 @@ def _handle_export_pdf_report(
         'users': user_display,
         'profile_img': profile_img_view_url,
         'location': location_disp,
+        'tenants': tenant_disp,
+        # Presentation settings (report mode, chart granularity, comparison mode)
+        'report_mode': report_mode,
+        'overview_chart': filters.get('overview_chart', 'monthly'),
+        'compare_mode': filters.get('compare_mode', 'yearly'),
         'date_from': date_from_disp,
         'date_to': date_to_disp,
 
@@ -3091,13 +2790,15 @@ def _handle_export_pdf_report(
             'key_indicators': overview.get('key_indicators', {}),
             'top_recyclables': overview.get('top_recyclables', []),
             'overall_charts': overview.get('overall_charts', {}),
+            'impact': overview_impact,
         },
+        # Performance: location hierarchy, or one summary row whose `buildings` are the
+        # tags/tenants in those modes (plus the flat group list for the table page).
+        'performance_data': performance.get('data', []),
+        'performance_groups': performance.get('groups', []),
         # Optional, not strictly required by renderer but present in example
         'waste_type_proportions': overview.get('waste_type_proportions', []),
         'material_summary': [],
-
-        # Performance (hierarchical org performance list)
-        'performance_data': performance.get('data', []),
 
         # Comparison
         'comparison_data': comparison_data,

@@ -1,0 +1,2451 @@
+{
+  "version": 3,
+  "description": "Rules for the Risks / Opportunities / Quick wins cards of the waste report (web Compare tab + PDF export), per report mode: location = building owner/operator, tenant = occupant, tag = event/tagged area. Evaluated by GEPPPlatform/services/cores/reports/report_insights.py over the scope's own data, current period vs the same period last year (or last month). See README.md for metrics and syntax.",
+  "max_items_per_section": 2,
+  "rules": [
+    {
+      "id": "L-R01",
+      "section": "risk",
+      "modes": [
+        "location"
+      ],
+      "group": "trend",
+      "title": {
+        "th": "ปริมาณขยะเพิ่มขึ้นจาก{compare_word}",
+        "en": "Waste is up on {compare_word}"
+      },
+      "when": "has_prev and prev_kg >= 5 and change_pct >= 15",
+      "priority": "60 + min(change_pct, 100) * 0.3",
+      "bullets": {
+        "th": [
+          "ขยะช่วง {cur_label} เพิ่มขึ้น {change_pct:pct} เมื่อเทียบกับช่วง {prev_label}",
+          "ค่าจัดเก็บและกำจัดขยะของอาคารจะเพิ่มขึ้นตามปริมาณ",
+          "ตรวจสอบพื้นที่หรือผู้ใช้อาคารที่ขยะเพิ่มขึ้น และกิจกรรมพิเศษในช่วงนี้"
+        ],
+        "en": [
+          "Waste for {cur_label} is up {change_pct:pct} on {prev_label}",
+          "The building's collection and disposal costs rise with volume",
+          "Find the areas or occupants behind the increase, and any one-off events"
+        ]
+      },
+      "reason": {
+        "th": "ขยะรวม {cur_kg:kg} เทียบกับ {prev_kg:kg} ในช่วง {prev_label} เพิ่มขึ้น {change_pct:pct} ซึ่งเป็นการเพิ่มขึ้นที่ชัดเจน จึงควรหาสาเหตุก่อนที่จะกลายเป็นแนวโน้มต่อเนื่อง",
+        "en": "{cur_kg:kg} this period against {prev_kg:kg} for {prev_label}: up {change_pct:pct}, a clear rise worth explaining before it becomes a trend."
+      }
+    },
+    {
+      "id": "T-R01",
+      "section": "risk",
+      "modes": [
+        "tenant"
+      ],
+      "group": "trend",
+      "title": {
+        "th": "ขยะของผู้เช่าเพิ่มขึ้นจาก{compare_word}",
+        "en": "Your waste is up on {compare_word}"
+      },
+      "when": "has_prev and prev_kg >= 5 and change_pct >= 15",
+      "priority": "60 + min(change_pct, 100) * 0.3",
+      "bullets": {
+        "th": [
+          "ขยะช่วง {cur_label} เพิ่มขึ้น {change_pct:pct} เมื่อเทียบกับช่วง {prev_label}",
+          "ตรวจสอบกิจกรรมในสำนักงานที่เพิ่มขึ้น เช่น การประชุม การสั่งอาหาร หรือพนักงานที่เพิ่มขึ้น",
+          "ตั้งเป้าลดขยะร่วมกันในทีมสำหรับเดือนถัดไป"
+        ],
+        "en": [
+          "Waste for {cur_label} is up {change_pct:pct} on {prev_label}",
+          "Look for what changed in the office: meetings, food orders, headcount",
+          "Set a shared team target to bring it down next month"
+        ]
+      },
+      "reason": {
+        "th": "ขยะรวม {cur_kg:kg} เทียบกับ {prev_kg:kg} ในช่วง {prev_label} เพิ่มขึ้น {change_pct:pct} ซึ่งเป็นการเพิ่มขึ้นที่ชัดเจน จึงควรหาสาเหตุก่อนที่จะกลายเป็นแนวโน้มต่อเนื่อง",
+        "en": "{cur_kg:kg} this period against {prev_kg:kg} for {prev_label}: up {change_pct:pct}, a clear rise worth explaining before it becomes a trend."
+      }
+    },
+    {
+      "id": "E-R01",
+      "section": "risk",
+      "modes": [
+        "tag"
+      ],
+      "group": "trend",
+      "title": {
+        "th": "ขยะจากกิจกรรม/พื้นที่เพิ่มขึ้นจาก{compare_word}",
+        "en": "Waste from these events/areas is up on {compare_word}"
+      },
+      "when": "has_prev and prev_kg >= 5 and change_pct >= 15",
+      "priority": "60 + min(change_pct, 100) * 0.3",
+      "bullets": {
+        "th": [
+          "ขยะช่วง {cur_label} เพิ่มขึ้น {change_pct:pct} เมื่อเทียบกับช่วง {prev_label}",
+          "ตรวจสอบว่ามาจากจำนวนผู้เข้าร่วม จำนวนกิจกรรม หรือรูปแบบการจัดที่เปลี่ยนไป",
+          "วางแผนจุดทิ้งและการคัดแยกให้พอกับขนาดงานครั้งถัดไป"
+        ],
+        "en": [
+          "Waste for {cur_label} is up {change_pct:pct} on {prev_label}",
+          "Check whether attendance, the number of events or the format changed",
+          "Size bins and sorting stations to match the next event"
+        ]
+      },
+      "reason": {
+        "th": "ขยะรวม {cur_kg:kg} เทียบกับ {prev_kg:kg} ในช่วง {prev_label} เพิ่มขึ้น {change_pct:pct} ซึ่งเป็นการเพิ่มขึ้นที่ชัดเจน จึงควรหาสาเหตุก่อนที่จะกลายเป็นแนวโน้มต่อเนื่อง",
+        "en": "{cur_kg:kg} this period against {prev_kg:kg} for {prev_label}: up {change_pct:pct}, a clear rise worth explaining before it becomes a trend."
+      }
+    },
+    {
+      "id": "L-R02",
+      "section": "risk",
+      "modes": [
+        "location"
+      ],
+      "group": "trend",
+      "title": {
+        "th": "ขยะเพิ่มขึ้นต่อเนื่องหลายเดือน",
+        "en": "Waste has risen several months in a row"
+      },
+      "when": "consecutive_increase_months >= 3",
+      "priority": "70 + consecutive_increase_months * 3",
+      "bullets": {
+        "th": [
+          "ปริมาณขยะต่อวันเพิ่มขึ้นติดต่อกัน {consecutive_increase_months:int} เดือน",
+          "หากไม่ปรับเปลี่ยน ต้นทุนและผลกระทบของอาคารจะสูงขึ้นต่อเนื่อง",
+          "กำหนดเป้าหมายลดขยะรายเดือนและติดตามผลทุกเดือน"
+        ],
+        "en": [
+          "Waste per day has grown {consecutive_increase_months:int} months in a row",
+          "Left alone, the building's costs and impact keep climbing",
+          "Set a monthly reduction target and review it every month"
+        ]
+      },
+      "reason": {
+        "th": "ปริมาณขยะเฉลี่ยต่อวันเพิ่มขึ้นทุกเดือนติดต่อกัน {consecutive_increase_months:int} เดือนจนถึงเดือนล่าสุด จึงเป็นแนวโน้มต่อเนื่อง ไม่ใช่ความผันผวนเดือนเดียว",
+        "en": "Average waste per day rose every month for {consecutive_increase_months:int} months up to the latest month, a sustained trend rather than a one-month blip."
+      }
+    },
+    {
+      "id": "T-R02",
+      "section": "risk",
+      "modes": [
+        "tenant"
+      ],
+      "group": "trend",
+      "title": {
+        "th": "ขยะของผู้เช่าเพิ่มขึ้นต่อเนื่อง",
+        "en": "Your waste has risen several months in a row"
+      },
+      "when": "consecutive_increase_months >= 3",
+      "priority": "70 + consecutive_increase_months * 3",
+      "bullets": {
+        "th": [
+          "ปริมาณขยะต่อวันเพิ่มขึ้นติดต่อกัน {consecutive_increase_months:int} เดือน",
+          "ทบทวนพฤติกรรมที่ทำให้เกิดขยะในสำนักงานร่วมกับทีม",
+          "ตั้งเป้าหมายลดขยะรายเดือนและแจ้งผลให้ทีมทราบ"
+        ],
+        "en": [
+          "Waste per day has grown {consecutive_increase_months:int} months in a row",
+          "Review with the team what creates waste in the office",
+          "Set a monthly target and share progress with the team"
+        ]
+      },
+      "reason": {
+        "th": "ปริมาณขยะเฉลี่ยต่อวันเพิ่มขึ้นทุกเดือนติดต่อกัน {consecutive_increase_months:int} เดือนจนถึงเดือนล่าสุด จึงเป็นแนวโน้มต่อเนื่อง",
+        "en": "Average waste per day rose every month for {consecutive_increase_months:int} months up to the latest month, a sustained trend."
+      }
+    },
+    {
+      "id": "L-R03",
+      "section": "risk",
+      "modes": [
+        "location"
+      ],
+      "group": "general_trend",
+      "title": {
+        "th": "ขยะทั่วไป (ส่งฝังกลบ) เพิ่มขึ้น",
+        "en": "General (landfill) waste is rising"
+      },
+      "when": "general_has_prev and general_prev_kg >= 3 and general_change_pct >= 20",
+      "priority": "55 + min(general_change_pct, 100) * 0.3",
+      "bullets": {
+        "th": [
+          "ขยะทั่วไปเพิ่มขึ้น {general_change_pct:pct} จาก{compare_word}",
+          "เพิ่มทั้งค่าฝังกลบและก๊าซเรือนกระจกของอาคาร",
+          "สุ่มตรวจถังขยะทั่วไปว่ามีวัสดุรีไซเคิลหรือเศษอาหารปนอยู่มากแค่ไหน"
+        ],
+        "en": [
+          "General waste is up {general_change_pct:pct} on {compare_word}",
+          "It raises both landfill fees and the building's emissions",
+          "Spot-check general bins for recyclables and food scraps"
+        ]
+      },
+      "reason": {
+        "th": "ขยะทั่วไป {general_cur_kg:kg} เทียบกับ {general_prev_kg:kg} ในช่วง {prev_label} เพิ่มขึ้น {general_change_pct:pct} ขยะส่วนนี้ส่วนใหญ่ไม่ได้ถูกนำกลับมาใช้ประโยชน์",
+        "en": "General waste was {general_cur_kg:kg} against {general_prev_kg:kg} for {prev_label}, up {general_change_pct:pct}; most of it is never recovered."
+      }
+    },
+    {
+      "id": "T-R03",
+      "section": "risk",
+      "modes": [
+        "tenant"
+      ],
+      "group": "general_trend",
+      "title": {
+        "th": "ขยะทั่วไปของผู้เช่าเพิ่มขึ้น",
+        "en": "Your general waste is rising"
+      },
+      "when": "general_has_prev and general_prev_kg >= 3 and general_change_pct >= 20",
+      "priority": "55 + min(general_change_pct, 100) * 0.3",
+      "bullets": {
+        "th": [
+          "ขยะทั่วไปเพิ่มขึ้น {general_change_pct:pct} จาก{compare_word}",
+          "ตรวจดูว่ามีกล่องอาหาร ขวด หรือกระดาษที่แยกได้ถูกทิ้งรวมหรือไม่",
+          "ย้ำการแยกขยะกับทีมและผู้มาติดต่อ"
+        ],
+        "en": [
+          "General waste is up {general_change_pct:pct} on {compare_word}",
+          "Check for food boxes, bottles or paper that could have been sorted",
+          "Remind the team and visitors how to sort"
+        ]
+      },
+      "reason": {
+        "th": "ขยะทั่วไป {general_cur_kg:kg} เทียบกับ {general_prev_kg:kg} ในช่วง {prev_label} เพิ่มขึ้น {general_change_pct:pct} ขยะส่วนนี้ส่วนใหญ่ไม่ได้ถูกนำกลับมาใช้ประโยชน์",
+        "en": "General waste was {general_cur_kg:kg} against {general_prev_kg:kg} for {prev_label}, up {general_change_pct:pct}; most of it is never recovered."
+      }
+    },
+    {
+      "id": "L-R04",
+      "section": "risk",
+      "modes": [
+        "location"
+      ],
+      "group": "sorting",
+      "title": {
+        "th": "การคัดแยกของอาคารแย่ลง",
+        "en": "The building's sorting is slipping"
+      },
+      "when": "has_prev and prev_kg >= 5 and total_kg >= 5 and diversion_change_pts <= -10",
+      "priority": "65 + min(-diversion_change_pts, 40)",
+      "bullets": {
+        "th": [
+          "สัดส่วนขยะที่คัดแยกได้ลดลงจาก {diversion_pct_prev:pct} เหลือ {diversion_pct:pct}",
+          "วัสดุรีไซเคิลที่ปนในขยะทั่วไปจะเสียมูลค่าและต้องส่งกำจัด",
+          "ตรวจจุดทิ้งขยะส่วนกลางและขั้นตอนการเก็บของแม่บ้าน"
+        ],
+        "en": [
+          "The sorted share dropped from {diversion_pct_prev:pct} to {diversion_pct:pct}",
+          "Recyclables mixed into general waste lose their value",
+          "Check the shared bin stations and the housekeeping routine"
+        ]
+      },
+      "reason": {
+        "th": "สัดส่วนขยะรีไซเคิลและขยะอินทรีย์ต่อขยะทั้งหมด ลดจาก {diversion_pct_prev:pct} ในช่วง {prev_label} เหลือ {diversion_pct:pct} ({diversion_change_pts:pts}) แสดงว่าการคัดแยกแย่ลงอย่างชัดเจน",
+        "en": "The recyclable + organic share fell from {diversion_pct_prev:pct} ({prev_label}) to {diversion_pct:pct} ({diversion_change_pts:pts}): sorting has clearly slipped."
+      }
+    },
+    {
+      "id": "T-R04",
+      "section": "risk",
+      "modes": [
+        "tenant"
+      ],
+      "group": "sorting",
+      "title": {
+        "th": "การคัดแยกของผู้เช่าแย่ลง",
+        "en": "Your sorting is slipping"
+      },
+      "when": "has_prev and prev_kg >= 5 and total_kg >= 5 and diversion_change_pts <= -10",
+      "priority": "65 + min(-diversion_change_pts, 40)",
+      "bullets": {
+        "th": [
+          "สัดส่วนขยะที่คัดแยกได้ลดลงจาก {diversion_pct_prev:pct} เหลือ {diversion_pct:pct}",
+          "ขยะที่ทิ้งผิดถังจะถูกนับเป็นขยะทั่วไปทั้งหมด",
+          "ทบทวนวิธีคัดแยกกับทีมและตรวจว่าถังในสำนักงานยังครบ"
+        ],
+        "en": [
+          "The sorted share dropped from {diversion_pct_prev:pct} to {diversion_pct:pct}",
+          "Waste in the wrong bin all counts as general waste",
+          "Refresh sorting with the team and check the office bins"
+        ]
+      },
+      "reason": {
+        "th": "สัดส่วนขยะรีไซเคิลและขยะอินทรีย์ต่อขยะทั้งหมด ลดจาก {diversion_pct_prev:pct} ในช่วง {prev_label} เหลือ {diversion_pct:pct} ({diversion_change_pts:pts}) แสดงว่าการคัดแยกแย่ลงอย่างชัดเจน",
+        "en": "The recyclable + organic share fell from {diversion_pct_prev:pct} ({prev_label}) to {diversion_pct:pct} ({diversion_change_pts:pts}): sorting has clearly slipped."
+      }
+    },
+    {
+      "id": "E-R04",
+      "section": "risk",
+      "modes": [
+        "tag"
+      ],
+      "group": "sorting",
+      "title": {
+        "th": "การคัดแยกในกิจกรรม/พื้นที่แย่ลง",
+        "en": "Sorting at these events/areas is slipping"
+      },
+      "when": "has_prev and prev_kg >= 5 and total_kg >= 5 and diversion_change_pts <= -10",
+      "priority": "65 + min(-diversion_change_pts, 40)",
+      "bullets": {
+        "th": [
+          "สัดส่วนขยะที่คัดแยกได้ลดลงจาก {diversion_pct_prev:pct} เหลือ {diversion_pct:pct}",
+          "จุดทิ้งที่ไม่ชัดเจนหรือไม่พอ ทำให้ผู้เข้าร่วมทิ้งรวม",
+          "ทบทวนตำแหน่งและจำนวนจุดคัดแยกในครั้งถัดไป"
+        ],
+        "en": [
+          "The sorted share dropped from {diversion_pct_prev:pct} to {diversion_pct:pct}",
+          "Unclear or too few stations push people to bin everything together",
+          "Review station placement and numbers for next time"
+        ]
+      },
+      "reason": {
+        "th": "สัดส่วนขยะรีไซเคิลและขยะอินทรีย์ต่อขยะทั้งหมด ลดจาก {diversion_pct_prev:pct} ในช่วง {prev_label} เหลือ {diversion_pct:pct} ({diversion_change_pts:pts}) แสดงว่าการคัดแยกแย่ลงอย่างชัดเจน",
+        "en": "The recyclable + organic share fell from {diversion_pct_prev:pct} ({prev_label}) to {diversion_pct:pct} ({diversion_change_pts:pts}): sorting has clearly slipped."
+      }
+    },
+    {
+      "id": "L-R05",
+      "section": "risk",
+      "modes": [
+        "location"
+      ],
+      "group": "sorting",
+      "title": {
+        "th": "ขยะทั่วไปของอาคารมีสัดส่วนเกินครึ่ง",
+        "en": "General waste is over half of the building's total"
+      },
+      "when": "total_kg >= 10 and general_pct >= 50",
+      "priority": "50 + (general_pct - 50) * 0.8",
+      "bullets": {
+        "th": [
+          "ขยะทั่วไปคิดเป็น {general_pct:pct} ของขยะทั้งหมด",
+          "ขยะส่วนนี้ส่วนใหญ่ถูกส่งฝังกลบ เพิ่มค่ากำจัดและก๊าซเรือนกระจก",
+          "ทบทวนระบบถังและจุดคัดแยกในพื้นที่ส่วนกลาง รวมถึงเงื่อนไขกับผู้รับขยะ"
+        ],
+        "en": [
+          "General waste is {general_pct:pct} of the total",
+          "Most of it goes to landfill, adding cost and emissions",
+          "Review the bin system in shared areas and the terms with your waste contractor"
+        ]
+      },
+      "reason": {
+        "th": "ขยะทั่วไป {general_kg:kg} จากขยะทั้งหมด {total_kg:kg} คิดเป็น {general_pct:pct} ซึ่งมากกว่าครึ่งหนึ่ง แสดงว่ายังมีวัสดุที่คัดแยกได้ปนอยู่ในขยะทั่วไปอีกมาก",
+        "en": "General waste is {general_kg:kg} of {total_kg:kg} ({general_pct:pct}), more than half, so a lot of sortable material is still going in the general bin."
+      }
+    },
+    {
+      "id": "T-R05",
+      "section": "risk",
+      "modes": [
+        "tenant"
+      ],
+      "group": "sorting",
+      "title": {
+        "th": "ขยะทั่วไปของผู้เช่ามีสัดส่วนเกินครึ่ง",
+        "en": "General waste is over half of your total"
+      },
+      "when": "total_kg >= 10 and general_pct >= 50",
+      "priority": "50 + (general_pct - 50) * 0.8",
+      "bullets": {
+        "th": [
+          "ขยะทั่วไปคิดเป็น {general_pct:pct} ของขยะทั้งหมด",
+          "กล่องอาหาร ขวด และกระดาษที่ทิ้งรวม ทำให้สัดส่วนนี้สูง",
+          "เริ่มจากแยกเศษอาหารและขวดออกก่อน เพราะทำได้ง่ายที่สุด"
+        ],
+        "en": [
+          "General waste is {general_pct:pct} of your total",
+          "Food boxes, bottles and paper binned together push it up",
+          "Start by pulling out food scraps and bottles, the easiest wins"
+        ]
+      },
+      "reason": {
+        "th": "ขยะทั่วไป {general_kg:kg} จากขยะทั้งหมด {total_kg:kg} คิดเป็น {general_pct:pct} ซึ่งมากกว่าครึ่งหนึ่ง แสดงว่ายังมีวัสดุที่คัดแยกได้ปนอยู่ในขยะทั่วไปอีกมาก",
+        "en": "General waste is {general_kg:kg} of {total_kg:kg} ({general_pct:pct}), more than half, so a lot of sortable material is still going in the general bin."
+      }
+    },
+    {
+      "id": "E-R05",
+      "section": "risk",
+      "modes": [
+        "tag"
+      ],
+      "group": "sorting",
+      "title": {
+        "th": "ขยะจากกิจกรรมส่วนใหญ่เป็นขยะทั่วไป",
+        "en": "Most event waste is general waste"
+      },
+      "when": "total_kg >= 10 and general_pct >= 50",
+      "priority": "50 + (general_pct - 50) * 0.8",
+      "bullets": {
+        "th": [
+          "ขยะทั่วไปคิดเป็น {general_pct:pct} ของขยะทั้งหมด",
+          "ผู้เข้าร่วมมักทิ้งรวมเมื่อจุดทิ้งไม่ชัดเจนหรืออยู่ไกล",
+          "วางจุดคัดแยกใกล้โซนอาหารและเครื่องดื่มพร้อมป้ายภาพ"
+        ],
+        "en": [
+          "General waste is {general_pct:pct} of the total",
+          "Attendees bin everything together when stations are unclear or far away",
+          "Put sorting stations with picture signs next to food and drink areas"
+        ]
+      },
+      "reason": {
+        "th": "ขยะทั่วไป {general_kg:kg} จากขยะทั้งหมด {total_kg:kg} คิดเป็น {general_pct:pct} ซึ่งมากกว่าครึ่งหนึ่ง แสดงว่ายังมีวัสดุที่คัดแยกได้ปนอยู่ในขยะทั่วไปอีกมาก",
+        "en": "General waste is {general_kg:kg} of {total_kg:kg} ({general_pct:pct}), more than half, so a lot of sortable material is still going in the general bin."
+      }
+    },
+    {
+      "id": "L-R07",
+      "section": "risk",
+      "modes": [
+        "location"
+      ],
+      "group": "hazard",
+      "title": {
+        "th": "มีขยะอันตรายที่ต้องจัดการเป็นพิเศษ",
+        "en": "Hazardous waste needs special handling"
+      },
+      "when": "hazardous_kg > 0",
+      "priority": "68 + min(hazardous_pct, 30)",
+      "bullets": {
+        "th": [
+          "จัดพื้นที่เก็บขยะอันตรายที่ปิดมิดชิดและมีป้ายชัดเจน",
+          "ส่งกำจัดผ่านผู้รับที่ได้รับอนุญาต พร้อมเก็บเอกสารการขนส่ง",
+          "อบรมแม่บ้านและพนักงานทำความสะอาดให้แยกได้ถูกต้อง"
+        ],
+        "en": [
+          "Set up a closed, clearly labelled hazardous-waste store",
+          "Use licensed contractors and keep the transport documents",
+          "Train housekeeping to separate it correctly"
+        ]
+      },
+      "reason": {
+        "th": "พบขยะอันตราย {hazardous_kg:kg} ({hazardous_pct:pct} ของขยะทั้งหมด) ในช่วงนี้ ขยะอันตรายทุกปริมาณต้องจัดการแยกตามกฎหมาย แม้จะมีปริมาณน้อย",
+        "en": "{hazardous_kg:kg} of hazardous waste ({hazardous_pct:pct} of the total) was recorded; any amount has to be handled separately under the regulations."
+      }
+    },
+    {
+      "id": "T-R07",
+      "section": "risk",
+      "modes": [
+        "tenant"
+      ],
+      "group": "hazard",
+      "title": {
+        "th": "มีขยะอันตรายที่ต้องแยกเก็บ",
+        "en": "Hazardous waste must be kept separate"
+      },
+      "when": "hazardous_kg > 0",
+      "priority": "68 + min(hazardous_pct, 30)",
+      "bullets": {
+        "th": [
+          "แยกเก็บถ่าน หลอดไฟ และตลับหมึกไว้ในกล่องปิด",
+          "แจ้งฝ่ายอาคารเพื่อส่งกำจัดตามช่องทางที่ถูกต้อง",
+          "ห้ามทิ้งปนในถังขยะทั่วไป"
+        ],
+        "en": [
+          "Keep batteries, lamps and toner cartridges in a closed box",
+          "Ask building management to send them for proper disposal",
+          "Never put them in the general bin"
+        ]
+      },
+      "reason": {
+        "th": "พบขยะอันตราย {hazardous_kg:kg} ({hazardous_pct:pct} ของขยะทั้งหมด) ในช่วงนี้ ขยะอันตรายทุกปริมาณต้องจัดการแยกตามกฎหมาย แม้จะมีปริมาณน้อย",
+        "en": "{hazardous_kg:kg} of hazardous waste ({hazardous_pct:pct} of the total) was recorded; any amount has to be handled separately under the regulations."
+      }
+    },
+    {
+      "id": "E-R07",
+      "section": "risk",
+      "modes": [
+        "tag"
+      ],
+      "group": "hazard",
+      "title": {
+        "th": "มีขยะอันตรายจากกิจกรรม/พื้นที่",
+        "en": "Hazardous waste at these events/areas"
+      },
+      "when": "hazardous_kg > 0",
+      "priority": "68 + min(hazardous_pct, 30)",
+      "bullets": {
+        "th": [
+          "เตรียมภาชนะแยกสำหรับถ่าน หลอดไฟ หรือกระป๋องสเปรย์",
+          "แจ้งผู้จัดและทีมงานให้แยกเก็บก่อนส่งกำจัด",
+          "ส่งต่อผู้รับกำจัดที่ได้รับอนุญาต"
+        ],
+        "en": [
+          "Provide a separate container for batteries, lamps or aerosol cans",
+          "Brief organisers and crew to keep them apart",
+          "Hand them to a licensed disposal contractor"
+        ]
+      },
+      "reason": {
+        "th": "พบขยะอันตราย {hazardous_kg:kg} ({hazardous_pct:pct} ของขยะทั้งหมด) ในช่วงนี้ ขยะอันตรายทุกปริมาณต้องจัดการแยกตามกฎหมาย แม้จะมีปริมาณน้อย",
+        "en": "{hazardous_kg:kg} of hazardous waste ({hazardous_pct:pct} of the total) was recorded; any amount has to be handled separately under the regulations."
+      }
+    },
+    {
+      "id": "L-R08",
+      "section": "risk",
+      "modes": [
+        "location",
+        "tenant"
+      ],
+      "group": "hazard",
+      "title": {
+        "th": "ขยะอันตรายเพิ่มขึ้น",
+        "en": "Hazardous waste is rising"
+      },
+      "when": "hazardous_has_prev and hazardous_prev_kg > 0 and hazardous_change_pct >= 20",
+      "priority": "75 + min(hazardous_change_pct, 100) * 0.2",
+      "bullets": {
+        "th": [
+          "ขยะอันตรายเพิ่มขึ้น {hazardous_change_pct:pct} จาก{compare_word}",
+          "เพิ่มความเสี่ยงด้านกฎหมายและความปลอดภัย",
+          "ตรวจสอบแหล่งที่มา เช่น ถ่านไฟฉาย หลอดไฟ หรือสารเคมีทำความสะอาด"
+        ],
+        "en": [
+          "Hazardous waste is up {hazardous_change_pct:pct} on {compare_word}",
+          "It raises legal and safety risk",
+          "Trace the source: batteries, lamps or cleaning chemicals"
+        ]
+      },
+      "reason": {
+        "th": "ขยะอันตราย {hazardous_cur_kg:kg} เทียบกับ {hazardous_prev_kg:kg} ในช่วง {prev_label} เพิ่มขึ้น {hazardous_change_pct:pct} ซึ่งเป็นหมวดที่ควรลดลง ไม่ใช่เพิ่มขึ้น",
+        "en": "Hazardous waste was {hazardous_cur_kg:kg} against {hazardous_prev_kg:kg} for {prev_label}, up {hazardous_change_pct:pct}, in a category that should be going down."
+      }
+    },
+    {
+      "id": "L-R09",
+      "section": "risk",
+      "modes": [
+        "location",
+        "tenant",
+        "tag"
+      ],
+      "group": "biohazard",
+      "title": {
+        "th": "มีขยะติดเชื้อ",
+        "en": "Infectious waste found"
+      },
+      "when": "bio_hazardous_kg > 0",
+      "priority": "66",
+      "bullets": {
+        "th": [
+          "แยกใส่ถุงแดงและภาชนะที่ปิดมิดชิด",
+          "ส่งกำจัดผ่านผู้รับขยะติดเชื้อที่ได้รับอนุญาต",
+          "ห้ามปนกับขยะทั่วไปหรือขยะรีไซเคิล"
+        ],
+        "en": [
+          "Bag it in red bags inside sealed containers",
+          "Use a licensed infectious-waste contractor",
+          "Never mix it with general or recyclable waste"
+        ]
+      },
+      "reason": {
+        "th": "พบขยะติดเชื้อ {bio_hazardous_kg:kg} ในช่วงนี้ ขยะประเภทนี้ต้องแยกจัดการตามข้อกำหนดด้านสาธารณสุขเสมอ",
+        "en": "{bio_hazardous_kg:kg} of infectious waste was recorded; it always has to be handled under public-health rules."
+      }
+    },
+    {
+      "id": "L-R10",
+      "section": "risk",
+      "modes": [
+        "location",
+        "tenant",
+        "tag"
+      ],
+      "group": "contamination",
+      "title": {
+        "th": "พลาสติกปนเปื้อนรีไซเคิลไม่ได้",
+        "en": "Contaminated plastic can't be recycled"
+      },
+      "when": "contaminated_plastic_kg >= 1 and contaminated_plastic_share >= 10",
+      "priority": "45 + min(contaminated_plastic_share, 50) * 0.3",
+      "bullets": {
+        "th": [
+          "พลาสติกที่มีเศษอาหารหรือของเหลวติดอยู่มักถูกปฏิเสธการรับซื้อ",
+          "ต้องส่งกำจัดแทนการรีไซเคิล เสียทั้งมูลค่าและค่าใช้จ่าย",
+          "เทเศษอาหารและล้างบรรจุภัณฑ์ก่อนทิ้ง"
+        ],
+        "en": [
+          "Plastic with food or liquid left in it is usually rejected by buyers",
+          "It ends up disposed of instead of recycled",
+          "Empty and rinse containers before binning them"
+        ]
+      },
+      "reason": {
+        "th": "พลาสติกปนเปื้อน {contaminated_plastic_kg:kg} คิดเป็น {contaminated_plastic_share:pct} ของพลาสติกทั้งหมด พลาสติกส่วนนี้ขายไม่ได้และทำให้พลาสติกที่สะอาดเสียราคาไปด้วย",
+        "en": "Contaminated plastic is {contaminated_plastic_kg:kg}, {contaminated_plastic_share:pct} of all plastic; it can't be sold and drags down the price of the clean plastic."
+      }
+    },
+    {
+      "id": "L-R11",
+      "section": "risk",
+      "modes": [
+        "location"
+      ],
+      "group": "data",
+      "title": {
+        "th": "ข้อมูลขยะไม่ได้บันทึกต่อเนื่อง",
+        "en": "Waste data has stopped coming in"
+      },
+      "when": "has_data and days_since_last_record >= 14",
+      "priority": "58 + min(days_since_last_record, 60) * 0.3",
+      "bullets": {
+        "th": [
+          "ไม่มีการบันทึกขยะมา {days_since_last_record:int} วัน",
+          "ข้อมูลที่ขาดหายทำให้ปริมาณขยะและอัตรารีไซเคิลคลาดเคลื่อน",
+          "ตรวจสอบว่าเครื่องชั่งและผู้บันทึกยังทำงานตามรอบปกติ"
+        ],
+        "en": [
+          "No waste has been recorded for {days_since_last_record:int} days",
+          "Missing data skews totals and the recycling rate",
+          "Check the scales and the people recording still follow the schedule"
+        ]
+      },
+      "reason": {
+        "th": "บันทึกล่าสุดเมื่อ {last_record_date} ห่างจากวันสิ้นสุดข้อมูลของรายงาน {days_since_last_record:int} วัน ซึ่งนานกว่ารอบการชั่งปกติ ตัวเลขในรายงานจึงอาจต่ำกว่าความจริง",
+        "en": "The last record was on {last_record_date}, {days_since_last_record:int} days before the end of the report window, longer than a normal weighing cycle, so the figures may be understated."
+      }
+    },
+    {
+      "id": "T-R11",
+      "section": "risk",
+      "modes": [
+        "tenant"
+      ],
+      "group": "data",
+      "title": {
+        "th": "ข้อมูลขยะของผู้เช่าไม่ได้บันทึกต่อเนื่อง",
+        "en": "Your waste data has stopped coming in"
+      },
+      "when": "has_data and days_since_last_record >= 14",
+      "priority": "58 + min(days_since_last_record, 60) * 0.3",
+      "bullets": {
+        "th": [
+          "ไม่มีการบันทึกขยะของผู้เช่ามา {days_since_last_record:int} วัน",
+          "แจ้งฝ่ายอาคารหรือผู้ดูแลการชั่งว่าข้อมูลของผู้เช่าขาดหาย",
+          "ตรวจว่าทีมยังนำขยะไปชั่งตามจุดที่กำหนด"
+        ],
+        "en": [
+          "Nothing has been recorded for you for {days_since_last_record:int} days",
+          "Let building management or the weighing team know your data is missing",
+          "Check your team still takes waste to the weighing point"
+        ]
+      },
+      "reason": {
+        "th": "บันทึกล่าสุดเมื่อ {last_record_date} ห่างจากวันสิ้นสุดข้อมูลของรายงาน {days_since_last_record:int} วัน ซึ่งนานกว่ารอบการชั่งปกติ ตัวเลขในรายงานจึงอาจต่ำกว่าความจริง",
+        "en": "The last record was on {last_record_date}, {days_since_last_record:int} days before the end of the report window, longer than a normal weighing cycle, so the figures may be understated."
+      }
+    },
+    {
+      "id": "L-R12",
+      "section": "risk",
+      "modes": [
+        "location",
+        "tenant"
+      ],
+      "group": "data",
+      "title": {
+        "th": "มีเดือนที่ไม่มีข้อมูล",
+        "en": "Some months have no data"
+      },
+      "when": "gap_months >= 1",
+      "priority": "52 + gap_months * 2",
+      "bullets": {
+        "th": [
+          "ไม่มีการบันทึกขยะในเดือน {gap_month_labels}",
+          "ยอดรวมทั้งช่วงและแนวโน้มรายเดือนจะคลาดเคลื่อน",
+          "กรอกข้อมูลย้อนหลัง หรือระบุเหตุผลหากไม่มีขยะจริง"
+        ],
+        "en": [
+          "Nothing was recorded in {gap_month_labels}",
+          "Period totals and the monthly trend will be off",
+          "Back-fill the data, or note why there was no waste"
+        ]
+      },
+      "reason": {
+        "th": "ในช่วงที่เลือกมี {gap_months:int} เดือนที่ไม่มีข้อมูลเลย ทั้งที่เดือนก่อนหน้าและถัดไปมีการบันทึก จึงน่าจะเป็นข้อมูลขาดมากกว่าไม่มีขยะจริง",
+        "en": "{gap_months:int} month(s) in the period have no records although the months around them do, which points to missing data rather than no waste."
+      }
+    },
+    {
+      "id": "L-R13",
+      "section": "risk",
+      "modes": [
+        "location",
+        "tenant"
+      ],
+      "group": "data",
+      "title": {
+        "th": "ปริมาณขยะลดลงผิดปกติ",
+        "en": "Unusually sharp drop in waste"
+      },
+      "when": "has_prev and prev_kg >= 10 and change_pct <= -60",
+      "priority": "57 + min(change_pct_abs, 100) * 0.1",
+      "bullets": {
+        "th": [
+          "ขยะช่วง {cur_label} ลดลง {change_pct_abs:pct} จาก{compare_word}",
+          "อาจมาจากการบันทึกไม่ครบ หรือกิจกรรมในพื้นที่ลดลงจริง",
+          "ตรวจสอบว่ามีจุดทิ้งขยะใดที่ยังไม่ได้ชั่งหรือบันทึก"
+        ],
+        "en": [
+          "Waste for {cur_label} fell {change_pct_abs:pct} on {compare_word}",
+          "Either recording is incomplete or activity really dropped",
+          "Check for bin points that haven't been weighed or recorded"
+        ]
+      },
+      "reason": {
+        "th": "ขยะรวม {cur_kg:kg} เทียบกับ {prev_kg:kg} ในช่วง {prev_label} ลดลง {change_pct_abs:pct} การลดลงมากขนาดนี้ในช่วงสั้น ๆ มักมาจากข้อมูลที่บันทึกไม่ครบ จึงควรตรวจก่อนสรุปว่าลดขยะได้จริง",
+        "en": "{cur_kg:kg} against {prev_kg:kg} for {prev_label}, down {change_pct_abs:pct}. A drop this sharp usually means incomplete records, so check before calling it a real reduction."
+      }
+    },
+    {
+      "id": "E-R14",
+      "section": "risk",
+      "modes": [
+        "tag"
+      ],
+      "group": "concentration",
+      "title": {
+        "th": "ขยะกระจุกอยู่ที่ {top_group_label}",
+        "en": "Waste is concentrated at {top_group_label}"
+      },
+      "when": "group_count >= 2 and top_group_share >= 60",
+      "priority": "55 + (top_group_share - 60) * 0.5",
+      "bullets": {
+        "th": [
+          "ขยะ {top_group_share:pct} มาจาก {top_group_label}",
+          "ตรวจรูปแบบกิจกรรมหรือพื้นที่นี้ว่าทำไมขยะมาก",
+          "เพิ่มจุดทิ้งและเจ้าหน้าที่ดูแลเฉพาะจุดนี้"
+        ],
+        "en": [
+          "{top_group_share:pct} of the waste comes from {top_group_label}",
+          "Look at why this event or area produces so much",
+          "Add bins and staff support at this point"
+        ]
+      },
+      "reason": {
+        "th": "{top_group_label} มีขยะ {top_group_kg:kg} คิดเป็น {top_group_share:pct} ของทั้งหมดจาก {group_count:int} แท็ก การปรับปรุงที่จุดนี้จุดเดียวจึงให้ผลมากที่สุด",
+        "en": "{top_group_label} accounts for {top_group_kg:kg}, {top_group_share:pct} of the total across {group_count:int} tags, so improving this one point pays off most."
+      }
+    },
+    {
+      "id": "L-O01",
+      "section": "opportunity",
+      "modes": [
+        "location"
+      ],
+      "group": "stream_organic",
+      "title": {
+        "th": "วางระบบจัดการขยะอินทรีย์ของอาคาร",
+        "en": "Set up organic-waste handling for the building"
+      },
+      "when": "organic_rank <= 3 and organic_pct >= 5",
+      "priority": "45 + organic_pct",
+      "bullets": {
+        "th": [
+          "จัดจุดรวมเศษอาหารแยกจากขยะทั่วไปในพื้นที่ส่วนกลางและศูนย์อาหาร",
+          "หาคู่ค้ารับเศษอาหารไปทำปุ๋ยหรืออาหารสัตว์ หรือพิจารณาเครื่องย่อยเศษอาหาร",
+          "เทียบค่าฝังกลบกับค่าจัดการขยะอินทรีย์เพื่อประเมินความคุ้มค่า"
+        ],
+        "en": [
+          "Create food-scrap collection points in shared areas and food courts",
+          "Find a compost or animal-feed partner, or consider a food digester",
+          "Compare landfill fees with organic handling costs"
+        ]
+      },
+      "reason": {
+        "th": "ขยะอินทรีย์และเศษอาหารเป็นขยะอันดับ {organic_rank:int} ({organic_kg:kg} หรือ {organic_pct:pct} ของขยะทั้งหมด) จึงเป็นหมวดที่ลดหรือแยกแล้วเห็นผลมากที่สุด",
+        "en": "Organic/food waste is waste stream #{organic_rank:int} ({organic_kg:kg}, {organic_pct:pct} of the total), so it's where reducing or sorting shows the biggest effect."
+      }
+    },
+    {
+      "id": "T-O02",
+      "section": "opportunity",
+      "modes": [
+        "tenant"
+      ],
+      "group": "stream_organic",
+      "title": {
+        "th": "แยกขยะอาหารในแพนทรี่",
+        "en": "Separate food waste in the pantry"
+      },
+      "when": "organic_rank <= 3 and organic_pct >= 5",
+      "priority": "45 + organic_pct",
+      "bullets": {
+        "th": [
+          "ตั้งถังเศษอาหารแยกในแพนทรี่และมุมทานอาหาร (ขอถังจากฝ่ายอาคารได้)",
+          "เทน้ำและเศษอาหารออกจากกล่องก่อนทิ้ง เพื่อให้บรรจุภัณฑ์รีไซเคิลได้",
+          "ลดอาหารเหลือจากการสั่งอาหารประชุมให้พอดีจำนวนคน"
+        ],
+        "en": [
+          "Keep a separate food-scrap bin in the pantry (ask building management for one)",
+          "Empty food and liquid from containers so the packaging can be recycled",
+          "Order meeting food to headcount to cut leftovers"
+        ]
+      },
+      "reason": {
+        "th": "ขยะอินทรีย์และเศษอาหารเป็นขยะอันดับ {organic_rank:int} ({organic_kg:kg} หรือ {organic_pct:pct} ของขยะทั้งหมด) จึงเป็นหมวดที่ลดหรือแยกแล้วเห็นผลมากที่สุด",
+        "en": "Organic/food waste is waste stream #{organic_rank:int} ({organic_kg:kg}, {organic_pct:pct} of the total), so it's where reducing or sorting shows the biggest effect."
+      }
+    },
+    {
+      "id": "E-O01",
+      "section": "opportunity",
+      "modes": [
+        "tag"
+      ],
+      "group": "stream_organic",
+      "title": {
+        "th": "จัดการเศษอาหารจากกิจกรรม",
+        "en": "Handle food waste from events"
+      },
+      "when": "organic_rank <= 3 and organic_pct >= 5",
+      "priority": "45 + organic_pct",
+      "bullets": {
+        "th": [
+          "วางถังเศษอาหารแยกใกล้โซนอาหาร",
+          "ตกลงกับผู้ให้บริการอาหารเรื่องปริมาณที่พอดีกับผู้เข้าร่วม",
+          "ส่งอาหารเหลือที่ยังรับประทานได้ให้หน่วยงานรับบริจาค"
+        ],
+        "en": [
+          "Put food-scrap bins next to food areas",
+          "Agree portions with caterers to match attendance",
+          "Donate edible surplus to food-rescue groups"
+        ]
+      },
+      "reason": {
+        "th": "ขยะอินทรีย์และเศษอาหารเป็นขยะอันดับ {organic_rank:int} ({organic_kg:kg} หรือ {organic_pct:pct} ของขยะทั้งหมด) จึงเป็นหมวดที่ลดหรือแยกแล้วเห็นผลมากที่สุด",
+        "en": "Organic/food waste is waste stream #{organic_rank:int} ({organic_kg:kg}, {organic_pct:pct} of the total), so it's where reducing or sorting shows the biggest effect."
+      }
+    },
+    {
+      "id": "L-O03",
+      "section": "opportunity",
+      "modes": [
+        "location"
+      ],
+      "group": "stream_paper",
+      "title": {
+        "th": "จัดโครงการเก็บกระดาษทั้งอาคาร",
+        "en": "Run a building-wide paper collection"
+      },
+      "when": "paper_rank <= 3 and paper_pct >= 5",
+      "priority": "45 + paper_pct",
+      "bullets": {
+        "th": [
+          "ตั้งกล่องเก็บกระดาษทุกชั้นแยกจากขยะทั่วไป",
+          "จัดบริการทำลายเอกสารลับที่ส่งกระดาษต่อไปรีไซเคิล",
+          "สื่อสารกับผู้เช่าเรื่องการลดการพิมพ์"
+        ],
+        "en": [
+          "Put paper collection boxes on every floor",
+          "Offer a secure-shredding service that recycles the paper",
+          "Encourage tenants to print less"
+        ]
+      },
+      "reason": {
+        "th": "กระดาษเป็นขยะอันดับ {paper_rank:int} ({paper_kg:kg} หรือ {paper_pct:pct} ของขยะทั้งหมด) จึงเป็นหมวดที่ลดหรือแยกแล้วเห็นผลมากที่สุด",
+        "en": "Paper is waste stream #{paper_rank:int} ({paper_kg:kg}, {paper_pct:pct} of the total), so it's where reducing or sorting shows the biggest effect."
+      }
+    },
+    {
+      "id": "T-O01",
+      "section": "opportunity",
+      "modes": [
+        "tenant"
+      ],
+      "group": "stream_paper",
+      "title": {
+        "th": "ลดการใช้กระดาษในสำนักงาน",
+        "en": "Cut paper use in the office"
+      },
+      "when": "paper_rank <= 3 and paper_pct >= 5",
+      "priority": "45 + paper_pct",
+      "bullets": {
+        "th": [
+          "ตั้งค่าเครื่องพิมพ์ให้พิมพ์ 2 หน้าและขาวดำเป็นค่าเริ่มต้น",
+          "ใช้เอกสารดิจิทัลและลายเซ็นอิเล็กทรอนิกส์แทนการพิมพ์",
+          "แยกกระดาษที่ใช้แล้วไว้ในกล่องเพื่อส่งรีไซเคิล"
+        ],
+        "en": [
+          "Default printers to double-sided, black-and-white",
+          "Use digital documents and e-signatures instead of printing",
+          "Keep used paper in a box for recycling"
+        ]
+      },
+      "reason": {
+        "th": "กระดาษเป็นขยะอันดับ {paper_rank:int} ({paper_kg:kg} หรือ {paper_pct:pct} ของขยะทั้งหมด) จึงเป็นหมวดที่ลดหรือแยกแล้วเห็นผลมากที่สุด",
+        "en": "Paper is waste stream #{paper_rank:int} ({paper_kg:kg}, {paper_pct:pct} of the total), so it's where reducing or sorting shows the biggest effect."
+      }
+    },
+    {
+      "id": "E-O03",
+      "section": "opportunity",
+      "modes": [
+        "tag"
+      ],
+      "group": "stream_paper",
+      "title": {
+        "th": "ลดสื่อสิ่งพิมพ์ในกิจกรรม",
+        "en": "Cut printed material at events"
+      },
+      "when": "paper_rank <= 3 and paper_pct >= 5",
+      "priority": "45 + paper_pct",
+      "bullets": {
+        "th": [
+          "ใช้ QR code แทนแผ่นพับและเอกสารแจก",
+          "พิมพ์เฉพาะที่จำเป็นและประเมินจำนวนให้พอดี",
+          "เก็บป้ายและสื่อไว้ใช้ซ้ำในครั้งถัดไป"
+        ],
+        "en": [
+          "Use QR codes instead of leaflets and handouts",
+          "Print only what's needed, in the right quantity",
+          "Keep signs and materials for reuse next time"
+        ]
+      },
+      "reason": {
+        "th": "กระดาษเป็นขยะอันดับ {paper_rank:int} ({paper_kg:kg} หรือ {paper_pct:pct} ของขยะทั้งหมด) จึงเป็นหมวดที่ลดหรือแยกแล้วเห็นผลมากที่สุด",
+        "en": "Paper is waste stream #{paper_rank:int} ({paper_kg:kg}, {paper_pct:pct} of the total), so it's where reducing or sorting shows the biggest effect."
+      }
+    },
+    {
+      "id": "L-O04",
+      "section": "opportunity",
+      "modes": [
+        "location"
+      ],
+      "group": "stream_plastic",
+      "title": {
+        "th": "ลดพลาสติกใช้ครั้งเดียวในอาคาร",
+        "en": "Cut single-use plastic in the building"
+      },
+      "when": "plastic_rank <= 3 and plastic_pct >= 5",
+      "priority": "45 + plastic_pct",
+      "bullets": {
+        "th": [
+          "ติดตั้งจุดเติมน้ำดื่มในพื้นที่ส่วนกลาง",
+          "ขอความร่วมมือร้านค้าในอาคารลดถุงและภาชนะพลาสติก",
+          "แยกขวด PET ใสเพื่อขายได้ราคาดีกว่า"
+        ],
+        "en": [
+          "Install water refill stations in shared areas",
+          "Ask shops in the building to cut bags and plastic containers",
+          "Keep clear PET bottles apart; they sell for more"
+        ]
+      },
+      "reason": {
+        "th": "พลาสติกเป็นขยะอันดับ {plastic_rank:int} ({plastic_kg:kg} หรือ {plastic_pct:pct} ของขยะทั้งหมด) จึงเป็นหมวดที่ลดหรือแยกแล้วเห็นผลมากที่สุด",
+        "en": "Plastic is waste stream #{plastic_rank:int} ({plastic_kg:kg}, {plastic_pct:pct} of the total), so it's where reducing or sorting shows the biggest effect."
+      }
+    },
+    {
+      "id": "T-O03",
+      "section": "opportunity",
+      "modes": [
+        "tenant"
+      ],
+      "group": "stream_plastic",
+      "title": {
+        "th": "ลดพลาสติกใช้ครั้งเดียวในสำนักงาน",
+        "en": "Cut single-use plastic in the office"
+      },
+      "when": "plastic_rank <= 3 and plastic_pct >= 5",
+      "priority": "45 + plastic_pct",
+      "bullets": {
+        "th": [
+          "ชวนพนักงานใช้แก้วและขวดน้ำส่วนตัว",
+          "งดรับช้อนส้อมและถุงพลาสติกเมื่อสั่งอาหาร",
+          "แยกขวดพลาสติกไว้ในถังรีไซเคิล"
+        ],
+        "en": [
+          "Encourage staff to use their own cups and bottles",
+          "Decline plastic cutlery and bags on food orders",
+          "Keep plastic bottles in the recycling bin"
+        ]
+      },
+      "reason": {
+        "th": "พลาสติกเป็นขยะอันดับ {plastic_rank:int} ({plastic_kg:kg} หรือ {plastic_pct:pct} ของขยะทั้งหมด) จึงเป็นหมวดที่ลดหรือแยกแล้วเห็นผลมากที่สุด",
+        "en": "Plastic is waste stream #{plastic_rank:int} ({plastic_kg:kg}, {plastic_pct:pct} of the total), so it's where reducing or sorting shows the biggest effect."
+      }
+    },
+    {
+      "id": "E-O02",
+      "section": "opportunity",
+      "modes": [
+        "tag"
+      ],
+      "group": "stream_plastic",
+      "title": {
+        "th": "ลดพลาสติกใช้ครั้งเดียวในกิจกรรม",
+        "en": "Cut single-use plastic at events"
+      },
+      "when": "plastic_rank <= 3 and plastic_pct >= 5",
+      "priority": "45 + plastic_pct",
+      "bullets": {
+        "th": [
+          "ใช้แก้วหรือภาชนะใช้ซ้ำพร้อมระบบมัดจำ",
+          "ตั้งจุดเติมน้ำดื่มแทนการแจกขวดน้ำ",
+          "กำหนดให้ร้านค้างดถุงและหลอดพลาสติก"
+        ],
+        "en": [
+          "Use reusable cups or containers with a deposit",
+          "Set up water refill points instead of handing out bottles",
+          "Ask vendors to drop plastic bags and straws"
+        ]
+      },
+      "reason": {
+        "th": "พลาสติกเป็นขยะอันดับ {plastic_rank:int} ({plastic_kg:kg} หรือ {plastic_pct:pct} ของขยะทั้งหมด) จึงเป็นหมวดที่ลดหรือแยกแล้วเห็นผลมากที่สุด",
+        "en": "Plastic is waste stream #{plastic_rank:int} ({plastic_kg:kg}, {plastic_pct:pct} of the total), so it's where reducing or sorting shows the biggest effect."
+      }
+    },
+    {
+      "id": "L-O05",
+      "section": "opportunity",
+      "modes": [
+        "location"
+      ],
+      "group": "stream_glass_metal",
+      "title": {
+        "th": "แยกขวดแก้วและกระป๋องจากศูนย์อาหาร/ร้านค้า",
+        "en": "Separate bottles and cans from food outlets"
+      },
+      "when": "(glass_rank <= 3 or metal_rank <= 3) and glass_metal_pct >= 5",
+      "priority": "40 + glass_metal_pct",
+      "bullets": {
+        "th": [
+          "ตั้งถังรับขวดแก้วและกระป๋องแยกในศูนย์อาหารและพื้นที่ร้านค้า",
+          "กระป๋องอะลูมิเนียมมีราคารับซื้อสูง ควรแยกเก็บต่างหาก",
+          "ให้ร้านค้าเทของเหลวออกก่อนทิ้ง"
+        ],
+        "en": [
+          "Add separate bottle and can bins in food courts and retail areas",
+          "Aluminium cans fetch a good price; keep them apart",
+          "Ask outlets to pour out liquids first"
+        ]
+      },
+      "reason": {
+        "th": "แก้วและโลหะรวมกัน {glass_metal_kg:kg} ({glass_metal_pct:pct}) และอยู่ใน 3 อันดับแรกของขยะ วัสดุกลุ่มนี้รีไซเคิลได้เกือบทั้งหมดหากแยกออกมา",
+        "en": "Glass and metal together are {glass_metal_kg:kg} ({glass_metal_pct:pct}) and rank in the top 3; almost all of it is recyclable once separated."
+      }
+    },
+    {
+      "id": "T-O04",
+      "section": "opportunity",
+      "modes": [
+        "tenant"
+      ],
+      "group": "stream_glass_metal",
+      "title": {
+        "th": "แยกขวดและกระป๋องในแพนทรี่",
+        "en": "Separate bottles and cans in the pantry"
+      },
+      "when": "(glass_rank <= 3 or metal_rank <= 3) and glass_metal_pct >= 5",
+      "priority": "40 + glass_metal_pct",
+      "bullets": {
+        "th": [
+          "ตั้งถังรับขวดและกระป๋องแยกในแพนทรี่",
+          "เทของเหลวออกก่อนทิ้งเพื่อลดการปนเปื้อน",
+          "ส่งรวมกับระบบรีไซเคิลของอาคาร"
+        ],
+        "en": [
+          "Add a bottle and can bin in the pantry",
+          "Pour out liquids first to avoid contamination",
+          "Hand them into the building's recycling"
+        ]
+      },
+      "reason": {
+        "th": "แก้วและโลหะรวมกัน {glass_metal_kg:kg} ({glass_metal_pct:pct}) และอยู่ใน 3 อันดับแรกของขยะ วัสดุกลุ่มนี้รีไซเคิลได้เกือบทั้งหมดหากแยกออกมา",
+        "en": "Glass and metal together are {glass_metal_kg:kg} ({glass_metal_pct:pct}) and rank in the top 3; almost all of it is recyclable once separated."
+      }
+    },
+    {
+      "id": "E-O04",
+      "section": "opportunity",
+      "modes": [
+        "tag"
+      ],
+      "group": "stream_glass_metal",
+      "title": {
+        "th": "แยกขวดและกระป๋องจากจุดเครื่องดื่ม",
+        "en": "Separate bottles and cans at drink points"
+      },
+      "when": "(glass_rank <= 3 or metal_rank <= 3) and glass_metal_pct >= 5",
+      "priority": "40 + glass_metal_pct",
+      "bullets": {
+        "th": [
+          "วางถังขวดและกระป๋องไว้ติดกับจุดขายเครื่องดื่ม",
+          "มอบหมายทีมงานเก็บรวบรวมหลังจบงาน",
+          "ขายหรือบริจาคให้ผู้รับซื้อ"
+        ],
+        "en": [
+          "Put bottle and can bins right next to drink stands",
+          "Assign crew to collect them after the event",
+          "Sell or donate them to a buyer"
+        ]
+      },
+      "reason": {
+        "th": "แก้วและโลหะรวมกัน {glass_metal_kg:kg} ({glass_metal_pct:pct}) และอยู่ใน 3 อันดับแรกของขยะ วัสดุกลุ่มนี้รีไซเคิลได้เกือบทั้งหมดหากแยกออกมา",
+        "en": "Glass and metal together are {glass_metal_kg:kg} ({glass_metal_pct:pct}) and rank in the top 3; almost all of it is recyclable once separated."
+      }
+    },
+    {
+      "id": "L-O06",
+      "section": "opportunity",
+      "modes": [
+        "location"
+      ],
+      "group": "construction",
+      "title": {
+        "th": "แยกจัดการขยะก่อสร้างและรีโนเวท",
+        "en": "Handle construction and renovation waste separately"
+      },
+      "when": "construction_kg >= 50 and construction_pct >= 5",
+      "priority": "42 + construction_pct * 0.5",
+      "bullets": {
+        "th": [
+          "จัดพื้นที่คัดแยกวัสดุก่อสร้างโดยเฉพาะ",
+          "ร่วมมือกับผู้รับซื้อวัสดุก่อสร้างรีไซเคิล เช่น เศษเหล็ก ไม้ คอนกรีต",
+          "ระบุเงื่อนไขการคัดแยกไว้ในสัญญาผู้รับเหมา"
+        ],
+        "en": [
+          "Set aside a sorting area for construction materials",
+          "Partner with buyers of scrap metal, wood and concrete",
+          "Write sorting requirements into contractor agreements"
+        ]
+      },
+      "reason": {
+        "th": "มีขยะก่อสร้าง {construction_kg:kg} ({construction_pct:pct} ของขยะทั้งหมด) ซึ่งเป็นปริมาณมากพอที่จะคุ้มกับการแยกจัดการและขายวัสดุบางส่วนได้",
+        "en": "{construction_kg:kg} of construction waste ({construction_pct:pct} of the total) is enough to justify separate handling and selling part of it."
+      }
+    },
+    {
+      "id": "L-O07",
+      "section": "opportunity",
+      "modes": [
+        "location"
+      ],
+      "group": "rdf",
+      "title": {
+        "th": "ส่งขยะทั่วไปที่เผาได้ไปเป็นเชื้อเพลิง (RDF)",
+        "en": "Send combustible general waste to RDF"
+      },
+      "when": "total_kg >= 50 and general_pct >= 40 and wte_kg == 0",
+      "priority": "38",
+      "bullets": {
+        "th": [
+          "ตรวจสอบกับผู้รับขยะว่ามีบริการแยกทำ RDF หรือไม่",
+          "ช่วยลดปริมาณที่ส่งฝังกลบและค่าฝังกลบ",
+          "แยกขยะเปียกออกก่อนเพื่อให้ขยะเผาได้มีคุณภาพ"
+        ],
+        "en": [
+          "Ask your contractor whether they offer RDF processing",
+          "It cuts the volume and cost of landfill",
+          "Take out wet waste first so the fuel fraction stays usable"
+        ]
+      },
+      "reason": {
+        "th": "ขยะทั่วไป {general_kg:kg} ({general_pct:pct}) ทั้งหมดยังไม่มีส่วนที่ส่งไปทำเชื้อเพลิง การแยกส่วนที่เผาได้ออกไปจะลดการฝังกลบได้ทันที",
+        "en": "None of the {general_kg:kg} of general waste ({general_pct:pct}) goes to fuel yet; diverting the combustible part cuts landfill straight away."
+      }
+    },
+    {
+      "id": "L-O08",
+      "section": "opportunity",
+      "modes": [
+        "location"
+      ],
+      "group": "value",
+      "title": {
+        "th": "ขายวัสดุรีไซเคิลแบบแยกชนิด",
+        "en": "Sell recyclables sorted by type"
+      },
+      "when": "recyclable_kg >= 20 and recyclable_pct >= 15",
+      "priority": "35 + recyclable_pct * 0.5",
+      "bullets": {
+        "th": [
+          "แยกเก็บตามชนิด เช่น กระดาษขาวดำ กระดาษลัง PET กระป๋อง",
+          "ทำสัญญากับผู้รับซื้อที่ให้ราคาตามชนิดวัสดุ",
+          "ติดตามรายได้จากวัสดุรีไซเคิลเป็นรายเดือน"
+        ],
+        "en": [
+          "Keep materials apart by type: white paper, cardboard, PET, cans",
+          "Contract a buyer that prices by material type",
+          "Track recycling revenue every month"
+        ]
+      },
+      "reason": {
+        "th": "มีวัสดุรีไซเคิล {recyclable_kg:kg} ({recyclable_pct:pct} ของขยะทั้งหมด) ในช่วงนี้ ซึ่งมากพอที่การแยกชนิดจะได้ราคาดีกว่าการขายรวม",
+        "en": "{recyclable_kg:kg} of recyclables ({recyclable_pct:pct} of the total) is enough volume for sorting by type to beat selling it mixed."
+      }
+    },
+    {
+      "id": "T-O10",
+      "section": "opportunity",
+      "modes": [
+        "tenant"
+      ],
+      "group": "value",
+      "title": {
+        "th": "ส่งวัสดุรีไซเคิลเข้าโครงการของอาคาร",
+        "en": "Feed recyclables into the building's programme"
+      },
+      "when": "recyclable_kg >= 20 and recyclable_pct >= 15",
+      "priority": "33 + recyclable_pct * 0.5",
+      "bullets": {
+        "th": [
+          "แยกกระดาษ ขวด และกระป๋องให้สะอาดและแห้ง",
+          "สอบถามฝ่ายอาคารเรื่องจุดรวมและรอบรับวัสดุรีไซเคิล",
+          "ขอข้อมูลปริมาณรีไซเคิลของผู้เช่าไว้ใช้ในรายงานองค์กร"
+        ],
+        "en": [
+          "Keep paper, bottles and cans clean and dry",
+          "Ask building management about collection points and pick-ups",
+          "Request your recycling figures for your company reporting"
+        ]
+      },
+      "reason": {
+        "th": "ผู้เช่ามีวัสดุรีไซเคิล {recyclable_kg:kg} ({recyclable_pct:pct}) ซึ่งมากพอที่จะแยกส่งเข้าระบบรีไซเคิลของอาคารได้อย่างเป็นระบบ",
+        "en": "You have {recyclable_kg:kg} of recyclables ({recyclable_pct:pct}), enough to feed the building's recycling routinely."
+      }
+    },
+    {
+      "id": "E-O05",
+      "section": "opportunity",
+      "modes": [
+        "tag"
+      ],
+      "group": "value",
+      "title": {
+        "th": "รวบรวมวัสดุรีไซเคิลหลังจบกิจกรรม",
+        "en": "Collect recyclables after events"
+      },
+      "when": "recyclable_kg >= 20 and recyclable_pct >= 15",
+      "priority": "35 + recyclable_pct * 0.5",
+      "bullets": {
+        "th": [
+          "แยกกระดาษลัง ขวด และกระป๋องไว้คนละจุด",
+          "นัดผู้รับซื้อหรือผู้รับบริจาคมารับหลังจบงาน",
+          "บันทึกปริมาณไว้เทียบในครั้งถัดไป"
+        ],
+        "en": [
+          "Keep cardboard, bottles and cans at separate points",
+          "Book a buyer or donation pick-up right after the event",
+          "Record the amounts to compare next time"
+        ]
+      },
+      "reason": {
+        "th": "มีวัสดุรีไซเคิล {recyclable_kg:kg} ({recyclable_pct:pct}) จากกิจกรรม/พื้นที่เหล่านี้ ซึ่งคุ้มค่าที่จะรวบรวมส่งต่อแทนการทิ้งรวม",
+        "en": "These events/areas produced {recyclable_kg:kg} of recyclables ({recyclable_pct:pct}), worth collecting instead of binning."
+      }
+    },
+    {
+      "id": "T-O05",
+      "section": "opportunity",
+      "modes": [
+        "tenant"
+      ],
+      "group": "stream_general",
+      "title": {
+        "th": "คัดแยกขยะที่โต๊ะทำงาน",
+        "en": "Sort waste at the desk"
+      },
+      "when": "general_rank == 1 and general_pct >= 40 and total_kg >= 10",
+      "priority": "40 + (general_pct - 40) * 0.8",
+      "bullets": {
+        "th": [
+          "เปลี่ยนถังรวมเป็นถังแยก 2–3 ช่องตามโซนทำงาน",
+          "กล่องและขวดที่ล้างแล้วรีไซเคิลได้ ไม่ต้องทิ้งเป็นขยะทั่วไป",
+          "ตั้งเป้าลดสัดส่วนขยะทั่วไปลง 5–10% ในไตรมาสถัดไป"
+        ],
+        "en": [
+          "Swap single bins for 2–3 compartment bins in each work zone",
+          "Rinsed boxes and bottles are recyclable, not general waste",
+          "Aim to cut the general-waste share by 5–10% next quarter"
+        ]
+      },
+      "reason": {
+        "th": "ขยะทั่วไปเป็นหมวดที่ใหญ่ที่สุดของผู้เช่า ({general_kg:kg} หรือ {general_pct:pct}) และการคัดแยกที่ต้นทางเป็นสิ่งที่ผู้เช่าควบคุมได้เองโดยตรง",
+        "en": "General waste is your largest stream ({general_kg:kg}, {general_pct:pct}), and sorting at source is fully in your hands."
+      }
+    },
+    {
+      "id": "L-O11",
+      "section": "opportunity",
+      "modes": [
+        "location"
+      ],
+      "group": "engage",
+      "title": {
+        "th": "จัดแคมเปญคัดแยกร่วมกับผู้ใช้อาคาร",
+        "en": "Run a sorting campaign with occupants"
+      },
+      "when": "total_kg >= 50 and general_pct >= 40",
+      "priority": "34",
+      "bullets": {
+        "th": [
+          "สื่อสารวิธีคัดแยกกับผู้เช่าและพนักงานผ่านป้ายและอีเมล",
+          "แจ้งผลการคัดแยกรายเดือนให้ผู้เช่าทราบ",
+          "มอบรางวัลให้ชั้นหรือผู้เช่าที่คัดแยกได้ดี"
+        ],
+        "en": [
+          "Explain sorting to tenants and staff via signs and email",
+          "Share monthly sorting results with tenants",
+          "Reward the floors or tenants that sort best"
+        ]
+      },
+      "reason": {
+        "th": "ขยะทั่วไปคิดเป็น {general_pct:pct} ของ {total_kg:kg} ซึ่งส่วนใหญ่เกิดจากพฤติกรรมของผู้ใช้อาคาร การสื่อสารและแรงจูงใจจึงเป็นเครื่องมือที่เจ้าของอาคารใช้ได้ทันที",
+        "en": "General waste is {general_pct:pct} of {total_kg:kg}, largely down to occupant habits, so communication and incentives are levers the owner can use now."
+      }
+    },
+    {
+      "id": "T-O08",
+      "section": "opportunity",
+      "modes": [
+        "tenant"
+      ],
+      "group": "procurement",
+      "title": {
+        "th": "ลดขยะตั้งแต่การจัดซื้อของสำนักงาน",
+        "en": "Cut waste at office procurement"
+      },
+      "when": "total_kg >= 50 and general_pct >= 40",
+      "priority": "30",
+      "bullets": {
+        "th": [
+          "เลือกผู้ขายที่ใช้บรรจุภัณฑ์น้อยหรือรับคืนบรรจุภัณฑ์",
+          "ซื้อของใช้สิ้นเปลืองแบบเติม (refill)",
+          "งดของแจกหรือของที่ระลึกที่กลายเป็นขยะทันที"
+        ],
+        "en": [
+          "Prefer suppliers with minimal or take-back packaging",
+          "Buy refills for consumables",
+          "Skip giveaways that become waste immediately"
+        ]
+      },
+      "reason": {
+        "th": "ขยะทั่วไปคิดเป็น {general_pct:pct} ของ {total_kg:kg} ส่วนหนึ่งมาจากบรรจุภัณฑ์และของใช้ครั้งเดียว ซึ่งผู้เช่าลดได้ตั้งแต่ขั้นตอนจัดซื้อ",
+        "en": "General waste is {general_pct:pct} of {total_kg:kg}; part of it is packaging and single-use items you can avoid at purchase."
+      }
+    },
+    {
+      "id": "E-O06",
+      "section": "opportunity",
+      "modes": [
+        "tag"
+      ],
+      "group": "focus",
+      "title": {
+        "th": "เริ่มปรับปรุงที่ {top_group_label} ก่อน",
+        "en": "Start with {top_group_label}"
+      },
+      "when": "group_count >= 2 and top_group_share >= 40",
+      "priority": "44 + (top_group_share - 40) * 0.4",
+      "bullets": {
+        "th": [
+          "ทบทวนการจัดการขยะของ {top_group_label} เป็นลำดับแรก",
+          "นำวิธีที่ได้ผลไปใช้กับกิจกรรม/พื้นที่อื่น",
+          "ติดตามผลเทียบกับครั้งก่อน"
+        ],
+        "en": [
+          "Review waste handling at {top_group_label} first",
+          "Roll out what works to the other events/areas",
+          "Track the result against last time"
+        ]
+      },
+      "reason": {
+        "th": "{top_group_label} มีขยะ {top_group_kg:kg} หรือ {top_group_share:pct} ของทั้งหมด การปรับปรุงที่จุดนี้จึงให้ผลมากกว่าการกระจายไปทุกจุดพร้อมกัน",
+        "en": "{top_group_label} produced {top_group_kg:kg}, {top_group_share:pct} of the total, so improving it beats spreading effort everywhere at once."
+      }
+    },
+    {
+      "id": "L-O09",
+      "section": "opportunity",
+      "modes": [
+        "location"
+      ],
+      "group": "trend_good",
+      "title": {
+        "th": "ต่อยอดแนวโน้มการลดขยะ",
+        "en": "Build on the drop in waste"
+      },
+      "when": "has_prev and prev_kg >= 5 and change_pct <= -10 and change_pct > -60",
+      "priority": "38 + min(change_pct_abs, 50) * 0.3",
+      "bullets": {
+        "th": [
+          "แจ้งผลการลดขยะ {change_pct_abs:pct} ให้ผู้ใช้อาคารรับทราบ",
+          "บันทึกว่ามาตรการใดได้ผล เพื่อขยายไปพื้นที่อื่น",
+          "ตั้งเป้าหมายรายเดือนเพื่อรักษาระดับนี้"
+        ],
+        "en": [
+          "Share the {change_pct_abs:pct} reduction with occupants",
+          "Note what worked and roll it out to other areas",
+          "Set a monthly target to hold the gain"
+        ]
+      },
+      "reason": {
+        "th": "ขยะรวม {cur_kg:kg} เทียบกับ {prev_kg:kg} ในช่วง {prev_label} ลดลง {change_pct_abs:pct} เป็นการลดลงที่ชัดเจนแต่ไม่มากผิดปกติ จึงน่าจะมาจากการเปลี่ยนแปลงจริง",
+        "en": "{cur_kg:kg} against {prev_kg:kg} for {prev_label}, down {change_pct_abs:pct}: a clear but not suspicious drop, likely a real change."
+      }
+    },
+    {
+      "id": "T-O06",
+      "section": "opportunity",
+      "modes": [
+        "tenant"
+      ],
+      "group": "trend_good",
+      "title": {
+        "th": "ต่อยอดแนวโน้มการลดขยะ",
+        "en": "Build on the drop in waste"
+      },
+      "when": "has_prev and prev_kg >= 5 and change_pct <= -10 and change_pct > -60",
+      "priority": "38 + min(change_pct_abs, 50) * 0.3",
+      "bullets": {
+        "th": [
+          "แจ้งผลการลดขยะ {change_pct_abs:pct} ให้ทีมรับทราบ",
+          "ตั้งเป้าหมายรายเดือนเพื่อรักษาระดับนี้",
+          "แบ่งปันวิธีที่ได้ผลกับทีมอื่นในองค์กร"
+        ],
+        "en": [
+          "Share the {change_pct_abs:pct} reduction with the team",
+          "Set a monthly target to hold the gain",
+          "Pass on what worked to other teams"
+        ]
+      },
+      "reason": {
+        "th": "ขยะรวม {cur_kg:kg} เทียบกับ {prev_kg:kg} ในช่วง {prev_label} ลดลง {change_pct_abs:pct} เป็นการลดลงที่ชัดเจนแต่ไม่มากผิดปกติ จึงน่าจะมาจากการเปลี่ยนแปลงจริง",
+        "en": "{cur_kg:kg} against {prev_kg:kg} for {prev_label}, down {change_pct_abs:pct}: a clear but not suspicious drop, likely a real change."
+      }
+    },
+    {
+      "id": "E-O07",
+      "section": "opportunity",
+      "modes": [
+        "tag"
+      ],
+      "group": "trend_good",
+      "title": {
+        "th": "ต่อยอดแนวโน้มการลดขยะ",
+        "en": "Build on the drop in waste"
+      },
+      "when": "has_prev and prev_kg >= 5 and change_pct <= -10 and change_pct > -60",
+      "priority": "38 + min(change_pct_abs, 50) * 0.3",
+      "bullets": {
+        "th": [
+          "สรุปสิ่งที่ทำต่างจากครั้งก่อนไว้เป็นแนวทาง",
+          "ใช้แนวทางเดียวกันกับกิจกรรมครั้งถัดไป",
+          "สื่อสารผลลัพธ์กับผู้จัดและผู้เข้าร่วม"
+        ],
+        "en": [
+          "Write down what you did differently",
+          "Use the same approach at the next event",
+          "Share the result with organisers and attendees"
+        ]
+      },
+      "reason": {
+        "th": "ขยะรวม {cur_kg:kg} เทียบกับ {prev_kg:kg} ในช่วง {prev_label} ลดลง {change_pct_abs:pct} เป็นการลดลงที่ชัดเจนแต่ไม่มากผิดปกติ จึงน่าจะมาจากการเปลี่ยนแปลงจริง",
+        "en": "{cur_kg:kg} against {prev_kg:kg} for {prev_label}, down {change_pct_abs:pct}: a clear but not suspicious drop, likely a real change."
+      }
+    },
+    {
+      "id": "L-O10",
+      "section": "opportunity",
+      "modes": [
+        "location",
+        "tenant"
+      ],
+      "group": "trend_good",
+      "title": {
+        "th": "การคัดแยกดีขึ้น ต่อยอดได้",
+        "en": "Sorting is improving"
+      },
+      "when": "has_prev and prev_kg >= 5 and total_kg >= 5 and diversion_change_pts >= 5",
+      "priority": "36 + min(diversion_change_pts, 30) * 0.5",
+      "bullets": {
+        "th": [
+          "สัดส่วนขยะที่คัดแยกได้เพิ่มจาก {diversion_pct_prev:pct} เป็น {diversion_pct:pct}",
+          "ใช้ผลนี้สื่อสารและชวนพื้นที่อื่นทำตาม",
+          "ตั้งเป้าหมายอัตราการคัดแยกรายเดือน"
+        ],
+        "en": [
+          "The sorted share rose from {diversion_pct_prev:pct} to {diversion_pct:pct}",
+          "Use it to bring other areas on board",
+          "Set a monthly sorting-rate target"
+        ]
+      },
+      "reason": {
+        "th": "สัดส่วนขยะรีไซเคิลและขยะอินทรีย์เพิ่มจาก {diversion_pct_prev:pct} ในช่วง {prev_label} เป็น {diversion_pct:pct} ({diversion_change_pts:pts}) เป็นสัญญาณว่าการคัดแยกได้ผล",
+        "en": "The recyclable + organic share rose from {diversion_pct_prev:pct} ({prev_label}) to {diversion_pct:pct} ({diversion_change_pts:pts}), a sign sorting is working."
+      }
+    },
+    {
+      "id": "L-O12",
+      "section": "opportunity",
+      "modes": [
+        "location",
+        "tenant",
+        "tag"
+      ],
+      "group": "zero_waste",
+      "title": {
+        "th": "ก้าวสู่เป้าหมาย Zero Waste",
+        "en": "Move toward Zero Waste"
+      },
+      "when": "total_kg >= 10 and diversion_pct >= 60",
+      "priority": "35 + (diversion_pct - 60) * 0.5",
+      "bullets": {
+        "th": [
+          "ตั้งเป้าอัตราการคัดแยก 80–90% ตามแนวทาง Zero Waste",
+          "มุ่งลดขยะทั่วไปที่เหลือ เช่น บรรจุภัณฑ์ปนเปื้อน",
+          "สื่อสารความสำเร็จในรายงานความยั่งยืน"
+        ],
+        "en": [
+          "Target an 80–90% sorting rate, in line with Zero Waste practice",
+          "Go after the remaining general waste, e.g. contaminated packaging",
+          "Report the result in sustainability reporting"
+        ]
+      },
+      "reason": {
+        "th": "สัดส่วนขยะที่คัดแยกได้ (รีไซเคิลและอินทรีย์) อยู่ที่ {diversion_pct:pct} ซึ่งสูงกว่าครึ่งหนึ่งอย่างชัดเจน จึงพร้อมตั้งเป้าหมายที่สูงขึ้น",
+        "en": "The sorted share (recyclable + organic) is {diversion_pct:pct}, well above half, so a higher target is realistic."
+      }
+    },
+    {
+      "id": "L-Q01",
+      "section": "quickwin",
+      "modes": [
+        "location"
+      ],
+      "group": "signage",
+      "title": {
+        "th": "ปรับปรุงป้ายบอกทางอย่างง่าย",
+        "en": "Simple signage fix"
+      },
+      "when": "total_kg >= 5 and general_pct >= 50",
+      "priority": "50 + (general_pct - 50) * 0.5",
+      "bullets": {
+        "th": [
+          "ตรวจสอบและเปลี่ยนป้ายคัดแยกที่ซีดจาง",
+          "เพิ่มรูปภาพตัวอย่างบนป้าย ไม่ใช่แค่ข้อความ",
+          "ใช้สีที่สอดคล้องกันทุกจุด"
+        ],
+        "en": [
+          "Audit and replace faded segregation signs",
+          "Add visual examples on signs, not just text",
+          "Use consistent colour coding at all stations"
+        ]
+      },
+      "reason": {
+        "th": "ขยะทั่วไปคิดเป็น {general_pct:pct} ของขยะทั้งหมด ซึ่งมากกว่าครึ่ง ป้ายที่ชัดเจนช่วยให้ทิ้งถูกถังได้ทันทีโดยแทบไม่มีค่าใช้จ่าย",
+        "en": "General waste is {general_pct:pct} of the total, more than half; clear signs get waste into the right bin straight away at almost no cost."
+      }
+    },
+    {
+      "id": "T-Q01",
+      "section": "quickwin",
+      "modes": [
+        "tenant"
+      ],
+      "group": "signage",
+      "title": {
+        "th": "ติดป้ายคัดแยกที่ถังในสำนักงาน",
+        "en": "Put sorting signs on office bins"
+      },
+      "when": "total_kg >= 5 and general_pct >= 50",
+      "priority": "50 + (general_pct - 50) * 0.5",
+      "bullets": {
+        "th": [
+          "ตรวจสอบและเปลี่ยนป้ายคัดแยกที่ซีดจาง",
+          "เพิ่มรูปภาพตัวอย่างบนป้าย ไม่ใช่แค่ข้อความ",
+          "ใช้สีที่สอดคล้องกันทุกจุด"
+        ],
+        "en": [
+          "Audit and replace faded segregation signs",
+          "Add visual examples on signs, not just text",
+          "Use consistent colour coding at all stations"
+        ]
+      },
+      "reason": {
+        "th": "ขยะทั่วไปคิดเป็น {general_pct:pct} ของขยะทั้งหมด ซึ่งมากกว่าครึ่ง ป้ายที่ชัดเจนช่วยให้ทิ้งถูกถังได้ทันทีโดยแทบไม่มีค่าใช้จ่าย",
+        "en": "General waste is {general_pct:pct} of the total, more than half; clear signs get waste into the right bin straight away at almost no cost."
+      }
+    },
+    {
+      "id": "E-Q01",
+      "section": "quickwin",
+      "modes": [
+        "tag"
+      ],
+      "group": "signage",
+      "title": {
+        "th": "ป้ายคัดแยกแบบมีรูปภาพที่จุดทิ้ง",
+        "en": "Picture signs at every bin station"
+      },
+      "when": "total_kg >= 5 and general_pct >= 50",
+      "priority": "50 + (general_pct - 50) * 0.5",
+      "bullets": {
+        "th": [
+          "ตรวจสอบและเปลี่ยนป้ายคัดแยกที่ซีดจาง",
+          "เพิ่มรูปภาพตัวอย่างบนป้าย ไม่ใช่แค่ข้อความ",
+          "ใช้สีที่สอดคล้องกันทุกจุด"
+        ],
+        "en": [
+          "Audit and replace faded segregation signs",
+          "Add visual examples on signs, not just text",
+          "Use consistent colour coding at all stations"
+        ]
+      },
+      "reason": {
+        "th": "ขยะทั่วไปคิดเป็น {general_pct:pct} ของขยะทั้งหมด ซึ่งมากกว่าครึ่ง ป้ายที่ชัดเจนช่วยให้ทิ้งถูกถังได้ทันทีโดยแทบไม่มีค่าใช้จ่าย",
+        "en": "General waste is {general_pct:pct} of the total, more than half; clear signs get waste into the right bin straight away at almost no cost."
+      }
+    },
+    {
+      "id": "L-Q02",
+      "section": "quickwin",
+      "modes": [
+        "location",
+        "tenant",
+        "tag"
+      ],
+      "group": "signage",
+      "title": {
+        "th": "ปรับปรุงป้ายบอกทางอย่างง่าย",
+        "en": "Simple signage fix"
+      },
+      "when": "total_kg >= 5 and unspecified_pct >= 15",
+      "priority": "48 + min(unspecified_pct, 50) * 0.3",
+      "bullets": {
+        "th": [
+          "ตรวจสอบและเปลี่ยนป้ายคัดแยกที่ซีดจาง",
+          "เพิ่มรูปภาพตัวอย่างบนป้าย ไม่ใช่แค่ข้อความ",
+          "ใช้สีที่สอดคล้องกันทุกจุด"
+        ],
+        "en": [
+          "Audit and replace faded segregation signs",
+          "Add visual examples on signs, not just text",
+          "Use consistent colour coding at all stations"
+        ]
+      },
+      "reason": {
+        "th": "ขยะที่บันทึกเป็นประเภทรวมหรือไม่ระบุมี {unspecified_kg:kg} ({unspecified_pct:pct} ของขยะทั้งหมด) แสดงว่าจุดทิ้งยังแยกได้ไม่ละเอียด",
+        "en": "{unspecified_kg:kg} ({unspecified_pct:pct} of the total) was recorded as mixed or unspecified, so bins aren't being sorted finely."
+      }
+    },
+    {
+      "id": "L-Q03",
+      "section": "quickwin",
+      "modes": [
+        "location"
+      ],
+      "group": "bins",
+      "title": {
+        "th": "การเพิ่มประสิทธิภาพตำแหน่งถังขยะ",
+        "en": "Bin placement optimisation"
+      },
+      "when": "total_kg >= 5 and general_pct >= 40 and general_kg > diversion_kg",
+      "priority": "46 + (general_pct - 40) * 0.4",
+      "bullets": {
+        "th": [
+          "วางถังรีไซเคิลคู่กับถังขยะทั่วไป",
+          "เพิ่มถังในจุดที่เกิดขยะมาก (ห้องพัก ห้องถ่ายเอกสาร)",
+          "เอาถังขยะทั่วไปออกจากจุดที่ควรรีไซเคิล"
+        ],
+        "en": [
+          "Place recycling bins next to general waste bins",
+          "Add bins in high-waste areas (break rooms, copy areas)",
+          "Remove general waste bins from recyclable zones"
+        ]
+      },
+      "reason": {
+        "th": "ขยะทั่วไป {general_kg:kg} มากกว่าขยะที่คัดแยกได้ {diversion_kg:kg} การมีถังรีไซเคิลอยู่ข้างถังขยะทั่วไปทุกจุดทำให้การแยกเป็นเรื่องง่ายที่สุด",
+        "en": "General waste ({general_kg:kg}) outweighs sorted waste ({diversion_kg:kg}); a recycling bin beside every general bin makes sorting the easy choice."
+      }
+    },
+    {
+      "id": "T-Q03",
+      "section": "quickwin",
+      "modes": [
+        "tenant"
+      ],
+      "group": "bins",
+      "title": {
+        "th": "วางถังรีไซเคิลคู่ถังขยะทั่วไปในสำนักงาน",
+        "en": "Pair recycling and general bins in the office"
+      },
+      "when": "total_kg >= 5 and general_pct >= 40 and general_kg > diversion_kg",
+      "priority": "46 + (general_pct - 40) * 0.4",
+      "bullets": {
+        "th": [
+          "วางถังรีไซเคิลไว้ข้างถังขยะทั่วไปทุกจุด",
+          "หากถังไม่พอ ติดต่อฝ่ายอาคารเพื่อขอถังเพิ่ม",
+          "ย้ายถังไปไว้ใกล้แพนทรี่และห้องถ่ายเอกสาร"
+        ],
+        "en": [
+          "Put a recycling bin next to every general bin",
+          "Ask building management for more bins if needed",
+          "Move bins close to the pantry and copy room"
+        ]
+      },
+      "reason": {
+        "th": "ขยะทั่วไป {general_kg:kg} มากกว่าขยะที่คัดแยกได้ {diversion_kg:kg} การมีถังรีไซเคิลอยู่ข้างถังขยะทั่วไปทุกจุดทำให้การแยกเป็นเรื่องง่ายที่สุด",
+        "en": "General waste ({general_kg:kg}) outweighs sorted waste ({diversion_kg:kg}); a recycling bin beside every general bin makes sorting the easy choice."
+      }
+    },
+    {
+      "id": "E-Q02",
+      "section": "quickwin",
+      "modes": [
+        "tag"
+      ],
+      "group": "bins",
+      "title": {
+        "th": "เจ้าหน้าที่ประจำจุดทิ้งขยะช่วงคนเยอะ",
+        "en": "Staff the bin stations at peak times"
+      },
+      "when": "total_kg >= 5 and general_pct >= 40 and general_kg > diversion_kg",
+      "priority": "46 + (general_pct - 40) * 0.4",
+      "bullets": {
+        "th": [
+          "ให้ทีมงานช่วยแนะนำการทิ้งที่จุดคัดแยกช่วงพีค",
+          "วางจุดคัดแยกครบชุดทุกจุด ไม่มีถังเดี่ยว",
+          "รวมจุดทิ้งให้น้อยลงแต่ครบถังทุกประเภท"
+        ],
+        "en": [
+          "Have crew guide people at the stations during peaks",
+          "Make every station a full set, never a lone bin",
+          "Fewer stations, each with every bin type"
+        ]
+      },
+      "reason": {
+        "th": "ขยะทั่วไป {general_kg:kg} มากกว่าขยะที่คัดแยกได้ {diversion_kg:kg} การมีถังรีไซเคิลอยู่ข้างถังขยะทั่วไปทุกจุดทำให้การแยกเป็นเรื่องง่ายที่สุด",
+        "en": "General waste ({general_kg:kg}) outweighs sorted waste ({diversion_kg:kg}); a recycling bin beside every general bin makes sorting the easy choice."
+      }
+    },
+    {
+      "id": "L-Q04",
+      "section": "quickwin",
+      "modes": [
+        "location",
+        "tenant",
+        "tag"
+      ],
+      "group": "specify",
+      "title": {
+        "th": "ระบุชนิดวัสดุรีไซเคิลตอนบันทึก",
+        "en": "Record recyclables by type"
+      },
+      "when": "unspecified_recyclable_kg >= 1 and unspecified_recyclable_share >= 10",
+      "priority": "47 + min(unspecified_recyclable_share, 60) * 0.3",
+      "bullets": {
+        "th": [
+          "เลือกชนิดย่อย เช่น กระดาษขาวดำ PET กระป๋อง แทน \"วัสดุรีไซเคิลรวม\"",
+          "ช่วยให้คำนวณการลดก๊าซเรือนกระจกได้แม่นยำขึ้น",
+          "วัสดุที่แยกชนิดขายได้ราคาดีกว่าวัสดุรวม"
+        ],
+        "en": [
+          "Pick the specific type (white paper, PET, cans) instead of \"mixed recyclables\"",
+          "Makes the greenhouse-gas calculation more accurate",
+          "Sorted materials sell for more than mixed ones"
+        ]
+      },
+      "reason": {
+        "th": "มีวัสดุรีไซเคิลที่บันทึกเป็นประเภทรวมหรือไม่ระบุ {unspecified_recyclable_kg:kg} คิดเป็น {unspecified_recyclable_share:pct} ของวัสดุรีไซเคิลทั้งหมด การระบุชนิดช่วยให้คำนวณผลกระทบได้แม่นยำและขายได้ราคาดีกว่า",
+        "en": "{unspecified_recyclable_kg:kg} of recyclables ({unspecified_recyclable_share:pct} of all recyclables) was recorded as mixed/unspecified; recording the type makes the impact figures accurate and sells for more."
+      }
+    },
+    {
+      "id": "L-Q05",
+      "section": "quickwin",
+      "modes": [
+        "location"
+      ],
+      "group": "cardboard",
+      "title": {
+        "th": "จัดจุดพับและมัดกล่องกระดาษลัง",
+        "en": "Set up a cardboard flattening point"
+      },
+      "when": "cardboard_kg >= 3",
+      "priority": "38",
+      "bullets": {
+        "th": [
+          "พับกล่องให้แบนและมัดรวมก่อนส่ง ลดพื้นที่จัดเก็บ",
+          "เก็บให้แห้ง ไม่ปนเทปและพลาสติก",
+          "นัดรอบรับซื้อประจำกับผู้รับซื้อ"
+        ],
+        "en": [
+          "Flatten and bundle boxes to save storage space",
+          "Keep them dry and free of tape and plastic",
+          "Agree a regular pick-up with a buyer"
+        ]
+      },
+      "reason": {
+        "th": "มีกระดาษลัง {cardboard_kg:kg} ในช่วงนี้ ซึ่งเป็นวัสดุที่ขายได้ทันทีหากพับเก็บให้แห้งและสะอาด",
+        "en": "{cardboard_kg:kg} of cardboard this period, which sells straight away if kept flat, dry and clean."
+      }
+    },
+    {
+      "id": "L-Q06",
+      "section": "quickwin",
+      "modes": [
+        "location",
+        "tenant"
+      ],
+      "group": "paper_sort",
+      "title": {
+        "th": "แยกกระดาษขาวดำออกจากกระดาษรวม",
+        "en": "Pull white paper out of mixed paper"
+      },
+      "when": "mixed_paper_kg >= 2 and mixed_paper_share >= 30",
+      "priority": "44",
+      "bullets": {
+        "th": [
+          "ตั้งกล่องเก็บกระดาษ A4 ขาวดำไว้ข้างเครื่องพิมพ์",
+          "กระดาษขาวดำขายได้ราคาสูงกว่ากระดาษรวมมาก",
+          "เอกสารลับให้ย่อยเส้นแล้วแยกเก็บเป็นกระดาษย่อย"
+        ],
+        "en": [
+          "Put a box for white A4 paper next to each printer",
+          "White office paper sells for much more than mixed paper",
+          "Shred confidential papers and keep the shreds separate"
+        ]
+      },
+      "reason": {
+        "th": "กระดาษรวม (จับจั๊ว) {mixed_paper_kg:kg} คิดเป็น {mixed_paper_share:pct} ของกระดาษทั้งหมด กระดาษขาวดำที่ปนอยู่จะขายได้ราคาต่ำลงตามกระดาษรวม",
+        "en": "Mixed paper is {mixed_paper_kg:kg}, {mixed_paper_share:pct} of all paper; white paper mixed into it sells at the lower mixed-paper price."
+      }
+    },
+    {
+      "id": "T-Q02",
+      "section": "quickwin",
+      "modes": [
+        "tenant"
+      ],
+      "group": "paper_qw",
+      "title": {
+        "th": "ตั้งค่าพิมพ์สองหน้าเป็นค่าเริ่มต้น",
+        "en": "Make double-sided printing the default"
+      },
+      "when": "paper_pct >= 10 and paper_kg >= 3",
+      "priority": "40 + paper_pct * 0.5",
+      "bullets": {
+        "th": [
+          "ตั้งค่าเริ่มต้นของเครื่องพิมพ์ทุกเครื่องเป็นพิมพ์สองหน้า",
+          "ให้ยืนยันก่อนพิมพ์เอกสารที่ยาวเกิน 20 หน้า",
+          "ติดป้ายเตือนใกล้เครื่องพิมพ์"
+        ],
+        "en": [
+          "Set every printer to double-sided by default",
+          "Require confirmation for jobs over 20 pages",
+          "Put a reminder sign next to the printers"
+        ]
+      },
+      "reason": {
+        "th": "กระดาษคิดเป็น {paper_pct:pct} ของขยะ ({paper_kg:kg}) การพิมพ์สองหน้าลดกระดาษได้ทันทีโดยไม่ต้องลงทุน",
+        "en": "Paper is {paper_pct:pct} of all waste ({paper_kg:kg}); double-sided printing cuts it immediately at no cost."
+      }
+    },
+    {
+      "id": "T-Q04",
+      "section": "quickwin",
+      "modes": [
+        "tenant"
+      ],
+      "group": "bins",
+      "title": {
+        "th": "ยกเลิกถังขยะประจำโต๊ะ",
+        "en": "Replace personal desk bins"
+      },
+      "when": "total_kg >= 20 and general_pct >= 55",
+      "priority": "36",
+      "bullets": {
+        "th": [
+          "ใช้จุดทิ้งรวมแบบแยกประเภทแทนถังใต้โต๊ะ",
+          "ทุกครั้งที่เดินไปทิ้งจะเห็นป้ายคัดแยก",
+          "ลดงานเก็บขยะรายวันของแม่บ้าน"
+        ],
+        "en": [
+          "Use shared sorting stations instead of under-desk bins",
+          "Every trip to the bin passes a sorting sign",
+          "Less daily bin-emptying for cleaners"
+        ]
+      },
+      "reason": {
+        "th": "ขยะทั่วไปคิดเป็น {general_pct:pct} ของขยะทั้งหมด ถังใต้โต๊ะมักทำให้ทุกอย่างกลายเป็นขยะทั่วไป",
+        "en": "General waste is {general_pct:pct} of the total; under-desk bins tend to turn everything into general waste."
+      }
+    },
+    {
+      "id": "T-Q05",
+      "section": "quickwin",
+      "modes": [
+        "tenant"
+      ],
+      "group": "rinse",
+      "title": {
+        "th": "เทเศษอาหารและล้างบรรจุภัณฑ์ก่อนทิ้ง",
+        "en": "Empty and rinse packaging before binning"
+      },
+      "when": "organic_kg >= 5 and plastic_kg >= 2",
+      "priority": "34",
+      "bullets": {
+        "th": [
+          "ตั้งจุดเทน้ำและเศษอาหารในแพนทรี่",
+          "บรรจุภัณฑ์ที่สะอาดรีไซเคิลได้และไม่ทำให้วัสดุอื่นปนเปื้อน",
+          "ติดป้ายเตือนบนถังรีไซเคิล"
+        ],
+        "en": [
+          "Add a place in the pantry to empty liquids and food",
+          "Clean packaging recycles and doesn't spoil other materials",
+          "Put a reminder on the recycling bins"
+        ]
+      },
+      "reason": {
+        "th": "พบทั้งเศษอาหาร {organic_kg:kg} และพลาสติก {plastic_kg:kg} ซึ่งมักปนเปื้อนกันเมื่อทิ้งพร้อมกัน ทำให้พลาสติกรีไซเคิลไม่ได้",
+        "en": "Both food waste ({organic_kg:kg}) and plastic ({plastic_kg:kg}) are present, and they contaminate each other when binned together."
+      }
+    },
+    {
+      "id": "E-Q05",
+      "section": "quickwin",
+      "modes": [
+        "tag"
+      ],
+      "group": "rinse",
+      "title": {
+        "th": "จุดเทน้ำและเศษอาหารก่อนถึงถังรีไซเคิล",
+        "en": "An emptying point before the recycling bins"
+      },
+      "when": "organic_kg >= 5 and plastic_kg >= 2",
+      "priority": "34",
+      "bullets": {
+        "th": [
+          "วางถังเทน้ำ/น้ำแข็งไว้หน้าจุดคัดแยก",
+          "ให้ทีมงานช่วยแนะนำช่วงคนเยอะ",
+          "แยกภาชนะที่สะอาดออกจากที่เปื้อน"
+        ],
+        "en": [
+          "Put a liquid/ice tip bin in front of each station",
+          "Have crew help at busy times",
+          "Keep clean containers apart from dirty ones"
+        ]
+      },
+      "reason": {
+        "th": "พบทั้งเศษอาหาร {organic_kg:kg} และพลาสติก {plastic_kg:kg} ซึ่งมักปนเปื้อนกันเมื่อทิ้งพร้อมกัน ทำให้พลาสติกรีไซเคิลไม่ได้",
+        "en": "Both food waste ({organic_kg:kg}) and plastic ({plastic_kg:kg}) are present, and they contaminate each other when binned together."
+      }
+    },
+    {
+      "id": "E-Q04",
+      "section": "quickwin",
+      "modes": [
+        "tag"
+      ],
+      "group": "vendor",
+      "title": {
+        "th": "แจ้งร้านค้าและผู้จัดเรื่องการคัดแยกล่วงหน้า",
+        "en": "Brief vendors and organisers in advance"
+      },
+      "when": "organic_pct >= 5 or plastic_pct >= 5",
+      "priority": "37",
+      "bullets": {
+        "th": [
+          "กำหนดชนิดบรรจุภัณฑ์ที่ร้านค้าใช้ได้ล่วงหน้า",
+          "แจ้งจุดทิ้งและวิธีแยกให้ร้านค้าทราบก่อนวันงาน",
+          "ให้ร้านค้าแยกเศษอาหารของตัวเองก่อนส่งทิ้ง"
+        ],
+        "en": [
+          "Agree allowed packaging with vendors in advance",
+          "Tell vendors where and how to sort before the day",
+          "Have vendors separate their own food scraps"
+        ]
+      },
+      "reason": {
+        "th": "ขยะจากกิจกรรม/พื้นที่เหล่านี้มีเศษอาหาร {organic_pct:pct} และพลาสติก {plastic_pct:pct} ซึ่งส่วนใหญ่มาจากร้านค้า การตกลงก่อนวันงานจึงลดได้ตั้งแต่ต้นทาง",
+        "en": "Food waste is {organic_pct:pct} and plastic {plastic_pct:pct} of the waste here, mostly from vendors, so agreeing things before the day cuts it at source."
+      }
+    },
+    {
+      "id": "L-Q07",
+      "section": "quickwin",
+      "modes": [
+        "location",
+        "tenant",
+        "tag"
+      ],
+      "group": "ewaste",
+      "title": {
+        "th": "จัดจุดรับขยะอิเล็กทรอนิกส์",
+        "en": "Set up an e-waste drop point"
+      },
+      "when": "electronic_kg > 0",
+      "priority": "42",
+      "bullets": {
+        "th": [
+          "ตั้งกล่องรับสายชาร์จและอุปกรณ์ขนาดเล็กที่เสีย",
+          "ส่งต่อผู้รีไซเคิลขยะอิเล็กทรอนิกส์ที่ได้รับอนุญาต",
+          "ห้ามทิ้งปนกับขยะทั่วไป"
+        ],
+        "en": [
+          "Put out a box for dead chargers and small devices",
+          "Pass them to a licensed e-waste recycler",
+          "Never put them in general waste"
+        ]
+      },
+      "reason": {
+        "th": "พบขยะอิเล็กทรอนิกส์ {electronic_kg:kg} ในช่วงนี้ ซึ่งมีสารอันตรายและต้องแยกจัดการเฉพาะ",
+        "en": "{electronic_kg:kg} of e-waste this period, which contains hazardous parts and needs separate handling."
+      }
+    },
+    {
+      "id": "L-Q08",
+      "section": "quickwin",
+      "modes": [
+        "location",
+        "tenant"
+      ],
+      "group": "hazard_qw",
+      "title": {
+        "th": "จัดจุดรวมถ่านไฟฉายและหลอดไฟ",
+        "en": "Set up a battery and lamp collection point"
+      },
+      "when": "hazardous_kg > 0",
+      "priority": "58 + min(hazardous_pct, 20)",
+      "bullets": {
+        "th": [
+          "ตั้งกล่องรวบรวมที่มีฝาปิดและป้ายชัดเจน",
+          "แจ้งทุกคนว่าห้ามทิ้งลงถังขยะทั่วไป",
+          "นัดส่งกำจัดเป็นรอบ"
+        ],
+        "en": [
+          "Put out a lidded, clearly labelled collection box",
+          "Tell everyone these never go in the general bin",
+          "Schedule regular hand-overs for disposal"
+        ]
+      },
+      "reason": {
+        "th": "พบขยะอันตราย {hazardous_kg:kg} การมีจุดรวมเฉพาะช่วยป้องกันไม่ให้ปนกับขยะอื่นตั้งแต่ต้นทาง",
+        "en": "{hazardous_kg:kg} of hazardous waste was recorded; a dedicated drop point keeps it out of other streams from the start."
+      }
+    },
+    {
+      "id": "L-Q09",
+      "section": "quickwin",
+      "modes": [
+        "location"
+      ],
+      "group": "briefing",
+      "title": {
+        "th": "อบรมแม่บ้านเรื่องการคัดแยก",
+        "en": "Refresh housekeeping on sorting"
+      },
+      "when": "has_prev and prev_kg >= 5 and diversion_change_pts <= -5",
+      "priority": "43",
+      "bullets": {
+        "th": [
+          "ทบทวนการเก็บขยะแยกประเภทกับแม่บ้านทุกกะ",
+          "ห้ามเทถังรีไซเคิลรวมกับถังขยะทั่วไป",
+          "ติดตามผลภายในเดือนถัดไป"
+        ],
+        "en": [
+          "Run a sorting refresher with every housekeeping shift",
+          "Never empty recycling bins into general waste",
+          "Check the result next month"
+        ]
+      },
+      "reason": {
+        "th": "สัดส่วนการคัดแยกลดลง {diversion_change_pts:pts} จาก{compare_word} การทบทวนสั้น ๆ มักได้ผลเร็วกว่าการเปลี่ยนอุปกรณ์",
+        "en": "The sorted share fell {diversion_change_pts:pts} on {compare_word}; a short refresher usually works faster than new equipment."
+      }
+    },
+    {
+      "id": "T-Q07",
+      "section": "quickwin",
+      "modes": [
+        "tenant"
+      ],
+      "group": "briefing",
+      "title": {
+        "th": "ย้ำวิธีคัดแยกกับพนักงาน",
+        "en": "Refresh sorting know-how with staff"
+      },
+      "when": "has_prev and prev_kg >= 5 and diversion_change_pts <= -5",
+      "priority": "43",
+      "bullets": {
+        "th": [
+          "สรุปวิธีคัดแยก 1 หน้าส่งในกลุ่มแชทของทีม",
+          "ใช้เวลา 5 นาทีในการประชุมประจำสัปดาห์",
+          "ชี้จุดที่ทิ้งผิดบ่อยพร้อมรูปตัวอย่าง"
+        ],
+        "en": [
+          "Send a one-page sorting guide to the team chat",
+          "Take 5 minutes of the weekly meeting",
+          "Show photos of the most common mistakes"
+        ]
+      },
+      "reason": {
+        "th": "สัดส่วนการคัดแยกลดลง {diversion_change_pts:pts} จาก{compare_word} การทบทวนสั้น ๆ มักได้ผลเร็วกว่าการเปลี่ยนอุปกรณ์",
+        "en": "The sorted share fell {diversion_change_pts:pts} on {compare_word}; a short refresher usually works faster than new equipment."
+      }
+    },
+    {
+      "id": "L-Q10",
+      "section": "quickwin",
+      "modes": [
+        "location"
+      ],
+      "group": "data_qw",
+      "title": {
+        "th": "ตั้งรอบชั่งและบันทึกขยะให้สม่ำเสมอ",
+        "en": "Weigh and record on a fixed schedule"
+      },
+      "when": "has_data and days_since_last_record >= 7 and days_since_last_record < 14",
+      "priority": "40",
+      "bullets": {
+        "th": [
+          "กำหนดวันและเวลาชั่งขยะประจำ",
+          "มอบหมายผู้รับผิดชอบหลักและผู้แทน",
+          "ตรวจรายการในระบบทุกสิ้นเดือน"
+        ],
+        "en": [
+          "Fix weighing days and times",
+          "Name an owner and a backup",
+          "Review the records at every month end"
+        ]
+      },
+      "reason": {
+        "th": "ไม่มีการบันทึกขยะมา {days_since_last_record:int} วัน (บันทึกล่าสุด {last_record_date}) ซึ่งเริ่มนานกว่ารอบปกติ",
+        "en": "Nothing has been recorded for {days_since_last_record:int} days (last record {last_record_date}), longer than the usual cycle."
+      }
+    },
+    {
+      "id": "T-Q09",
+      "section": "quickwin",
+      "modes": [
+        "tenant"
+      ],
+      "group": "data_qw",
+      "title": {
+        "th": "ตรวจกับฝ่ายอาคารว่าขยะของผู้เช่าถูกชั่งครบ",
+        "en": "Check with the building that your waste is weighed"
+      },
+      "when": "has_data and days_since_last_record >= 7 and days_since_last_record < 14",
+      "priority": "40",
+      "bullets": {
+        "th": [
+          "สอบถามรอบการชั่งขยะของผู้เช่ากับฝ่ายอาคาร",
+          "ตรวจว่าทีมนำขยะไปจุดชั่งตามที่กำหนด",
+          "แจ้งหากพบว่าขยะบางส่วนไม่ได้ถูกชั่ง"
+        ],
+        "en": [
+          "Ask building management about your weighing schedule",
+          "Check your team uses the weighing point",
+          "Report any waste that isn't being weighed"
+        ]
+      },
+      "reason": {
+        "th": "ไม่มีการบันทึกขยะของผู้เช่ามา {days_since_last_record:int} วัน (บันทึกล่าสุด {last_record_date}) ซึ่งเริ่มนานกว่ารอบปกติ",
+        "en": "Nothing has been recorded for you for {days_since_last_record:int} days (last record {last_record_date}), longer than the usual cycle."
+      }
+    },
+    {
+      "id": "T-Q10",
+      "section": "quickwin",
+      "modes": [
+        "tenant"
+      ],
+      "group": "assign",
+      "title": {
+        "th": "ระบุผู้เช่าในทุกการชั่ง",
+        "en": "Tag the tenant on every weighing"
+      },
+      "when": "unassigned_share >= 20 and group_count >= 1",
+      "priority": "45 + min(unassigned_share, 60) * 0.2",
+      "bullets": {
+        "th": [
+          "ตั้งค่า PIN หรือ QR แยกรายผู้เช่า",
+          "ตรวจรายการที่ยังไม่ระบุผู้เช่าและแก้ไข",
+          "แจ้งผู้ชั่งให้เลือกผู้เช่าทุกครั้ง"
+        ],
+        "en": [
+          "Set up a PIN or QR code per tenant",
+          "Review records without a tenant and fix them",
+          "Remind whoever weighs to pick the tenant every time"
+        ]
+      },
+      "reason": {
+        "th": "ขยะ {unassigned_kg:kg} ({unassigned_share:pct} ของทั้งหมด) ยังไม่ได้ระบุผู้เช่า รายงานรายผู้เช่าจึงยังไม่ครบ",
+        "en": "{unassigned_kg:kg} ({unassigned_share:pct} of the total) has no tenant yet, so per-tenant reporting is incomplete."
+      }
+    },
+    {
+      "id": "E-Q07",
+      "section": "quickwin",
+      "modes": [
+        "tag"
+      ],
+      "group": "assign",
+      "title": {
+        "th": "ติดแท็กให้ครบทุกรายการ",
+        "en": "Tag every record"
+      },
+      "when": "unassigned_share >= 20 and group_count >= 1",
+      "priority": "45 + min(unassigned_share, 60) * 0.2",
+      "bullets": {
+        "th": [
+          "เลือกแท็กกิจกรรม/พื้นที่ทุกครั้งที่บันทึก",
+          "ตรวจรายการที่ยังไม่มีแท็กและแก้ไข",
+          "ตั้งชื่อแท็กให้ชัดเจนและใช้ซ้ำได้"
+        ],
+        "en": [
+          "Pick the event/area tag every time you record",
+          "Review untagged records and fix them",
+          "Give tags clear, reusable names"
+        ]
+      },
+      "reason": {
+        "th": "ขยะ {unassigned_kg:kg} ({unassigned_share:pct} ของทั้งหมด) ยังไม่มีแท็ก การเปรียบเทียบระหว่างกิจกรรม/พื้นที่จึงยังไม่ครบ",
+        "en": "{unassigned_kg:kg} ({unassigned_share:pct} of the total) is untagged, so comparisons between events/areas are incomplete."
+      }
+    },
+    {
+      "id": "E-Q06",
+      "section": "quickwin",
+      "modes": [
+        "tag"
+      ],
+      "group": "hazard_qw",
+      "title": {
+        "th": "ภาชนะแยกขยะอันตรายในกิจกรรม",
+        "en": "A hazardous-waste container at events"
+      },
+      "when": "hazardous_kg > 0",
+      "priority": "58 + min(hazardous_pct, 20)",
+      "bullets": {
+        "th": [
+          "เตรียมภาชนะมีฝาปิดสำหรับถ่านและกระป๋องสเปรย์",
+          "แจ้งทีมงานให้เก็บแยกตั้งแต่ติดตั้งงาน",
+          "ส่งต่อผู้รับกำจัดที่ได้รับอนุญาต"
+        ],
+        "en": [
+          "Provide a lidded container for batteries and aerosol cans",
+          "Brief crew to keep them apart from set-up",
+          "Hand them to a licensed contractor"
+        ]
+      },
+      "reason": {
+        "th": "พบขยะอันตราย {hazardous_kg:kg} จากกิจกรรม/พื้นที่เหล่านี้ ภาชนะเฉพาะช่วยไม่ให้ปนกับขยะอื่น",
+        "en": "{hazardous_kg:kg} of hazardous waste came from these events/areas; a dedicated container keeps it out of other streams."
+      }
+    }
+  ],
+  "fallback": {
+    "no_data": {
+      "title": {
+        "th": "ยังไม่มีข้อมูลในช่วงเวลาที่เลือก",
+        "en": "No data for the selected period"
+      },
+      "bullets": {
+        "th": [
+          "เลือกช่วงเวลาหรือสถานที่ที่มีการบันทึกขยะ"
+        ],
+        "en": [
+          "Pick a period or location that has waste records"
+        ]
+      },
+      "reason": {
+        "th": "ไม่พบรายการขยะในช่วงเวลาและตัวกรองที่เลือก จึงยังวิเคราะห์ไม่ได้",
+        "en": "There are no waste records for this period and filter, so nothing can be analysed yet."
+      }
+    },
+    "location": {
+      "risk": {
+        "title": {
+          "th": "ยังไม่พบความเสี่ยงที่ต้องเฝ้าระวัง",
+          "en": "No risks flagged"
+        },
+        "bullets": {
+          "th": [
+            "ตัวชี้วัดในช่วงนี้อยู่ในระดับปกติ",
+            "ติดตามแนวโน้มต่อเนื่องทุกเดือน"
+          ],
+          "en": [
+            "Indicators for this period look normal",
+            "Keep tracking the trend every month"
+          ]
+        },
+        "reason": {
+          "th": "ไม่พบการเพิ่มขึ้นที่ชัดเจนจาก{compare_word} และสัดส่วนขยะทั่วไปยังไม่เกินครึ่งหนึ่ง{trend_note}",
+          "en": "No clear rise on {compare_word}, and general waste is not over half the total.{trend_note}"
+        }
+      },
+      "opportunity": {
+        "title": {
+          "th": "ตั้งเป้าหมายลดขยะของอาคาร",
+          "en": "Set a building reduction target"
+        },
+        "bullets": {
+          "th": [
+            "ใช้ยอดขยะช่วงนี้เป็นฐาน แล้วตั้งเป้าลด 5%",
+            "ติดตามผลในรายงานทุกเดือน"
+          ],
+          "en": [
+            "Use this period as the baseline and aim for 5% less",
+            "Track progress in this report every month"
+          ]
+        },
+        "reason": {
+          "th": "ยังไม่มีหมวดขยะใดโดดเด่นพอสำหรับคำแนะนำเฉพาะ การตั้งเป้าหมายจึงเป็นจุดเริ่มต้นที่ดี",
+          "en": "No stream stands out enough for specific advice yet, so a baseline target is the best starting point."
+        }
+      },
+      "quickwin": {
+        "title": {
+          "th": "ปรับปรุงป้ายบอกทางอย่างง่าย",
+          "en": "Simple signage fix"
+        },
+        "bullets": {
+          "th": [
+            "ตรวจสอบและเปลี่ยนป้ายคัดแยกที่ซีดจาง",
+            "เพิ่มรูปภาพตัวอย่างบนป้าย ไม่ใช่แค่ข้อความ"
+          ],
+          "en": [
+            "Audit and replace faded segregation signs",
+            "Add visual examples on signs, not just text"
+          ]
+        },
+        "reason": {
+          "th": "เป็นคำแนะนำพื้นฐานที่ทำได้ทันทีโดยแทบไม่มีค่าใช้จ่าย",
+          "en": "A baseline fix you can do today at almost no cost."
+        }
+      }
+    },
+    "tenant": {
+      "risk": {
+        "title": {
+          "th": "ยังไม่พบความเสี่ยงที่ต้องเฝ้าระวัง",
+          "en": "No risks flagged"
+        },
+        "bullets": {
+          "th": [
+            "ตัวชี้วัดในช่วงนี้อยู่ในระดับปกติ",
+            "ติดตามแนวโน้มต่อเนื่องทุกเดือน"
+          ],
+          "en": [
+            "Indicators for this period look normal",
+            "Keep tracking the trend every month"
+          ]
+        },
+        "reason": {
+          "th": "ไม่พบการเพิ่มขึ้นที่ชัดเจนจาก{compare_word} และสัดส่วนขยะทั่วไปยังไม่เกินครึ่งหนึ่ง{trend_note}",
+          "en": "No clear rise on {compare_word}, and general waste is not over half the total.{trend_note}"
+        }
+      },
+      "opportunity": {
+        "title": {
+          "th": "ตั้งเป้าหมายลดขยะของทีม",
+          "en": "Set a team reduction target"
+        },
+        "bullets": {
+          "th": [
+            "ใช้ยอดขยะช่วงนี้เป็นฐาน แล้วตั้งเป้าลด 5%",
+            "แจ้งผลให้ทีมทราบทุกเดือน"
+          ],
+          "en": [
+            "Use this period as the baseline and aim for 5% less",
+            "Share progress with the team every month"
+          ]
+        },
+        "reason": {
+          "th": "ยังไม่มีหมวดขยะใดโดดเด่นพอสำหรับคำแนะนำเฉพาะ การตั้งเป้าหมายร่วมกันจึงเป็นจุดเริ่มต้นที่ดี",
+          "en": "No stream stands out enough for specific advice yet, so a shared target is the best starting point."
+        }
+      },
+      "quickwin": {
+        "title": {
+          "th": "ติดป้ายคัดแยกที่ถังในสำนักงาน",
+          "en": "Put sorting signs on office bins"
+        },
+        "bullets": {
+          "th": [
+            "ตรวจสอบและเปลี่ยนป้ายคัดแยกที่ซีดจาง",
+            "เพิ่มรูปภาพตัวอย่างบนป้าย ไม่ใช่แค่ข้อความ"
+          ],
+          "en": [
+            "Audit and replace faded segregation signs",
+            "Add visual examples on signs, not just text"
+          ]
+        },
+        "reason": {
+          "th": "เป็นคำแนะนำพื้นฐานที่ผู้เช่าทำได้ทันทีโดยแทบไม่มีค่าใช้จ่าย",
+          "en": "A baseline fix you can do today at almost no cost."
+        }
+      }
+    },
+    "tag": {
+      "risk": {
+        "title": {
+          "th": "ยังไม่พบความเสี่ยงที่ต้องเฝ้าระวัง",
+          "en": "No risks flagged"
+        },
+        "bullets": {
+          "th": [
+            "ตัวชี้วัดในช่วงนี้อยู่ในระดับปกติ",
+            "ติดตามแนวโน้มต่อเนื่องทุกเดือน"
+          ],
+          "en": [
+            "Indicators for this period look normal",
+            "Keep tracking the trend every month"
+          ]
+        },
+        "reason": {
+          "th": "ไม่พบการเพิ่มขึ้นที่ชัดเจนจาก{compare_word} และสัดส่วนขยะทั่วไปยังไม่เกินครึ่งหนึ่ง{trend_note}",
+          "en": "No clear rise on {compare_word}, and general waste is not over half the total.{trend_note}"
+        }
+      },
+      "opportunity": {
+        "title": {
+          "th": "บันทึกผลไว้เทียบกับกิจกรรมครั้งถัดไป",
+          "en": "Record results to compare with the next event"
+        },
+        "bullets": {
+          "th": [
+            "ใช้ข้อมูลครั้งนี้เป็นฐานของกิจกรรมลักษณะเดียวกัน",
+            "ตั้งเป้าลดขยะต่อผู้เข้าร่วมในครั้งถัดไป"
+          ],
+          "en": [
+            "Use this as the baseline for similar events",
+            "Set a per-attendee reduction target for next time"
+          ]
+        },
+        "reason": {
+          "th": "ยังไม่มีหมวดขยะใดโดดเด่นพอสำหรับคำแนะนำเฉพาะ ข้อมูลครั้งนี้จึงมีค่าที่สุดในฐานะเกณฑ์เปรียบเทียบ",
+          "en": "No stream stands out enough for specific advice, so this data is most useful as a benchmark."
+        }
+      },
+      "quickwin": {
+        "title": {
+          "th": "ป้ายคัดแยกแบบมีรูปภาพที่จุดทิ้ง",
+          "en": "Picture signs at every bin station"
+        },
+        "bullets": {
+          "th": [
+            "ตรวจสอบและเปลี่ยนป้ายคัดแยกที่ซีดจาง",
+            "เพิ่มรูปภาพตัวอย่างบนป้าย ไม่ใช่แค่ข้อความ"
+          ],
+          "en": [
+            "Audit and replace faded segregation signs",
+            "Add visual examples on signs, not just text"
+          ]
+        },
+        "reason": {
+          "th": "เป็นคำแนะนำพื้นฐานที่ทำได้ทันทีในทุกกิจกรรม",
+          "en": "A baseline fix that works at any event."
+        }
+      }
+    }
+  }
+}
