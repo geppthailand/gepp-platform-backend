@@ -586,8 +586,9 @@ class CampaignService:
 
             for tx, user, am, dp in claim_rows.all():
                 user_name = (user.display_name if user else None) or (user.line_display_name if user else None) or f"User #{tx.reward_user_id}"
-                if search and search.lower() not in user_name.lower():
+                if search and not self._matches(search, user_name, am.name if am else None):
                     continue
+                source = tx.source or "staff"
                 items.append({
                     "id": f"claim-{tx.id}",
                     "type": "claim",
@@ -600,7 +601,61 @@ class CampaignService:
                     "value": float(tx.value) if tx.value is not None else None,
                     "unit": tx.unit,
                     "points": float(tx.points) if tx.points is not None else 0,
-                    "status": "completed",
+                    # A self-submitted claim only reaches the ledger once approved.
+                    "status": "approved" if source == "self" else "completed",
+                    "source": source,
+                    "image_count": len(tx.image_ids or []),
+                    "transaction_id": tx.transaction_id,
+                    "droppoint_id": dp.id if dp else None,
+                    "droppoint_name": dp.name if dp else None,
+                })
+
+            # [ADMIN-TOOLS] Self-submitted claims not on the ledger yet: pending always
+            # (they are real "รับ" in progress), rejected only when Admin tools is on — with
+            # it off there is no status column to explain a rejected row.
+            from ...models.rewards.claim_requests import RewardClaimRequest
+            from .claim_request_service import ClaimRequestService, admin_tools_enabled
+            show = ["pending", "rejected"] if admin_tools_enabled(self.db, organization_id) else ["pending"]
+            req_q = (
+                self.db.query(RewardClaimRequest, RewardUser, RewardActivityMaterial, Droppoint)
+                .outerjoin(RewardUser, RewardUser.id == RewardClaimRequest.reward_user_id)
+                .outerjoin(RewardActivityMaterial, RewardActivityMaterial.id == RewardClaimRequest.reward_activity_materials_id)
+                .outerjoin(Droppoint, Droppoint.id == RewardClaimRequest.droppoint_id)
+                .filter(
+                    RewardClaimRequest.reward_campaign_id == id,
+                    RewardClaimRequest.deleted_date.is_(None),
+                    RewardClaimRequest.status != "approved",
+                )
+            )
+            if date_from:
+                req_q = req_q.filter(RewardClaimRequest.submitted_date >= date_from)
+            if date_to:
+                req_q = req_q.filter(RewardClaimRequest.submitted_date <= date_to)
+            req_rows = req_q.all()
+            if ClaimRequestService(self.db).reconcile([r for r, *_ in req_rows]):
+                self.db.commit()
+            for req, user, am, dp in req_rows:
+                if req.status not in show:
+                    continue
+                user_name = (user.display_name if user else None) or (user.line_display_name if user else None) or f"User #{req.reward_user_id}"
+                if search and not self._matches(search, user_name, am.name if am else None):
+                    continue
+                items.append({
+                    "id": f"request-{req.id}",
+                    "type": "claim",
+                    "datetime": self._safe_iso(req.submitted_date),
+                    "member_name": user_name,
+                    "reward_user_id": req.reward_user_id,
+                    "staff_id": None,
+                    "item_name": am.name if am else None,
+                    "item_type": am.type if am else None,
+                    "value": float(req.value) if req.value is not None else None,
+                    "unit": req.unit,
+                    "points": float(req.requested_points or 0),
+                    "status": req.status,
+                    "source": "self",
+                    "image_count": len(req.image_ids or []),
+                    "transaction_id": req.transaction_id,
                     "droppoint_id": dp.id if dp else None,
                     "droppoint_name": dp.name if dp else None,
                 })
@@ -623,7 +678,7 @@ class CampaignService:
 
             for r, user, cat in redeem_rows.all():
                 user_name = (user.display_name if user else None) or (user.line_display_name if user else None) or f"User #{r.reward_user_id}"
-                if search and search.lower() not in user_name.lower():
+                if search and not self._matches(search, user_name, cat.name if cat else None):
                     continue
                 items.append({
                     "id": f"redeem-{r.id}",
@@ -651,7 +706,15 @@ class CampaignService:
         return {
             "items": paged,
             "pagination": {"page": page, "page_size": page_size, "total": total},
+            # self-submitted claims awaiting review (redemptions have their own pending state)
+            "pending_count": sum(1 for x in items if x.get("source") == "self" and x.get("status") == "pending"),
         }
+
+    @staticmethod
+    def _matches(search: str, *fields) -> bool:
+        """The search box says "member or item", so match either."""
+        needle = search.lower()
+        return any(needle in (f or "").lower() for f in fields)
 
     def list_members(
         self,

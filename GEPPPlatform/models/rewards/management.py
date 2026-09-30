@@ -34,6 +34,10 @@ class RewardSetup(Base, BaseModel):
     # hides every cost-related UI (deposit unit_price, KPI baht subtexts, campaign budget /
     # rate inputs, the top-level cost tab). Data is preserved across toggle flips.
     cost_management_enabled = Column(Boolean, nullable=False, default=False)
+    # [ADMIN-TOOLS] Master switch for admin-attached claims, per-member claim mode
+    # (staff / non_staff) and the self-submit + review flow. OFF (default) = the program
+    # behaves exactly as before; data created while ON is kept when it is switched off.
+    admin_tools_enabled = Column(Boolean, nullable=False, default=False)
 
 
 class RewardCampaign(Base, BaseModel):

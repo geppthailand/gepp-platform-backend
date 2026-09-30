@@ -2,7 +2,7 @@
 Point transaction models
 """
 
-from sqlalchemy import Column, String, ForeignKey, BigInteger, DateTime
+from sqlalchemy import Column, String, Text, ForeignKey, BigInteger, DateTime
 from sqlalchemy.types import DECIMAL
 from sqlalchemy.dialects.postgresql import JSONB
 from ..base import Base, BaseModel
@@ -25,3 +25,11 @@ class RewardPointTransaction(Base, BaseModel):
     reference_type = Column(String(20), nullable=True)  # claim / redeem / adjust / expire / summary
     reference_id = Column(BigInteger, nullable=True)  # FK to source record
     image_ids = Column(JSONB, nullable=True)  # array of file IDs from claim photo
+    # [ADMIN-TOOLS] who put this claim on the ledger: 'staff' (droppoint staff, the
+    # original flow), 'admin' (attached from the web Members tab) or 'self' (a non-staff
+    # member's own submission, created when the admin approves it).
+    source = Column(String(16), nullable=False, default='staff')
+    created_by_user_location_id = Column(BigInteger, nullable=True)  # admin (user_locations.id) for source='admin'
+    transaction_id = Column(BigInteger, nullable=True)         # waste transaction created with this claim
+    transaction_record_id = Column(BigInteger, nullable=True)  # its record for this item
+    note = Column(Text, nullable=True)
