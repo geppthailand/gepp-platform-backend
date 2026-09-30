@@ -24,6 +24,10 @@ from GEPPPlatform.services.cores.iot_devices.auto_approve import (
     resolve_auto_approve,
     stamp_scale_origin,
 )
+from GEPPPlatform.services.cores.iot_devices.debug_stamp import (
+    is_debug_log_active,
+    stamp_debug_notes,
+)
 from GEPPPlatform.services.cores.iot_devices.sorter import (
     allowed_material_ids,
     filter_materials,
@@ -1700,6 +1704,14 @@ def handle_iot_devices_routes(event: Dict[str, Any], data: Dict[str, Any], **com
             # auto-approval is on, so "came from a scale" stays visible in the
             # transaction list even when the org keeps the review step.
             stamp_scale_origin(data)
+
+            # Debug Log Mode (backoffice device page, 1 h) doubles as "this is a
+            # test scale": everything posted inside the window is marked
+            # "[DEBUG] Test Scale" in its notes so test weighings can be told
+            # apart from real intake. Before the sorter branch so its note is
+            # appended after the marker.
+            if is_debug_log_active(db_session, device_id):
+                stamp_debug_notes(data)
 
             # ── ผู้คัดแยก: read the payload the other way round ──────────────
             # The tablet posted the location it was offered, and a sorter was

@@ -87,6 +87,8 @@ class TransactionPresignedUrlService:
         expiration_seconds: int = 3600,
         file_sizes: Optional[List[Optional[int]]] = None,
         existing_file_ids: Optional[List[int]] = None,
+        max_upload_bytes_override: Optional[int] = None,
+        key_prefix: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Generate presigned URLs for transaction file uploads and create file records
@@ -107,6 +109,20 @@ class TransactionPresignedUrlService:
             existing_file_ids: attachments already on this transaction. The limit
                 is a per-transaction TOTAL, so the remaining budget depends on
                 them — and their sizes come from the database/S3, not the client.
+            max_upload_bytes_override: use THIS ceiling instead of the
+                organization's per-transaction attachment limit. Only for
+                uploads that are not transaction attachments — today, the
+                backoffice's per-device document library. Those are filed by
+                GEPP staff against a device, are not customer data entry, and
+                are not billed, so the customer's contracted attachment limit
+                is the wrong number: an org on a 0.1 MB plan still needs its
+                3 MB calibration certificate stored. Still a real ceiling, just
+                a different one — never pass None-meaning-unlimited.
+            key_prefix: S3 key prefix under `org/{id}/`. Defaults to
+                `transactions/{year}/{month}`. Passed explicitly so device
+                documents do not land in a folder named "transactions", which
+                is where every other caller's files go and where anyone
+                auditing the bucket would reasonably expect only transactions.
 
         Returns:
             Dict with presigned URLs, file IDs, and metadata
@@ -134,7 +150,14 @@ class TransactionPresignedUrlService:
             # or the lookup fails, so a resolver problem cannot block uploads.
             max_upload_bytes = int(DEFAULT_MAX_FILE_SIZE_MB * 1024 * 1024)
             max_image_dimension_px = DEFAULT_MAX_IMAGE_DIMENSION_PX
-            if db is not None:
+            if max_upload_bytes_override is not None:
+                # Deliberately skips resolve_org_limits entirely: this upload is
+                # not a transaction attachment, so the org's attachment limit
+                # must not apply to it in EITHER direction — neither to block a
+                # certificate on a 0.1 MB plan, nor to let a 50 MB default in
+                # where the caller wanted a tighter ceiling.
+                max_upload_bytes = int(max_upload_bytes_override)
+            elif db is not None:
                 try:
                     from ...subscriptions.limits import resolve_org_limits
                     _limits = resolve_org_limits(db, organization_id)
@@ -234,7 +257,9 @@ class TransactionPresignedUrlService:
 
                 # S3 key structure
                 current_date = datetime.now()
-                s3_key = f"org/{organization_id}/transactions/{current_date.year}/{current_date.month:02d}/{unique_filename}"
+                prefix = (key_prefix or
+                          f"transactions/{current_date.year}/{current_date.month:02d}")
+                s3_key = f"org/{organization_id}/{prefix.strip('/')}/{unique_filename}"
 
                 # Generate presigned URL
                 content_type = self._get_content_type(file_extension)
@@ -406,13 +431,25 @@ class TransactionPresignedUrlService:
             'jpeg': 'image/jpeg',
             'png': 'image/png',
             'gif': 'image/gif',
+            # webp matters more than it looks: the business platform compresses
+            # every uploaded photo TO webp, so without this entry the most
+            # common image on the platform was stored as octet-stream — which
+            # makes browsers download it instead of showing it, and makes it
+            # indistinguishable from a binary blob to anything reading
+            # mime_type. bmp/heic/heif are here for phone-camera originals.
+            'webp': 'image/webp',
+            'bmp': 'image/bmp',
+            'heic': 'image/heic',
+            'heif': 'image/heif',
             'pdf': 'application/pdf',
             'doc': 'application/msword',
             'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
             'xls': 'application/vnd.ms-excel',
             'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
             'csv': 'text/csv',
-            'txt': 'text/plain'
+            'txt': 'text/plain',
+            'ppt': 'application/vnd.ms-powerpoint',
+            'pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
         }
         return content_types.get(file_extension, 'application/octet-stream')
 

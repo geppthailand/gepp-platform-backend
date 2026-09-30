@@ -1525,6 +1525,7 @@ class AdminService:
                 'deviceType': d.device_type,
                 'macAddressBluetooth': d.mac_address_bluetooth,
                 'macAddressTablet': d.mac_address_tablet,
+                'serialNumber': d.serial_number,
                 'organizationId': d.organization_id,
                 'organizationName': org_map.get(d.organization_id),
                 'isActive': d.is_active,
@@ -1566,6 +1567,7 @@ class AdminService:
             'deviceType': device.device_type,
             'macAddressBluetooth': device.mac_address_bluetooth,
             'macAddressTablet': device.mac_address_tablet,
+            'serialNumber': device.serial_number,
             'organizationId': device.organization_id,
             'organizationName': org_name,
             'hasPassword': bool(device.password),
@@ -1603,6 +1605,7 @@ class AdminService:
         device.device_type = device_type
         device.mac_address_bluetooth = (data.get('macAddressBluetooth') or '').strip() or None
         device.mac_address_tablet = (data.get('macAddressTablet') or '').strip() or None
+        device.serial_number = (data.get('serialNumber') or '').strip() or None
         device.password = hashed
         device.organization_id = int(org_id) if org_id else None
 
@@ -1631,6 +1634,11 @@ class AdminService:
             device.mac_address_bluetooth = data['macAddressBluetooth'] or None
         if 'macAddressTablet' in data:
             device.mac_address_tablet = data['macAddressTablet'] or None
+        if 'serialNumber' in data:
+            # Trimmed, and blank means "not recorded" rather than an empty
+            # string — otherwise '' and NULL both mean unknown and every
+            # caller has to test for two things.
+            device.serial_number = (data['serialNumber'] or '').strip() or None
         if 'organizationId' in data:
             device.organization_id = int(data['organizationId']) if data['organizationId'] else None
         if 'isActive' in data:
