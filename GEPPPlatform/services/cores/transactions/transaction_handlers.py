@@ -333,6 +333,14 @@ def handle_get_transaction(
                 origin_location['path'] = origin_path
                 transaction['origin_location'] = origin_location
 
+        # Reward-created transactions link back to their campaign ledger ("ระบบรางวัล" badge).
+        if transaction.get('transaction_method') == 'reward' and not is_shared_view:
+            try:
+                from ...rewards.claim_request_service import reward_link_for_transaction
+                transaction['reward_link'] = reward_link_for_transaction(transaction_service.db, transaction_id)
+            except Exception as _rl_err:  # the detail must load even if the link can't be resolved
+                logger.warning("reward_link lookup failed for tx %s: %s", transaction_id, _rl_err)
+
         return {
             'success': True,
             'transaction': transaction

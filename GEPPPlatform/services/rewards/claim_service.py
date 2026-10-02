@@ -285,8 +285,7 @@ class ClaimService:
             weight_kg=total_weight,
             images=image_ids or [],
             notes=notes,
-            # Only an admin-added claim names its creator; staff claims never set this.
-            created_by_id=transaction_created_by_id,
+            created_by_id=transaction_created_by_id,   # None for reward claims → "ระบบรางวัล"
         )
         self.db.add(transaction)
         self.db.flush()
@@ -342,14 +341,15 @@ class ClaimService:
         now = datetime.now(timezone.utc)
 
         origin_id = droppoint.user_location_id if droppoint and droppoint.user_location_id else None
-        creator_id = self.record_creator_id(campaign.organization_id, droppoint, created_by_user_location_id)
+        # On /waste-transactions every reward claim reads as "ระบบรางวัล", whoever recorded it;
+        # an admin-added claim keeps the admin on the reward row (created_by_user_location_id).
+        creator_id = self.record_creator_id(campaign.organization_id, droppoint)
         notes = (f"Reward claim (added by admin) - Campaign: {campaign.name}" if source == "admin"
                  else f"Reward claim - Campaign: {campaign.name}")
         if note:
             notes += f"\n{note}"
         transaction_id, record_by_item = self.create_waste_transaction(
             campaign, droppoint, prep["items"], now, TransactionStatus.completed, image_ids, notes, creator_id,
-            transaction_created_by_id=created_by_user_location_id,
         )
 
         total_points = Decimal("0")

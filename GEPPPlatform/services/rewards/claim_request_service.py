@@ -423,3 +423,63 @@ class ClaimRequestService:
             "review_note": req.review_note,
             "transaction_id": req.transaction_id,
         }
+
+
+# ---------------------------------------------------------------------------
+# Waste transaction ↔ reward rows (for the "ระบบรางวัล" link on /waste-transactions)
+# ---------------------------------------------------------------------------
+
+def _legacy_claim_rows(db: Session, tx: Transaction):
+    """Claims created before reward rows stored transaction_id (migration 093): the staff
+    claim wrote the reward rows and the waste transaction with the same timestamp, so an
+    exact claimed_date == transaction_date match inside the organization finds them."""
+    return db.query(RewardPointTransaction).filter(
+        RewardPointTransaction.organization_id == tx.organization_id,
+        RewardPointTransaction.reference_type == "claim",
+        RewardPointTransaction.transaction_id.is_(None),
+        RewardPointTransaction.claimed_date == tx.transaction_date,
+    )
+
+
+def reward_rows_for_transaction(db: Session, organization_id: int, transaction_id: int) -> tuple[set, set]:
+    """(reward_point_transactions ids, reward_claim_requests ids) created with this waste
+    transaction — used by the campaign ledger search to show exactly that transaction."""
+    tx = db.query(Transaction).filter(Transaction.id == transaction_id,
+                                      Transaction.organization_id == organization_id).first()
+    if tx is None or tx.transaction_method != "reward":
+        return set(), set()
+    claim_ids = {r.id for r in db.query(RewardPointTransaction.id).filter(
+        RewardPointTransaction.transaction_id == tx.id).all()}
+    if not claim_ids:
+        claim_ids = {r.id for r in _legacy_claim_rows(db, tx).all()}
+    request_ids = {r.id for r in db.query(RewardClaimRequest.id).filter(
+        RewardClaimRequest.transaction_id == tx.id, RewardClaimRequest.deleted_date.is_(None)).all()}
+    return claim_ids, request_ids
+
+
+def reward_link_for_transaction(db: Session, transaction_id: int) -> Optional[dict]:
+    """Campaign behind a reward-created waste transaction, for the badge in its detail
+    modal that opens /rewards?tab=campaigns&id=…&ctab=transactions&q=<transaction id>."""
+    tx = db.query(Transaction).filter(Transaction.id == transaction_id).first()
+    if tx is None or tx.transaction_method != "reward":
+        return None
+    campaign_id = None
+    source = None
+    row = db.query(RewardPointTransaction).filter(RewardPointTransaction.transaction_id == tx.id).first()
+    if row is None:
+        req = db.query(RewardClaimRequest).filter(RewardClaimRequest.transaction_id == tx.id).first()
+        if req is not None:
+            campaign_id, source = req.reward_campaign_id, "self"
+        else:
+            row = _legacy_claim_rows(db, tx).first()
+    if row is not None:
+        campaign_id, source = row.reward_campaign_id, (row.source or "staff")
+    if not campaign_id:
+        return {"transaction_id": tx.id, "campaign_id": None, "campaign_name": None, "source": None}
+    campaign = db.query(RewardCampaign).filter(RewardCampaign.id == campaign_id).first()
+    return {
+        "transaction_id": tx.id,
+        "campaign_id": campaign_id,
+        "campaign_name": campaign.name if campaign else None,
+        "source": source,
+    }

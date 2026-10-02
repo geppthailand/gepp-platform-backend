@@ -28,6 +28,17 @@ def handle_admin_routes(path: str, data: dict, **commonParams):
     # Extract ID from path patterns like /organizations/123 or /subscription-plans/123/permissions/456
     path_parts = [p for p in internal_path.strip('/').split('/') if p]
 
+    # Data Policy (retention diagnostics): every method under /admin/data-policy/*.
+    # Dispatched before the per-method blocks so the generic `{resource}/{id}`
+    # shapes below never try to int() a sub-path such as `units` or `rules`.
+    if path_parts and path_parts[0] == 'data-policy':
+        from .data_policy import handle_data_policy_route
+        return handle_data_policy_route(
+            method, path_parts, data,
+            commonParams.get('query_params', {}) or {},
+            db_session, commonParams.get('current_user', {}) or {},
+        )
+
     if method == "POST":
         if internal_path == "/login":
             return admin_handler.admin_login(data)

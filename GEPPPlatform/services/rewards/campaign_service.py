@@ -558,6 +558,27 @@ class CampaignService:
 
         items: list[dict] = []
 
+        # Search by waste transaction id ("150939" / "#150939", what the "ระบบรางวัล" link on
+        # /waste-transactions sends) → exactly the reward rows created with it. A row key
+        # ("claim-12") also works. Anything else matches member or item name.
+        import re as _re
+        from .claim_request_service import reward_rows_for_transaction
+        search = (search or "").strip() or None
+        id_claims: set = set()
+        id_requests: set = set()
+        row_key = None
+        if search and _re.fullmatch(r"#?\d+", search):
+            id_claims, id_requests = reward_rows_for_transaction(self.db, organization_id, int(search.lstrip("#")))
+        elif search and _re.fullmatch(r"(claim|request|redeem)-\d+", search.lower()):
+            row_key = search.lower()
+
+        def keep(key: str, name: str, item_name, by_id: bool) -> bool:
+            if not search:
+                return True
+            if row_key:
+                return key == row_key
+            return by_id or self._matches(search, name, item_name)
+
         # --- CLAIMS ---
         if ref_type in (None, "all", "claim"):
             claim_rows = (
@@ -586,7 +607,7 @@ class CampaignService:
 
             for tx, user, am, dp in claim_rows.all():
                 user_name = (user.display_name if user else None) or (user.line_display_name if user else None) or f"User #{tx.reward_user_id}"
-                if search and not self._matches(search, user_name, am.name if am else None):
+                if not keep(f"claim-{tx.id}", user_name, am.name if am else None, tx.id in id_claims):
                     continue
                 source = tx.source or "staff"
                 items.append({
@@ -638,7 +659,7 @@ class CampaignService:
                 if req.status not in show:
                     continue
                 user_name = (user.display_name if user else None) or (user.line_display_name if user else None) or f"User #{req.reward_user_id}"
-                if search and not self._matches(search, user_name, am.name if am else None):
+                if not keep(f"request-{req.id}", user_name, am.name if am else None, req.id in id_requests):
                     continue
                 items.append({
                     "id": f"request-{req.id}",
@@ -678,7 +699,7 @@ class CampaignService:
 
             for r, user, cat in redeem_rows.all():
                 user_name = (user.display_name if user else None) or (user.line_display_name if user else None) or f"User #{r.reward_user_id}"
-                if search and not self._matches(search, user_name, cat.name if cat else None):
+                if not keep(f"redeem-{r.id}", user_name, cat.name if cat else None, False):
                     continue
                 items.append({
                     "id": f"redeem-{r.id}",
