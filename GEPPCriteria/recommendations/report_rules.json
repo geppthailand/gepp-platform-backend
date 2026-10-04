@@ -239,7 +239,7 @@
         ]
       },
       "reason": {
-        "th": "สัดส่วนขยะรีไซเคิลและขยะอินทรีย์ต่อขยะทั้งหมด ลดจาก {diversion_pct_prev:pct} ในช่วง {prev_label} เหลือ {diversion_pct:pct} ({diversion_change_pts:pts}) แสดงว่าการคัดแยกแย่ลงอย่างชัดเจน",
+        "th": "สัดส่วนวัสดุรีไซเคิลและขยะอินทรีย์ต่อขยะทั้งหมด ลดจาก {diversion_pct_prev:pct} ในช่วง {prev_label} เหลือ {diversion_pct:pct} ({diversion_change_pts:pts}) แสดงว่าการคัดแยกแย่ลงอย่างชัดเจน",
         "en": "The recyclable + organic share fell from {diversion_pct_prev:pct} ({prev_label}) to {diversion_pct:pct} ({diversion_change_pts:pts}): sorting has clearly slipped."
       }
     },
@@ -269,7 +269,7 @@
         ]
       },
       "reason": {
-        "th": "สัดส่วนขยะรีไซเคิลและขยะอินทรีย์ต่อขยะทั้งหมด ลดจาก {diversion_pct_prev:pct} ในช่วง {prev_label} เหลือ {diversion_pct:pct} ({diversion_change_pts:pts}) แสดงว่าการคัดแยกแย่ลงอย่างชัดเจน",
+        "th": "สัดส่วนวัสดุรีไซเคิลและขยะอินทรีย์ต่อขยะทั้งหมด ลดจาก {diversion_pct_prev:pct} ในช่วง {prev_label} เหลือ {diversion_pct:pct} ({diversion_change_pts:pts}) แสดงว่าการคัดแยกแย่ลงอย่างชัดเจน",
         "en": "The recyclable + organic share fell from {diversion_pct_prev:pct} ({prev_label}) to {diversion_pct:pct} ({diversion_change_pts:pts}): sorting has clearly slipped."
       }
     },
@@ -299,7 +299,7 @@
         ]
       },
       "reason": {
-        "th": "สัดส่วนขยะรีไซเคิลและขยะอินทรีย์ต่อขยะทั้งหมด ลดจาก {diversion_pct_prev:pct} ในช่วง {prev_label} เหลือ {diversion_pct:pct} ({diversion_change_pts:pts}) แสดงว่าการคัดแยกแย่ลงอย่างชัดเจน",
+        "th": "สัดส่วนวัสดุรีไซเคิลและขยะอินทรีย์ต่อขยะทั้งหมด ลดจาก {diversion_pct_prev:pct} ในช่วง {prev_label} เหลือ {diversion_pct:pct} ({diversion_change_pts:pts}) แสดงว่าการคัดแยกแย่ลงอย่างชัดเจน",
         "en": "The recyclable + organic share fell from {diversion_pct_prev:pct} ({prev_label}) to {diversion_pct:pct} ({diversion_change_pts:pts}): sorting has clearly slipped."
       }
     },
@@ -533,7 +533,7 @@
         "th": [
           "แยกใส่ถุงแดงและภาชนะที่ปิดมิดชิด",
           "ส่งกำจัดผ่านผู้รับขยะติดเชื้อที่ได้รับอนุญาต",
-          "ห้ามปนกับขยะทั่วไปหรือขยะรีไซเคิล"
+          "ห้ามปนกับขยะทั่วไปหรือวัสดุรีไซเคิล"
         ],
         "en": [
           "Bag it in red bags inside sealed containers",
@@ -1477,7 +1477,7 @@
         ]
       },
       "reason": {
-        "th": "สัดส่วนขยะรีไซเคิลและขยะอินทรีย์เพิ่มจาก {diversion_pct_prev:pct} ในช่วง {prev_label} เป็น {diversion_pct:pct} ({diversion_change_pts:pts}) เป็นสัญญาณว่าการคัดแยกได้ผล",
+        "th": "สัดส่วนวัสดุรีไซเคิลและขยะอินทรีย์เพิ่มจาก {diversion_pct_prev:pct} ในช่วง {prev_label} เป็น {diversion_pct:pct} ({diversion_change_pts:pts}) เป็นสัญญาณว่าการคัดแยกได้ผล",
         "en": "The recyclable + organic share rose from {diversion_pct_prev:pct} ({prev_label}) to {diversion_pct:pct} ({diversion_change_pts:pts}), a sign sorting is working."
       }
     },

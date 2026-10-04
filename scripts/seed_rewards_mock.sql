@@ -177,7 +177,7 @@ INSERT INTO reward_campaigns (
   target_participants, budget_baht
 ) VALUES
   (25, 'รักษ์โลก ฤดูร้อน 2026',
-   '[MOCK] เก็บขยะรีไซเคิลตลอดฤดูร้อน รับแต้มแลกของรางวัล',
+   '[MOCK] เก็บวัสดุรีไซเคิลตลอดฤดูร้อน รับแต้มแลกของรางวัล',
    NOW() - INTERVAL '170 days', NOW() + INTERVAL '60 days', 'active',
    200, 50000),
   (25, 'BYO Bag Challenge',

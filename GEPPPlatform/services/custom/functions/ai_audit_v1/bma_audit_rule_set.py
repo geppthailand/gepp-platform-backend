@@ -62,7 +62,7 @@ MATERIAL_KEY_TO_ID: Dict[str, int] = {
 MATERIAL_ID_TO_THAI: Dict[int, str] = {
     94: "ขยะทั่วไป",
     77: "ขยะอินทรีย์",
-    298: "ขยะรีไซเคิล",
+    298: "วัสดุรีไซเคิล",
     113: "ขยะอันตราย",
 }
 
@@ -511,7 +511,7 @@ def process_decision(claimed_type: str, ai_json: Dict[str, Any]) -> Dict[str, An
         # Rule: Pure Recyclable (Bottle pile) -> WC 298
         if main == "recyclable" and pct < 20:
              logger.info(f"[BMA_AUDIT] ✅ Decision: Pure recyclable in general bin → reject WC 298")
-             return {"code": "wc", "status": "reject", "dt": "298", "wi": ["ขยะรีไซเคิล"]}
+             return {"code": "wc", "status": "reject", "dt": "298", "wi": ["วัสดุรีไซเคิล"]}
 
         # Rule: Pure Organic (Loose food) -> WC 77
         if main == "organic" and pct < 20:
@@ -550,7 +550,7 @@ def process_decision(claimed_type: str, ai_json: Dict[str, Any]) -> Dict[str, An
             # False Friends (M-150/Water bottles) -> WC 298
             if main == "recyclable" or "ขวด" in str(items):
                 logger.info(f"[BMA_AUDIT] ✅ Decision: Recyclable in hazardous bin → reject WC 298")
-                return {"code": "wc", "status": "reject", "dt": "298", "wi": ["ขยะรีไซเคิล (ขวด)"]}
+                return {"code": "wc", "status": "reject", "dt": "298", "wi": ["วัสดุรีไซเคิล (ขวด)"]}
 
             # General waste in hazardous bin -> WC 94
             if main == "general" or main == "general_plastic":
@@ -952,7 +952,7 @@ def execute(
             missing_thai = {
                 "general": "ขยะทั่วไป",
                 "organic": "ขยะอินทรีย์",
-                "recyclable": "ขยะรีไซเคิล",
+                "recyclable": "วัสดุรีไซเคิล",
             }
             missing_items = [missing_thai.get(m, m) for m in missing]
 

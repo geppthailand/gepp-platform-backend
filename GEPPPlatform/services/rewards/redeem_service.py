@@ -932,7 +932,7 @@ class RedeemService:
             {
                 "id": "lifetime_100kg",
                 "label": "100 กก. รวม",
-                "description": "สะสมขยะรีไซเคิลรวม 100 กก. ข้ามทุกชุมชน",
+                "description": "สะสมวัสดุรีไซเคิลรวม 100 กก. ข้ามทุกชุมชน",
                 "icon": "💯",
                 "earned": lifetime_kg >= 100,
                 "progress": {"current": int(min(lifetime_kg, 100)), "target": 100},

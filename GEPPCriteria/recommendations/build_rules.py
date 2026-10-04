@@ -103,7 +103,7 @@ R('T-R03', 'risk', T, 'general_trend', GEN_UP_WHEN, GEN_UP_PRIO,
 
 SORT_DOWN_WHEN = "has_prev and prev_kg >= 5 and total_kg >= 5 and diversion_change_pts <= -10"
 SORT_DOWN_PRIO = "65 + min(-diversion_change_pts, 40)"
-SORT_DOWN_REASON_TH = "สัดส่วนขยะรีไซเคิลและขยะอินทรีย์ต่อขยะทั้งหมด ลดจาก {diversion_pct_prev:pct} ในช่วง {prev_label} เหลือ {diversion_pct:pct} ({diversion_change_pts:pts}) แสดงว่าการคัดแยกแย่ลงอย่างชัดเจน"
+SORT_DOWN_REASON_TH = "สัดส่วนวัสดุรีไซเคิลและขยะอินทรีย์ต่อขยะทั้งหมด ลดจาก {diversion_pct_prev:pct} ในช่วง {prev_label} เหลือ {diversion_pct:pct} ({diversion_change_pts:pts}) แสดงว่าการคัดแยกแย่ลงอย่างชัดเจน"
 SORT_DOWN_REASON_EN = "The recyclable + organic share fell from {diversion_pct_prev:pct} ({prev_label}) to {diversion_pct:pct} ({diversion_change_pts:pts}): sorting has clearly slipped."
 R('L-R04', 'risk', L, 'sorting', SORT_DOWN_WHEN, SORT_DOWN_PRIO,
   ("การคัดแยกของอาคารแย่ลง", "The building's sorting is slipping"),
@@ -211,7 +211,7 @@ R('L-R09', 'risk', ['location', 'tenant', 'tag'], 'biohazard', "bio_hazardous_kg
   ("มีขยะติดเชื้อ", "Infectious waste found"),
   ["แยกใส่ถุงแดงและภาชนะที่ปิดมิดชิด",
    "ส่งกำจัดผ่านผู้รับขยะติดเชื้อที่ได้รับอนุญาต",
-   "ห้ามปนกับขยะทั่วไปหรือขยะรีไซเคิล"],
+   "ห้ามปนกับขยะทั่วไปหรือวัสดุรีไซเคิล"],
   ["Bag it in red bags inside sealed containers",
    "Use a licensed infectious-waste contractor",
    "Never mix it with general or recyclable waste"],
@@ -527,7 +527,7 @@ R('L-O10', 'opportunity', LT, 'trend_good', "has_prev and prev_kg >= 5 and total
   ["The sorted share rose from {diversion_pct_prev:pct} to {diversion_pct:pct}",
    "Use it to bring other areas on board",
    "Set a monthly sorting-rate target"],
-  "สัดส่วนขยะรีไซเคิลและขยะอินทรีย์เพิ่มจาก {diversion_pct_prev:pct} ในช่วง {prev_label} เป็น {diversion_pct:pct} ({diversion_change_pts:pts}) เป็นสัญญาณว่าการคัดแยกได้ผล",
+  "สัดส่วนวัสดุรีไซเคิลและขยะอินทรีย์เพิ่มจาก {diversion_pct_prev:pct} ในช่วง {prev_label} เป็น {diversion_pct:pct} ({diversion_change_pts:pts}) เป็นสัญญาณว่าการคัดแยกได้ผล",
   "The recyclable + organic share rose from {diversion_pct_prev:pct} ({prev_label}) to {diversion_pct:pct} ({diversion_change_pts:pts}), a sign sorting is working.")
 
 ZW_REASON = ("สัดส่วนขยะที่คัดแยกได้ (รีไซเคิลและอินทรีย์) อยู่ที่ {diversion_pct:pct} ซึ่งสูงกว่าครึ่งหนึ่งอย่างชัดเจน จึงพร้อมตั้งเป้าหมายที่สูงขึ้น",
