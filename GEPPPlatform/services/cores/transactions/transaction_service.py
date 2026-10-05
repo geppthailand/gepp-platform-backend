@@ -2888,6 +2888,9 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                         # End of day: 23:59:59.999999
                         date_to_obj = date_to_obj.replace(hour=23, minute=59, second=59, microsecond=999999)
                         date_to_obj = tz.localize(date_to_obj) if hasattr(tz, 'localize') else date_to_obj.replace(tzinfo=tz)
+                    elif date_to_obj.second == 59 and date_to_obj.microsecond == 0:
+                        # A datetime from the time filter ("… 17:59:59+07:00") covers that whole second.
+                        date_to_obj = date_to_obj.replace(microsecond=999999)
                     date_conds.append(TransactionRecord.transaction_date <= date_to_obj)
 
                 query = query.filter(exists().where(and_(*date_conds)))

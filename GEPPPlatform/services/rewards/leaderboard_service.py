@@ -114,7 +114,8 @@ class LeaderboardService:
             if r.campaign_id is not None and r.campaign_deleted is not None:
                 continue
             # Skip non-material claims (activity rows don't reduce GHG even if logged as weight)
-            if r.material_type and r.material_type != "material":
+            # [PACKAGING] packaging claims are kilograms of material too (value = kg)
+            if r.material_type and r.material_type not in ("material", "packaging"):
                 continue
             ghg = qty * _estimate_ghg_per_kg(r.material_name)
             acc = per_user.setdefault(r.user_id, {"ghg": 0.0, "kg": 0.0, "claims": 0})

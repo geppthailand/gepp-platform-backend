@@ -38,6 +38,8 @@ class RewardSetup(Base, BaseModel):
     # (staff / non_staff) and the self-submit + review flow. OFF (default) = the program
     # behaves exactly as before; data created while ON is kept when it is switched off.
     admin_tools_enabled = Column(Boolean, nullable=False, default=False)
+    # [ADMIN-TOOLS] member self-claims must carry at least one photo (migration 099)
+    self_claim_photo_required = Column(Boolean, nullable=False, default=False)
 
 
 class RewardCampaign(Base, BaseModel):
@@ -67,8 +69,10 @@ class RewardActivityMaterial(Base, BaseModel):
     organization_id = Column(BigInteger, ForeignKey('organizations.id'), nullable=False)
     name = Column(String(255), nullable=False)
     description = Column(Text, nullable=True)
-    type = Column(String(20), nullable=False)  # material / activity
+    type = Column(String(20), nullable=False)  # material / activity / packaging
     material_id = Column(BigInteger, nullable=True)  # FK materials.id when type=material
+    # FK packagings.id when type=packaging: claimed in pieces, converted to kg per material
+    packaging_id = Column(BigInteger, ForeignKey('packagings.id'), nullable=True)
     image_id = Column(BigInteger, nullable=True)  # FK files.id
     selling_price_per_kg = Column(DECIMAL(10, 2), nullable=True)  # waste resale value (THB/kg)
     # [V3-OVERVIEW] DEPRECATED — column kept for backward-compat but no longer read.

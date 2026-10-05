@@ -43,6 +43,11 @@ class RewardClaimRequest(Base, BaseModel):
     reviewed_date = Column(DateTime(timezone=True), nullable=True)
     review_note = Column(Text, nullable=True)
     submitted_date = Column(DateTime(timezone=True), nullable=False)
+    # [PACKAGING] pieces + per-material snapshot [{material_id, weight_kg, record_id}];
+    # transaction_record_id stays NULL because one packaging item spans several records.
+    quantity = Column(DECIMAL(14, 3), nullable=True)
+    quantity_unit = Column(String(16), nullable=True)
+    components = Column(JSONB, nullable=True)
 
 
 # ---------------------------------------------------------------------------

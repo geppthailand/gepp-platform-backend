@@ -249,6 +249,35 @@ class OrganizationService:
             )
         return bool(enabled)
 
+    EVIDENCE_MODES = ('none', 'transaction', 'record')
+
+    def set_transaction_evidence_mode(
+        self,
+        organization_id: int,
+        mode: str,
+        acting_user_id: Optional[int] = None,
+    ) -> str:
+        """Set the org-wide "require evidence on manual transactions" mode.
+
+        Org-wide for the same reason as scale auto-approval: it is an audit rule of the
+        organisation, not a preference of whoever enters data — so it is owner-only
+        (checked by the caller) and logged.
+        """
+        if mode not in self.EVIDENCE_MODES:
+            raise ValidationException(f"transaction_evidence_mode must be one of {', '.join(self.EVIDENCE_MODES)}")
+        org = self.db.query(Organization).filter(Organization.id == organization_id).first()
+        if not org:
+            raise ValidationException('Organization not found')
+        previous = getattr(org, 'transaction_evidence_mode', 'none') or 'none'
+        org.transaction_evidence_mode = mode
+        self.db.commit()
+        if previous != mode:
+            logger.info(
+                "[evidence] organization %s transaction evidence %s -> %s by user %s",
+                organization_id, previous, mode, acting_user_id,
+            )
+        return mode
+
     def get_organization_setup(self, organization_id: int) -> Optional[Dict[str, Any]]:
         """
         Get the current organization setup structure.
@@ -276,7 +305,8 @@ class OrganizationService:
         # input_destination / show_all_location_options (which are per user), these
         # apply to everyone in the org — the UI must say so.
         org_row = self.db.query(
-            Organization.auto_approve_scale_transactions, Organization.owner_id
+            Organization.auto_approve_scale_transactions, Organization.owner_id,
+            Organization.transaction_evidence_mode,
         ).filter(Organization.id == organization_id).first()
 
         return {
@@ -284,6 +314,7 @@ class OrganizationService:
             'organization_id': setup.organization_id,
             'auto_approve_scale_transactions': bool(org_row[0]) if org_row else False,
             'organization_owner_id': org_row[1] if org_row else None,
+            'transaction_evidence_mode': (org_row[2] or 'none') if org_row else 'none',
             'version': setup.version,
             'is_active': setup.is_active,
             'root_nodes': setup.root_nodes,

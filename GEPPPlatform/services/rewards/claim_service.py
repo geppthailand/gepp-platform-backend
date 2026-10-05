@@ -25,13 +25,14 @@ from ...models.rewards.management import (
     RewardCampaignDroppoint,
     RewardActivityMaterial,
 )
-from ...models.rewards.points import RewardPointTransaction
+from ...models.rewards.points import RewardPointTransaction, RewardPointTransactionComponent
 from ...models.rewards.redemptions import OrganizationRewardUser, Droppoint
 from ...models.subscriptions.organizations import Organization
 from ...models.transactions.transactions import Transaction, TransactionStatus
 from ...models.transactions.transaction_records import TransactionRecord
 from ...models.cores.references import Material
 from ...exceptions import NotFoundException, BadRequestException
+from . import packaging_conversion as pkg
 
 
 class ClaimService:
@@ -141,6 +142,14 @@ class ClaimService:
             value = Decimal(str(item.get("value", 0)))
             if not activity_material_id or value <= 0:
                 raise BadRequestException("Each item requires activity_material_id and a positive value")
+            activity_mat = (
+                self.db.query(RewardActivityMaterial)
+                .filter(RewardActivityMaterial.id == activity_material_id)
+                .first()
+            )
+            is_packaging = bool(activity_mat and activity_mat.type == "packaging")
+            if is_packaging:
+                value = Decimal(pkg.pieces_of(value))   # points are per piece
 
             claim_rule = (
                 self.db.query(RewardCampaignClaim)
@@ -212,11 +221,26 @@ class ClaimService:
 
             submission_total += points
 
-            activity_mat = (
-                self.db.query(RewardActivityMaterial)
-                .filter(RewardActivityMaterial.id == activity_material_id)
-                .first()
-            )
+            if is_packaging:
+                # [PACKAGING] pieces → kg per material (snapshot). `value` becomes the total kg
+                # so ledger weights stay in kilograms; the pieces travel as `quantity`.
+                comp = pkg.compositions(self.db, [activity_mat.packaging_id]).get(int(activity_mat.packaging_id or 0), [])
+                components = pkg.convert(comp, int(value))
+                prepared.append({
+                    "activity_material_id": activity_material_id,
+                    "value": sum((c["weight_kg"] for c in components), Decimal("0")),
+                    "points": points,
+                    "unit": "kg",
+                    "quantity": value,
+                    "quantity_unit": "pcs",
+                    "components": components,
+                    "activity_mat": activity_mat,
+                    "material_id": None,
+                    "main_material_id": None,
+                    "category_id": None,
+                })
+                continue
+
             linked_material_id = activity_mat.material_id if activity_mat else None
             main_material_id = category_id = None
             if linked_material_id:
@@ -268,14 +292,28 @@ class ClaimService:
         created_by_id: Optional[int],
         transaction_created_by_id: Optional[int] = None,
     ) -> tuple[Optional[int], dict]:
-        """Transaction + one record per material-linked item. Returns (transaction_id,
-        {item_index: record_id}); (None, {}) when no item resolves to a material."""
+        """Transaction + one record per material-linked item, plus one record per MATERIAL for
+        all packaging items together (their components summed by material). Returns
+        (transaction_id, {item_index: record_id}); each packaging item gets
+        `component_records` = {material_id: record_id}. (None, {}) when nothing resolves
+        to a material."""
         linked = [(i, it) for i, it in enumerate(prepared_items) if it["main_material_id"] and it["category_id"]]
-        if not linked:
+        # [PACKAGING] material_id → {kg, meta, contributions[(label, pieces, kg)]}
+        pkg_groups: dict[int, dict] = {}
+        for it in prepared_items:
+            for c in it.get("components") or []:
+                if not (c["main_material_id"] and c["category_id"]):
+                    continue
+                g = pkg_groups.setdefault(c["material_id"], {"kg": Decimal("0"), "meta": c, "parts": []})
+                g["kg"] += c["weight_kg"]
+                label = pkg.packaging_label(self.db, it["activity_mat"].packaging_id) or it["activity_mat"].name
+                g["parts"].append((label, it["quantity"], c["weight_kg"]))
+        if not linked and not pkg_groups:
             return None, {}
         origin_id = droppoint.user_location_id if droppoint and droppoint.user_location_id else None
         record_status = "completed" if status == TransactionStatus.completed else status.value
-        total_weight = sum((it["value"] for _i, it in linked), Decimal("0"))
+        total_weight = (sum((it["value"] for _i, it in linked), Decimal("0"))
+                        + sum((g["kg"] for g in pkg_groups.values()), Decimal("0")))
         transaction = Transaction(
             transaction_method="reward",
             status=status,
@@ -312,6 +350,41 @@ class ClaimService:
             self.db.flush()
             record_ids.append(tx_record.id)
             record_by_item[i] = tx_record.id
+
+        # [PACKAGING] one record per material; the note says which packagings it came from.
+        record_by_material: dict[int, int] = {}
+        for material_id, g in pkg_groups.items():
+            meta = g["meta"]
+            unit_weight = meta["unit_weight"] if meta["unit_weight"] and meta["unit_weight"] > 0 else Decimal("1")
+            parts = ", ".join(f"{label} × {int(pieces)} = {pkg.fmt_kg(kg)}" for label, pieces, kg in g["parts"])
+            tx_record = TransactionRecord(
+                status=record_status,
+                created_transaction_id=transaction.id,
+                transaction_type="rewards",
+                material_id=material_id,
+                main_material_id=meta["main_material_id"],
+                category_id=meta["category_id"],
+                # reports weigh a record as origin_quantity × materials.unit_weight
+                origin_quantity=(g["kg"] / unit_weight).quantize(pkg.KG_PLACES),
+                origin_weight_kg=g["kg"],
+                unit="kg",
+                notes=f"แปลงจากบรรจุภัณฑ์ (ระบบรางวัล): {parts}",
+                created_by_id=created_by_id,
+                transaction_date=claimed_at,
+                completed_date=claimed_at if status == TransactionStatus.completed else None,
+                images=image_ids or [],
+            )
+            self.db.add(tx_record)
+            self.db.flush()
+            record_ids.append(tx_record.id)
+            record_by_material[material_id] = tx_record.id
+        for it in prepared_items:
+            if it.get("components"):
+                it["component_records"] = {
+                    c["material_id"]: record_by_material[c["material_id"]]
+                    for c in it["components"] if c["material_id"] in record_by_material
+                }
+
         transaction.transaction_records = record_ids
         self.db.flush()
         return transaction.id, record_by_item
@@ -371,12 +444,15 @@ class ClaimService:
                 image_ids=image_ids,
                 source=source,
                 created_by_user_location_id=created_by_user_location_id,
-                transaction_id=transaction_id if i in record_by_item else None,
+                transaction_id=transaction_id if (i in record_by_item or it.get("component_records")) else None,
                 transaction_record_id=record_by_item.get(i),
                 note=note,
+                quantity=it.get("quantity"),
+                quantity_unit=it.get("quantity_unit"),
             )
             self.db.add(txn)
             self.db.flush()
+            self.add_components(txn, it)
             total_points += it["points"]
             total_weight += it["value"]
             items_claimed.append({
@@ -432,6 +508,17 @@ class ClaimService:
             "transaction_id": transaction_id,
             "items_claimed": items_claimed,
         }
+
+    def add_components(self, reward_row: RewardPointTransaction, item: dict) -> None:
+        """[PACKAGING] snapshot the per-material kg of a packaging claim on its ledger row."""
+        for c in item.get("components") or []:
+            self.db.add(RewardPointTransactionComponent(
+                organization_id=reward_row.organization_id,
+                reward_point_transaction_id=reward_row.id,
+                material_id=c["material_id"],
+                weight_kg=c["weight_kg"],
+                transaction_record_id=(item.get("component_records") or {}).get(c["material_id"]),
+            ))
 
     def ensure_membership(self, reward_user_id: int, organization_id: int) -> None:
         """Auto-register the user in the organization on their first claim.

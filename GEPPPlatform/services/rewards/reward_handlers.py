@@ -181,6 +181,18 @@ def handle_reward_routes(event: Dict[str, Any], data: Dict[str, Any], **params) 
             item_id = data.get("id") or query_params.get("id")
             return svc.delete(int(item_id), current_org_id)
 
+        # --- Packaging catalogue (read-only for organisations; GEPP edits it in the back office)
+        if path == "/api/rewards/packagings" and method == "GET":
+            from ..admin.packaging_admin_service import PackagingAdminService
+            res = PackagingAdminService(db_session).list_packagings({
+                "q": query_params.get("q"), "brandId": query_params.get("brand_id"),
+                "isActive": "true", "page": query_params.get("page", 1),
+                "pageSize": query_params.get("page_size", 200),
+            })
+            # only items that can actually be claimed (a composition is required)
+            res["items"] = [p for p in res["items"] if p["components"]]
+            return res
+
         # --- Activity Materials ---
         if path == "/api/rewards/activity-materials" and method == "GET":
             svc = ActivityMaterialService(db_session)

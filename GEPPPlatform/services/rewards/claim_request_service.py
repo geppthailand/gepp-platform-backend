@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Iterable, Optional
 
-from sqlalchemy import or_, text
+from sqlalchemy import and_, or_, text
 from sqlalchemy.orm import Session
 
 from ...exceptions import BadRequestException, NotFoundException
@@ -29,7 +29,7 @@ from ...models.rewards.claim_requests import RewardClaimRequest
 from ...models.rewards.management import (
     RewardActivityMaterial, RewardCampaign, RewardCampaignClaim, RewardCampaignDroppoint, RewardSetup,
 )
-from ...models.rewards.points import RewardPointTransaction
+from ...models.rewards.points import RewardPointTransaction, RewardPointTransactionComponent
 from ...models.rewards.redemptions import Droppoint, OrganizationRewardUser
 from ...models.subscriptions.organizations import Organization
 from ...models.transactions.transaction_records import TransactionRecord
@@ -37,7 +37,26 @@ from ...models.transactions.transactions import Transaction, TransactionStatus
 from .claim_service import ClaimService
 
 STATUSES = ("pending", "approved", "rejected")
+
+
+def _components_json(item: dict) -> Optional[list]:
+    """[PACKAGING] JSON snapshot of a prepared packaging item's components."""
+    comps = item.get("components")
+    if not comps:
+        return None
+    recs = item.get("component_records") or {}
+    return [{"material_id": c["material_id"], "weight_kg": str(c["weight_kg"]),
+             "record_id": recs.get(c["material_id"])} for c in comps]
 MAX_IMAGES = 3
+
+
+def photo_required(db: Session, organization_id: int) -> bool:
+    """reward_setup.self_claim_photo_required (migration 099)."""
+    return bool(
+        db.query(RewardSetup.self_claim_photo_required)
+        .filter(RewardSetup.organization_id == organization_id, RewardSetup.deleted_date.is_(None))
+        .scalar()
+    )
 
 
 def admin_tools_enabled(db: Session, organization_id: int) -> bool:
@@ -138,9 +157,10 @@ class ClaimRequestService:
                     "name": am.name,
                     "description": am.description,
                     "type": am.type,
-                    "unit": "kg" if am.type == "material" else "times",
+                    "unit": {"material": "kg", "packaging": "pcs"}.get(am.type, "times"),
                     "points": float(rule.points),
                     "image_id": am.image_id,
+                    "packaging": self._packaging_info(am),
                 })
         dps_by_campaign: dict[int, list] = {i: [] for i in ids}
         if ids:
@@ -159,6 +179,7 @@ class ClaimRequestService:
         org = self.db.query(Organization).filter(Organization.id == organization_id).first()
         return {
             "organization": {"id": organization_id, "name": org.name if org else None},
+            "photo_required": photo_required(self.db, organization_id),
             "campaigns": [{
                 "id": c.id,
                 "name": c.name,
@@ -171,6 +192,14 @@ class ClaimRequestService:
             } for c in campaigns if items_by_campaign.get(c.id)],
         }
 
+    def _packaging_info(self, am: RewardActivityMaterial) -> Optional[dict]:
+        if am.type != "packaging" or not am.packaging_id:
+            return None
+        from .packaging_conversion import compositions, packaging_label
+        parts = compositions(self.db, [am.packaging_id]).get(int(am.packaging_id), [])
+        return {"id": am.packaging_id, "label": packaging_label(self.db, am.packaging_id),
+                "kg_per_piece": float(sum((c["weight_kg"] for c in parts), 0))}
+
     # ------------------------------------------------------------------
     # Submit (LIFF)
     # ------------------------------------------------------------------
@@ -181,6 +210,8 @@ class ClaimRequestService:
         if not items:
             raise BadRequestException("Choose at least one item")
         image_ids = [int(i) for i in (image_ids or []) if str(i).isdigit()][:MAX_IMAGES]
+        if not image_ids and photo_required(self.db, organization_id):
+            raise BadRequestException("A photo is required for this program")
 
         campaign = self.db.query(RewardCampaign).filter(RewardCampaign.id == campaign_id).first()
         if campaign is None or campaign.organization_id != organization_id:
@@ -224,9 +255,12 @@ class ClaimRequestService:
                 status="pending",
                 image_ids=image_ids or None,
                 note=note,
-                transaction_id=transaction_id if i in record_by_item else None,
+                transaction_id=transaction_id if (i in record_by_item or it.get("component_records")) else None,
                 transaction_record_id=record_by_item.get(i),
                 submitted_date=now,
+                quantity=it.get("quantity"),
+                quantity_unit=it.get("quantity_unit"),
+                components=_components_json(it),
             )
             self.db.add(req)
             self.db.flush()
@@ -295,8 +329,19 @@ class ClaimRequestService:
                     transaction_id=req.transaction_id,
                     transaction_record_id=req.transaction_record_id,
                     note=req.note,
+                    quantity=req.quantity,
+                    quantity_unit=req.quantity_unit,
                 )
                 self.db.add(reward_row)
+                # [PACKAGING] the per-material snapshot taken at submit time
+                for c in req.components or []:
+                    self.db.add(RewardPointTransactionComponent(
+                        organization_id=req.organization_id,
+                        reward_point_transaction_id=new_id,
+                        material_id=int(c["material_id"]),
+                        weight_kg=Decimal(str(c["weight_kg"])),
+                        transaction_record_id=c.get("record_id"),
+                    ))
                 req.reward_point_transaction_id = new_id
                 changed = True
             elif reward_row.deleted_date is not None:
@@ -356,9 +401,30 @@ class ClaimRequestService:
                 continue
             siblings = by_tx.get(req.transaction_id, [])
             siblings_pending = all((s.status or "pending") == "pending" for s in siblings)
+            comp_records = [by_id.get(int(c["record_id"])) for c in (req.components or []) if c.get("record_id")]
+            if comp_records:
+                out[req.id] = self._map_packaging_status(comp_records, txs.get(req.transaction_id), siblings_pending)
+                continue
             out[req.id] = self._map_waste_status(by_id.get(req.transaction_record_id), txs.get(req.transaction_id),
                                                  siblings_pending)
         return out
+
+    @classmethod
+    def _map_packaging_status(cls, records: list, tx: Optional[Transaction], siblings_pending: bool) -> Optional[str]:
+        """[PACKAGING] a packaging item spans one record per material: rejected as soon as any
+        of them is rejected or deleted, approved once all of them are approved."""
+        if tx is not None and tx.deleted_date is not None:
+            return "rejected"
+        statuses = []
+        for r in records:
+            if r is None or r.deleted_date is not None:
+                return "rejected"
+            statuses.append((r.status or "pending").lower())
+        if any(s == "rejected" for s in statuses):
+            return "rejected"
+        if statuses and all(s in ("approved", "completed") for s in statuses):
+            return "approved"
+        return cls._map_waste_status(None, tx, siblings_pending) if siblings_pending else "pending"
 
     def sync_from_waste(self, record_ids: Iterable[int] = (), transaction_ids: Iterable[int] = ()) -> int:
         record_ids, transaction_ids = set(record_ids or ()), set(transaction_ids or ())
@@ -367,6 +433,15 @@ class ClaimRequestService:
         conds = []
         if record_ids:
             conds.append(RewardClaimRequest.transaction_record_id.in_(record_ids))
+            # [PACKAGING] packaging requests have no single record: find them by the
+            # transaction of the changed records.
+            pkg_tx_ids = {
+                r[0] for r in self.db.query(TransactionRecord.created_transaction_id)
+                .filter(TransactionRecord.id.in_(record_ids)).all() if r[0]
+            }
+            if pkg_tx_ids:
+                conds.append(and_(RewardClaimRequest.transaction_id.in_(pkg_tx_ids),
+                                  RewardClaimRequest.components.isnot(None)))
         if transaction_ids:
             conds.append(RewardClaimRequest.transaction_id.in_(transaction_ids))
         reqs = self.db.query(RewardClaimRequest).filter(or_(*conds), RewardClaimRequest.deleted_date.is_(None)).all()
@@ -415,6 +490,8 @@ class ClaimRequestService:
             "item_type": activity.type if activity else None,
             "value": float(req.value or 0),
             "unit": req.unit,
+            "quantity": float(req.quantity) if req.quantity is not None else None,
+            "quantity_unit": req.quantity_unit,
             "requested_points": float(req.requested_points or 0),
             "status": req.status,
             "image_count": len(req.image_ids or []),

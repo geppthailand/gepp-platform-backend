@@ -139,16 +139,22 @@ class AdminToolsService:
         req = self._request(organization_id, key)
         target = "approved" if action == "approve" else "rejected"
         svc = ClaimRequestService(self.db)
-        if req.transaction_record_id:
+        # One record for a material item; one per material for a packaging item (shared by the
+        # other packaging items of the same submission — they are decided together).
+        record_ids = [req.transaction_record_id] if req.transaction_record_id else sorted({
+            int(c["record_id"]) for c in (req.components or []) if c.get("record_id")
+        })
+        if record_ids:
             from ..cores.transaction_audit.manual_audit_service import ManualAuditService
             audit = ManualAuditService()
-            if action == "approve":
-                res = audit.approve_transaction_record(self.db, req.transaction_record_id, int(reviewer_id), notes=note)
-            else:
-                res = audit.reject_transaction_record(self.db, req.transaction_record_id, int(reviewer_id),
-                                                      rejection_reason=note)
-            if not res.get("success"):
-                raise BadRequestException(res.get("error") or "Could not update the waste transaction")
+            for record_id in record_ids:
+                if action == "approve":
+                    res = audit.approve_transaction_record(self.db, record_id, int(reviewer_id), notes=note)
+                else:
+                    res = audit.reject_transaction_record(self.db, record_id, int(reviewer_id),
+                                                          rejection_reason=note)
+                if not res.get("success"):
+                    raise BadRequestException(res.get("error") or "Could not update the waste transaction")
             self.db.refresh(req)
         # Covers claims with no waste record, and makes the outcome explicit either way.
         svc.apply_status(req, target, reviewer_id=int(reviewer_id), note=note)
@@ -223,6 +229,17 @@ class AdminToolsService:
                     "record_status": rec.status if rec else None,
                 }
 
+        # [PACKAGING] pieces + per-material split (snapshot on the request / ledger row)
+        quantity = (req.quantity if req is not None else None)
+        if quantity is None and ptx is not None:
+            quantity = ptx.quantity
+        quantity_unit = (req.quantity_unit if req is not None else None) or (ptx.quantity_unit if ptx else None)
+        components = self._components_detail(req, ptx)
+        packaging = None
+        if activity is not None and activity.type == "packaging" and activity.packaging_id:
+            from .packaging_conversion import packaging_label
+            packaging = {"id": activity.packaging_id, "label": packaging_label(self.db, activity.packaging_id)}
+
         image_ids = list((req.image_ids if req is not None else None) or (ptx.image_ids if ptx else None) or [])
         images = self._image_urls(image_ids, organization_id, current_user_id)
         source = "self" if req is not None else (ptx.source or "staff")
@@ -244,6 +261,10 @@ class AdminToolsService:
             "item": {"id": activity.id, "name": activity.name, "type": activity.type} if activity else None,
             "value": float(base.value or 0),
             "unit": base.unit,
+            "quantity": float(quantity) if quantity is not None else None,
+            "quantity_unit": quantity_unit,
+            "components": components,
+            "packaging": packaging,
             "points": float(ptx.points) if ptx is not None and ptx.deleted_date is None else 0.0,
             "requested_points": float(req.requested_points) if req is not None else (float(ptx.points) if ptx else 0.0),
             "droppoint": {"id": dp.id, "name": dp.name} if dp else None,
@@ -258,6 +279,34 @@ class AdminToolsService:
             "waste": waste,
             "can_review": req is not None,
         }
+
+    def _components_detail(self, req, ptx) -> list[dict]:
+        """[PACKAGING] [{material_id, name_th, name_en, weight_kg, record_id, record_status}]."""
+        from ...models.rewards.points import RewardPointTransactionComponent
+        from ...models.cores.references import Material
+        raw: list[dict] = []
+        if ptx is not None:
+            for c in self.db.query(RewardPointTransactionComponent).filter(
+                RewardPointTransactionComponent.reward_point_transaction_id == ptx.id,
+                RewardPointTransactionComponent.deleted_date.is_(None),
+            ).all():
+                raw.append({"material_id": int(c.material_id), "weight_kg": float(c.weight_kg),
+                            "record_id": c.transaction_record_id})
+        if not raw and req is not None and req.components:
+            raw = [{"material_id": int(c["material_id"]), "weight_kg": float(c["weight_kg"]),
+                    "record_id": c.get("record_id")} for c in req.components]
+        if not raw:
+            return []
+        mats = {m.id: m for m in self.db.query(Material).filter(Material.id.in_({c["material_id"] for c in raw})).all()}
+        rec_ids = {int(c["record_id"]) for c in raw if c.get("record_id")}
+        recs = {r.id: r for r in self.db.query(TransactionRecord).filter(TransactionRecord.id.in_(rec_ids)).all()} if rec_ids else {}
+        out = []
+        for c in raw:
+            m = mats.get(c["material_id"])
+            r = recs.get(int(c["record_id"])) if c.get("record_id") else None
+            out.append({**c, "name_th": m.name_th if m else None, "name_en": m.name_en if m else None,
+                        "record_status": r.status if r is not None else None})
+        return out
 
     def _user_name(self, user_location_id: Optional[int]) -> Optional[str]:
         if not user_location_id:

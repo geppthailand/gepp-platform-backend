@@ -8,7 +8,7 @@ from .management import (
     RewardCampaignTarget, RewardActivityType,
 )
 from .catalog import RewardCatalog, RewardStock, RewardCatalogCategory
-from .points import RewardPointTransaction
+from .points import RewardPointTransaction, RewardPointTransactionComponent
 from .claim_requests import RewardClaimRequest, register_claim_request_sync
 from .redemptions import (
     RewardRedemption, RewardStaffInvite, RewardUser, OrganizationRewardUser,

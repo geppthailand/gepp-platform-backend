@@ -66,30 +66,22 @@ def rollup_headcount(
     headcount_by_id: Dict[int, Optional[int]],
 ) -> Optional[int]:
     """
-    Effective headcount for a set of nodes: each node's own value plus the own-values
-    of every descendant.
+    Effective headcount for a set of nodes.
 
-    A stored value means "people at this node only", so summing down the tree is correct
-    and there is no override rule.
+    A stored value is the headcount of the WHOLE node, including everything under it
+    (a building of 1,000 people with a floor of 100: the floor's 100 are part of the
+    1,000). So a node with a value counts that value alone; only a node without a value
+    falls back to the sum of its children's effective headcounts.
 
-    Overlapping selections are safe: the covered set is accumulated as a set, so
-    [Building 1, Floor 3] counts Floor 3 once even though both reach it. That also makes
-    it correct to pass the already-descendant-expanded `origin_ids` the reports filter
-    sends — the union is the same set either way.
+    Same rule as `resolve_headcount_scope` (the per-capita figure in reports), computed
+    on the fly every time — nothing is stored.
+
+    Overlapping selections are safe ([Building 1, Floor 3] counts Building 1 once).
 
     Returns None — not 0 — when no node in any of the subtrees has a value at all, so
     "nobody has filled this in" stays distinguishable from "zero people work here".
     """
-    covered: Set[int] = set()
-    for nid in target_ids:
-        covered.add(nid)
-        covered |= expand_with_descendants(root_nodes, {nid}) - {nid}
-
-    values = [headcount_by_id.get(nid) for nid in covered]
-    present = [v for v in values if v is not None]
-    if not present:
-        return None
-    return sum(present)
+    return resolve_headcount_scope(root_nodes, set(target_ids), headcount_by_id)['total']
 
 
 def resolve_headcount_scope(
@@ -104,19 +96,23 @@ def resolve_headcount_scope(
     branches nobody entered a headcount for lands in the numerator with no matching people
     in the denominator, which deflates kg/head.
 
-    So only the subtrees that actually have a headcount count on BOTH sides:
+    A stored headcount covers the node's whole subtree (the people of a building include
+    those of its floors), so the topmost node with a value is counted ONCE and every
+    headcount below it is ignored. Only subtrees that have a headcount count on BOTH sides:
 
-        branch A: 10          → root; its whole subtree's waste counts
-          building 1: 5       → inside A, so its 5 people add to the total, but its waste
-                                is NOT added again — A's subtree already includes it
+        branch A: 10          → root; its whole subtree's waste counts, 10 people
+          building 1: 5       → inside A: already part of A's 10, not added again
           building 2: unset   → waste counts (inside A), no people to add
         branch B: 7           → root
           building 3: unset   → waste counts (inside B)
         branch C: unset       → NOT a root: its own waste is excluded
           building 4: 6       → root in its own right (no ancestor has a headcount)
 
-        denominator = 10+5+7+6 = 28
+        denominator = 10+7+6 = 23
         numerator   = waste(A subtree) + waste(B subtree) + waste(building 4 subtree)
+
+    Example (One Bangkok feedback): UOB Plaza (building) 1,000 people with Floor 1 at 100
+    → 1,000, not 1,100. Computed on the fly for every report request.
 
     Returns:
         {'total': int|None, 'covered_ids': set[int]}
@@ -143,11 +139,9 @@ def resolve_headcount_scope(
             if nid is not None and nid in scope_ids:
                 hc = headcount_by_id.get(nid)
                 if inside_root:
-                    # Already under a counted subtree: contribute people, waste is implied.
+                    # Already under a counted subtree: its waste is implied and its
+                    # people are part of the ancestor's headcount — nothing to add.
                     covered_ids.add(nid)
-                    if hc is not None:
-                        present = True
-                        total += hc
                 elif hc is not None:
                     # Topmost node with a headcount — this subtree is what we divide.
                     next_inside = True

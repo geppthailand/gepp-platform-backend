@@ -441,6 +441,17 @@ def handle_update_organization_setup(org_service: OrganizationService, user_id: 
                     organization_id=organization.id, enabled=flag, acting_user_id=user_id,
                 )
 
+            # Org-WIDE, owner-only, same reasoning as auto-approval: whether manually entered
+            # transactions must carry evidence is an audit rule, not a personal preference.
+            if 'transaction_evidence_mode' in body:
+                if organization.owner_id != user_id:
+                    raise UnauthorizedException(
+                        'Only the organization owner can change the evidence requirement'
+                    )
+                org_service.set_transaction_evidence_mode(
+                    organization_id=organization.id, mode=body['transaction_evidence_mode'], acting_user_id=user_id,
+                )
+
             if level_names:
                 setup_data = org_service.update_organization_setup_level_names(
                     organization_id=organization.id,
@@ -463,6 +474,9 @@ def handle_update_organization_setup(org_service: OrganizationService, user_id: 
                 )
                 setup_data['auto_approve_scale_transactions_editable'] = (
                     organization.owner_id == user_id
+                )
+                setup_data['transaction_evidence_mode'] = (
+                    org_service.get_organization_by_id(organization.id).transaction_evidence_mode or 'none'
                 )
         else:
             # Prepare setup data including locations

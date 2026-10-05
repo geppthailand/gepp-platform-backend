@@ -772,7 +772,8 @@ class RedeemService:
         for r in valid_tx:
             qty = float(r.value or 0)
             is_weight = _is_weight_unit(r.unit) and qty > 0
-            is_material = (r.am_type == "material") if r.am_type else False
+            # [PACKAGING] a packaging claim's value is kg of material as well
+            is_material = (r.am_type in ("material", "packaging")) if r.am_type else False
 
             if is_weight:
                 kg = qty

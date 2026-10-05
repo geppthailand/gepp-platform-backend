@@ -197,6 +197,7 @@ class AdminService:
             'autoApproveScaleTransactions': bool(
                 getattr(org, 'auto_approve_scale_transactions', False)
             ),
+            'transactionEvidenceMode': getattr(org, 'transaction_evidence_mode', None) or 'none',
             'maxOrgStructureNodes': org.max_org_structure_nodes if hasattr(org, 'max_org_structure_nodes') else 50,
             # Usage-limit defaults. None = "not overridden", which the UI shows
             # as the inherited system value rather than as 0.
@@ -352,6 +353,10 @@ class AdminService:
             org.allow_ai_audit = bool(data['allowAiAudit'])
         if 'autoApproveScaleTransactions' in data:
             org.auto_approve_scale_transactions = bool(data['autoApproveScaleTransactions'])
+        if 'transactionEvidenceMode' in data:
+            if data['transactionEvidenceMode'] not in ('none', 'transaction', 'record'):
+                raise BadRequestException('transactionEvidenceMode must be none, transaction or record')
+            org.transaction_evidence_mode = data['transactionEvidenceMode']
         if 'isActive' in data:
             org.is_active = bool(data['isActive'])
         if 'maxOrgStructureNodes' in data:

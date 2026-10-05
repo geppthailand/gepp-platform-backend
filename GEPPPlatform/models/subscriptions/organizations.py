@@ -22,6 +22,9 @@ class Organization(Base, BaseModel):
     # `approved` instead of `pending` (see resolve_auto_approve — a device can override
     # this either way via device_settings.auto_approve_mode). Migration 078.
     auto_approve_scale_transactions = Column(Boolean, nullable=False, default=False)
+    # Require attachments on manually created transactions: 'none' | 'transaction' | 'record'
+    # (migration 097). Web create path only — scale, rewards and imports are exempt.
+    transaction_evidence_mode = Column(String(16), nullable=False, default='none', server_default='none')
 
     # AI Audit Configuration
     ai_audit_rule_set_id = Column(BigInteger, ForeignKey('ai_audit_rule_sets.id'), default=1)

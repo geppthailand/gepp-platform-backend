@@ -201,6 +201,43 @@ def handle_transaction_routes(event: Dict[str, Any], data: Dict[str, Any], **par
         }
 
 
+def _has_files(obj: Any) -> bool:
+    """True when a transaction / record payload carries at least one attachment."""
+    if not isinstance(obj, dict):
+        return False
+    for key in ('images', 'file_ids', 'attachments', 'files'):
+        val = obj.get(key)
+        if isinstance(val, list) and any(v not in (None, '', {}) for v in val):
+            return True
+    return False
+
+
+def _enforce_evidence_requirement(db, organization_id, transaction_data, records_data) -> None:
+    """Raise EVIDENCE_REQUIRED when the organisation's evidence mode is not satisfied.
+
+    'transaction': at least one file anywhere (on the transaction or on any record).
+    'record'     : every record has a file, unless the transaction itself carries one
+                   (a single delivery note photographed once covers all its lines).
+    """
+    from ....models.subscriptions.organizations import Organization
+    mode = db.query(Organization.transaction_evidence_mode).filter(
+        Organization.id == organization_id
+    ).scalar() or 'none'
+    if mode == 'none':
+        return
+    records = [r for r in (records_data or []) if isinstance(r, dict)]
+    tx_has = _has_files(transaction_data)
+    if mode == 'transaction':
+        ok = tx_has or any(_has_files(r) for r in records)
+    else:
+        ok = tx_has or (bool(records) and all(_has_files(r) for r in records))
+    if not ok:
+        raise ValidationException(
+            'EVIDENCE_REQUIRED: this organization requires an attachment '
+            + ('on the transaction' if mode == 'transaction' else 'on every record (or one on the transaction)')
+        )
+
+
 def handle_create_transaction(
     transaction_service: TransactionService,
     data: Dict[str, Any],
@@ -236,6 +273,14 @@ def handle_create_transaction(
             if transaction_data.get('transaction_method') == SCALE_TRANSACTION_METHOD:
                 transaction_data.pop('transaction_method', None)
             transaction_data.pop('is_internal_transfer', None)
+
+        # Org rule: manually entered transactions may have to carry evidence. Checked on the
+        # web path only — scale readings (trusted_channel='iot') have their own per-device
+        # photo rule, and rewards / Excel imports never come through this handler.
+        if trusted_channel != 'iot':
+            _enforce_evidence_requirement(
+                transaction_service.db, current_user_organization_id, transaction_data, transaction_records_data
+            )
 
         # Set organization_id and created_by_id from current user
         transaction_data['organization_id'] = current_user_organization_id

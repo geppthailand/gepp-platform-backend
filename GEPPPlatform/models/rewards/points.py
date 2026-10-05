@@ -33,3 +33,21 @@ class RewardPointTransaction(Base, BaseModel):
     transaction_id = Column(BigInteger, nullable=True)         # waste transaction created with this claim
     transaction_record_id = Column(BigInteger, nullable=True)  # its record for this item
     note = Column(Text, nullable=True)
+    # [PACKAGING] pieces claimed for a packaging item. `value` stays in KG (the total of the
+    # components) so every weight aggregate keeps summing kilograms; the per-material split
+    # is in reward_point_transaction_components.
+    quantity = Column(DECIMAL(14, 3), nullable=True)
+    quantity_unit = Column(String(16), nullable=True)  # 'pcs'
+
+
+class RewardPointTransactionComponent(Base, BaseModel):
+    """[PACKAGING] kg per material of one packaging claim, snapshotted when claimed (the
+    catalogue may change later). Source of GHG / material totals for packaging claims.
+    No FK to reward_point_transactions — see migration 098."""
+    __tablename__ = 'reward_point_transaction_components'
+
+    organization_id = Column(BigInteger, ForeignKey('organizations.id'), nullable=False)
+    reward_point_transaction_id = Column(BigInteger, nullable=False)
+    material_id = Column(BigInteger, ForeignKey('materials.id'), nullable=False)
+    weight_kg = Column(DECIMAL(14, 6), nullable=False)
+    transaction_record_id = Column(BigInteger, nullable=True)

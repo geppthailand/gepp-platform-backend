@@ -463,6 +463,9 @@ class CampaignService:
             )
             .scalar() or 0
         )
+        # [PACKAGING] packaging claims carry their materials as components
+        from .packaging_conversion import packaging_ghg_kg
+        ghg_kg += packaging_ghg_kg(self.db, RewardPointTransaction.reward_campaign_id == id)
 
         redemptions = (
             self.db.query(func.count(RewardRedemption.id))
@@ -621,6 +624,8 @@ class CampaignService:
                     "item_type": am.type if am else None,
                     "value": float(tx.value) if tx.value is not None else None,
                     "unit": tx.unit,
+                    "quantity": float(tx.quantity) if tx.quantity is not None else None,
+                    "quantity_unit": tx.quantity_unit,
                     "points": float(tx.points) if tx.points is not None else 0,
                     # A self-submitted claim only reaches the ledger once approved.
                     "status": "approved" if source == "self" else "completed",
@@ -672,6 +677,8 @@ class CampaignService:
                     "item_type": am.type if am else None,
                     "value": float(req.value) if req.value is not None else None,
                     "unit": req.unit,
+                    "quantity": float(req.quantity) if req.quantity is not None else None,
+                    "quantity_unit": req.quantity_unit,
                     "points": float(req.requested_points or 0),
                     "status": req.status,
                     "source": "self",

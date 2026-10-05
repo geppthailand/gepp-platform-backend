@@ -372,10 +372,27 @@ class SetupImportService:
             dests_out.append({**d, 'hub_type_key': _hub_type_key(d['business_type']),
                               'mode': mode, 'errors': errors, 'warnings': warnings})
 
+        # Users that no origin / destination lists as a member end up with "no location
+        # assigned" after the import (feedback p.31). Not blocking — a user may be assigned
+        # later in the app — but flagged on the user row and counted in the summary.
+        assigned_names = set()
+        for o in origins_out:
+            assigned_names |= {_norm(m) for m in (o.get('members') or [])}
+        for d in dests_out:
+            assigned_names |= {_norm(m) for m in (d.get('members') or [])}
+        unassigned_users = 0
+        for u in users_out:
+            if u.get('display_name') and _norm(u['display_name']) not in assigned_names:
+                u.setdefault('warnings', [])
+                if 'no_location_assigned' not in u['warnings']:
+                    u['warnings'].append('no_location_assigned')
+                unassigned_users += 1
+
         summary = {
             'users': len(users_out), 'tags': len(tags_out), 'tenants': len(tenants_out),
             'origins': len(origins_out), 'destinations': len(dests_out),
             'blocking_errors': blocking,
+            'users_without_location': unassigned_users,
         }
         return {
             'users': users_out, 'tags': tags_out, 'tenants': tenants_out,
@@ -568,6 +585,11 @@ class SetupImportService:
             return {'success': False, 'message': 'This import has already been confirmed'}
 
         preview = edited or row.preview_payload or {}
+        # IDs in an edited preview come from free-text cells: a non-numeric one used to reach
+        # int() below and surface as "Internal server error in service layer" (p.32).
+        id_errors = self._id_errors(preview)
+        if id_errors:
+            return {'success': False, 'message': 'Validation failed', 'errors': id_errors}
         # Re-validate emails on the (possibly edited) payload — the admin may have fixed dups.
         revalidation = self._revalidate_users(preview.get('users', []), organization_id)
         if revalidation:
@@ -634,12 +656,15 @@ class SetupImportService:
                     # created_by_id=None: a back-office admin import into a target org the admin
                     # isn't a member of — passing them as creator would trip create_user's
                     # org-inheritance validation and override the explicit organization_id.
+                    # parent_user_id=owner: imported users belong under the main account, like
+                    # users the owner creates in the app. Without it they became roots of their
+                    # own and the members list filed them under "อื่นๆ" (feedback p.25).
                     res = usvc.create_user({
                         'display_name': u['display_name'], 'email': (u['email'] or '').strip(),
                         'password': u.get('password') or None, 'role': role_key,
                         'first_name': u.get('first_name'), 'last_name': u.get('last_name'),
                         'qr_name': u.get('qr_name'), 'organization_id': organization_id,
-                        'is_user': True,
+                        'is_user': True, 'parent_user_id': owner_id,
                     }, created_by_id=None, auto_generate_credentials=True)
                     if not res.get('success'):
                         raise RuntimeError(res.get('message') or 'User creation failed')
@@ -938,6 +963,23 @@ class SetupImportService:
             er = self.db.query(UserLocation.email).filter(UserLocation.id == owner_id).first()
             owner_email = (er[0].strip().lower() if er and er[0] else None)
         return owner_id, owner_email
+
+    @staticmethod
+    def _id_errors(preview: Dict[str, Any]) -> List[str]:
+        """Every 'id' cell in the preview must be empty or a whole number."""
+        errors = []
+        for section in ('users', 'tags', 'tenants', 'origins', 'destinations'):
+            for item in preview.get(section) or []:
+                if not isinstance(item, dict):
+                    continue
+                v = item.get('id')
+                if v in (None, ''):
+                    continue
+                try:
+                    int(str(v).strip())
+                except (TypeError, ValueError):
+                    errors.append(f"{section.capitalize()} row {item.get('row_index', '?')}: ID '{v}' is not a number")
+        return errors
 
     def _revalidate_users(self, users: List[Dict[str, Any]],
                           organization_id: Optional[int] = None) -> List[str]:
