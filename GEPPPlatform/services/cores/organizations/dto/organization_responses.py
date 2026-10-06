@@ -335,6 +335,9 @@ class OrganizationSetupResponse:
     # flip it — the enforcement itself lives in the handler.
     auto_approve_scale_transactions: bool = False
     auto_approve_scale_transactions_editable: bool = False
+    # ORG-WIDE: 'none' | 'transaction' | 'record' — attachments required on manual
+    # transactions (web create only). Editable by the owner (same flag as auto-approve).
+    transaction_evidence_mode: str = 'none'
     created_date: Optional[str] = None
     updated_date: Optional[str] = None
 
@@ -363,6 +366,7 @@ class OrganizationSetupResponse:
         result['auto_approve_scale_transactions_editable'] = bool(
             self.auto_approve_scale_transactions_editable
         )
+        result['transaction_evidence_mode'] = self.transaction_evidence_mode or 'none'
         if self.created_date:
             result['created_date'] = self.created_date
         if self.updated_date:
@@ -391,6 +395,7 @@ class OrganizationSetupResponse:
             auto_approve_scale_transactions_editable=bool(
                 data.get('auto_approve_scale_transactions_editable', False)
             ),
+            transaction_evidence_mode=data.get('transaction_evidence_mode') or 'none',
             created_date=data.get('created_date'),
             updated_date=data.get('updated_date')
         )

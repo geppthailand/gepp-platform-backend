@@ -53,7 +53,7 @@ class CampaignTargetService:
         if target.target_level == "main":
             # Sum claim weight across all material-type ActivityMaterials whose
             # Material has this main_material_id.
-            return float(
+            direct = float(
                 self.db.query(func.coalesce(func.sum(RewardPointTransaction.value), 0))
                 .select_from(RewardPointTransaction)
                 .join(
@@ -68,6 +68,18 @@ class CampaignTargetService:
                 )
                 .scalar() or 0
             )
+            # [PACKAGING] + the kg of that main material inside packaging claims
+            from ...models.rewards.points import RewardPointTransactionComponent as C
+            packaged = float(
+                self.db.query(func.coalesce(func.sum(C.weight_kg), 0))
+                .select_from(C)
+                .join(RewardPointTransaction, RewardPointTransaction.id == C.reward_point_transaction_id)
+                .join(Material, Material.id == C.material_id)
+                .filter(*base_filters, C.deleted_date.is_(None),
+                        Material.main_material_id == target.main_material_id)
+                .scalar() or 0
+            )
+            return direct + packaged
 
         # activity_material level
         am = (
@@ -77,6 +89,16 @@ class CampaignTargetService:
         )
         if not am:
             return 0.0
+
+        if am.type == "packaging":
+            # [PACKAGING] targets in pieces ('pcs') sum the pieces; a kg target sums value (kg).
+            col = RewardPointTransaction.quantity if target.target_unit == "pcs" else RewardPointTransaction.value
+            return float(
+                self.db.query(func.coalesce(func.sum(col), 0))
+                .filter(*base_filters,
+                        RewardPointTransaction.reward_activity_materials_id == target.activity_material_id)
+                .scalar() or 0
+            )
 
         if am.type == "activity":
             # Count claim rows. Exclude only rows clearly tagged as weight ('kg')
@@ -137,8 +159,8 @@ class CampaignTargetService:
                 .filter(RewardActivityMaterial.id == target.activity_material_id)
                 .first()
             )
-            if am and am.type == "activity":
-                return "activity"
+            if am and am.type in ("activity", "packaging"):
+                return am.type
         return "material"
 
     def _to_dict(self, item: RewardCampaignTarget, include_progress: bool = True) -> dict:
@@ -249,7 +271,8 @@ class CampaignTargetService:
                 raise BadRequestException(
                     "ActivityMaterial is not linked to this campaign — add it via campaign claims first"
                 )
-            target_unit = "times" if am.type == "activity" else "kg"
+            # [PACKAGING] packaging targets count pieces
+            target_unit = {"activity": "times", "packaging": "pcs"}.get(am.type, "kg")
 
         # If a soft-deleted target with same scope exists — restore it instead of creating duplicate
         existing_q = self.db.query(RewardCampaignTarget).filter(
@@ -343,8 +366,8 @@ class CampaignTargetService:
             result.append({
                 "id": am.id,
                 "name": am.name,
-                "type": am.type,  # 'material' | 'activity'
-                "unit": "times" if am.type == "activity" else "kg",
+                "type": am.type,  # 'material' | 'activity' | 'packaging'
+                "unit": {"activity": "times", "packaging": "pcs"}.get(am.type, "kg"),
             })
         return result
 

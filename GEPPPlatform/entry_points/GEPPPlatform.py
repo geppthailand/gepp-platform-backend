@@ -1051,7 +1051,7 @@ def main(event, context):
                         # Handle all materials management routes
                         from GEPPPlatform.services.cores.reports.reports_handlers import handle_reports_routes
 
-                        reports_result = handle_reports_routes(event, **commonParams)
+                        reports_result = handle_reports_routes(event, data=body, **commonParams)
                         # If handler returned an API Gateway proxy response (e.g., raw PDF),
                         # pass it through directly without wrapping.
                         if isinstance(reports_result, dict) and \

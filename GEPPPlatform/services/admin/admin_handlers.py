@@ -132,6 +132,29 @@ class AdminHandlers:
 
     # ── Resource CRUD Dispatch ─────────────────────────────────────────
 
+    def _advice_feedback(self, query_params: dict) -> Dict[str, Any]:
+        """B5: report advice feedback joined with its snapshot (training / review samples).
+        Filters: organizationId, ruleId, vote, rulesVersion; page / pageSize."""
+        from ..cores.reports.advice_feedback_service import training_rows
+        org = query_params.get('organizationId')
+        rows = training_rows(self.admin_service.db_session,
+                             organization_ids=[int(org)] if org else None,
+                             rules_version=query_params.get('rulesVersion') or None,
+                             only_votes=False)
+        if query_params.get('ruleId'):
+            rows = [r for r in rows if r['rule_id'] == query_params['ruleId']]
+        if query_params.get('vote'):
+            rows = [r for r in rows if r['label']['vote'] == query_params['vote']]
+        rows.reverse()  # newest first
+        page = max(1, int(query_params.get('page', 1) or 1))
+        size = min(500, max(1, int(query_params.get('pageSize', 50) or 50)))
+        return {'items': rows[(page - 1) * size: page * size], 'total': len(rows), 'page': page, 'pageSize': size}
+
+    def _packaging(self):
+        # Packaging catalogue (migration 098) lives in its own service module.
+        from .packaging_admin_service import PackagingAdminService
+        return PackagingAdminService(self.admin_service.db_session)
+
     def list_resource(self, resource: str, query_params: dict) -> Dict[str, Any]:
         handler_map = {
             'organizations': self.admin_service.list_organizations,
@@ -144,6 +167,9 @@ class AdminHandlers:
             'iot-scales': self.admin_service.list_iot_scales,
             # Materials + reference lists (for the material form's selects)
             'materials': self.admin_service.list_materials,
+            'packagings': lambda qp: self._packaging().list_packagings(qp),
+            'packaging-brands': lambda qp: self._packaging().list_brands(qp),
+            'report-advice-feedback': self._advice_feedback,
             'main-materials': self.admin_service.list_main_materials,
             'material-categories': self.admin_service.list_material_categories,
             # CRM / Marketing module
@@ -180,6 +206,8 @@ class AdminHandlers:
             'iot-devices': self.admin_service.get_iot_device,
             'iot-scales': self.admin_service.get_iot_scale,
             'materials': self.admin_service.get_material,
+            'packagings': lambda rid: self._packaging().get_packaging(rid),
+            'packaging-brands': lambda rid: self._packaging().get_brand(rid),
             # CRM / Marketing
             'crm-segments': lambda rid: crm.get_crm_segment(self.db_session, rid),
             'crm-templates': lambda rid: crm.get_crm_template(self.db_session, rid),
@@ -206,6 +234,8 @@ class AdminHandlers:
             'iot-devices': self.admin_service.create_iot_device,
             'iot-scales': self.admin_service.create_iot_scale,
             'materials': self.admin_service.create_material,
+            'packagings': lambda d: self._packaging().create_packaging(d),
+            'packaging-brands': lambda d: self._packaging().create_brand(d),
             # CRM / Marketing
             'crm-segments': lambda d: crm.create_crm_segment(self.db_session, d),
             'crm-templates': lambda d: crm.create_crm_template(self.db_session, d),
@@ -229,6 +259,8 @@ class AdminHandlers:
             'iot-devices': self.admin_service.update_iot_device,
             'iot-scales': self.admin_service.update_iot_scale,
             'materials': self.admin_service.update_material,
+            'packagings': lambda rid, d: self._packaging().update_packaging(rid, d),
+            'packaging-brands': lambda rid, d: self._packaging().update_brand(rid, d),
             # CRM / Marketing
             'crm-segments': lambda rid, d: crm.update_crm_segment(self.db_session, rid, d),
             'crm-templates': lambda rid, d: crm.update_crm_template(self.db_session, rid, d),
@@ -250,6 +282,8 @@ class AdminHandlers:
             'iot-devices': lambda rid: self.admin_service.delete_iot_device(rid, current_user=self.current_user),
             'iot-scales': self.admin_service.delete_iot_scale,
             'materials': self.admin_service.delete_material,
+            'packagings': lambda rid: self._packaging().delete_packaging(rid),
+            'packaging-brands': lambda rid: self._packaging().delete_brand(rid),
             # CRM / Marketing
             'crm-segments': lambda rid: crm.delete_crm_segment(self.db_session, rid),
             'crm-templates': lambda rid: crm.delete_crm_template(self.db_session, rid),

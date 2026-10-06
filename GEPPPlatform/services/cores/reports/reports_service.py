@@ -19,6 +19,7 @@ from ....models.transactions.transactions import Transaction, TransactionStatus
 from ....models.transactions.transaction_records import TransactionRecord
 from ....models.subscriptions.subscription_models import OrganizationRole
 from ....exceptions import ValidationException, NotFoundException
+from ....libs.timeWindow import apply_time_window, has_time_window
 
 logger = logging.getLogger(__name__)
 
@@ -516,6 +517,7 @@ class ReportsService:
                 q = q.filter(TransactionRecord.transaction_date >= report_from)
             if report_to:
                 q = q.filter(TransactionRecord.transaction_date <= report_to)
+            q = apply_time_window(q, TransactionRecord.transaction_date, filters)
             if material_ids:
                 try:
                     q = q.filter(TransactionRecord.material_id.in_([int(m) for m in material_ids]))
@@ -653,6 +655,8 @@ class ReportsService:
                             query = query.filter(TransactionRecord.transaction_date >= date_from)
                         if date_to:
                             query = query.filter(TransactionRecord.transaction_date <= date_to)
+                # "เวลาเดิมทุกวัน": the same hours on every day of the range
+                query = apply_time_window(query, TransactionRecord.transaction_date, filters)
 
             # Apply member-based filtering (non-admin users only see their own origins + descendants)
             query = self._apply_member_filter_to_transaction_query(query, current_user_id, organization_id)
@@ -758,6 +762,7 @@ class ReportsService:
                 query = query.filter(TransactionRecord.transaction_date >= filters['date_from'])
             if filters.get('date_to'):
                 query = query.filter(TransactionRecord.transaction_date <= filters['date_to'])
+            query = apply_time_window(query, TransactionRecord.transaction_date, filters)
         return list(query.all())
 
     def _fetch_collection_markers(
@@ -1077,7 +1082,8 @@ class ReportsService:
                 Transaction.status != TransactionStatus.rejected,
                 Transaction.origin_id.isnot(None)
             ]
-            if filters and (filters.get('date_from') or filters.get('date_to') or filters.get('material_ids')):
+            if filters and (filters.get('date_from') or filters.get('date_to') or filters.get('material_ids')
+                            or has_time_window(filters)):
                 tr_query = self.db.query(
                     Transaction.origin_id,
                     Transaction.location_tag_id,
@@ -1104,6 +1110,7 @@ class ReportsService:
                         tr_query = tr_query.filter(TransactionRecord.transaction_date >= date_from)
                     if date_to:
                         tr_query = tr_query.filter(TransactionRecord.transaction_date <= date_to)
+                tr_query = apply_time_window(tr_query, TransactionRecord.transaction_date, filters)
                 tr_query = self._apply_member_filter_to_transaction_query(tr_query, current_user_id, organization_id)
                 combos_result = tr_query.distinct().all()
             else:
@@ -1492,6 +1499,7 @@ class ReportsService:
                     transaction_records_query = transaction_records_query.filter(TransactionRecord.transaction_date >= date_from)
                 if date_to:
                     transaction_records_query = transaction_records_query.filter(TransactionRecord.transaction_date <= date_to)
+                transaction_records_query = apply_time_window(transaction_records_query, TransactionRecord.transaction_date, filters)
             
             transaction_records = transaction_records_query.all()
             

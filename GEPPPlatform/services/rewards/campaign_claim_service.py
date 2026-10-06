@@ -30,6 +30,15 @@ class CampaignClaimService:
         if activity_material:
             result["activity_material_name"] = activity_material.name
             result["activity_material_type"] = activity_material.type
+            result["unit"] = {"material": "kg", "packaging": "pcs"}.get(activity_material.type, "times")
+            if activity_material.type == "packaging" and activity_material.packaging_id:
+                from .packaging_conversion import compositions, packaging_label
+                parts = compositions(self.db, [activity_material.packaging_id]).get(int(activity_material.packaging_id), [])
+                result["packaging"] = {
+                    "id": activity_material.packaging_id,
+                    "label": packaging_label(self.db, activity_material.packaging_id),
+                    "kg_per_piece": float(sum((c["weight_kg"] for c in parts), 0)),
+                }
         return result
 
     def list(self, campaign_id: int) -> list[dict]:

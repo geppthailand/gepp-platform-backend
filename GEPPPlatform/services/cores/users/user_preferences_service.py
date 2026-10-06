@@ -20,10 +20,20 @@ from ....models.users.user_locations_settings import UserLocationSettings
 REPORT_MODES = ('location', 'tag', 'tenant')
 OVERVIEW_CHART_MODES = ('yearly', 'monthly', 'daily')
 COMPARE_MODES = ('yearly', 'monthly')
+# Overview chart breakdown: 'all' (every category stacked, default), 'recycled' (recyclables
+# vs the rest) or 'category:<id>' (one category vs the rest).
+_BREAKDOWN_CATEGORY = re.compile(r'^category:\d{1,9}$')
+
+
+def is_overview_breakdown(value: Any) -> bool:
+    return isinstance(value, str) and (value in ('recycled', 'all') or bool(_BREAKDOWN_CATEGORY.match(value)))
 
 REPORT_DEFAULTS: Dict[str, Any] = {
     'mode': 'location',
     'overview_chart': 'monthly',
+    'overview_breakdown': 'all',
+    # Trend line through the overview bars (monthly / yearly); also drawn in the PDF.
+    'overview_trend': False,
     'compare_mode': 'yearly',
 }
 
@@ -39,6 +49,10 @@ def _clean_report(patch: Dict[str, Any]) -> Dict[str, Any]:
         out['overview_chart'] = patch['overview_chart']
     if patch.get('compare_mode') in COMPARE_MODES:
         out['compare_mode'] = patch['compare_mode']
+    if is_overview_breakdown(patch.get('overview_breakdown')):
+        out['overview_breakdown'] = patch['overview_breakdown']
+    if isinstance(patch.get('overview_trend'), bool):
+        out['overview_trend'] = patch['overview_trend']
     return out
 
 

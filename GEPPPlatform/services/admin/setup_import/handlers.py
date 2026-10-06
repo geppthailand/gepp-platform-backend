@@ -42,14 +42,17 @@ def handle_setup_import_route(
     data = data or {}
     query_params = query_params or {}
     admin_id = (current_user or {}).get('user_id') or (current_user or {}).get('id')
-    organization_id = int(path_parts[1])
+    try:
+        organization_id = int(path_parts[1])
+    except (TypeError, ValueError, IndexError):
+        raise BadRequestException('Invalid organization id')
 
     # Resolve the target org DB (same pattern as transactions-export).
     from ..db_target_resolver import session_for_target
     target = query_params.get('dbTarget') or 'local'
     try:
         session, owns = session_for_target(target, db_session)
-    except PermissionError as e:
+    except (PermissionError, ValueError) as e:  # unknown dbTarget → 400, not a 500
         raise BadRequestException(str(e))
 
     try:
@@ -71,7 +74,10 @@ def handle_setup_import_route(
             )
 
         if method == 'POST' and len(path_parts) == 5 and path_parts[2] == 'setup-import':
-            import_id = int(path_parts[3])
+            try:
+                import_id = int(path_parts[3])
+            except (TypeError, ValueError):
+                raise BadRequestException('Invalid import id')
             action = path_parts[4]
             if action == 'extract':
                 return service.extract(import_id, organization_id)

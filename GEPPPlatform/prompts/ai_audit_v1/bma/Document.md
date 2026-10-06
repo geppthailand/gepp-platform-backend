@@ -303,7 +303,7 @@ For each material that has an image attached, apply the following rules:
     "sv": "c",
     "de": {
       "dt": "0",
-      "wi": ["ไม่มีขยะอินทรีย์", "ไม่มีขยะรีไซเคิล"]
+      "wi": ["ไม่มีขยะอินทรีย์", "ไม่มีวัสดุรีไซเคิล"]
     }
   }
 }

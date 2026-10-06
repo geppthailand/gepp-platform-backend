@@ -87,6 +87,11 @@ class OrganizationRewardUser(Base, BaseModel):
     reward_user_id = Column(BigInteger, ForeignKey('reward_users.id'), nullable=False)
     organization_id = Column(BigInteger, ForeignKey('organizations.id'), nullable=False)
     role = Column(String(20), default='user')  # user / staff
+    # [ADMIN-TOOLS] How this member's claims get recorded in THIS organization:
+    # 'staff' = a staff member records them (default), 'non_staff' = the member may
+    # submit claims themselves in the LIFF (reviewed by an admin). Only honoured while
+    # the org's reward_setup.admin_tools_enabled is on.
+    claim_mode = Column(String(16), nullable=False, default='staff')
 
 
 class Droppoint(Base, BaseModel):

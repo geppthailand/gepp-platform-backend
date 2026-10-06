@@ -28,6 +28,17 @@ def handle_admin_routes(path: str, data: dict, **commonParams):
     # Extract ID from path patterns like /organizations/123 or /subscription-plans/123/permissions/456
     path_parts = [p for p in internal_path.strip('/').split('/') if p]
 
+    # Data Policy (retention diagnostics): every method under /admin/data-policy/*.
+    # Dispatched before the per-method blocks so the generic `{resource}/{id}`
+    # shapes below never try to int() a sub-path such as `units` or `rules`.
+    if path_parts and path_parts[0] == 'data-policy':
+        from .data_policy import handle_data_policy_route
+        return handle_data_policy_route(
+            method, path_parts, data,
+            commonParams.get('query_params', {}) or {},
+            db_session, commonParams.get('current_user', {}) or {},
+        )
+
     if method == "POST":
         if internal_path == "/login":
             return admin_handler.admin_login(data)
@@ -112,7 +123,8 @@ def handle_admin_routes(path: str, data: dict, **commonParams):
         if (
             len(path_parts) == 3
             and path_parts[0] == 'iot-devices'
-            and path_parts[2] in ('commands', 'tags', 'maintenance', 'debug-log', 'settings')
+            and path_parts[2] in ('commands', 'tags', 'maintenance', 'debug-log',
+                                  'settings', 'documents')
         ):
             try:
                 device_id = int(path_parts[1])
@@ -139,6 +151,35 @@ def handle_admin_routes(path: str, data: dict, **commonParams):
                 return admin_handler.admin_service.update_iot_device_settings(
                     device_id, data
                 )
+            if sub == 'documents':
+                # Step 1 of the upload: allocate the pending file row + the
+                # presigned POST the browser uploads with. Step 2 is the
+                # browser → S3 POST; step 3 is .../documents/{fileId}/confirm.
+                from .iot_documents import start_upload
+                return start_upload(
+                    db_session, device_id, data,
+                    commonParams.get('current_user', {}) or {},
+                )
+
+        # IoT devices: POST /admin/iot-devices/{id}/documents/{fileId}/confirm
+        # — the browser has finished POSTing the bytes to S3 and is telling us
+        # so. The size is then read back from S3, not from this request.
+        if (
+            len(path_parts) == 5
+            and path_parts[0] == 'iot-devices'
+            and path_parts[2] == 'documents'
+            and path_parts[4] == 'confirm'
+        ):
+            try:
+                device_id = int(path_parts[1])
+                doc_file_id = int(path_parts[3])
+            except ValueError:
+                raise NotFoundException(f'POST endpoint not found: {internal_path}')
+            from .iot_documents import confirm_upload
+            return confirm_upload(
+                db_session, device_id, doc_file_id, data,
+                commonParams.get('current_user', {}) or {},
+            )
 
         # CRM sub-paths without id: /crm-segments/preview, /crm-templates/render-preview, /crm-templates/generate-ai
         if len(path_parts) == 2 and path_parts[0].startswith('crm-') and \
@@ -266,6 +307,9 @@ def handle_admin_routes(path: str, data: dict, **commonParams):
                 )
             if sub == 'settings':
                 return admin_handler.admin_service.get_iot_device_settings(device_id)
+            if sub == 'documents':
+                from .iot_documents import list_documents
+                return list_documents(db_session, device_id, query_params)
             raise NotFoundException(f"GET endpoint not found: {internal_path}")
 
         # GET /admin/crm-deliveries.csv — Sprint 4 CSV export (special path with dot extension)
@@ -368,6 +412,26 @@ def handle_admin_routes(path: str, data: dict, **commonParams):
             raise NotFoundException(f"GET endpoint not found: {internal_path}")
 
     elif method == "PUT":
+        # IoT devices: PUT /admin/iot-devices/{id}/documents/{fileId}
+        # — change a document's category or note. Matched before the generic
+        # `{resource}/{id}` shape, whose len==2 test this would never reach
+        # anyway, but kept adjacent to its POST/DELETE siblings for legibility.
+        if (
+            len(path_parts) == 4
+            and path_parts[0] == 'iot-devices'
+            and path_parts[2] == 'documents'
+        ):
+            try:
+                device_id = int(path_parts[1])
+                doc_file_id = int(path_parts[3])
+            except ValueError:
+                raise NotFoundException(f'PUT endpoint not found: {internal_path}')
+            from .iot_documents import update_document
+            return update_document(
+                db_session, device_id, doc_file_id, data,
+                commonParams.get('current_user', {}) or {},
+            )
+
         # PUT /admin/global-settings — a bulk write with no resource id, because
         # the page saves whatever the operator changed in one go. Matched before
         # the generic `{resource}/{id}` shape, which would try to int() the key.
@@ -397,6 +461,26 @@ def handle_admin_routes(path: str, data: dict, **commonParams):
                 hardware_id,
                 current_user=commonParams.get('current_user', {}),
                 query_params=commonParams.get('query_params', {}) or {},
+            )
+
+        # IoT devices: DELETE /admin/iot-devices/{id}/documents/{fileId}
+        # — placed ABOVE the generic `{resource}/{id}` branch. That branch only
+        # matches len==2 so there is no collision today, but a 4-part path
+        # falling through to the `else` would 404 with a misleading message.
+        if (
+            len(path_parts) == 4
+            and path_parts[0] == 'iot-devices'
+            and path_parts[2] == 'documents'
+        ):
+            try:
+                device_id = int(path_parts[1])
+                doc_file_id = int(path_parts[3])
+            except ValueError:
+                raise NotFoundException(f'DELETE endpoint not found: {internal_path}')
+            from .iot_documents import delete_document
+            return delete_document(
+                db_session, device_id, doc_file_id,
+                commonParams.get('current_user', {}) or {},
             )
 
         if len(path_parts) == 2:

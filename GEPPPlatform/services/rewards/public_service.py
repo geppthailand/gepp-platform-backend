@@ -492,15 +492,22 @@ class PublicRewardService:
             .all()
         )
 
+        from .claim_request_service import admin_tools_enabled
+
         result = []
         for oru in rows:
             org = self.db.query(Organization).filter(Organization.id == oru.organization_id).first()
+            claim_mode = getattr(oru, "claim_mode", None) or "staff"
             result.append({
                 "id": oru.id,
                 "organization_id": oru.organization_id,
                 "organization_name": org.name if org else None,
                 "role": oru.role,
                 "is_active": oru.is_active,
+                "claim_mode": claim_mode,
+                # [ADMIN-TOOLS] the LIFF shows the "submit yourself" tab only when this is true
+                "self_claim_enabled": bool(oru.is_active and claim_mode == "non_staff"
+                                           and admin_tools_enabled(self.db, oru.organization_id)),
             })
         return result
 

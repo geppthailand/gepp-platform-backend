@@ -103,7 +103,7 @@ R('T-R03', 'risk', T, 'general_trend', GEN_UP_WHEN, GEN_UP_PRIO,
 
 SORT_DOWN_WHEN = "has_prev and prev_kg >= 5 and total_kg >= 5 and diversion_change_pts <= -10"
 SORT_DOWN_PRIO = "65 + min(-diversion_change_pts, 40)"
-SORT_DOWN_REASON_TH = "สัดส่วนขยะรีไซเคิลและขยะอินทรีย์ต่อขยะทั้งหมด ลดจาก {diversion_pct_prev:pct} ในช่วง {prev_label} เหลือ {diversion_pct:pct} ({diversion_change_pts:pts}) แสดงว่าการคัดแยกแย่ลงอย่างชัดเจน"
+SORT_DOWN_REASON_TH = "สัดส่วนวัสดุรีไซเคิลและขยะอินทรีย์ต่อขยะทั้งหมด ลดจาก {diversion_pct_prev:pct} ในช่วง {prev_label} เหลือ {diversion_pct:pct} ({diversion_change_pts:pts}) แสดงว่าการคัดแยกแย่ลงอย่างชัดเจน"
 SORT_DOWN_REASON_EN = "The recyclable + organic share fell from {diversion_pct_prev:pct} ({prev_label}) to {diversion_pct:pct} ({diversion_change_pts:pts}): sorting has clearly slipped."
 R('L-R04', 'risk', L, 'sorting', SORT_DOWN_WHEN, SORT_DOWN_PRIO,
   ("การคัดแยกของอาคารแย่ลง", "The building's sorting is slipping"),
@@ -211,7 +211,7 @@ R('L-R09', 'risk', ['location', 'tenant', 'tag'], 'biohazard', "bio_hazardous_kg
   ("มีขยะติดเชื้อ", "Infectious waste found"),
   ["แยกใส่ถุงแดงและภาชนะที่ปิดมิดชิด",
    "ส่งกำจัดผ่านผู้รับขยะติดเชื้อที่ได้รับอนุญาต",
-   "ห้ามปนกับขยะทั่วไปหรือขยะรีไซเคิล"],
+   "ห้ามปนกับขยะทั่วไปหรือวัสดุรีไซเคิล"],
   ["Bag it in red bags inside sealed containers",
    "Use a licensed infectious-waste contractor",
    "Never mix it with general or recyclable waste"],
@@ -329,7 +329,7 @@ R('L-O03', 'opportunity', L, 'stream_paper', "paper_rank <= 3 and paper_pct >= 5
    "Offer a secure-shredding service that recycles the paper",
    "Encourage tenants to print less"],
   rt, re_)
-R('T-O01', 'opportunity', T, 'stream_paper', "paper_rank <= 3 and paper_pct >= 5", "45 + paper_pct",
+R('T-O01', 'opportunity', T, 'stream_paper', "paper_rank <= 3 and paper_pct >= 5 and diversion_pct < 60", "45 + paper_pct",
   ("ลดการใช้กระดาษในสำนักงาน", "Cut paper use in the office"),
   ["ตั้งค่าเครื่องพิมพ์ให้พิมพ์ 2 หน้าและขาวดำเป็นค่าเริ่มต้น",
    "ใช้เอกสารดิจิทัลและลายเซ็นอิเล็กทรอนิกส์แทนการพิมพ์",
@@ -338,7 +338,7 @@ R('T-O01', 'opportunity', T, 'stream_paper', "paper_rank <= 3 and paper_pct >= 5
    "Use digital documents and e-signatures instead of printing",
    "Keep used paper in a box for recycling"],
   rt, re_)
-R('E-O03', 'opportunity', E, 'stream_paper', "paper_rank <= 3 and paper_pct >= 5", "45 + paper_pct",
+R('E-O03', 'opportunity', E, 'stream_paper', "paper_rank <= 3 and paper_pct >= 5 and diversion_pct < 60", "45 + paper_pct",
   ("ลดสื่อสิ่งพิมพ์ในกิจกรรม", "Cut printed material at events"),
   ["ใช้ QR code แทนแผ่นพับและเอกสารแจก",
    "พิมพ์เฉพาะที่จำเป็นและประเมินจำนวนให้พอดี",
@@ -465,10 +465,10 @@ R('T-O05', 'opportunity', T, 'stream_general', "general_rank == 1 and general_pc
   ("คัดแยกขยะที่โต๊ะทำงาน", "Sort waste at the desk"),
   ["เปลี่ยนถังรวมเป็นถังแยก 2–3 ช่องตามโซนทำงาน",
    "กล่องและขวดที่ล้างแล้วรีไซเคิลได้ ไม่ต้องทิ้งเป็นขยะทั่วไป",
-   "ตั้งเป้าลดสัดส่วนขยะทั่วไปลง 5–10% ในไตรมาสถัดไป"],
+   "ตั้งเป้าให้สัดส่วนขยะทั่วไปต่ำกว่า {general_pct:pct} ในไตรมาสถัดไป"],
   ["Swap single bins for 2–3 compartment bins in each work zone",
    "Rinsed boxes and bottles are recyclable, not general waste",
-   "Aim to cut the general-waste share by 5–10% next quarter"],
+   "Aim to bring the general-waste share below {general_pct:pct} next quarter"],
   "ขยะทั่วไปเป็นหมวดที่ใหญ่ที่สุดของผู้เช่า ({general_kg:kg} หรือ {general_pct:pct}) และการคัดแยกที่ต้นทางเป็นสิ่งที่ผู้เช่าควบคุมได้เองโดยตรง",
   "General waste is your largest stream ({general_kg:kg}, {general_pct:pct}), and sorting at source is fully in your hands.")
 R('L-O11', 'opportunity', L, 'engage', "total_kg >= 50 and general_pct >= 40", "34",
@@ -527,7 +527,7 @@ R('L-O10', 'opportunity', LT, 'trend_good', "has_prev and prev_kg >= 5 and total
   ["The sorted share rose from {diversion_pct_prev:pct} to {diversion_pct:pct}",
    "Use it to bring other areas on board",
    "Set a monthly sorting-rate target"],
-  "สัดส่วนขยะรีไซเคิลและขยะอินทรีย์เพิ่มจาก {diversion_pct_prev:pct} ในช่วง {prev_label} เป็น {diversion_pct:pct} ({diversion_change_pts:pts}) เป็นสัญญาณว่าการคัดแยกได้ผล",
+  "สัดส่วนวัสดุรีไซเคิลและขยะอินทรีย์เพิ่มจาก {diversion_pct_prev:pct} ในช่วง {prev_label} เป็น {diversion_pct:pct} ({diversion_change_pts:pts}) เป็นสัญญาณว่าการคัดแยกได้ผล",
   "The recyclable + organic share rose from {diversion_pct_prev:pct} ({prev_label}) to {diversion_pct:pct} ({diversion_change_pts:pts}), a sign sorting is working.")
 
 ZW_REASON = ("สัดส่วนขยะที่คัดแยกได้ (รีไซเคิลและอินทรีย์) อยู่ที่ {diversion_pct:pct} ซึ่งสูงกว่าครึ่งหนึ่งอย่างชัดเจน จึงพร้อมตั้งเป้าหมายที่สูงขึ้น",
@@ -558,7 +558,7 @@ for rid, modes, title in [
 R('L-Q02', 'quickwin', ['location', 'tenant', 'tag'], 'signage', "total_kg >= 5 and unspecified_pct >= 15", "48 + min(unspecified_pct, 50) * 0.3",
   ("ปรับปรุงป้ายบอกทางอย่างง่าย", "Simple signage fix"), SIGN_TH, SIGN_EN, *SIGN_UNSPEC_REASON)
 
-BIN_WHEN = "total_kg >= 5 and general_pct >= 40 and general_kg > diversion_kg"
+BIN_WHEN = "total_kg >= 5 and general_pct >= 40 and general_kg > diversion_kg and diversion_pct < 40"
 BIN_REASON = ("ขยะทั่วไป {general_kg:kg} มากกว่าขยะที่คัดแยกได้ {diversion_kg:kg} การมีถังรีไซเคิลอยู่ข้างถังขยะทั่วไปทุกจุดทำให้การแยกเป็นเรื่องง่ายที่สุด",
               "General waste ({general_kg:kg}) outweighs sorted waste ({diversion_kg:kg}); a recycling bin beside every general bin makes sorting the easy choice.")
 R('L-Q03', 'quickwin', L, 'bins', BIN_WHEN, "46 + (general_pct - 40) * 0.4",

@@ -31,6 +31,8 @@ from .public_service import PublicRewardService
 from .history_service import HistoryService
 from .invite_service import InviteService
 from .merge_service import MergeService
+from .admin_tools_service import AdminToolsService
+from .claim_request_service import ClaimRequestService
 
 from ...exceptions import (
     APIException,
@@ -178,6 +180,18 @@ def handle_reward_routes(event: Dict[str, Any], data: Dict[str, Any], **params) 
             svc = ActivityTypeService(db_session)
             item_id = data.get("id") or query_params.get("id")
             return svc.delete(int(item_id), current_org_id)
+
+        # --- Packaging catalogue (read-only for organisations; GEPP edits it in the back office)
+        if path == "/api/rewards/packagings" and method == "GET":
+            from ..admin.packaging_admin_service import PackagingAdminService
+            res = PackagingAdminService(db_session).list_packagings({
+                "q": query_params.get("q"), "brandId": query_params.get("brand_id"),
+                "isActive": "true", "page": query_params.get("page", 1),
+                "pageSize": query_params.get("page_size", 200),
+            })
+            # only items that can actually be claimed (a composition is required)
+            res["items"] = [p for p in res["items"] if p["components"]]
+            return res
 
         # --- Activity Materials ---
         if path == "/api/rewards/activity-materials" and method == "GET":
@@ -641,6 +655,23 @@ def handle_reward_routes(event: Dict[str, Any], data: Dict[str, Any], **params) 
             svc = InviteService(db_session)
             return svc.revoke_invite(int(data.get("id")), current_org_id)
 
+        # --- Admin tools (reward_setup.admin_tools_enabled; every call refuses while OFF) ---
+        if path == "/api/rewards/admin-tools/claim" and method == "POST":
+            return AdminToolsService(db_session).attach_claim(current_org_id, current_user_id, data or {})
+
+        if path == "/api/rewards/members/claim-mode" and method == "PUT":
+            return AdminToolsService(db_session).set_claim_mode(
+                current_org_id, int((data or {}).get("id") or 0), (data or {}).get("claim_mode"))
+
+        if path == "/api/rewards/admin-tools/review" and method == "POST":
+            body = data or {}
+            return AdminToolsService(db_session).review(
+                current_org_id, current_user_id, body.get("key"), body.get("action"), body.get("note"))
+
+        if path == "/api/rewards/transactions/detail" and method == "GET":
+            return AdminToolsService(db_session).transaction_detail(
+                current_org_id, current_user_id, query_params.get("key"))
+
         # ============================================================
         # PUBLIC / LIFF ENDPOINTS
         # All user-facing endpoints resolve reward_user_id server-side
@@ -695,6 +726,10 @@ def handle_reward_routes(event: Dict[str, Any], data: Dict[str, Any], **params) 
             return svc.verify_staff(_resolve_user(), data.get("droppoint_hash"))
 
         if path == "/api/rewards/public/claim" and method == "POST":
+            # A staff claim is always made at a droppoint (ClaimService itself allows none
+            # for admin-attached claims, so the requirement lives here).
+            if not data.get("droppoint_id"):
+                raise BadRequestException("droppoint_id is required")
             # Resolve caller's staff identity from header — ignore client-provided staff_org_user_id
             pub_svc = PublicRewardService(db_session)
             verified_staff_id = pub_svc.resolve_staff_for_campaign(line_user_id, data.get("campaign_id"))
@@ -717,6 +752,35 @@ def handle_reward_routes(event: Dict[str, Any], data: Dict[str, Any], **params) 
             svc = CampaignClaimService(db_session)
             campaign_id = query_params.get("campaign_id")
             return svc.list(int(campaign_id))
+
+        # --- Self-submitted claims (non-staff members, Admin tools) ---
+        if path == "/api/rewards/public/self-claim/orgs" and method == "GET":
+            return ClaimRequestService(db_session).self_claim_organizations(_resolve_user())
+
+        if path == "/api/rewards/public/self-claim/options" and method == "GET":
+            return ClaimRequestService(db_session).self_claim_options(
+                _resolve_user(), int(query_params.get("organization_id") or 0))
+
+        if path == "/api/rewards/public/self-claim/presign" and method == "POST":
+            return _self_claim_presign(db_session, _resolve_user(), data or {})
+
+        if path == "/api/rewards/public/self-claim" and method == "POST":
+            body = data or {}
+            droppoint_id = body.get("droppoint_id")
+            return ClaimRequestService(db_session).submit(
+                reward_user_id=_resolve_user(),
+                organization_id=int(body.get("organization_id") or 0),
+                campaign_id=int(body.get("campaign_id") or 0),
+                items=[{"activity_material_id": int(i.get("activity_material_id") or 0), "value": i.get("value")}
+                       for i in (body.get("items") or [])],
+                droppoint_id=int(droppoint_id) if droppoint_id else None,
+                image_ids=body.get("image_ids"),
+                note=(body.get("note") or "").strip() or None,
+            )
+
+        if path == "/api/rewards/public/self-claim/history" and method == "GET":
+            org_id = query_params.get("organization_id")
+            return ClaimRequestService(db_session).history(_resolve_user(), int(org_id) if org_id else None)
 
         if path == "/api/rewards/public/redeem/orgs" and method == "GET":
             svc = RedeemService(db_session)
@@ -928,3 +992,33 @@ def handle_reward_routes(event: Dict[str, Any], data: Dict[str, Any], **params) 
         print(f"[REWARDS] Error: {str(e)}")
         print(traceback.format_exc())
         raise APIException(f"Internal error: {str(e)}")
+
+def _self_claim_presign(db_session, reward_user_id: int, data: Dict[str, Any]) -> Dict[str, Any]:
+    """Upload URLs for a self-claim's photos. Same S3 layout and org limits as transaction
+    attachments; only a member allowed to self-submit in that org gets them."""
+    from ..cores.transactions.presigned_url_service import TransactionPresignedUrlService
+    from ...models.subscriptions.organizations import Organization
+
+    org_id = int(data.get("organization_id") or 0)
+    ClaimRequestService(db_session)._self_claim_membership(reward_user_id, org_id)
+    file_names = [n for n in (data.get("file_names") or []) if isinstance(n, str) and n.strip()][:3]
+    if not file_names:
+        raise BadRequestException("file_names is required")
+    owner_id = db_session.query(Organization.owner_id).filter(Organization.id == org_id).scalar()
+    result = TransactionPresignedUrlService().get_transaction_file_upload_presigned_urls(
+        file_names=file_names,
+        organization_id=org_id,
+        user_id=int(owner_id or 0),
+        db=db_session,
+        file_type="transaction_image",
+        related_entity_type="reward_claim_request",
+        file_sizes=data.get("file_sizes"),
+    )
+    if not result.get("success"):
+        raise BadRequestException(result.get("message") or result.get("error") or "Could not prepare the upload")
+    return {
+        "presigned_urls": result.get("presigned_urls", []),
+        "file_records": result.get("file_records", []),
+        "max_file_size_bytes": result.get("max_file_size_bytes"),
+        "max_image_dimension_px": result.get("max_image_dimension_px"),
+    }

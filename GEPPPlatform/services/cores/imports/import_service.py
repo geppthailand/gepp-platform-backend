@@ -480,6 +480,7 @@ class ImportService:
         locations = self.db.query(UserLocation).filter(
             UserLocation.organization_id == organization_id,
             UserLocation.is_active == True,  # noqa: E712
+            UserLocation.deleted_date.is_(None),
         ).all()
 
         # Scope selectable origins to the acting user's assigned locations (non-owners only).
@@ -500,6 +501,10 @@ class ImportService:
                 'type': loc.type,
                 'tag_ids': [int(x) for x in (loc.tags or []) if isinstance(x, (int, float))],
                 'tenant_ids': [int(x) for x in (loc.tenants or []) if isinstance(x, (int, float))],
+                'member_ids': {
+                    int(m.get('user_id')) for m in (loc.members or [])
+                    if isinstance(m, dict) and str(m.get('user_id', '')).isdigit()
+                },
             }
 
         tags = self.db.query(UserLocationTag).filter(
@@ -580,6 +585,14 @@ class ImportService:
             info = loc_by_id.get(lid)
             if not info:
                 continue
+            # Non-owners see the destinations they can see elsewhere in the app: hubs they are a
+            # member of, and destination-flagged origins they are assigned to.
+            if allowed_origin_ids is not None and current_user_id is not None:
+                if info.get('type') == 'hub':
+                    if int(current_user_id) not in info.get('member_ids', set()):
+                        continue
+                elif lid not in allowed_origin_ids:
+                    continue
             destinations.append({
                 'id': lid,
                 'names': info['names'],
@@ -589,9 +602,11 @@ class ImportService:
         # Origins (in the tree) first in pre-order; hubs (not in tree) after.
         destinations.sort(key=lambda d: tree_order.index(d['id']) if d['id'] in tree_order else 10**9)
 
-        # Order locations in tree pre-order (parents before children); any not in the tree last.
-        ordered_ids = [lid for lid in tree_order if lid in loc_by_id]
-        ordered_ids += [lid for lid in loc_by_id if lid not in depth_by_id]
+        # Selectable origins = nodes of the org-chart tree, in pre-order (parents before
+        # children). Rows outside the tree are users, hubs (destinations) or detached
+        # locations — offering them as the "location" of a waste record was the bug
+        # reported on the import screen (p.37), so they are no longer appended.
+        ordered_ids = [lid for lid in tree_order if lid in loc_by_id and loc_by_id[lid].get('type') != 'hub']
 
         # Non-owner: keep only the origins this user is assigned to (Tier 1). Ancestor nodes
         # stay in loc_by_id/labels so paths still render, but they aren't selectable options.

@@ -321,7 +321,7 @@ WHERE oru.organization_id=:target_org AND oru.role='user'
 WITH ins AS (
   INSERT INTO reward_campaigns (organization_id, name, description, start_date, end_date, status, target_participants, budget_baht, point_to_baht_rate, is_active, created_date)
   VALUES
-    (:target_org,'♻️ รักษ์โลกทุกวัน 2026','เก็บขยะรีไซเคิลทุกชนิดมาที่จุดรับ รับแต้มสะสมแลกของรางวัลมากมายตลอดทั้งปี', NOW()-INTERVAL '330 days', NOW()+INTERVAL '90 days','active',300,80000,0.5,TRUE, NOW()-INTERVAL '330 days'),
+    (:target_org,'♻️ รักษ์โลกทุกวัน 2026','เก็บวัสดุรีไซเคิลทุกชนิดมาที่จุดรับ รับแต้มสะสมแลกของรางวัลมากมายตลอดทั้งปี', NOW()-INTERVAL '330 days', NOW()+INTERVAL '90 days','active',300,80000,0.5,TRUE, NOW()-INTERVAL '330 days'),
     (:target_org,'🥤 BYO Bag & Cup Challenge','พกถุงผ้าหรือแก้วน้ำส่วนตัวมาที่จุดรับ รับแต้มพิเศษทุกครั้ง ช่วยลดขยะพลาสติกแบบใช้ครั้งเดียว', NOW()-INTERVAL '200 days', NOW()+INTERVAL '40 days','active',150,25000,0.5,TRUE, NOW()-INTERVAL '200 days'),
     (:target_org,'📦 กระดาษแลกแต้ม','รวบรวมกระดาษและกล่องลังเก่า นำมาแลกแต้มเพื่อสิ่งแวดล้อม', NOW()-INTERVAL '150 days', NOW()+INTERVAL '60 days','active',120,20000,0.6,TRUE, NOW()-INTERVAL '150 days'),
     (:target_org,'🔩 โลหะรีไซเคิล','นำเศษโลหะและกระป๋องมารีไซเคิล รับแต้มในอัตราพิเศษ', NOW()-INTERVAL '120 days', NOW()+INTERVAL '80 days','active',80,15000,0.7,TRUE, NOW()-INTERVAL '120 days'),

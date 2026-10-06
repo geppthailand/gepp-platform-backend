@@ -2,13 +2,14 @@
 Manual Audit API handlers for human-driven audit operations
 """
 
-from typing import Dict, Any
+from typing import Any, Dict, Optional
 import logging
 import traceback
 from datetime import datetime, timezone
 
 from .manual_audit_service import ManualAuditService
 from ..transactions.transaction_service import TransactionService
+from ..transactions.transaction_handlers import parse_list_filters
 
 logger = logging.getLogger(__name__)
 
@@ -277,6 +278,14 @@ def handle_manual_audit_routes(event: Dict[str, Any], data: Dict[str, Any], **pa
                 data,
                 current_user_organization_id,
                 current_user_id
+            )
+
+        # Approve / reject everything matching the list filter (all pages)
+        elif path in ('/api/audit/manual/transactions/bulk/approve-filtered',
+                      '/api/audit/manual/transactions/bulk/reject-filtered') and method == 'POST':
+            return handle_bulk_by_filter(
+                manual_audit_service, db_session, data or {}, current_user_organization_id, current_user_id,
+                action='approved' if path.endswith('approve-filtered') else 'rejected',
             )
 
         else:
@@ -747,54 +756,119 @@ def handle_reject_transaction_record(
         }
 
 
-def _create_txn_approved_notifications_for_bulk(
+# Filter-wide bulk actions are synchronous inside one API request (API Gateway ~29 s): above this
+# many matching transactions the client is asked to narrow the filter instead.
+MAX_FILTER_BULK = 2000
+
+
+def _create_batch_notifications(
     db_session: Any,
     organization_id: int,
     current_user_id: int,
     transaction_ids: list,
-) -> None:
-    """Create per-transaction TXN_APPROVED notifications + emails for all approved transactions.
-    DB work runs sequentially, emails are collected then sent in parallel (joined before return)."""
+    action: str,
+    source: str = 'selected',
+    batch_filters: Optional[Dict[str, Any]] = None,
+    notes: Optional[str] = None,
+) -> Optional[int]:
+    """Record the bulk action as one batch and tell people once: ONE bell notification for the
+    batch and ONE digest email per recipient (instead of one per transaction). Returns the
+    batch id."""
     if not transaction_ids or organization_id is None:
-        return
+        return None
+    tids = [int(t) for t in transaction_ids]
+    event = 'TXN_APPROVED' if action == 'approved' else 'TXN_REJECTED'
     txn_service = TransactionService(db_session)
-    txn_service._deferred_emails = []  # Enable deferred email collection
-    for tid in transaction_ids:
-        try:
-            txn_service.create_txn_approved_notifications(
-                transaction_id=int(tid),
-                organization_id=organization_id,
-                created_by_id=int(current_user_id),
+    txn_service._deferred_emails = []  # collect, then send in parallel (joined before return)
+    batch_id = None
+    try:
+        # Own savepoint: a failure here (e.g. migration 101 not run yet) rolls back only this
+        # part — it must never abort the request's transaction (that once broke the
+        # traceability upsert that used to run after it).
+        with db_session.begin_nested():
+            batch_id = txn_service.create_audit_batch(
+                organization_id=organization_id, action=action, transaction_ids=tids,
+                created_by_id=int(current_user_id), source=source, filters=batch_filters, notes=notes,
             )
-            txn_service.notify_owner_if_different(int(tid), 'TXN_APPROVED', int(current_user_id))
-        except Exception as e:
-            logger.warning("TXN_APPROVED notifications failed for transaction_id=%s: %s", tid, str(e))
-    txn_service.flush_deferred_emails_parallel()  # Send all emails in parallel, wait for all
+            txn_service.create_txn_batch_notifications(
+                event=event, organization_id=organization_id, actor_id=int(current_user_id),
+                transaction_ids=tids, batch_id=batch_id,
+            )
+        db_session.commit()
+    except Exception as e:
+        logger.warning("Batch %s notifications failed (%d transactions), falling back to one per "
+                       "transaction: %s", action, len(tids), str(e))
+        batch_id = None
+        txn_service._deferred_emails = []   # drop any digest collected before the failure
+        for tid in tids:   # people are still told, the old way
+            try:
+                if action == 'approved':
+                    txn_service.create_txn_approved_notifications(transaction_id=tid, organization_id=organization_id,
+                                                                  created_by_id=int(current_user_id))
+                else:
+                    txn_service.create_txn_rejected_notifications(transaction_id=tid, organization_id=organization_id,
+                                                                  created_by_id=int(current_user_id))
+                txn_service.notify_owner_if_different(tid, event, int(current_user_id))
+            except Exception as e2:
+                logger.warning("%s notification failed for transaction_id=%s: %s", event, tid, str(e2))
+    txn_service.flush_deferred_emails_parallel()
+    return batch_id
 
 
-def _create_txn_rejected_notifications_for_bulk(
+def _create_txn_approved_notifications_for_bulk(db_session, organization_id, current_user_id, transaction_ids, **kw):
+    return _create_batch_notifications(db_session, organization_id, current_user_id, transaction_ids, 'approved', **kw)
+
+
+def _create_txn_rejected_notifications_for_bulk(db_session, organization_id, current_user_id, transaction_ids, **kw):
+    return _create_batch_notifications(db_session, organization_id, current_user_id, transaction_ids, 'rejected', **kw)
+
+
+def handle_bulk_by_filter(
+    service: ManualAuditService,
     db_session: Any,
+    data: Dict[str, Any],
     organization_id: int,
     current_user_id: int,
-    transaction_ids: list,
-) -> None:
-    """Create per-transaction TXN_REJECTED notifications + emails for all rejected transactions.
-    DB work runs sequentially, emails are collected then sent in parallel (joined before return)."""
-    if not transaction_ids or organization_id is None:
-        return
-    txn_service = TransactionService(db_session)
-    txn_service._deferred_emails = []  # Enable deferred email collection
-    for tid in transaction_ids:
-        try:
-            txn_service.create_txn_rejected_notifications(
-                transaction_id=int(tid),
-                organization_id=organization_id,
-                created_by_id=int(current_user_id),
-            )
-            txn_service.notify_owner_if_different(int(tid), 'TXN_REJECTED', int(current_user_id))
-        except Exception as e:
-            logger.warning("TXN_REJECTED notifications failed for transaction_id=%s: %s", tid, str(e))
-    txn_service.flush_deferred_emails_parallel()  # Send all emails in parallel, wait for all
+    action: str,
+) -> Dict[str, Any]:
+    """
+    POST /api/audit/manual/transactions/bulk/approve-filtered | reject-filtered
+
+    Approve / reject EVERY pending transaction matching the list filters (all pages), not just
+    the page on screen. Payload: {"filters": {<the GET /api/transactions params>}, "notes" |
+    "rejection_reason": "..."}. The set is resolved server-side with the list's own query, in
+    this organization only (rows shared from other orgs stay read-only) and within the user's
+    location access.
+    """
+    filters_in = data.get('filters') or {}
+    if not isinstance(filters_in, dict):
+        raise ValidationException('filters must be an object')
+    params = {str(k): str(v) for k, v in filters_in.items()
+              if v not in (None, '') and not isinstance(v, (dict, list))}
+    kwargs = parse_list_filters(params)
+    kwargs['status'] = 'pending'   # only what is still waiting can be approved / rejected
+    res = TransactionService(db_session).list_transactions(
+        organization_id=organization_id, current_user_id=current_user_id,
+        ids_only=True, max_ids=MAX_FILTER_BULK, **kwargs,
+    )
+    if not res.get('success'):
+        raise APIException(res.get('message') or 'Could not resolve the filtered transactions')
+    ids = res.get('ids') or []
+    if len(ids) > MAX_FILTER_BULK:
+        raise ValidationException(
+            f'More than {MAX_FILTER_BULK} pending transactions match this filter; narrow the filter and try again')
+    if not ids:
+        return {'success': True, 'message': 'No pending transactions match this filter',
+                'data': {'results': [], 'errors': [], 'batch_id': None,
+                         'summary': {'total_requested': 0, 'successful': 0, 'failed': 0, 'unchanged': 0}}}
+    payload = {'transaction_ids': ids}
+    if action == 'approved':
+        payload['notes'] = data.get('notes')
+        return handle_bulk_approve_transactions(service, db_session, payload, organization_id, current_user_id,
+                                                source='filter', batch_filters=params)
+    payload['rejection_reason'] = data.get('rejection_reason')
+    return handle_bulk_reject_transactions(service, db_session, payload, organization_id, current_user_id,
+                                           source='filter', batch_filters=params)
 
 
 def handle_bulk_approve_transactions(
@@ -802,7 +876,9 @@ def handle_bulk_approve_transactions(
     db_session: Any,
     data: Dict[str, Any],
     organization_id: int,
-    current_user_id: int
+    current_user_id: int,
+    source: str = 'selected',
+    batch_filters: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Handle POST /api/audit/manual/transactions/bulk/approve - Bulk approve multiple pending transactions
@@ -883,15 +959,19 @@ def handle_bulk_approve_transactions(
                     })
 
             approved_tids = [r['transaction_id'] for r in results]
+            batch_id = None
             if approved_tids:
-                _create_txn_approved_notifications_for_bulk(db_session, organization_id, current_user_id, approved_tids)
                 _bulk_upsert_traceability_groups_on_approve(db_session, approved_tids)
+                batch_id = _create_txn_approved_notifications_for_bulk(
+                    db_session, organization_id, current_user_id, approved_tids, source=source,
+                    batch_filters=batch_filters, notes=global_notes)
             return {
                 'success': len(errors) == 0,
                 'message': f'Bulk approve completed: {len(results)} successful, {len(errors)} failed',
                 'data': {
                     'results': results,
                     'errors': errors,
+                    'batch_id': batch_id,
                     'summary': {
                         'total_requested': len(items),
                         'successful': len(results),
@@ -905,12 +985,18 @@ def handle_bulk_approve_transactions(
                 db=db_session,
                 transaction_ids=transaction_ids,
                 auditor_user_id=current_user_id,
-                notes=global_notes
+                notes=global_notes,
+                organization_id=organization_id,
             )
-            approved_tids = [r['transaction_id'] for r in result.get('results', [])]
+            # Only the rows this call changed: skipped (already approved / rejected) rows are in
+            # `results` too, with success False, and must not be notified again.
+            approved_tids = [r['transaction_id'] for r in result.get('results', []) if r.get('success')]
+            result['batch_id'] = None
             if approved_tids:
-                _create_txn_approved_notifications_for_bulk(db_session, organization_id, current_user_id, approved_tids)
                 _bulk_upsert_traceability_groups_on_approve(db_session, approved_tids)
+                result['batch_id'] = _create_txn_approved_notifications_for_bulk(
+                    db_session, organization_id, current_user_id, approved_tids, source=source,
+                    batch_filters=batch_filters, notes=global_notes)
             return {
                 'success': result['success'],
                 'message': f'Bulk approve completed: {result["summary"]["successful"]} successful, {result["summary"]["failed"]} failed',
@@ -936,7 +1022,9 @@ def handle_bulk_reject_transactions(
     db_session: Any,
     data: Dict[str, Any],
     organization_id: int,
-    current_user_id: int
+    current_user_id: int,
+    source: str = 'selected',
+    batch_filters: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Handle POST /api/audit/manual/transactions/bulk/reject - Bulk reject multiple pending transactions
@@ -1018,8 +1106,10 @@ def handle_bulk_reject_transactions(
 
             rejected_tids = [r['transaction_id'] for r in results]
             if rejected_tids:
-                _create_txn_rejected_notifications_for_bulk(db_session, organization_id, current_user_id, rejected_tids)
                 _bulk_remove_records_from_traceability_group_on_reject(db_session, rejected_tids)
+                _create_txn_rejected_notifications_for_bulk(
+                    db_session, organization_id, current_user_id, rejected_tids, source=source,
+                    batch_filters=batch_filters, notes=global_rejection_reason)
             return {
                 'success': len(errors) == 0,
                 'message': f'Bulk reject completed: {len(results)} successful, {len(errors)} failed',
@@ -1039,12 +1129,16 @@ def handle_bulk_reject_transactions(
                 db=db_session,
                 transaction_ids=transaction_ids,
                 auditor_user_id=current_user_id,
-                rejection_reason=global_rejection_reason
+                rejection_reason=global_rejection_reason,
+                organization_id=organization_id,
             )
-            rejected_tids = [r['transaction_id'] for r in result.get('results', [])]
+            rejected_tids = [r['transaction_id'] for r in result.get('results', []) if r.get('success')]
+            result['batch_id'] = None
             if rejected_tids:
-                _create_txn_rejected_notifications_for_bulk(db_session, organization_id, current_user_id, rejected_tids)
                 _bulk_remove_records_from_traceability_group_on_reject(db_session, rejected_tids)
+                result['batch_id'] = _create_txn_rejected_notifications_for_bulk(
+                    db_session, organization_id, current_user_id, rejected_tids, source=source,
+                    batch_filters=batch_filters, notes=global_rejection_reason)
             return {
                 'success': result['success'],
                 'message': f'Bulk reject completed: {result["summary"]["successful"]} successful, {result["summary"]["failed"]} failed',

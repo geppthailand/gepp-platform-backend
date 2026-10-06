@@ -17,6 +17,12 @@ class IoTDevice(Base, BaseModel):
     password = Column(String(255))
     organization_id = Column(BigInteger)
 
+    # Serial number printed on the SCALE itself (migration 092). NOT the
+    # tablet's — that lives on iot_hardwares.serial_number, and a tablet is
+    # swapped or re-paired without the scale changing. Free text, not unique:
+    # it is transcribed from a physical plate that is often scratched.
+    serial_number = Column(String(128))
+
     # Operational labels (string array) — e.g. ["pilot-group-a","firmware-v2"].
     # Independent of organization; filtered with @> operator in admin list.
     tags = Column(JSONB, nullable=False, default=list)

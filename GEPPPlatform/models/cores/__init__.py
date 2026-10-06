@@ -23,6 +23,7 @@ from .permissions import Permission, PermissionType
 from .translations import Translation
 from .roles import SystemRole, SystemPermission
 from .files import File, FileType, FileStatus, FileSource
+from .packagings import Packaging, PackagingBrand, PackagingMaterial, PACKAGING_TYPES
 
 __all__ = [
     # Locations

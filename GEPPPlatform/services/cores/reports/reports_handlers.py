@@ -245,6 +245,13 @@ def _build_filters_from_query_params(query_params: Dict[str, Any], timezone_name
         filters['overview_chart'] = query_params['overview_chart']
     if query_params.get('compare_mode') in ('yearly', 'monthly'):
         filters['compare_mode'] = query_params['compare_mode']
+    if is_overview_breakdown(query_params.get('overview_breakdown')):
+        filters['overview_breakdown'] = query_params['overview_breakdown']
+    if str(query_params.get('overview_trend', '')).lower() in ('1', 'true', '0', 'false'):
+        filters['overview_trend'] = str(query_params['overview_trend']).lower() in ('1', 'true')
+
+    # "เวลาเดิมทุกวัน": only records within these hours on every day of the range
+    filters.update(parse_time_window(query_params, timezone_name))
 
     return filters
 
@@ -283,6 +290,8 @@ _WASTE_TO_ENERGY_CAT_ID = 9  # Material category ID for Waste To Energy
 # Report modes: the same report regrouped by location (default), tag (event / tagged
 # area) or tenant. Rows from get_overview_data carry location_tag_id at 20, tenant_id at 21.
 REPORT_MODES = ('location', 'tag', 'tenant')
+from ..users.user_preferences_service import is_overview_breakdown  # noqa: E402
+from ....libs.timeWindow import parse_time_window, TIME_WINDOW_KEYS  # noqa: E402
 _GROUP_ROW_INDEX = {'tag': 20, 'tenant': 21}
 
 
@@ -623,6 +632,7 @@ def _handle_overview_report(
         'origin_ids', 'origin_combos', 'location_ids', 'destination_ids',
         'filter_tag_ids', 'filter_tenant_ids', 'location_tag_id', 'tenant_id',
         'material_ids',
+        'time_from',   # a daily time window narrows the data like any other filter
     )
     _has_scope_filter = bool(filters) and any(
         filters.get(k) is not None for k in _scope_filter_keys
@@ -646,6 +656,9 @@ def _handle_overview_report(
     plastic_saved = 0.0
     category_waste_map = {}
     month_totals_by_year = {}
+    # kg per category per month / per day, for the chart's "by category" views
+    month_cat_by_year: Dict[int, Dict[int, Dict[int, float]]] = {}
+    day_cat: Dict[str, Dict[int, float]] = {}
     tx_ids = set()
     tx_approved = set()
 
@@ -707,6 +720,11 @@ def _handle_overview_report(
                 if y not in month_totals_by_year:
                     month_totals_by_year[y] = {}
                 month_totals_by_year[y][m] = month_totals_by_year[y].get(m, 0.0) + weight
+                if cat_id is not None:
+                    mc = month_cat_by_year.setdefault(y, {}).setdefault(m, {})
+                    mc[cat_id] = mc.get(cat_id, 0.0) + weight
+                    dc = day_cat.setdefault(record_day, {})
+                    dc[cat_id] = dc.get(cat_id, 0.0) + weight
             except Exception:
                 pass
 
@@ -936,8 +954,12 @@ def _handle_overview_report(
         rw = is_record_recyclable(w, cat, gid, group_leaf_data, group_completion)
         if rw > 0:
             bucket[1] += rw
+    def _cat_kg(m: Dict[int, float]) -> Dict[str, float]:
+        return {str(c): round(kg, 2) for c, kg in (m or {}).items() if kg > 0}
+
     daily_data = [
-        {'date': d, 'value': round(v[0], 2), 'recycled': round(min(v[1], v[0]), 2)}
+        {'date': d, 'value': round(v[0], 2), 'recycled': round(min(v[1], v[0]), 2),
+         'by_category': _cat_kg(day_cat.get(d))}
         for d, v in sorted(day_totals.items())
     ]
 
@@ -951,6 +973,7 @@ def _handle_overview_report(
                 'month': datetime(2000, m, 1).strftime('%b'),
                 'value': round(monthly[m], 2),
                 'recycled': round(min(recycled.get(m, 0.0), monthly[m]), 2),
+                'by_category': _cat_kg(month_cat_by_year.get(year, {}).get(m)),
             }
             for m in sorted(monthly.keys())
         ]
@@ -2064,7 +2087,8 @@ def _handle_comparison_report(
         d_from, d_to = _utc_bounds(start, end)
         side_filters: Dict[str, Any] = {'date_from': d_from, 'date_to': d_to}
         # Same location/tag/tenant/material conventions as the other tabs.
-        for key in ('material_ids', 'location_ids', 'filter_tag_ids', 'filter_tenant_ids', 'destination_ids'):
+        for key in ('material_ids', 'location_ids', 'filter_tag_ids', 'filter_tenant_ids', 'destination_ids',
+                    *TIME_WINDOW_KEYS):
             if filters.get(key):
                 side_filters[key] = filters[key]
         if filters.get('origin_combos'):
@@ -2201,6 +2225,22 @@ def _handle_comparison_report(
         today_local, mode=report_mode, compare_mode=compare_mode,
     )
 
+    # B5: keep what the advice engine saw (all metrics, every matched rule) so a like /
+    # dislike on a card becomes a self-contained, comparable training sample.
+    from .advice_feedback_service import save_snapshot, snapshot_filters
+    scores_ = insights['scores']
+    snapshot_id = save_snapshot(
+        reports_service.db, organization_id,
+        (current_user or {}).get('user_id') or (current_user or {}).get('id'),
+        rules_version=scores_.get('rules_version') or '',
+        report_mode=report_mode, compare_mode=compare_mode,
+        periods={'cur_start': cur_start, 'cur_end': cur_end, 'prev_start': prev_start, 'prev_end': prev_end},
+        filters=snapshot_filters(filters or {}),
+        metrics=scores_.get('metrics') or {},
+        labels=insights.get('txt') or {},
+        evaluated=scores_.get('evaluated') or [],
+    )
+
     return {
         'success': True,
         'mode': compare_mode,
@@ -2211,6 +2251,7 @@ def _handle_comparison_report(
         'right': right,
         'buckets': buckets_out,
         'scores': insights['scores'],
+        'insights_snapshot_id': snapshot_id,
         'message': 'Comparison report generated successfully'
     }
 
@@ -2237,7 +2278,20 @@ def handle_reports_routes(event: Dict[str, Any], **common_params) -> Dict[str, A
     try:
         # Initialize service
         reports_service = ReportsService(db_session)
-        
+
+        # B5: like / dislike + comment on advice cards (the only write route here)
+        if path == '/api/reports/advice-feedback':
+            from .advice_feedback_service import AdviceFeedbackService
+            organization_id = _validate_organization_id(current_user)
+            uid = current_user.get('user_id') or current_user.get('id')
+            svc = AdviceFeedbackService(db_session)
+            if method == 'GET':
+                return {'items': svc.list_mine(int(uid), query_params.get('snapshot_id'),
+                                               query_params.get('date_from'), query_params.get('date_to'))}
+            if method in ('POST', 'PUT'):
+                return svc.upsert(organization_id, int(uid), common_params.get('data') or {})
+            raise APIException(f"Method {method} not supported", status_code=405, error_code="METHOD_NOT_ALLOWED")
+
         # Only handle GET requests
         if method != 'GET':
             raise APIException(
@@ -2425,6 +2479,8 @@ def _handle_export_pdf_report(
     filters.setdefault('report_mode', _prefs.get('mode', 'location'))
     filters.setdefault('overview_chart', _prefs.get('overview_chart', 'monthly'))
     filters.setdefault('compare_mode', _prefs.get('compare_mode', 'yearly'))
+    filters.setdefault('overview_breakdown', _prefs.get('overview_breakdown', 'all'))
+    filters.setdefault('overview_trend', bool(_prefs.get('overview_trend', False)))
     report_mode = _report_mode(filters)
 
     # 1) Pull data from the existing handlers/services
@@ -2450,7 +2506,7 @@ def _handle_export_pdf_report(
         _stat_title_map = {
             'Total Recyclables': 'วัสดุรีไซเคิลทั้งหมด',
             'Number of Trees': 'จำนวนต้นไม้',
-            'Plastic Saved': 'พลาสติกที่ประหยัดได้',
+            'Plastic Saved': 'พลาสติกที่นำกลับมาใช้ประโยชน์',
             'Waste per Head': 'ขยะต่อคน (กก.)',
         }
         for stat in (overview.get('overall_charts', {}) or {}).get('chart_stat_data', []):
@@ -2510,26 +2566,44 @@ def _handle_export_pdf_report(
     # 2) Format display dates like "01 Jan 2025" in client timezone
     _TH_MONTHS_SHORT = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.']
 
-    def _fmt_display_date_tz(iso_str: Optional[str], tz_name: Optional[str]) -> str:
+    def _local_dt(iso_str: Optional[str], tz_name: Optional[str]):
         dt = _parse_datetime(iso_str)
         if not dt:
+            return None
+        try:
+            return dt.astimezone(ZoneInfo(tz_name or current_user.get('timezone') or 'Asia/Bangkok'))
+        except Exception:
+            return dt
+
+    def _fmt_display_date_tz(iso_str: Optional[str], tz_name: Optional[str], with_time: bool = False) -> str:
+        local_dt = _local_dt(iso_str, tz_name)
+        if local_dt is None:
             return str(iso_str or "")
         try:
-            # Determine client timezone (fallback Asia/Bangkok)
-            tz = ZoneInfo(tz_name or current_user.get('timezone') or 'Asia/Bangkok')
-            # Convert to client timezone for display
-            local_dt = dt.astimezone(tz)
             if language == 'th':
                 th_month = _TH_MONTHS_SHORT[local_dt.month - 1]
                 be_year = local_dt.year + 543
-                return f"{local_dt.day:02d} {th_month} {be_year}"
-            return local_dt.strftime("%d %b %Y")
+                out = f"{local_dt.day:02d} {th_month} {be_year}"
+            else:
+                out = local_dt.strftime("%d %b %Y")
+            return f"{out} {local_dt.strftime('%H:%M')}" if with_time else out
         except Exception:
-            return dt.isoformat()
+            return local_dt.isoformat()
 
     client_tz_name = (current_user.get('timezone') or 'Asia/Bangkok')
-    date_from_disp = _fmt_display_date_tz(filters.get('date_from'), client_tz_name)
-    date_to_disp = _fmt_display_date_tz(filters.get('date_to'), client_tz_name)
+    # A time of day is shown only when the user narrowed the range with one (the time
+    # filter); whole-day ranges (00:00:00 → 23:59:59) keep the date-only header.
+    _lf = _local_dt(filters.get('date_from'), client_tz_name)
+    _lt = _local_dt(filters.get('date_to'), client_tz_name)
+    _show_time = bool(
+        _lf and _lt and ((_lf.hour, _lf.minute) != (0, 0) or (_lt.hour, _lt.minute) != (23, 59))
+    )
+    date_from_disp = _fmt_display_date_tz(filters.get('date_from'), client_tz_name, _show_time)
+    date_to_disp = _fmt_display_date_tz(filters.get('date_to'), client_tz_name, _show_time)
+    if filters.get('time_from') and filters.get('time_to'):
+        # "เวลาเดิมทุกวัน": the same hours on every day — say so after the dates
+        _every = 'ทุกวัน' if language == 'th' else 'every day'
+        date_to_disp = f"{date_to_disp} ({filters['time_from']}–{filters['time_to']} {_every})"
 
     # 3) Resolve display user name from UserLocation (by current user id)
     def _display_user_name_from_db(user: Dict[str, Any]) -> str:
@@ -2779,6 +2853,8 @@ def _handle_export_pdf_report(
         # Presentation settings (report mode, chart granularity, comparison mode)
         'report_mode': report_mode,
         'overview_chart': filters.get('overview_chart', 'monthly'),
+        'overview_breakdown': filters.get('overview_breakdown', 'all'),
+        'overview_trend': bool(filters.get('overview_trend', False)),
         'compare_mode': filters.get('compare_mode', 'yearly'),
         'date_from': date_from_disp,
         'date_to': date_to_disp,

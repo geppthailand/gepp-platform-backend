@@ -8,7 +8,8 @@ from .management import (
     RewardCampaignTarget, RewardActivityType,
 )
 from .catalog import RewardCatalog, RewardStock, RewardCatalogCategory
-from .points import RewardPointTransaction
+from .points import RewardPointTransaction, RewardPointTransactionComponent
+from .claim_requests import RewardClaimRequest, register_claim_request_sync
 from .redemptions import (
     RewardRedemption, RewardStaffInvite, RewardUser, OrganizationRewardUser,
     Droppoint, DroppointType
@@ -22,8 +23,11 @@ __all__ = [
     # Catalog
     'RewardCatalog', 'RewardStock', 'RewardCatalogCategory',
     # Points
-    'RewardPointTransaction',
+    'RewardPointTransaction', 'RewardClaimRequest',
     # Redemptions & Users
     'RewardRedemption', 'RewardStaffInvite', 'RewardUser', 'OrganizationRewardUser',
     'Droppoint', 'DroppointType',
 ]
+
+# Keep self-submitted claim requests in step with waste transaction status changes.
+register_claim_request_sync()

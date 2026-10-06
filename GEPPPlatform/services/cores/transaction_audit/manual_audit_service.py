@@ -717,7 +717,8 @@ class ManualAuditService:
         db: Session,
         transaction_ids: List[int],
         auditor_user_id: int,
-        notes: Optional[str] = None
+        notes: Optional[str] = None,
+        organization_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Bulk approve multiple transactions in a single DB transaction.
@@ -728,10 +729,12 @@ class ManualAuditService:
             errors = []
             unchanged_count = 0
 
-            # Fetch all transactions in one query
-            transactions = db.query(Transaction).filter(
-                Transaction.id.in_(transaction_ids)
-            ).all()
+            # Fetch all transactions in one query — this organization's only (another org's
+            # transaction, e.g. a shared row, counts as not found)
+            tq = db.query(Transaction).filter(Transaction.id.in_(transaction_ids))
+            if organization_id is not None:
+                tq = tq.filter(Transaction.organization_id == organization_id)
+            transactions = tq.all()
             found_ids = {t.id for t in transactions}
 
             # Track missing transactions as real errors
@@ -867,7 +870,8 @@ class ManualAuditService:
         db: Session,
         transaction_ids: List[int],
         auditor_user_id: int,
-        rejection_reason: Optional[str] = None
+        rejection_reason: Optional[str] = None,
+        organization_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Bulk reject multiple transactions in a single DB transaction.
@@ -878,10 +882,12 @@ class ManualAuditService:
             errors = []
             unchanged_count = 0
 
-            # Fetch all transactions in one query
-            transactions = db.query(Transaction).filter(
-                Transaction.id.in_(transaction_ids)
-            ).all()
+            # Fetch all transactions in one query — this organization's only (another org's
+            # transaction, e.g. a shared row, counts as not found)
+            tq = db.query(Transaction).filter(Transaction.id.in_(transaction_ids))
+            if organization_id is not None:
+                tq = tq.filter(Transaction.organization_id == organization_id)
+            transactions = tq.all()
             found_ids = {t.id for t in transactions}
 
             # Track missing transactions as real errors

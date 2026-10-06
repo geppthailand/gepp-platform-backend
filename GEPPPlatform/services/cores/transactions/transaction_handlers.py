@@ -9,6 +9,7 @@ import traceback
 
 from ..iot_devices.auto_approve import SCALE_TRANSACTION_METHOD
 from .transaction_service import TransactionService
+from ....libs.timeWindow import parse_time_window
 from .presigned_url_service import TransactionPresignedUrlService
 from GEPPPlatform.services.cores.users.user_service import UserService
 
@@ -201,6 +202,43 @@ def handle_transaction_routes(event: Dict[str, Any], data: Dict[str, Any], **par
         }
 
 
+def _has_files(obj: Any) -> bool:
+    """True when a transaction / record payload carries at least one attachment."""
+    if not isinstance(obj, dict):
+        return False
+    for key in ('images', 'file_ids', 'attachments', 'files'):
+        val = obj.get(key)
+        if isinstance(val, list) and any(v not in (None, '', {}) for v in val):
+            return True
+    return False
+
+
+def _enforce_evidence_requirement(db, organization_id, transaction_data, records_data) -> None:
+    """Raise EVIDENCE_REQUIRED when the organisation's evidence mode is not satisfied.
+
+    'transaction': at least one file anywhere (on the transaction or on any record).
+    'record'     : every record has a file, unless the transaction itself carries one
+                   (a single delivery note photographed once covers all its lines).
+    """
+    from ....models.subscriptions.organizations import Organization
+    mode = db.query(Organization.transaction_evidence_mode).filter(
+        Organization.id == organization_id
+    ).scalar() or 'none'
+    if mode == 'none':
+        return
+    records = [r for r in (records_data or []) if isinstance(r, dict)]
+    tx_has = _has_files(transaction_data)
+    if mode == 'transaction':
+        ok = tx_has or any(_has_files(r) for r in records)
+    else:
+        ok = tx_has or (bool(records) and all(_has_files(r) for r in records))
+    if not ok:
+        raise ValidationException(
+            'EVIDENCE_REQUIRED: this organization requires an attachment '
+            + ('on the transaction' if mode == 'transaction' else 'on every record (or one on the transaction)')
+        )
+
+
 def handle_create_transaction(
     transaction_service: TransactionService,
     data: Dict[str, Any],
@@ -236,6 +274,14 @@ def handle_create_transaction(
             if transaction_data.get('transaction_method') == SCALE_TRANSACTION_METHOD:
                 transaction_data.pop('transaction_method', None)
             transaction_data.pop('is_internal_transfer', None)
+
+        # Org rule: manually entered transactions may have to carry evidence. Checked on the
+        # web path only — scale readings (trusted_channel='iot') have their own per-device
+        # photo rule, and rewards / Excel imports never come through this handler.
+        if trusted_channel != 'iot':
+            _enforce_evidence_requirement(
+                transaction_service.db, current_user_organization_id, transaction_data, transaction_records_data
+            )
 
         # Set organization_id and created_by_id from current user
         transaction_data['organization_id'] = current_user_organization_id
@@ -333,6 +379,14 @@ def handle_get_transaction(
                 origin_location['path'] = origin_path
                 transaction['origin_location'] = origin_location
 
+        # Reward-created transactions link back to their campaign ledger ("ระบบรางวัล" badge).
+        if transaction.get('transaction_method') == 'reward' and not is_shared_view:
+            try:
+                from ...rewards.claim_request_service import reward_link_for_transaction
+                transaction['reward_link'] = reward_link_for_transaction(transaction_service.db, transaction_id)
+            except Exception as _rl_err:  # the detail must load even if the link can't be resolved
+                logger.warning("reward_link lookup failed for tx %s: %s", transaction_id, _rl_err)
+
         return {
             'success': True,
             'transaction': transaction
@@ -342,6 +396,82 @@ def handle_get_transaction(
         if isinstance(e, (NotFoundException, UnauthorizedException)):
             raise
         raise APIException(f'Failed to retrieve transaction: {str(e)}')
+
+
+def parse_list_filters(query_params: Dict[str, Any]) -> Dict[str, Any]:
+    """The list filters of GET /api/transactions as keyword arguments for
+    TransactionService.list_transactions. Shared with the Manual Audit "approve / reject all
+    matching" endpoints, so "all matching" means exactly what the list shows."""
+    status = query_params.get('status')
+    destination_id = int(query_params['destination_id']) if query_params.get('destination_id') else None
+
+    # Origin filter: may be a single origin_id (int) or composite "origin_id|tag_id|tenant_id"
+    origin_id = None
+    location_tag_id = None
+    tenant_id = None
+    origin_raw = query_params.get('origin_id')
+    if origin_raw:
+        if '|' in str(origin_raw):
+            parts = str(origin_raw).split('|')
+            origin_id = int(parts[0]) if parts[0] else None
+            location_tag_id = int(parts[1]) if len(parts) > 1 and parts[1] else None
+            tenant_id = int(parts[2]) if len(parts) > 2 and parts[2] else None
+        else:
+            origin_id = int(origin_raw)
+
+    # Additional filter parameters
+    search = query_params.get('search')
+    date_from = query_params.get('date_from')
+    date_to = query_params.get('date_to')
+    time_window = parse_time_window(query_params)   # "เวลาเดิมทุกวัน"
+    audit_batch_raw = str(query_params.get('audit_batch_id') or '').strip()
+    audit_batch_id = int(audit_batch_raw) if audit_batch_raw.isdigit() else None   # bell → batch list
+    material_id = int(query_params['material_id']) if query_params.get('material_id') else None
+    # New multi-select material filter: material_ids (comma-separated)
+    material_ids_raw = query_params.get('material_ids')
+    material_ids = [int(x) for x in material_ids_raw.split(',') if x.strip()] if material_ids_raw else None
+
+    # New multi-select filters: location_ids, tag_ids, tenant_ids (comma-separated)
+    location_ids_raw = query_params.get('location_ids')
+    location_ids = [int(x) for x in location_ids_raw.split(',') if x.strip()] if location_ids_raw else None
+    tag_ids_raw = query_params.get('tag_ids')
+    filter_tag_ids = [int(x) for x in tag_ids_raw.split(',') if x.strip()] if tag_ids_raw else None
+    tenant_ids_raw = query_params.get('tenant_ids')
+    filter_tenant_ids = [int(x) for x in tenant_ids_raw.split(',') if x.strip()] if tenant_ids_raw else None
+
+    # Legacy district/sub_district filters (used when location_ids is not provided)
+    district_raw = query_params.get('district')
+    district = None
+    if district_raw:
+        if '|' in str(district_raw):
+            parts = str(district_raw).split('|')
+            if origin_id is None:
+                origin_id = int(parts[0]) if parts[0] else None
+            if location_tag_id is None:
+                location_tag_id = int(parts[1]) if len(parts) > 1 and parts[1] else None
+            if tenant_id is None:
+                tenant_id = int(parts[2]) if len(parts) > 2 and parts[2] else None
+        else:
+            district = int(district_raw)
+    sub_district = int(query_params['sub_district']) if query_params.get('sub_district') else None
+
+    # Provenance filters: where the row came from, and who approved it. Unknown values
+    # are dropped rather than erroring — a stale bookmark shouldn't break the list.
+    source = query_params.get('source')
+    if source not in ('iot', 'qr_input', 'import', 'manual'):
+        source = None
+    approval_source = query_params.get('approval_source')
+    if approval_source not in ('human', 'ai', 'auto_scale'):
+        approval_source = None
+
+    return dict(
+        status=status, origin_id=origin_id, destination_id=destination_id, search=search,
+        date_from=date_from, date_to=date_to, time_window=time_window, audit_batch_id=audit_batch_id,
+        district=district, sub_district=sub_district, location_tag_id=location_tag_id, tenant_id=tenant_id,
+        material_id=material_id, location_ids=location_ids, filter_tag_ids=filter_tag_ids,
+        filter_tenant_ids=filter_tenant_ids, material_ids=material_ids, source=source,
+        approval_source=approval_source,
+    )
 
 
 def handle_list_transactions(
@@ -364,90 +494,17 @@ def handle_list_transactions(
         # Parse query parameters
         page = int(query_params.get('page', 1))
         page_size = min(int(query_params.get('page_size', 20)), 100)  # Max 100 per page
-        status = query_params.get('status')
-        destination_id = int(query_params['destination_id']) if query_params.get('destination_id') else None
         include_records = query_params.get('include_records', 'false').lower() == 'true'
-
-        # Origin filter: may be a single origin_id (int) or composite "origin_id|tag_id|tenant_id"
-        origin_id = None
-        location_tag_id = None
-        tenant_id = None
-        origin_raw = query_params.get('origin_id')
-        if origin_raw:
-            if '|' in str(origin_raw):
-                parts = str(origin_raw).split('|')
-                origin_id = int(parts[0]) if parts[0] else None
-                location_tag_id = int(parts[1]) if len(parts) > 1 and parts[1] else None
-                tenant_id = int(parts[2]) if len(parts) > 2 and parts[2] else None
-            else:
-                origin_id = int(origin_raw)
-
-        # Additional filter parameters
-        search = query_params.get('search')
-        date_from = query_params.get('date_from')
-        date_to = query_params.get('date_to')
-        material_id = int(query_params['material_id']) if query_params.get('material_id') else None
-        # New multi-select material filter: material_ids (comma-separated)
-        material_ids_raw = query_params.get('material_ids')
-        material_ids = [int(x) for x in material_ids_raw.split(',') if x.strip()] if material_ids_raw else None
-
-        # New multi-select filters: location_ids, tag_ids, tenant_ids (comma-separated)
-        location_ids_raw = query_params.get('location_ids')
-        location_ids = [int(x) for x in location_ids_raw.split(',') if x.strip()] if location_ids_raw else None
-        tag_ids_raw = query_params.get('tag_ids')
-        filter_tag_ids = [int(x) for x in tag_ids_raw.split(',') if x.strip()] if tag_ids_raw else None
-        tenant_ids_raw = query_params.get('tenant_ids')
-        filter_tenant_ids = [int(x) for x in tenant_ids_raw.split(',') if x.strip()] if tenant_ids_raw else None
-
-        # Legacy district/sub_district filters (used when location_ids is not provided)
-        district_raw = query_params.get('district')
-        district = None
-        if district_raw:
-            if '|' in str(district_raw):
-                parts = str(district_raw).split('|')
-                if origin_id is None:
-                    origin_id = int(parts[0]) if parts[0] else None
-                if location_tag_id is None:
-                    location_tag_id = int(parts[1]) if len(parts) > 1 and parts[1] else None
-                if tenant_id is None:
-                    tenant_id = int(parts[2]) if len(parts) > 2 and parts[2] else None
-            else:
-                district = int(district_raw)
-        sub_district = int(query_params['sub_district']) if query_params.get('sub_district') else None
-
-        # Provenance filters: where the row came from, and who approved it. Unknown values
-        # are dropped rather than erroring — a stale bookmark shouldn't break the list.
-        source = query_params.get('source')
-        if source not in ('iot', 'qr_input', 'import', 'manual'):
-            source = None
-        approval_source = query_params.get('approval_source')
-        if approval_source not in ('human', 'ai', 'auto_scale'):
-            approval_source = None
+        filters = parse_list_filters(query_params)
 
         # Always filter by user's organization and only transactions where user is in origin members
         result = transaction_service.list_transactions(
             organization_id=current_user_organization_id,
-            status=status,
-            origin_id=origin_id,
-            destination_id=destination_id,
             page=page,
             page_size=page_size,
             include_records=include_records,
-            search=search,
-            date_from=date_from,
-            date_to=date_to,
-            district=district,
-            sub_district=sub_district,
-            location_tag_id=location_tag_id,
-            tenant_id=tenant_id,
-            material_id=material_id,
             current_user_id=current_user_id,
-            location_ids=location_ids,
-            filter_tag_ids=filter_tag_ids,
-            filter_tenant_ids=filter_tenant_ids,
-            material_ids=material_ids,
-            source=source,
-            approval_source=approval_source
+            **filters,
         )
 
         if result['success']:

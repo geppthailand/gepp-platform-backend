@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import ast
 import calendar
+import hashlib
 import json
 import logging
 import math
@@ -497,6 +498,10 @@ def evaluate_rules(rules_doc: Dict[str, Any], num: Dict[str, Any], txt: Dict[str
         return out
 
     matched: Dict[str, List[Tuple[float, Dict[str, Any]]]] = {s: [] for s in SECTION_KEYS}
+    # Every rule whose condition held, with its priority and whether it made the cut (group
+    # dedupe / max items). Kept with the advice snapshot so feedback samples can learn the
+    # ranking too, not only the condition (B5).
+    evaluated: List[Dict[str, Any]] = []
     for rule in rules_doc.get('rules') or []:
         section = rule.get('section')
         if section not in SECTION_KEYS or mode not in (rule.get('modes') or MODES):
@@ -516,17 +521,77 @@ def evaluate_rules(rules_doc: Dict[str, Any], num: Dict[str, Any], txt: Dict[str
         picked: List[Dict[str, Any]] = []
         for _prio, item in sorted(matched[section], key=lambda p: p[0], reverse=True):
             g = item.get('group')
+            dropped = None
             if g and g in seen_groups:
+                dropped = 'group'
+            elif len(picked) >= max_items:
+                dropped = 'max_items'
+            evaluated.append({'id': item['id'], 'section': section, 'group': g,
+                              'priority': item['priority'], 'shown': dropped is None, 'dropped': dropped})
+            if dropped:
                 continue
             if g:
                 seen_groups.add(g)
             picked.append(item)
-            if len(picked) >= max_items:
-                break
         if not picked and mode_fallbacks.get(section):
             picked = [_render_item(mode_fallbacks[section], section, num, txt, 0, True)]
         out[key] = picked
+    out['evaluated'] = evaluated
     return out
+
+
+def rules_fingerprint(rules_doc: Dict[str, Any]) -> str:
+    """'v<version>-<sha12>' of the rules file: identifies exactly which rule set produced an
+    advice, so feedback collected under an older rule set is not mixed up with the new one."""
+    raw = json.dumps(rules_doc, sort_keys=True, ensure_ascii=False).encode('utf-8')
+    return f"v{rules_doc.get('version', 0)}-{hashlib.sha256(raw).hexdigest()[:12]}"
+
+
+def rule_input_names(rule: Dict[str, Any]) -> List[str]:
+    """Metric names a rule reads: its condition, its priority and its text placeholders."""
+    names = set()
+    for expr in (rule.get('when'), str(rule.get('priority', '0'))):
+        if expr:
+            try:
+                names |= _compile_expr(expr)[1]
+            except (SyntaxError, ValueError):
+                pass
+    for part in ('title', 'reason'):
+        for text_ in (rule.get(part) or {}).values():
+            names |= {m.group(1) for m in _PLACEHOLDER.finditer(text_ or '')}
+    for lst in (rule.get('bullets') or {}).values():
+        for text_ in lst or []:
+            names |= {m.group(1) for m in _PLACEHOLDER.finditer(text_ or '')}
+    return sorted(names)
+
+
+def rule_sample(rule: Dict[str, Any], num: Dict[str, Any], txt: Dict[str, Dict[str, str]]) -> Dict[str, Any]:
+    """The rule as it fired on these metrics: definition, the inputs it read (values), whether
+    the condition holds, its priority and the rendered text — one self-contained training
+    sample once a like / dislike is attached (B5)."""
+    inputs = {n: num[n] for n in rule_input_names(rule) if n in num}
+    labels = {n: {lang: txt[lang].get(n) for lang in LANGS} for n in rule_input_names(rule)
+              if n not in num and any(txt[lang].get(n) is not None for lang in LANGS)}
+    try:
+        holds = bool(eval_expr(rule['when'], num))
+    except Exception:  # noqa: BLE001 — a sample is still useful when the rule no longer evaluates
+        holds = None
+    try:
+        priority = float(eval_expr(str(rule.get('priority', '0')), num))
+    except Exception:  # noqa: BLE001
+        priority = None
+    return {
+        'rule': {k: rule.get(k) for k in ('id', 'section', 'modes', 'group', 'when', 'priority', 'title', 'bullets', 'reason')},
+        'inputs': inputs,
+        'labels': labels,
+        'condition_holds': holds,
+        'priority': priority,
+        'rendered': {lang: {
+            'title': render_template((rule.get('title') or {}).get(lang, ''), num, txt[lang], lang),
+            'bullets': [render_template(b, num, txt[lang], lang) for b in ((rule.get('bullets') or {}).get(lang) or [])],
+            'reason': render_template((rule.get('reason') or {}).get(lang, ''), num, txt[lang], lang),
+        } for lang in LANGS},
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -544,4 +609,6 @@ def build_report_insights(cur_records: List[Dict[str, Any]], prev_records: List[
         rules_doc = load_rules()
     scores = evaluate_rules(rules_doc, num, txt, mode)
     scores['metrics'] = num
-    return {'scores': scores, 'labels': {lang: {k: txt[lang][k] for k in ('cur_label', 'prev_label')} for lang in LANGS}}
+    scores['rules_version'] = rules_fingerprint(rules_doc)
+    return {'scores': scores, 'txt': txt,
+            'labels': {lang: {k: txt[lang][k] for k in ('cur_label', 'prev_label')} for lang in LANGS}}

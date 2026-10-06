@@ -63,6 +63,10 @@ main_material_colorPalette = [
   "#047857", "#115E59",
   "#022C22", "#042F2E",
 ]
+# Materials pages: bars, pie and legend use the dashboard's palettes by rank (main materials =
+# MaterialsTab, sub materials = SubMaterialsSection), so item N has the same colour as on
+# screen. The PDF pie shows the top 5 and folds the rest into one grey "others" slice.
+OTHERS_GREY = "#c8ced4"
 sub_material_colorPalette = [
     "#166534", "#4D7C0F", "#854D0E",
     "#16A34A", "#65A30D", "#CA8A04",
@@ -70,6 +74,65 @@ sub_material_colorPalette = [
     "#15803D", "#3F6212", "#A16207",
     "#4ADE80", "#A3E635", "#FACC15",
 ]
+
+
+def _rank_color(palette: list, i: int):
+    return colors.HexColor(palette[i % len(palette)])
+
+
+def _top5_pie(items_sorted: list, palette: list, value_key: str = "total_waste") -> tuple:
+    """(values, colours, others_value): top 5 in the page's palette, the rest one grey slice."""
+    vals = [float(it.get(value_key, 0) or 0) for it in items_sorted]
+    top = vals[:5]
+    rest = sum(vals[5:])
+    values = top + ([rest] if rest > 0 else [])
+    cols = [_rank_color(palette, i) for i in range(len(top))] + ([colors.HexColor(OTHERS_GREY)] if rest > 0 else [])
+    return (values or [1.0]), (cols or [colors.HexColor(OTHERS_GREY)]), rest
+
+
+def _paginate_table_rows(rows: list, per_page: int, is_data=lambda r: True, min_tail: int = 2,
+                         continuation=None) -> list:
+    """Split table rows into pages of at most `per_page`.
+
+    - The last page keeps at least `min_tail` data rows with the closing row (e.g. the total),
+      so a total never sits alone on a new page.
+    - `continuation(prev_rows, next_row)` may return a row to repeat at the top of a page
+      (e.g. a group header "(cont.)"); it counts towards the page size.
+    - A row flagged `keep_with_next` (group header) is never the last row on a page.
+    """
+    def build(caps: dict) -> list:
+        pages, cur, i = [], [], 0
+        while i < len(rows):
+            cap = per_page - caps.get(len(pages), 0)
+            if not cur and pages and continuation:
+                cont = continuation(pages[-1], rows[i])
+                if cont is not None:
+                    cur.append(cont)
+            row = rows[i]
+            room = cap - len(cur)
+            needs = 2 if (isinstance(row, dict) and row.get("keep_with_next")) else 1
+            if room >= needs or (not cur):
+                cur.append(row)
+                i += 1
+                if len(cur) >= cap:
+                    pages.append(cur)
+                    cur = []
+            else:
+                pages.append(cur)
+                cur = []
+        if cur:
+            pages.append(cur)
+        return pages
+
+    caps: dict = {}
+    pages = build(caps)
+    while len(pages) > 1 and sum(1 for r in pages[-1] if is_data(r)) < min_tail:
+        k = len(pages) - 2
+        caps[k] = caps.get(k, 0) + 1
+        if caps[k] >= per_page - 1:
+            break
+        pages = build(caps)
+    return pages
 
 
 def _fit_text_to_width(text: str, font_name: str, font_size: float, max_w: float) -> str:
@@ -683,6 +746,8 @@ MUTED = colors.HexColor("#6f8a7e")
 INK = colors.HexColor("#2e5c4b")
 RECYCLED_COLOR = colors.HexColor("#2f8f6b")
 REST_COLOR = colors.HexColor("#d3e6dc")
+TREND_COLOR = colors.HexColor("#1f4a3a")   # same as the web trend line
+RECYCLABLE_CATEGORY_ID = "1"   # material_categories "วัสดุรีไซเคิล"
 INCREASE_COLOR = colors.HexColor("#c2562e")
 DECREASE_COLOR = colors.HexColor("#1f8a5e")
 SECTION_COLORS = {
@@ -844,48 +909,136 @@ def _impact_values(data: dict) -> dict:
     return imp
 
 
-def _overview_month_points(data: dict) -> list:
-    """[(label, total, recycled)] in calendar order, months with waste only."""
-    chart = ((data.get("overview_data", {}) or {}).get("overall_charts") or {}).get("chart_data") or {}
-    months_en = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-    short = _t_months_short(data)
+CATEGORY_FALLBACK_PALETTE = ["#2a78d6", "#eda100", "#1baf7a", "#e34948", "#eb6834", "#64748b", "#4a3aa7", "#c8553d", "#0e7490"]
+
+
+def _category_meta(data: dict) -> dict:
+    """category_id (str) → (display name, colour, total kg), from waste_type_proportions."""
+    out = {}
+    wtp = ((data.get("overview_data", {}) or {}).get("waste_type_proportions")
+           or data.get("waste_type_proportions") or [])
+    for i, it in enumerate(wtp):
+        cid = it.get("category_id")
+        if cid is None:
+            continue
+        name = str(it.get("category_name") or f"#{cid}")
+        en = str(it.get("category_name_en") or it.get("category_name") or "")
+        col = MATERIAL_COLORS.get(en) or colors.HexColor(CATEGORY_FALLBACK_PALETTE[i % len(CATEGORY_FALLBACK_PALETTE)])
+        out[str(cid)] = (name, col, float(it.get("total_waste", 0) or 0))
+    return out
+
+
+def _chart_buckets(data: dict) -> tuple:
+    """(granularity, [{label, total, recycled, by_cat}]) following the chart setting."""
+    gran = (data.get("overview_chart") or "monthly")
+    charts = ((data.get("overview_data", {}) or {}).get("overall_charts") or {})
     lang = data.get("language", "en") or "en"
-    pts = []
-    if isinstance(chart, dict):
-        years = sorted(chart.keys())
-        multi_year = len(years) > 1
+    short = _t_months_short(data)
+    months_en = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+    def bucket(label, p_list):
+        total = sum(float(p.get("value", 0) or 0) for p in p_list)
+        rec = sum(float(p.get("recycled", 0) or 0) for p in p_list)
+        by_cat: dict = {}
+        for p in p_list:
+            for cid, kg in (p.get("by_category") or {}).items():
+                by_cat[str(cid)] = by_cat.get(str(cid), 0.0) + float(kg or 0)
+        return {"label": label, "total": total, "recycled": min(total, rec), "by_cat": by_cat}
+
+    if gran == "daily":
+        out = []
+        for p in charts.get("daily_data") or []:
+            try:
+                _y, m, d = (int(x) for x in str(p.get("date", "")).split("-"))
+            except ValueError:
+                continue
+            out.append(bucket(f"{d} {short[m - 1]}", [p]))
+        return gran, out
+    chart = charts.get("chart_data") or {}
+    if not isinstance(chart, dict):
+        return gran, []
+    years = sorted(chart.keys())
+    if gran == "yearly":
+        out = []
         for y in years:
-            for p in chart.get(y) or []:
-                m = str(p.get("month", ""))
-                if m not in months_en:
-                    continue
-                total = float(p.get("value", 0) or 0)
-                if total <= 0:
-                    continue
-                idx = months_en.index(m)
-                label = short[idx]
-                if multi_year:
-                    try:
-                        yy = int(y) + (543 if lang == "th" else 0)
-                        label = f"{label} {str(yy)[-2:]}"
-                    except ValueError:
-                        pass
-                pts.append(((int(y) if str(y).isdigit() else 0, idx), label, total,
-                            min(total, float(p.get("recycled", 0) or 0))))
-    pts.sort(key=lambda t: t[0])
-    return [(label, total, rec) for _k, label, total, rec in pts]
+            b = bucket(str(int(y) + 543) if (lang == "th" and str(y).isdigit()) else str(y), chart.get(y) or [])
+            if b["total"] > 0:
+                out.append(b)
+        return gran, out
+    multi_year = len(years) > 1
+    keyed = []
+    for y in years:
+        for p in chart.get(y) or []:
+            m = str(p.get("month", ""))
+            if m not in months_en or float(p.get("value", 0) or 0) <= 0:
+                continue
+            idx = months_en.index(m)
+            label = short[idx]
+            if multi_year and str(y).isdigit():
+                yy = int(y) + (543 if lang == "th" else 0)
+                label = f"{label} {str(yy)[-2:]}"
+            keyed.append(((int(y) if str(y).isdigit() else 0, idx), bucket(label, [p])))
+    keyed.sort(key=lambda t: t[0])
+    return "monthly", [b for _k, b in keyed]
 
 
-def _stacked_month_chart(pdf, x, y, w, h, points, data):
-    left_pad, right_pad, top_pad, bottom_pad = 64, 18, 22, 46
+def _chart_series(data: dict) -> tuple:
+    """(granularity, labels, series, rate_row) for the overview chart.
+
+    series = [(name, colour, values)] bottom → top, following the user's breakdown:
+      recycled      recyclables vs the rest, rate row = recycling rate per bucket
+      category:<id> that category vs the rest, rate row = its share per bucket
+      all           every category stacked (default), no rate row
+    """
+    gran, buckets = _chart_buckets(data)
+    labels = [b["label"] for b in buckets]
+    totals = [b["total"] for b in buckets]
+    mode = str(data.get("overview_breakdown") or "all")
+    meta = _category_meta(data)
+    other = _t('other_waste', data)
+    # Same rules as the web: the recyclable category IS the default view (no separate
+    # "category:1"), and without per-category amounts the category views fall back to it.
+    if mode == f"category:{RECYCLABLE_CATEGORY_ID}" or (
+            mode != "recycled" and not any(b["by_cat"] for b in buckets)):
+        mode = "recycled"
+
+    def share_row(label, values):
+        return (label, [f"{(v / t * 100.0) if t > 0 else 0:.1f}%" for v, t in zip(values, totals)])
+
+    if mode.startswith("category:") and mode.split(":", 1)[1] in meta:
+        cid = mode.split(":", 1)[1]
+        name, col, _tot = meta[cid]
+        vals = [min(b["total"], b["by_cat"].get(cid, 0.0)) for b in buckets]
+        series = [(name, col, vals), (other, REST_COLOR, [t - v for t, v in zip(totals, vals)])]
+        return gran, labels, series, share_row(_t('share_row', data), vals)
+    if mode == "all" and meta:
+        series = []
+        for cid, (name, col, _tot) in sorted(meta.items(), key=lambda kv: -kv[1][2]):
+            vals = [b["by_cat"].get(cid, 0.0) for b in buckets]
+            if any(v > 0 for v in vals):
+                series.append((name, col, vals))
+        rest = [max(0.0, t - sum(sv[2][i] for sv in series)) for i, t in enumerate(totals)]
+        if any(v > 0.01 for v in rest):
+            series.append((_t('uncategorized', data), colors.HexColor(OTHERS_GREY), rest))
+        return gran, labels, series, None
+    rec = [b["recycled"] for b in buckets]
+    series = [(_t('recycled', data), RECYCLED_COLOR, rec), (other, REST_COLOR, [t - r for t, r in zip(totals, rec)])]
+    return gran, labels, series, share_row(_t('recycling_rate_row', data), rec)
+
+
+def _stacked_month_chart(pdf, x, y, w, h, labels, series, rate_row, data):
+    """Stacked bars (monthly / yearly). Every series is a band; the total sits on top."""
+    left_pad, right_pad, top_pad, bottom_pad = 64, 18, 22, (46 if rate_row else 30)
     gx, gy = x + left_pad, y + bottom_pad
     gw, gh = w - left_pad - right_pad, h - bottom_pad - top_pad
-    if not points or gw <= 0 or gh <= 0:
+    n = len(labels)
+    totals = [sum(sv[2][i] for sv in series) for i in range(n)]
+    if not n or gw <= 0 or gh <= 0 or max(totals or [0]) <= 0:
         pdf.setFillColor(MUTED)
         pdf.setFont(REG, 10)
         pdf.drawCentredString(x + w / 2.0, y + h / 2.0, _t('no_data', data))
         return
-    top_val = _nice_top(max(t for _l, t, _r in points) * 1.08)
+    top_val = _nice_top(max(totals) * 1.08)
     pdf.setLineWidth(0.5)
     for frac in (0.0, 0.25, 0.5, 0.75, 1.0):
         yt = gy + frac * gh
@@ -896,80 +1049,76 @@ def _stacked_month_chart(pdf, x, y, w, h, points, data):
         pdf.drawRightString(gx - 6, yt - 3, _tick_label(top_val * frac))
     pdf.setFont(REG, 8)
     pdf.drawRightString(gx - 6, gy + gh + 8, _t('kg', data))
-    n = len(points)
     slot = gw / n
     bar_w = max(8.0, min(46.0, slot * 0.5))
-    pdf.setFillColor(MUTED)
-    pdf.setFont(REG, 7.5)
-    pdf.drawString(x + 12, gy - 30, _t('recycling_rate_row', data))
-    for i, (label, total, rec) in enumerate(points):
+    if rate_row:
+        pdf.setFillColor(MUTED)
+        pdf.setFont(REG, 7.5)
+        pdf.drawString(x + 12, gy - 30, rate_row[0])
+    tops = []   # (centre x, top y) per bar: trend line + value labels go on top of all bars
+    for i, label in enumerate(labels):
         cx = gx + slot * (i + 0.5)
         bx = cx - bar_w / 2.0
-        rest = max(0.0, total - rec)
-        h_rec = rec / top_val * gh
-        h_rest = rest / top_val * gh
         radius = min(bar_w * 0.22, 5)
-        if h_rest > 0.5:
-            if h_rec > 0:
-                pdf.setFillColor(RECYCLED_COLOR)
-                pdf.rect(bx, gy, bar_w, h_rec, stroke=0, fill=1)
-            _draw_bar_top_round_rect(pdf, bx, gy + h_rec, bar_w, h_rest, radius, REST_COLOR)
-        else:
-            _draw_bar_top_round_rect(pdf, bx, gy, bar_w, h_rec, radius, RECYCLED_COLOR)
-        pdf.setFillColor(INK)
-        pdf.setFont(REG, 8)
-        pdf.drawCentredString(cx, gy + h_rec + h_rest + 4, _format_number(total))
+        heights = [sv[2][i] / top_val * gh for sv in series]
+        top_idx = max((k for k, hgt in enumerate(heights) if hgt > 0.5), default=-1)
+        base = gy
+        for k, (sv, hgt) in enumerate(zip(series, heights)):
+            if hgt <= 0:
+                continue
+            if k == top_idx:
+                _draw_bar_top_round_rect(pdf, bx, base, bar_w, hgt, radius, sv[1])
+            else:
+                pdf.setFillColor(sv[1])
+                pdf.rect(bx, base, bar_w, hgt, stroke=0, fill=1)
+            base += hgt
+        tops.append((cx, base))
         pdf.setFillColor(TEXT)
         pdf.setFont(REG, 8.5)
         pdf.drawCentredString(cx, gy - 14, label)
-        pdf.setFillColor(RECYCLED_COLOR)
-        pdf.setFont(MED, 8)
-        pdf.drawCentredString(cx, gy - 30, f"{(rec / total * 100.0) if total > 0 else 0:.1f}%")
+        if rate_row:
+            pdf.setFillColor(series[0][1] if series[0][1] != REST_COLOR else RECYCLED_COLOR)
+            pdf.setFont(MED, 8)
+            pdf.drawCentredString(cx, gy - 30, rate_row[1][i])
+    # Trend line through the bar totals (the user's "เส้นแนวโน้ม" switch on the web).
+    if data.get("overview_trend") and len(tops) >= 2:
+        pdf.setStrokeColor(TREND_COLOR)
+        pdf.setLineWidth(1.2)
+        path = pdf.beginPath()
+        path.moveTo(*tops[0])
+        for pt in tops[1:]:
+            path.lineTo(*pt)
+        pdf.drawPath(path, stroke=1, fill=0)
+        pdf.setFillColor(TREND_COLOR)
+        for (px, py) in tops:
+            pdf.circle(px, py, 2.2, stroke=0, fill=1)
+    # Value on top of the bar: small and muted so a full year stays readable;
+    # dropped entirely once the bars get too narrow to carry a number.
+    if n <= 18:
+        pdf.setFont(REG, 6.5)
+        for i, (px, py) in enumerate(tops):
+            txt = _format_number(totals[i])
+            if data.get("overview_trend"):   # keep the number readable where the line crosses it
+                tw = stringWidth(txt, REG, 6.5)
+                pdf.setFillColor(WHITE)
+                pdf.roundRect(px - tw / 2.0 - 2, py + 2.5, tw + 4, 8, 2, stroke=0, fill=1)
+            pdf.setFillColor(MUTED)
+            pdf.drawCentredString(px, py + 4, txt)
 
 
-def _chart_points(data: dict) -> tuple:
-    """(granularity, [(label, total, recycled)]) for the overview chart, following the
-    user's chart setting: monthly / yearly bars, or daily for the stacked area."""
-    gran = (data.get("overview_chart") or "monthly")
-    charts = ((data.get("overview_data", {}) or {}).get("overall_charts") or {})
-    lang = data.get("language", "en") or "en"
-    if gran == "daily":
-        pts = []
-        short = _t_months_short(data)
-        for p in charts.get("daily_data") or []:
-            try:
-                y, m, d = (int(x) for x in str(p.get("date", "")).split("-"))
-            except ValueError:
-                continue
-            total = float(p.get("value", 0) or 0)
-            pts.append((f"{d} {short[m - 1]}", total, min(total, float(p.get("recycled", 0) or 0))))
-        return gran, pts
-    if gran == "yearly":
-        by_year: dict = {}
-        for y, arr in (charts.get("chart_data") or {}).items():
-            t = sum(float(p.get("value", 0) or 0) for p in arr or [])
-            r = sum(float(p.get("recycled", 0) or 0) for p in arr or [])
-            if t > 0:
-                by_year[str(y)] = (t, min(t, r))
-        pts = []
-        for y in sorted(by_year):
-            label = str(int(y) + 543) if (lang == "th" and y.isdigit()) else y
-            pts.append((label, by_year[y][0], by_year[y][1]))
-        return gran, pts
-    return "monthly", _overview_month_points(data)
-
-
-def _stacked_area_chart(pdf, x, y, w, h, points, data):
-    """Daily view: recycled area (bottom) under the day's total (top band)."""
+def _stacked_area_chart(pdf, x, y, w, h, labels, series, data):
+    """Daily view: the series stacked as bands, bottom → top."""
     left_pad, right_pad, top_pad, bottom_pad = 64, 18, 22, 30
     gx, gy = x + left_pad, y + bottom_pad
     gw, gh = w - left_pad - right_pad, h - bottom_pad - top_pad
-    if not points or gw <= 0 or gh <= 0:
+    n = len(labels)
+    totals = [sum(sv[2][i] for sv in series) for i in range(n)]
+    if not n or gw <= 0 or gh <= 0 or max(totals or [0]) <= 0:
         pdf.setFillColor(MUTED)
         pdf.setFont(REG, 10)
         pdf.drawCentredString(x + w / 2.0, y + h / 2.0, _t('no_data', data))
         return
-    top_val = _nice_top(max(t for _l, t, _r in points) * 1.08)
+    top_val = _nice_top(max(totals) * 1.08)
     pdf.setLineWidth(0.5)
     for frac in (0.0, 0.25, 0.5, 0.75, 1.0):
         yt = gy + frac * gh
@@ -979,35 +1128,97 @@ def _stacked_area_chart(pdf, x, y, w, h, points, data):
         pdf.setFont(REG, 8)
         pdf.drawRightString(gx - 6, yt - 3, _tick_label(top_val * frac))
     pdf.drawRightString(gx - 6, gy + gh + 8, _t('kg', data))
-    n = len(points)
     step = gw / max(1, n - 1) if n > 1 else 0
     xs = [gx + (i * step if n > 1 else gw / 2.0) for i in range(n)]
 
     def ypos(v):
         return gy + v / top_val * gh
 
-    # Total band (light) then recycled band (strong) on top of it.
-    for series_idx, colour in ((1, REST_COLOR), (2, RECYCLED_COLOR)):
+    lower = [0.0] * n
+    for _name, col, vals in series:
+        upper = [lower[i] + vals[i] for i in range(n)]
         path = pdf.beginPath()
-        path.moveTo(xs[0], gy)
-        for i, p in enumerate(points):
-            path.lineTo(xs[i], ypos(p[series_idx]))
-        path.lineTo(xs[-1], gy)
+        path.moveTo(xs[0], ypos(lower[0]))
+        for i in range(n):
+            path.lineTo(xs[i], ypos(upper[i]))
+        for i in range(n - 1, -1, -1):
+            path.lineTo(xs[i], ypos(lower[i]))
         path.close()
-        pdf.setFillColor(colour)
+        pdf.setFillColor(col)
         pdf.drawPath(path, stroke=0, fill=1)
+        lower = upper
     pdf.setStrokeColor(colors.HexColor("#7fb49d"))
     pdf.setLineWidth(1)
     line = pdf.beginPath()
-    for i, p in enumerate(points):
-        (line.moveTo if i == 0 else line.lineTo)(xs[i], ypos(p[1]))
+    for i in range(n):
+        (line.moveTo if i == 0 else line.lineTo)(xs[i], ypos(totals[i]))
     pdf.drawPath(line, stroke=1, fill=0)
     # ~8 evenly spaced date labels
     pdf.setFillColor(TEXT)
     pdf.setFont(REG, 8)
     every = max(1, int(math.ceil(n / 8.0)))
     for i in range(0, n, every):
-        pdf.drawCentredString(xs[i], gy - 14, points[i][0])
+        pdf.drawCentredString(xs[i], gy - 14, labels[i])
+
+
+def _fit_legend(pdf, right_x, y, entries, max_w, full_w=None):
+    """Legend swatches, right-aligned, full names (never truncated).
+
+    One line beside the chart title when it fits in max_w at a readable size; otherwise the
+    legend wraps onto rows of up to full_w under the title. Returns the y of the lowest row,
+    so the caller can start the chart below it.
+    """
+    gap = 27   # swatch (9) + gaps around it
+
+    def item_w(nm, sz):
+        return stringWidth(nm, REG, sz) + gap
+
+    def draw_row(row, row_y, sz):
+        pdf.setFont(REG, sz)
+        cur = right_x
+        for (label, col) in reversed(row):
+            cur -= stringWidth(label, REG, sz)
+            pdf.setFillColor(TEXT)
+            pdf.drawString(cur, row_y, label)
+            cur -= 13
+            pdf.setFillColor(col)
+            pdf.roundRect(cur, row_y, 9, 9, 2, stroke=0, fill=1)
+            cur -= 14
+
+    size = 8.5
+    while size > 7.5 and sum(item_w(e[0], size) for e in entries) > max_w:
+        size -= 0.5
+    if not entries or sum(item_w(e[0], size) for e in entries) <= max_w or not full_w:
+        draw_row(list(entries), y, size)
+        return y
+    # Wrap under the title: fill rows up to full_w, each row right-aligned.
+    size = 8
+    rows, row, row_w = [], [], 0.0
+    for nm, col in entries:
+        nm = _fit_text_to_width(nm, REG, size, full_w - gap)   # only a name wider than the card
+        w = item_w(nm, size)
+        if row and row_w + w > full_w:
+            rows.append(row)
+            row, row_w = [], 0.0
+        row.append((nm, col))
+        row_w += w
+    if row:
+        rows.append(row)
+    row_y = y
+    for r in rows:
+        row_y -= 14
+        draw_row(r, row_y, size)
+    return row_y
+
+
+def _rate_title_value(data: dict) -> tuple:
+    """Recycling rate (or the separation rate when the scope has no measured rate)."""
+    ki = (data.get("overview_data", {}) or {}).get("key_indicators", {}) or {}
+    rr_raw = ki.get("recycle_rate")
+    if rr_raw is not None:
+        return _t('chip_recycling_rate', data), f"{float(rr_raw):.2f}"
+    sep = ki.get("separation_rate")
+    return _t('chip_separation_rate', data), (f"{float(sep):.2f}" if sep is not None else "—")
 
 
 def draw_overview(pdf, page_width_points: float, page_height_points: float, data: dict) -> None:
@@ -1039,8 +1250,10 @@ def draw_overview(pdf, page_width_points: float, page_height_points: float, data
     _stat_chip(pdf, margin, chip_y, chip_w, chip_h, _t('total_transactions', data), tx_total_text)
     _stat_chip(pdf, margin + chip_w + chip_gap, chip_y, chip_w, chip_h, _t('total_approved', data), tx_approved_text)
 
-    # Key indicators: all three in kg, so the bars share one scale (total = full bar).
-    ki_h = 2.2 * inch
+    # Key indicators: every bar is a share of the total waste of the selected sources
+    # (total = 100%). Like the dashboard card: the label on its own line, then the value on
+    # the left and the share on the right, then the bar.
+    ki_h = 184           # three stacked rows + the share note
     ki_y = chip_y - 8 - ki_h
     _rounded_card(pdf, margin, ki_y, left_col_w, ki_h, radius=8)
     pad = 28
@@ -1050,17 +1263,34 @@ def draw_overview(pdf, page_width_points: float, page_height_points: float, data
     tw = float(ki.get("total_waste", 0) or 0)
     recycled = float(impact.get("recycled_kg") or 0)
     plastic = float(impact.get("plastic_saved_kg") or 0)
-    norm_base = max(tw, recycled, plastic, 1.0)
     row_w = left_col_w - 2 * pad
     row_x = margin + pad
     row_y = ki_y + ki_h - 50
-    _label_progress(pdf, row_x, row_y - 24, row_w, _t('total_waste_kg', data), _format_number(tw), tw / norm_base, colors.HexColor("#84b8a3"), colors.HexColor("#e1e7ef"), bar_h=6)
-    _label_progress(pdf, row_x, row_y - 58, row_w, _t('total_recyclables_kg', data), _format_number(recycled), recycled / norm_base, colors.HexColor("#9ac7b5"), colors.HexColor("#e1e7ef"), bar_h=6)
-    _label_progress(pdf, row_x, row_y - 92, row_w, _t('plastic_saved_kg', data), _format_number(plastic), plastic / norm_base, colors.HexColor("#b6d7c9"), colors.HexColor("#e1e7ef"), bar_h=6)
+    ki_rows = [
+        ('total_waste_kg', tw, "#84b8a3"),
+        ('total_recyclables_kg', recycled, "#9ac7b5"),
+        ('plastic_saved_kg', plastic, "#b6d7c9"),
+    ]
+    for i, (key, val, color) in enumerate(ki_rows):
+        share = (val / tw) if tw > 0 else 0.0
+        top = row_y - 2 - 40 * i
+        pdf.setFillColor(MUTED)
+        pdf.setFont(REG, 9)
+        pdf.drawString(row_x, top, _fit_text_to_width(_t(key, data), REG, 9, row_w))
+        pdf.setFillColor(TEXT)
+        pdf.setFont(MED, 12)
+        pdf.drawString(row_x, top - 16, _format_number(val))
+        pdf.setFillColor(colors.HexColor("#2f8f6b"))
+        pdf.setFont(MED, 10)
+        pdf.drawRightString(row_x + row_w, top - 16, f"{share * 100:.2f}%")
+        _progress_bar(pdf, row_x, top - 27, row_w, 5, min(1.0, share), colors.HexColor(color), colors.HexColor("#e1e7ef"))
+    pdf.setFillColor(MUTED)
+    pdf.setFont(REG, 7.5)
+    pdf.drawString(row_x, ki_y + 11, _fit_text_to_width(_t('key_indicators_share_note', data), REG, 7.5, row_w))
 
     # Top list: locations, tags ("activities") or tenants, following the report mode.
     mode = data.get("report_mode") or "location"
-    tr_h = 2.15 * inch
+    tr_h = 132           # three rows; shorter so the taller key-indicator card still fits the page
     tr_y = ki_y - 8 - tr_h
     _rounded_card(pdf, margin, tr_y, left_col_w, tr_h, radius=8)
     pdf.setFillColor(TEXT)
@@ -1070,12 +1300,12 @@ def draw_overview(pdf, page_width_points: float, page_height_points: float, data
     items = (ov.get("top_recyclables") or [])[:3]
     if items:
         max_val = max(float(it.get("total_waste", 0) or 0) for it in items) or 1.0
-        y_ptr = tr_y + tr_h - 72
+        y_ptr = tr_y + tr_h - 64
         for it in items:
             name = _fit_text_to_width(str(it.get("origin_name", "")), REG, 10, left_col_w - 2 * pad - 90)
             val = float(it.get("total_waste", 0) or 0)
             _label_progress(pdf, margin + pad, y_ptr, left_col_w - 2 * pad, name, _format_number(val), val / max_val, colors.HexColor("#c8ced4"), colors.HexColor("#e1e7ef"), bar_h=6)
-            y_ptr -= 32
+            y_ptr -= 29
     else:
         pdf.setFillColor(MUTED)
         pdf.setFont(REG, 9.5)
@@ -1090,13 +1320,7 @@ def draw_overview(pdf, page_width_points: float, page_height_points: float, data
     pdf.setFont("IBMPlexSansThai-Medium", 12)
     pdf.drawString(overall_x + 16, overall_y + overall_h - 30, _t('overall', data))
     # Title on top, unit on the line under the value (no units in brackets in the title).
-    rr_raw = ki.get("recycle_rate")
-    if rr_raw is not None:
-        rate_title, rate_value = _t('chip_recycling_rate', data), f"{float(rr_raw):.2f}"
-    else:
-        sep = ki.get("separation_rate")
-        rate_title = _t('chip_separation_rate', data)
-        rate_value = f"{float(sep):.2f}" if sep is not None else "—"
+    rate_title, rate_value = _rate_title_value(data)
     per_head = impact.get("waste_per_head")
     headcount = impact.get("headcount")
     kg_short = _t('unit_kg_short', data)
@@ -1120,19 +1344,21 @@ def draw_overview(pdf, page_width_points: float, page_height_points: float, data
     for i, (title, value, sub) in enumerate(stats):
         _stat_chip(pdf, overall_x + 16 + i * (sw + gap), sy, sw, sh, title, value, "white", subtitle=sub)
 
-    gran, points = _chart_points(data)
+    gran, labels, series, rate_row = _chart_series(data)
     legend_y = sy - 18
     pdf.setFillColor(TEXT)
     pdf.setFont(MED, 10)
-    pdf.drawString(overall_x + 16, legend_y, _t(f'chart_{gran}', data))
-    _legend_swatches(pdf, overall_x + right_col_w - 16, legend_y,
-                     [(_t('recycled', data), RECYCLED_COLOR), (_t('other_waste', data), REST_COLOR)])
+    title = _t(f'chart_{gran}', data)
+    pdf.drawString(overall_x + 16, legend_y, title)
+    title_w = stringWidth(title, MED, 10)
+    legend_bottom = _fit_legend(pdf, overall_x + right_col_w - 16, legend_y, [(nm, col) for nm, col, _v in series],
+                                right_col_w - 32 - title_w - 20, full_w=right_col_w - 32)
     cy = overall_y + 10
-    ch = legend_y - 10 - cy
+    ch = legend_bottom - 10 - cy
     if gran == "daily":
-        _stacked_area_chart(pdf, overall_x + 8, cy, right_col_w - 16, ch, points, data)
+        _stacked_area_chart(pdf, overall_x + 8, cy, right_col_w - 16, ch, labels, series, data)
     else:
-        _stacked_month_chart(pdf, overall_x + 8, cy, right_col_w - 16, ch, points, data)
+        _stacked_month_chart(pdf, overall_x + 8, cy, right_col_w - 16, ch, labels, series, rate_row, data)
     _footer(pdf, page_width_points, data)
 
 def draw_overview_breakdown(pdf, page_width_points: float, page_height_points: float, data: dict) -> None:
@@ -1160,6 +1386,17 @@ def draw_overview_breakdown(pdf, page_width_points: float, page_height_points: f
     pdf.setFillColor(TEXT)
     pdf.setFont("IBMPlexSansThai-Medium", 12)
     pdf.drawString(left_x + 16, card_y + card_h - 24, _t('category_proportion', data))
+    # Recycling rate on this page too: customers often forward this one page on its own.
+    rate_title, rate_value = _rate_title_value(data)
+    rate_text = f"{rate_value} %" if rate_value != "—" else rate_value
+    rv_w = stringWidth(rate_text, MED, 12)
+    pdf.setFillColor(colors.HexColor("#2f8f6b"))
+    pdf.setFont(MED, 12)
+    pdf.drawString(left_x + left_w - 16 - rv_w, card_y + card_h - 24, rate_text)
+    pdf.setFillColor(MUTED)
+    pdf.setFont(REG, 8.5)
+    rt_w = stringWidth(rate_title, REG, 8.5)
+    pdf.drawString(left_x + left_w - 16 - rv_w - 6 - rt_w, card_y + card_h - 23, rate_title)
     # Resolve items
     wt_props = (data.get("overview_data", {}).get("waste_type_proportions")
                 or data.get("waste_type_proportions") or [])
@@ -1243,12 +1480,18 @@ def draw_overview_breakdown(pdf, page_width_points: float, page_height_points: f
     _hdr_prop = _t('proportion_pct', data)
     _hdr_prop_w = stringWidth(_hdr_prop, "IBMPlexSansThai-Medium", 9)
     pdf.drawString(hx + 3 * col_w - 10 - _hdr_prop_w, hy, _hdr_prop)
-    # Rows (limit to fit)
+    # Rows: at most 8; anything beyond is folded into one "other" row rather than dropped.
     max_rows = 8
     row_h = 32
-    for i, it in enumerate(items[:max_rows]):
+    rows = list(items)
+    if len(rows) > max_rows:
+        rest = rows[max_rows - 1:]
+        rest_total = sum(r["total"] for r in rest)
+        rest_perc = sum((r["perc"] or 0) for r in rest) if all(r["perc"] is not None for r in rest) else None
+        rows = rows[:max_rows - 1] + [{"name": _t('others', data), "color_key": "", "total": rest_total, "perc": rest_perc}]
+    for i, it in enumerate(rows):
         y_row = header_y - row_h - i * row_h
-        table_type = "Footer" if i == min(max_rows, len(items)) - 1 else "Body"
+        table_type = "Body"
         row_bg = WHITE if (i % 2 == 0) else colors.HexColor("#f5faf8")
         pdf.setFillColor(row_bg)
         draw_table(pdf, right_x + 12, y_row, right_w - 24, row_h, 8, table_type)
@@ -1271,6 +1514,17 @@ def draw_overview_breakdown(pdf, page_width_points: float, page_height_points: f
         p_text = f"{_format_number(perc_val)} %"
         p_w = stringWidth(p_text, "IBMPlexSansThai-Regular", 9)
         pdf.drawString(hx + 3 * col_w - 10 - p_w, y_text, p_text)
+    # Total row
+    y_tot = header_y - row_h - len(rows) * row_h
+    pdf.setFillColor(colors.HexColor("#eaf3ef"))
+    draw_table(pdf, right_x + 12, y_tot, right_w - 24, row_h, 8, "Footer")
+    pdf.setFillColor(TEXT)
+    pdf.setFont(MED, 9)
+    pdf.drawString(hx + 10, y_tot + 12, _t('total', data))
+    t_text = _format_number(sum(it["total"] for it in items))
+    pdf.drawString(hx + 2 * col_w - 10 - stringWidth(t_text, MED, 9), y_tot + 12, t_text)
+    tp_text = "100.00 %"
+    pdf.drawString(hx + 3 * col_w - 10 - stringWidth(tp_text, MED, 9), y_tot + 12, tp_text)
     _footer(pdf, page_width_points, data)
 def _perf_labels(data: dict) -> dict:
     """Titles for the performance pages by report mode (location / tag / tenant)."""
@@ -1371,8 +1625,9 @@ def draw_performance(pdf, page_width_points: float, page_height_points: float, d
         total_text_w = stringWidth(total_text, "IBMPlexSansThai-Regular", 10)
         pdf.drawString(1 * inch + 2.8 * inch - total_text_w, y_total + bar_h + 0.12 * inch, total_text)
         _progress_bar(pdf, 1 * inch, y_total, 2.8 * inch, bar_h, 1.0, colors.HexColor("#c5d2da"))
-        # Subsequent bars for individual waste types
-        for idx, (label, amount) in enumerate(performance_data["metrics"].items()):
+        # Subsequent bars for individual waste types, largest first (as on the dashboard)
+        _metrics = sorted((performance_data.get("metrics") or {}).items(), key=lambda kv: -float(kv[1] or 0))
+        for idx, (label, amount) in enumerate(_metrics):
             y = start_y - (idx + 1) * (bar_h + gap)
             pdf.setFillColor(TEXT)
             pdf.setFont("IBMPlexSansThai-Regular", 10)
@@ -1382,7 +1637,8 @@ def draw_performance(pdf, page_width_points: float, page_height_points: float, d
             value_text = f"{_format_number(amount)} {_t('kg', data)}"
             value_width = stringWidth(value_text, "IBMPlexSansThai-Regular", 10)
             pdf.drawString(1 * inch + 2.8 * inch - value_width, y + bar_h + 0.12 * inch, value_text)
-            _progress_bar(pdf, 1 * inch, y, 2.8 * inch, bar_h, amount / performance_data["totalWasteKg"], MATERIAL_COLORS.get(label, colors.HexColor("#cfe2f3")))
+            _progress_bar(pdf, 1 * inch, y, 2.8 * inch, bar_h, (float(amount or 0) / total_waste_val) if total_waste_val > 0 else 0.0,
+                          MATERIAL_COLORS.get(label, colors.HexColor("#cfe2f3")))
         gap = 1 * inch
         outer_x = gap + 3.22 * inch
         outer_y = left_card_y
@@ -1499,18 +1755,24 @@ def draw_performance_table(pdf, page_width_points: float, page_height_points: fl
         draw_table(pdf, padding, page_height_points - (3 * inch), page_width_points - 2 * padding, 24, 8, "Header")
         pdf.setFillColor(TEXT)
         pdf.setFont("IBMPlexSansThai-Medium", 9)
-        pdf.drawString(padding + 16, page_height_points - (2.88 * inch), labels['name_col'])
-        pdf.drawString(padding + 1.8 * inch, page_height_points - (2.88 * inch), _t('total_waste_kg', data))
-        pdf.drawString(padding + 3.2 * inch, page_height_points - (2.88 * inch), _t('general_kg', data))
-        pdf.drawString(padding + 4.4 * inch, page_height_points - (2.88 * inch), _t('total_recyclable_incl', data))
-        pdf.drawString(padding + 7.7 * inch, page_height_points - (2.88 * inch), _t('recycling_rate_pct_header', data))
-        # Pre-compute right edges for numeric columns (align values to these)
-        _col_pad = 24
-        _right_total = padding + 3.2 * inch - _col_pad - 2
-        _right_general = padding + 4.4 * inch - _col_pad - 6
-        _right_recyclable = padding + 7.7 * inch - _col_pad + 14
-        _right_rate = padding + 9.3 * inch - _col_pad - 6
-        pdf.drawString(padding + 9.3 * inch, page_height_points - (2.88 * inch), _t('status', data))
+        # Column bands [start, end) from the left edge of the table. The name is left-aligned;
+        # every other header AND its values are centred on the same x, so they line up.
+        _table_w = page_width_points - 2 * padding
+        _bands = {
+            'total': (1.8 * inch, 3.2 * inch),
+            'general': (3.2 * inch, 4.4 * inch),
+            'recyclable': (4.4 * inch, 7.7 * inch),
+            'rate': (7.7 * inch, 9.1 * inch),
+            'status': (9.1 * inch, _table_w),
+        }
+        _cx = {k: padding + (a + b) / 2.0 for k, (a, b) in _bands.items()}
+        _hy = page_height_points - (2.88 * inch)
+        pdf.drawString(padding + 16, _hy, labels['name_col'])
+        pdf.drawCentredString(_cx['total'], _hy, _t('total_waste_kg', data))
+        pdf.drawCentredString(_cx['general'], _hy, _t('general_kg', data))
+        pdf.drawCentredString(_cx['recyclable'], _hy, _t('total_recyclable_incl', data))
+        pdf.drawCentredString(_cx['rate'], _hy, _t('recycling_rate_pct_header', data))
+        pdf.drawCentredString(_cx['status'], _hy, _t('status', data))
         page_branches = rows_src[page_idx:page_idx + branches_per_page]
         for idx, branch in enumerate(page_branches):
             y_base = page_height_points - (3 * inch) - 32 - (idx * 32)
@@ -1527,28 +1789,22 @@ def draw_performance_table(pdf, page_width_points: float, page_height_points: fl
             _bn = _fit_text_to_width(branch["branchName"], "IBMPlexSansThai-Regular", 9,
                                      (padding + 1.8 * inch) - (padding + 30) - 6)
             pdf.drawString(padding + 30, y_base + 12, _bn)
-            _txt_total = _format_number(branch["totalWasteKg"])
-            _w_total = stringWidth(_txt_total, "IBMPlexSansThai-Regular", 9)
-            pdf.drawString(_right_total - _w_total, y_text, _txt_total)
             general = branch.get("metrics", {}).get("General Waste") or 0
-            _txt_general = _format_number(general)
-            _w_general = stringWidth(_txt_general, "IBMPlexSansThai-Regular", 9)
-            pdf.drawString(_right_general - _w_general, y_text, _txt_general)
             recyclable = branch.get("metrics", {}).get("Recyclable Waste") or 0
             organic = branch.get("metrics", {}).get("Organic Waste") or 0
-
-            _txt_recyclable = _format_number(recyclable + organic)
-            _w_recyclable = stringWidth(_txt_recyclable, "IBMPlexSansThai-Regular", 9)
-            pdf.drawString(_right_recyclable - _w_recyclable, y_text, _txt_recyclable)
-            _txt_rate = f"{_format_number(branch['recyclingRatePercent'])} %"
-            _w_rate = stringWidth(_txt_rate, "IBMPlexSansThai-Regular", 9)
-            pdf.drawString(_right_rate - _w_rate, y_text, _txt_rate)
-            color = colors.HexColor("#0bb980") if branch["recyclingRatePercent"] > 20 else colors.HexColor("#f49d0d")
-            pdf.setFillColor(color)
+            pdf.drawCentredString(_cx['total'], y_text, _format_number(branch["totalWasteKg"]))
+            pdf.drawCentredString(_cx['general'], y_text, _format_number(general))
+            pdf.drawCentredString(_cx['recyclable'], y_text, _format_number(recyclable + organic))
+            pdf.drawCentredString(_cx['rate'], y_text, f"{_format_number(branch['recyclingRatePercent'])} %")
+            ok = branch["recyclingRatePercent"] > 20
+            status_txt = _t('status_normal', data) if ok else _t('status_need_imprv', data)
             circle_radius = 3.5
-            circle_x = padding + 9.2 * inch
-            pdf.circle(circle_x, y_text + 3, circle_radius, stroke=0, fill=1)
-            pdf.drawString(padding + 9.3 * inch, y_text, _t('status_normal', data) if branch["recyclingRatePercent"] > 20 else _t('status_need_imprv', data))
+            st_w = stringWidth(status_txt, "IBMPlexSansThai-Regular", 9)
+            group_w = 2 * circle_radius + 5 + st_w
+            st_x = _cx['status'] - group_w / 2.0
+            pdf.setFillColor(colors.HexColor("#0bb980") if ok else colors.HexColor("#f49d0d"))
+            pdf.circle(st_x + circle_radius, y_text + 3, circle_radius, stroke=0, fill=1)
+            pdf.drawString(st_x + 2 * circle_radius + 5, y_text, status_txt)
         _footer(pdf, page_width_points, data)
 
 def _advice_item_text(itm: dict, lang: str, bullet_type: str):
@@ -1872,8 +2128,12 @@ def draw_comparison(pdf, page_width_points: float, page_height_points: float, da
                    _t('quantity_by_month' if mode == 'yearly' else 'quantity_by_day', data))
     series_l = _short_period(left, mode, lang)
     series_r = _short_period(right, mode, lang)
-    _legend_swatches(pdf, card_x + card_w - 18, chart_y + chart_h - 24,
-                     [(series_l, colors.HexColor("#c9d6cf")), (series_r, colors.HexColor("#84b8a3"))])
+    # Days (monthly mode) are drawn as two lines — 2 × 31 bars side by side were unreadable.
+    # Months (yearly mode) stay as paired bars. The table swatches reuse these colours.
+    as_lines = mode != 'yearly'
+    col_l = colors.HexColor("#a8bbb1") if as_lines else colors.HexColor("#c9d6cf")
+    col_r = colors.HexColor("#2f8f6b") if as_lines else colors.HexColor("#84b8a3")
+    _legend_swatches(pdf, card_x + card_w - 18, chart_y + chart_h - 24, [(series_l, col_l), (series_r, col_r)])
     table_y = CONTENT_BOTTOM
     table_h = chart_y - 12 - table_y
     _rounded_card(pdf, card_x, table_y, card_w, table_h, radius=10, fill=WHITE)
@@ -1901,17 +2161,40 @@ def draw_comparison(pdf, page_width_points: float, page_height_points: float, da
     slot = gw / len(buckets)
     bar_w = max(2.5, min(18.0, slot * 0.34))
     show_values = len(buckets) <= 12
+    if as_lines:
+        for key, col, width in (("left_kg", col_l, 1.4), ("right_kg", col_r, 1.8)):
+            pts = []
+            for i, b in enumerate(buckets):
+                v = b.get(key)
+                if v is None:
+                    continue
+                pts.append((gx + slot * (i + 0.5), gy + float(v) / top_val * gh))
+            if not pts:
+                continue
+            pdf.setStrokeColor(col)
+            pdf.setLineWidth(width)
+            pdf.setLineJoin(1)
+            path = pdf.beginPath()
+            path.moveTo(*pts[0])
+            for pt in pts[1:]:
+                path.lineTo(*pt)
+            pdf.drawPath(path, stroke=1, fill=0)
+            pdf.setFillColor(col)
+            for px, py in pts:
+                pdf.circle(px, py, 1.6, stroke=0, fill=1)
+        pdf.setLineWidth(0.5)
     for i, b in enumerate(buckets):
         cx = gx + slot * (i + 0.5)
-        for j, (v, col) in enumerate(((float(b.get("left_kg") or 0), colors.HexColor("#c9d6cf")),
-                                      (float(b.get("right_kg") or 0), colors.HexColor("#84b8a3")))):
-            bx = cx - bar_w - 1 + j * (bar_w + 2)
-            bh = v / top_val * gh
-            _draw_bar_top_round_rect(pdf, bx, gy, bar_w, bh, min(bar_w * 0.3, 4), col)
-            if show_values and v > 0:
-                pdf.setFillColor(INK)
-                pdf.setFont(REG, 6.5)
-                pdf.drawCentredString(bx + bar_w / 2.0, gy + bh + 3, _fmt_compact(v))
+        if not as_lines:
+            for j, (v, col) in enumerate(((float(b.get("left_kg") or 0), col_l),
+                                          (float(b.get("right_kg") or 0), col_r))):
+                bx = cx - bar_w - 1 + j * (bar_w + 2)
+                bh = v / top_val * gh
+                _draw_bar_top_round_rect(pdf, bx, gy, bar_w, bh, min(bar_w * 0.3, 4), col)
+                if show_values and v > 0:
+                    pdf.setFillColor(INK)
+                    pdf.setFont(REG, 6.5)
+                    pdf.drawCentredString(bx + bar_w / 2.0, gy + bh + 3, _fmt_compact(v))
         pdf.setFillColor(TEXT)
         pdf.setFont(REG, 8 if len(buckets) <= 16 else 6.5)
         pdf.drawCentredString(cx, gy - 12, str(b.get(f"label_{lang}") or b.get("key")))
@@ -1952,7 +2235,13 @@ def draw_comparison(pdf, page_width_points: float, page_height_points: float, da
             draw_table(pdf, tx, ry, tw, row_h, 8, "Footer" if r_i == len(rows) - 1 else "Body")
             pdf.setFillColor(TEXT)
             pdf.setFont(REG, fsize)
-            pdf.drawString(tx + 12, ry + 10, _fit_text_to_width(label, REG, fsize, label_w - 16))
+            lx = tx + 12
+            if r_i < 2:   # colour swatch of the period, matching the chart
+                pdf.setFillColor(col_l if r_i == 0 else col_r)
+                pdf.roundRect(lx, ry + 10, 7, 7, 1.5, stroke=0, fill=1)
+                pdf.setFillColor(TEXT)
+                lx += 12
+            pdf.drawString(lx, ry + 10, _fit_text_to_width(label, REG, fsize, label_w - 16 - (lx - tx - 12)))
             for i, cell in enumerate(cells):
                 if colour_by is not None:
                     pdf.setFillColor(INCREASE_COLOR if colour_by[i] > 0 else (DECREASE_COLOR if colour_by[i] < 0 else TEXT))
@@ -1986,11 +2275,16 @@ def draw_comparison(pdf, page_width_points: float, page_height_points: float, da
             draw_table(pdf, tx, ry, tw, row_h, 8, "Footer" if r_i == len(rows) - 1 else "Body")
             pdf.setFont(REG if r_i < 2 else MED, 9)
             for i, cell in enumerate(cells):
+                cell_x = tx + 12 + col_w * i
+                if i == 0 and r_i < 2:   # colour swatch of the period, matching the chart
+                    pdf.setFillColor(col_l if r_i == 0 else col_r)
+                    pdf.roundRect(cell_x, ry + 10, 7, 7, 1.5, stroke=0, fill=1)
+                    cell_x += 12
                 if r_i == 2 and i > 0:
                     pdf.setFillColor(INCREASE_COLOR if rt - lt > 0 else (DECREASE_COLOR if rt - lt < 0 else TEXT))
                 else:
                     pdf.setFillColor(TEXT)
-                pdf.drawString(tx + 12 + col_w * i, ry + 10, _fit_text_to_width(str(cell), REG, 9, col_w - 16))
+                pdf.drawString(cell_x, ry + 10, _fit_text_to_width(str(cell), REG, 9, col_w - 16))
     _footer(pdf, page_width_points, data)
 
 
@@ -2093,7 +2387,7 @@ def draw_main_materials(pdf, page_width_points: float, page_height_points: float
         y_bar = center_y - (row_h / 2.0)
         value = float(it.get("total_waste", 0) or 0)
         w = (value / top_val) * chart_w
-        bar_color = colors.HexColor(main_material_colorPalette[i % len(main_material_colorPalette)])
+        bar_color = _rank_color(main_material_colorPalette, i)
         _draw_right_round_rect(chart_left, y_bar, w, row_h, cap_r, bar_color)
         name = _t_name(it, "main_material_name", data)
         label_lines = wrap_label(name, "IBMPlexSansThai-Regular", 10, label_area)
@@ -2115,10 +2409,8 @@ def draw_main_materials(pdf, page_width_points: float, page_height_points: float
             pdf.setFillColor(TEXT)
             x_out = min(chart_right - 4 - sw, chart_left + w + 6)
             pdf.drawString(x_out, y_bar + row_h / 2.0 - 4, val_text)
-    items_all = items_sorted
-    pie_values = [float(it.get("total_waste", 0) or 0) for it in items_all] or [1.0]
-    pie_colors = [colors.HexColor(main_material_colorPalette[i % len(main_material_colorPalette)]) for i in range(len(items_all))] or [BAR2]
-    pie_size = max(60.0, min(pie_card, card_h2) * 0.6)
+    pie_values, pie_colors, others_val = _top5_pie(items_sorted, main_material_colorPalette)
+    pie_size = max(60.0, min(pie_card, card_h2) * 0.55)
     pie_x = x_right + (pie_card - pie_size) / 2.0
     pie_y = card_y2 + (card_h2 - pie_size) - 36
     pdf.setFillColor(TEXT)
@@ -2132,19 +2424,23 @@ def draw_main_materials(pdf, page_width_points: float, page_height_points: float
     right_x = x_right + pie_card - 12
     box_size = 8
     pdf.setFont("IBMPlexSansThai-Regular", 10)
-    for i, it in enumerate(top5):
-        y = start_y - i * (row_h + 6)
-        c = colors.HexColor(main_material_colorPalette[i % len(main_material_colorPalette)])
+    legend_rows = list(top5)
+    if others_val > 0:
+        legend_rows.append({"_others": True, "total_waste": others_val})
+    legend_step = 17 if len(legend_rows) > 5 else row_h + 6   # 6 rows (top 5 + others) must fit the card
+    for i, it in enumerate(legend_rows):
+        y = start_y - i * legend_step
+        c = colors.HexColor(OTHERS_GREY) if it.get("_others") else _rank_color(main_material_colorPalette, i)
         pdf.setFillColor(c)
         pdf.roundRect(left_x, y - box_size + 7, box_size, box_size, 2, stroke=0, fill=1)
-        name = _t_name(it, "main_material_name", data)
+        name = _t('others', data) if it.get("_others") else _t_name(it, "main_material_name", data)
         pdf.setFillColor(TEXT)
         max_name_w = (right_x - left_x) - box_size - 54
         label = name
         while stringWidth(label, "IBMPlexSansThai-Regular", 10) > max_name_w and len(label) > 1:
             label = label[:-2] + "…"
         pdf.drawString(left_x + box_size + 6, y, label)
-        perc = it.get("proportion_percent")
+        perc = None if it.get("_others") else it.get("proportion_percent")
         if perc is None:
             total_w = float((data.get("main_materials_data", {}) or {}).get("total_waste", 0) or 0) or sum(pie_values) or 1.0
             perc = (float(it.get("total_waste", 0) or 0) / total_w) * 100.0
@@ -2153,57 +2449,108 @@ def draw_main_materials(pdf, page_width_points: float, page_height_points: float
         pdf.drawString(right_x - pw, y, perc_text)
     _footer(pdf, page_width_points, data)
 
+def _material_table_header(pdf, page_width_points, padding, header_y, header_text_y, first_col_label, data, cols):
+    pdf.setFillColor(colors.HexColor("#f5faf8"))
+    draw_table(pdf, padding, header_y, page_width_points - 2 * padding, 24, 8, "Header")
+    pdf.setFillColor(TEXT)
+    pdf.setFont(MED, 9)
+    pdf.drawString(padding + 16, header_text_y, first_col_label)
+    pdf.drawRightString(cols['total'], header_text_y, _t('total_waste_kg', data))
+    pdf.drawRightString(cols['pct'], header_text_y, _t('percentage_pct', data))
+    pdf.drawRightString(cols['ghg'], header_text_y, _t('ghg_reduction_kgco2e', data))
+
+
+def _material_table_cols(page_width_points, padding) -> dict:
+    """Right edges of the numeric columns, shared by the header and every row."""
+    return {
+        'total': padding + 4.6 * inch,
+        'pct': padding + 6.9 * inch,
+        'ghg': page_width_points - padding - 16,
+    }
+
+
+def _draw_material_row(pdf, page_width_points, padding, y_base, idx, row, data, cols, name_key, is_last):
+    """One table row. kinds: item | group | group_cont | total."""
+    kind = row.get("kind")
+    tw = page_width_points - 2 * padding
+    table_type = "Footer" if is_last else "Body"
+    if kind in ("group", "group_cont"):
+        bg = colors.HexColor("#eef6f2")
+    elif kind == "total":
+        bg = colors.HexColor("#e2efe9")
+    else:
+        bg = WHITE if (idx % 2 == 0) else colors.HexColor("#f8fbfa")
+    pdf.setFillColor(bg)
+    draw_table(pdf, padding, y_base, tw, 32, 8, table_type)
+    y_text = y_base + 12
+    bold = kind in ("group", "group_cont", "total")
+    font = MED if bold else REG
+    if kind == "item":
+        indent = 34 if row.get("grouped") else 16
+        if row.get("grouped"):   # small L connector (the font has no box-drawing glyphs)
+            pdf.setStrokeColor(colors.HexColor("#b9cbc2"))
+            pdf.setLineWidth(0.8)
+            lx = padding + 22
+            pdf.line(lx, y_text + 9, lx, y_text + 3)
+            pdf.line(lx, y_text + 3, lx + 7, y_text + 3)
+            pdf.setLineWidth(0.5)
+        name = _t_name(row["item"], name_key, data)
+        pdf.setFillColor(TEXT)
+        pdf.setFont(REG, 9)
+        pdf.drawString(padding + indent, y_text, _fit_text_to_width(name, REG, 9, cols['total'] - padding - indent - 1.2 * inch))
+        vals = (row["item"].get("total_waste", 0), row["item"].get("proportion_percent", 0), row["item"].get("ghg_reduction", 0))
+    else:
+        if kind == "total":
+            label = _t('total', data)
+        else:
+            label = str(row["name"]) + (f" {_t('continued', data)}" if kind == "group_cont" else "")
+        pdf.setFillColor(TEXT)
+        pdf.setFont(MED, 9.5)
+        label = _fit_text_to_width(label, MED, 9.5, cols['total'] - padding - 16 - 1.6 * inch)
+        pdf.drawString(padding + 16, y_text, label)
+        if kind in ("group", "group_cont") and row.get("count"):
+            lw = stringWidth(label, MED, 9.5)
+            pdf.setFillColor(MUTED)
+            pdf.setFont(REG, 8)
+            pdf.drawString(padding + 16 + lw + 6, y_text, _t('items_count', data).replace('{n}', str(row["count"])))
+        vals = (row.get("total_waste", 0), row.get("proportion_percent", 0), row.get("ghg_reduction", 0))
+    pdf.setFillColor(TEXT)
+    pdf.setFont(font, 9)
+    pdf.drawRightString(cols['total'], y_text, _format_number(vals[0] or 0))
+    pdf.drawRightString(cols['pct'], y_text, f"{float(vals[1] or 0):.2f}%")
+    pdf.drawRightString(cols['ghg'], y_text, _format_number(vals[2] or 0))
+
+
+def _material_total_row(items: list) -> dict:
+    return {
+        "kind": "total",
+        "total_waste": sum(float(it.get("total_waste", 0) or 0) for it in items),
+        "proportion_percent": 100.0 if items else 0.0,
+        "ghg_reduction": sum(float(it.get("ghg_reduction", 0) or 0) for it in items),
+    }
+
+
 def draw_main_materials_table(pdf, page_width_points: float, page_height_points: float, data: dict) -> None:
+    """Main materials table: one row per main material and a closing total row. Every page
+    repeats the header; the last page always carries at least two rows with the total."""
     padding = 0.78 * inch
-    mats_per_page = 10
-    total_mats = len(data["main_materials_data"]["porportions"])
-    # Sub header ends at page_height_points - (1.96 * inch), content starts 24 points below
     content_top = page_height_points - (1.96 * inch) - 24
     header_y = content_top - 24
     header_text_y = content_top - 15
-    for page_idx in range(0, total_mats, mats_per_page):
+    mats = (data.get("main_materials_data", {}) or {}).get("porportions", []) or []
+    if not mats:
+        return
+    cols = _material_table_cols(page_width_points, padding)
+    rows = [{"kind": "item", "item": m} for m in mats] + [_material_total_row(mats)]
+    pages = _paginate_table_rows(rows, 10, is_data=lambda r: r.get("kind") == "item")
+    for page_rows in pages:
         pdf.showPage()
         _header(pdf, page_width_points, page_height_points, data)
         _sub_header(pdf, page_width_points, page_height_points, data, _t('main_materials', data))
-        pdf.setFillColor(colors.HexColor("#f5faf8"))
-        draw_table(pdf, padding, header_y, page_width_points - 2 * padding, 24, 8, "Header")
-        pdf.setFillColor(TEXT)
-        pdf.setFont("IBMPlexSansThai-Medium", 9)
-        pdf.drawString(padding + 16, header_text_y, _t('main_material', data))
-        pdf.drawString(padding + 3.2 * inch, header_text_y, _t('total_waste_kg', data))
-        pdf.drawString(padding + 5.8 * inch, header_text_y, _t('percentage_pct', data))
-        # Right-align the GHG header so its right edge is 16pt from the right table border
-        ghg_header = _t('ghg_reduction_kgco2e', data)
-        ghg_right = page_width_points - padding - 16
-        ghg_header_w = stringWidth(ghg_header, "IBMPlexSansThai-Medium", 9)
-        pdf.drawString(ghg_right - ghg_header_w, header_text_y, ghg_header)
-        # Compute right edges for Total Waste and Percentage columns (align values to these)
-        _col_pad_mm = 8
-        _right_total_mm = padding + 5.8 * inch - _col_pad_mm - 106
-        _right_percent_mm = padding + 8.5 * inch - _col_pad_mm - 118
-        page_mats = data["main_materials_data"]["porportions"][page_idx:page_idx + mats_per_page]
-        for idx, mat in enumerate(page_mats):
-            y_base = header_y - 32 - (idx * 32)
-            table_type = "Footer" if idx == len(page_mats) - 1 else "Body"
-            row_bg = WHITE if (idx % 2 == 0) else colors.HexColor("#f5faf8")
-            pdf.setFillColor(row_bg)
-            draw_table(pdf, padding, y_base, page_width_points - 2 * padding, 32, 8, table_type)
-            pdf.setFillColor(TEXT)
-            pdf.setFont("IBMPlexSansThai-Regular", 9)
-            y_text = y_base + 12
-            pdf.drawString(padding + 16, y_text, _fit_text_to_width(_t_name(mat, "main_material_name", data), "IBMPlexSansThai-Regular", 9, 3.2 * inch - 90))
-            # Right-align Total Waste within its column
-            _txt_total_mm = _format_number(mat["total_waste"])
-            _w_total_mm = stringWidth(_txt_total_mm, "IBMPlexSansThai-Regular", 9)
-            pdf.drawString(_right_total_mm - _w_total_mm, y_text, _txt_total_mm)
-            # Right-align Percentage within its column
-            _txt_percent_mm = f"{mat['proportion_percent']:.2f}%"
-            _w_percent_mm = stringWidth(_txt_percent_mm, "IBMPlexSansThai-Regular", 9)
-            pdf.drawString(_right_percent_mm - _w_percent_mm, y_text, _txt_percent_mm)
-            # Right-align the GHG value to keep 16pt gap from right border
-            ghg_val = _format_number(mat["ghg_reduction"])
-            ghg_val_w = stringWidth(ghg_val, "IBMPlexSansThai-Regular", 9)
-            pdf.drawString(ghg_right - ghg_val_w, y_text, ghg_val)
+        _material_table_header(pdf, page_width_points, padding, header_y, header_text_y, _t('main_material', data), data, cols)
+        for idx, row in enumerate(page_rows):
+            _draw_material_row(pdf, page_width_points, padding, header_y - 32 - idx * 32, idx, row, data, cols,
+                               "main_material_name", idx == len(page_rows) - 1)
         _footer(pdf, page_width_points, data)
 
 def draw_sub_materials(pdf, page_width_points: float, page_height_points: float, data: dict) -> None:
@@ -2291,7 +2638,7 @@ def draw_sub_materials(pdf, page_width_points: float, page_height_points: float,
         y_bar = center_y - (row_h / 2.0)
         value = float(it.get("total_waste", 0) or 0)
         w = (value / top_val) * chart_w
-        bar_color = colors.HexColor(sub_material_colorPalette[i % len(sub_material_colorPalette)])
+        bar_color = _rank_color(sub_material_colorPalette, i)
         _draw_right_round_rect(chart_left, y_bar, w, row_h, cap_r, bar_color)
         name = _t_name(it, "material_name", data)
         label_lines = wrap_label(name, "IBMPlexSansThai-Regular", 10, label_area)
@@ -2313,10 +2660,8 @@ def draw_sub_materials(pdf, page_width_points: float, page_height_points: float,
             pdf.setFillColor(TEXT)
             x_out = min(chart_right - 4 - sw, chart_left + w + 6)
             pdf.drawString(x_out, y_bar + row_h / 2.0 - 4, val_text)
-    items_all = items_sorted
-    pie_values = [float(it.get("total_waste", 0) or 0) for it in items_all] or [1.0]
-    pie_colors = [colors.HexColor(sub_material_colorPalette[i % len(sub_material_colorPalette)]) for i in range(len(items_all))] or [BAR2]
-    pie_size = max(60.0, min(pie_card, card_h2) * 0.6)
+    pie_values, pie_colors, others_val = _top5_pie(items_sorted, sub_material_colorPalette)
+    pie_size = max(60.0, min(pie_card, card_h2) * 0.55)
     pie_x = x_right + (pie_card - pie_size) / 2.0
     pie_y = card_y2 + (card_h2 - pie_size) - 36
     pdf.setFillColor(TEXT)
@@ -2330,19 +2675,23 @@ def draw_sub_materials(pdf, page_width_points: float, page_height_points: float,
     right_x = x_right + pie_card - 12
     box_size = 8
     pdf.setFont("IBMPlexSansThai-Regular", 10)
-    for i, it in enumerate(top5):
-        y = start_y - i * (row_h + 6)
-        c = colors.HexColor(sub_material_colorPalette[i % len(sub_material_colorPalette)])
+    legend_rows = list(top5)
+    if others_val > 0:
+        legend_rows.append({"_others": True, "total_waste": others_val})
+    legend_step = 17 if len(legend_rows) > 5 else row_h + 6   # 6 rows (top 5 + others) must fit the card
+    for i, it in enumerate(legend_rows):
+        y = start_y - i * legend_step
+        c = colors.HexColor(OTHERS_GREY) if it.get("_others") else _rank_color(sub_material_colorPalette, i)
         pdf.setFillColor(c)
         pdf.roundRect(left_x, y - box_size + 7, box_size, box_size, 2, stroke=0, fill=1)
-        name = _t_name(it, "material_name", data)
+        name = _t('others', data) if it.get("_others") else _t_name(it, "material_name", data)
         pdf.setFillColor(TEXT)
         max_name_w = (right_x - left_x) - box_size - 54
         label = name
         while stringWidth(label, "IBMPlexSansThai-Regular", 10) > max_name_w and len(label) > 1:
             label = label[:-2] + "…"
         pdf.drawString(left_x + box_size + 6, y, label)
-        perc = it.get("proportion_percent")
+        perc = None if it.get("_others") else it.get("proportion_percent")
         if perc is None:
             total_w = float((data.get("sub_materials_data", {}) or {}).get("total_waste", 0) or 0) or sum(pie_values) or 1.0
             perc = (float(it.get("total_waste", 0) or 0) / total_w) * 100.0
@@ -2352,109 +2701,53 @@ def draw_sub_materials(pdf, page_width_points: float, page_height_points: float,
     _footer(pdf, page_width_points, data)
 
 def draw_sub_materials_table(pdf, page_width_points: float, page_height_points: float, data: dict) -> None:
+    """Sub materials grouped by main material: a group row with the group's subtotal, its
+    materials indented under it, and a closing total row. A group that continues on the next
+    page repeats its header there "(cont.)"; a group header never ends a page."""
     padding = 0.78 * inch
-    rows_per_page = 10
-    # Sub header ends at page_height_points - (1.96 * inch), content starts 24 points below
     content_top = page_height_points - (1.96 * inch) - 24
     header_y = content_top - 24
     header_text_y = content_top - 15
-    grouped = (data.get("sub_materials_data", {}) or {}).get("porportions_grouped", {}) or {}
-    flat_rows = []
+    sm = data.get("sub_materials_data", {}) or {}
+    grouped = sm.get("porportions_grouped", {}) or {}
+    rows, all_items = [], []
     for group_name, items in grouped.items():
-        flat_rows.append(("group", group_name))
-        for item in items or []:
-            flat_rows.append(("item", item))
-    total_rows = len(flat_rows)
-    start_idx = 0
-    while start_idx < total_rows:
-        # Determine how many rows can fit on this page
-        # Check if we need to skip a group header that can't fit with at least one member
-        page_rows = []
-        current_idx = start_idx
-        min_y = 1.5 * inch  # Minimum y position for content
-        
-        while current_idx < total_rows and len(page_rows) < rows_per_page:
-            row_type, payload = flat_rows[current_idx]
-            
-            # If this is a group header, check if at least one member can fit after it
-            if row_type == "group":
-                # Check if there's at least one item after this group header
-                if current_idx + 1 < total_rows and flat_rows[current_idx + 1][0] == "item":
-                    # Check if we have room for both the group header and at least one item
-                    rows_needed = 2  # group header + at least 1 item
-                    if len(page_rows) + rows_needed <= rows_per_page:
-                        page_rows.append((row_type, payload))
-                        current_idx += 1
-                    else:
-                        # Not enough room, break to start new page
-                        break
-                else:
-                    # No items after this group, skip it (orphaned group header)
-                    current_idx += 1
-                    continue
-            else:
-                # Regular item, add it
-                page_rows.append((row_type, payload))
-                current_idx += 1
-        
-        # If no rows were added, skip to next item to avoid infinite loop
-        if not page_rows:
-            start_idx += 1
+        items = [it for it in (items or []) if isinstance(it, dict)]
+        if not items:
             continue
-        
+        all_items.extend(items)
+        group = {
+            "kind": "group", "name": group_name, "count": len(items), "keep_with_next": True,
+            "total_waste": sum(float(it.get("total_waste", 0) or 0) for it in items),
+            "proportion_percent": sum(float(it.get("proportion_percent", 0) or 0) for it in items),
+            "ghg_reduction": sum(float(it.get("ghg_reduction", 0) or 0) for it in items),
+        }
+        rows.append(group)
+        for it in items:
+            rows.append({"kind": "item", "item": it, "grouped": True, "group": group})
+    if not rows:
+        flat = [it for it in (sm.get("porportions") or []) if isinstance(it, dict)]
+        all_items = flat
+        rows = [{"kind": "item", "item": it} for it in flat]
+    if not rows:
+        return
+    rows.append(_material_total_row(all_items))
+
+    def continuation(prev_page, next_row):
+        g = next_row.get("group") if next_row.get("kind") == "item" else None
+        return dict(g, kind="group_cont", keep_with_next=False) if g else None
+
+    cols = _material_table_cols(page_width_points, padding)
+    pages = _paginate_table_rows(rows, 10, is_data=lambda r: r.get("kind") == "item", continuation=continuation)
+    for page_rows in pages:
         pdf.showPage()
         _header(pdf, page_width_points, page_height_points, data)
         _sub_header(pdf, page_width_points, page_height_points, data, _t('sub_materials', data))
-        pdf.setFillColor(colors.HexColor("#f5faf8"))
-        draw_table(pdf, padding, header_y, page_width_points - 2 * padding, 24, 8, "Header")
-        pdf.setFillColor(TEXT)
-        pdf.setFont("IBMPlexSansThai-Medium", 9)
-        pdf.drawString(padding + 16, header_text_y, _t('sub_material', data))
-        pdf.drawString(padding + 3.2 * inch, header_text_y, _t('total_waste_kg', data))
-        pdf.drawString(padding + 5.8 * inch, header_text_y, _t('percentage_pct', data))
-        # Right-align the GHG header so its right edge is 16pt from the right table border
-        ghg_header = _t('ghg_reduction_kgco2e', data)
-        ghg_right = page_width_points - padding - 16
-        ghg_header_w = stringWidth(ghg_header, "IBMPlexSansThai-Medium", 9)
-        pdf.drawString(ghg_right - ghg_header_w, header_text_y, ghg_header)
-        # Compute right edges for Total Waste and Percentage columns (align values to these)
-        _col_pad_sm = 8
-        _right_total_sm = padding + 5.8 * inch - _col_pad_sm - 110
-        _right_percent_sm = padding + 8.5 * inch - _col_pad_sm - 118
-        for idx, (row_type, payload) in enumerate(page_rows):
-            y_base = header_y - 32 - (idx * 32)
-            table_type = "Footer" if idx == len(page_rows) - 1 else "Body"
-            # Alternating background for all Body/Footer rows starting white
-            row_bg = WHITE if (idx % 2 == 0) else colors.HexColor("#f5faf8")
-            if row_type == "group":
-                pdf.setFillColor(row_bg)
-                draw_table(pdf, padding, y_base, page_width_points - 2 * padding, 32, 8, table_type)
-                pdf.setFillColor(TEXT)
-                pdf.setFont("IBMPlexSansThai-Medium", 10)
-                pdf.drawString(padding + 16, y_base + 12, _fit_text_to_width(str(payload), "IBMPlexSansThai-Medium", 10, page_width_points - 2 * padding - 32))
-            else:
-                mat = payload
-                pdf.setFillColor(row_bg)
-                draw_table(pdf, padding, y_base, page_width_points - 2 * padding, 32, 8, table_type)
-                pdf.setFillColor(TEXT)
-                pdf.setFont("IBMPlexSansThai-Regular", 9)
-                y_text = y_base + 12
-                pdf.drawString(padding + 16, y_text, _fit_text_to_width(_t_name(mat, "material_name", data), "IBMPlexSansThai-Regular", 9, 3.2 * inch - 90))
-                # Right-align Total Waste value
-                _txt_total_sm = _format_number(mat.get("total_waste", 0))
-                _w_total_sm = stringWidth(_txt_total_sm, "IBMPlexSansThai-Regular", 9)
-                pdf.drawString(_right_total_sm - _w_total_sm, y_text, _txt_total_sm)
-                # Right-align Percentage value
-                _txt_percent_sm = f"{float(mat.get('proportion_percent', 0) or 0):.2f}%"
-                _w_percent_sm = stringWidth(_txt_percent_sm, "IBMPlexSansThai-Regular", 9)
-                pdf.drawString(_right_percent_sm - _w_percent_sm, y_text, _txt_percent_sm)
-                # Right-align the GHG value to keep 16pt gap from right border
-                ghg_val = _format_number(mat.get("ghg_reduction", 0))
-                ghg_val_w = stringWidth(ghg_val, "IBMPlexSansThai-Regular", 9)
-                pdf.drawString(ghg_right - ghg_val_w, y_text, ghg_val)
+        _material_table_header(pdf, page_width_points, padding, header_y, header_text_y, _t('sub_material', data), data, cols)
+        for idx, row in enumerate(page_rows):
+            _draw_material_row(pdf, page_width_points, padding, header_y - 32 - idx * 32, idx, row, data, cols,
+                               "material_name", idx == len(page_rows) - 1)
         _footer(pdf, page_width_points, data)
-        # Update start_idx to continue from where we left off
-        start_idx = current_idx
 
 def draw_waste_diversion(pdf, page_width_points: float, page_height_points: float, data: dict) -> None:
     pdf.showPage()

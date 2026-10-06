@@ -28,6 +28,8 @@ def _month_boundaries(now: datetime):
     return this_start, last_start
 
 
+from .packaging_conversion import packaging_ghg_kg  # noqa: E402
+
 class OverviewService:
     def __init__(self, db: Session):
         self.db = db
@@ -523,6 +525,7 @@ class OverviewService:
                 )
                 .scalar() or 0
             )
+            ghg_kg += packaging_ghg_kg(self.db, RewardPointTransaction.reward_campaign_id == c.id)
 
             # Stock for this campaign (join via reward_campaign_catalog → reward_catalog)
             stock_rows = (
@@ -804,7 +807,9 @@ class OverviewService:
                 RewardPointTransaction.reward_campaign_id.in_(eligible_ids),
                 RewardPointTransaction.reference_type == "claim",
                 RewardPointTransaction.deleted_date.is_(None),
-                RewardActivityMaterial.type == metric,
+                # packaging claims are weighed in kg too ([PACKAGING] value = kg)
+                RewardActivityMaterial.type.in_(("material", "packaging")) if metric == "material"
+                else RewardActivityMaterial.type == metric,
             )
         )
         if date_from_dt is not None:
@@ -1380,13 +1385,18 @@ class OverviewService:
                 RewardPointTransaction.deleted_date.is_(None),
             )
         )
+        extra = [RewardPointTransaction.organization_id == organization_id]
         if start is not None:
             q = q.filter(RewardPointTransaction.claimed_date >= start)
+            extra.append(RewardPointTransaction.claimed_date >= start)
         if end is not None:
             q = q.filter(RewardPointTransaction.claimed_date < end)
+            extra.append(RewardPointTransaction.claimed_date < end)
         if campaign_id is not None:
             q = q.filter(RewardPointTransaction.reward_campaign_id == campaign_id)
-        return float(q.scalar() or 0)
+            extra.append(RewardPointTransaction.reward_campaign_id == campaign_id)
+        # [PACKAGING] + Σ component kg × calc_ghg for packaging claims
+        return float(q.scalar() or 0) + packaging_ghg_kg(self.db, *extra)
 
     def _sum_waste_revenue(self, organization_id: int, start, end, campaign_id=None) -> float:
         q = (

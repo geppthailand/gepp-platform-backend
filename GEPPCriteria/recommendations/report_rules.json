@@ -239,7 +239,7 @@
         ]
       },
       "reason": {
-        "th": "สัดส่วนขยะรีไซเคิลและขยะอินทรีย์ต่อขยะทั้งหมด ลดจาก {diversion_pct_prev:pct} ในช่วง {prev_label} เหลือ {diversion_pct:pct} ({diversion_change_pts:pts}) แสดงว่าการคัดแยกแย่ลงอย่างชัดเจน",
+        "th": "สัดส่วนวัสดุรีไซเคิลและขยะอินทรีย์ต่อขยะทั้งหมด ลดจาก {diversion_pct_prev:pct} ในช่วง {prev_label} เหลือ {diversion_pct:pct} ({diversion_change_pts:pts}) แสดงว่าการคัดแยกแย่ลงอย่างชัดเจน",
         "en": "The recyclable + organic share fell from {diversion_pct_prev:pct} ({prev_label}) to {diversion_pct:pct} ({diversion_change_pts:pts}): sorting has clearly slipped."
       }
     },
@@ -269,7 +269,7 @@
         ]
       },
       "reason": {
-        "th": "สัดส่วนขยะรีไซเคิลและขยะอินทรีย์ต่อขยะทั้งหมด ลดจาก {diversion_pct_prev:pct} ในช่วง {prev_label} เหลือ {diversion_pct:pct} ({diversion_change_pts:pts}) แสดงว่าการคัดแยกแย่ลงอย่างชัดเจน",
+        "th": "สัดส่วนวัสดุรีไซเคิลและขยะอินทรีย์ต่อขยะทั้งหมด ลดจาก {diversion_pct_prev:pct} ในช่วง {prev_label} เหลือ {diversion_pct:pct} ({diversion_change_pts:pts}) แสดงว่าการคัดแยกแย่ลงอย่างชัดเจน",
         "en": "The recyclable + organic share fell from {diversion_pct_prev:pct} ({prev_label}) to {diversion_pct:pct} ({diversion_change_pts:pts}): sorting has clearly slipped."
       }
     },
@@ -299,7 +299,7 @@
         ]
       },
       "reason": {
-        "th": "สัดส่วนขยะรีไซเคิลและขยะอินทรีย์ต่อขยะทั้งหมด ลดจาก {diversion_pct_prev:pct} ในช่วง {prev_label} เหลือ {diversion_pct:pct} ({diversion_change_pts:pts}) แสดงว่าการคัดแยกแย่ลงอย่างชัดเจน",
+        "th": "สัดส่วนวัสดุรีไซเคิลและขยะอินทรีย์ต่อขยะทั้งหมด ลดจาก {diversion_pct_prev:pct} ในช่วง {prev_label} เหลือ {diversion_pct:pct} ({diversion_change_pts:pts}) แสดงว่าการคัดแยกแย่ลงอย่างชัดเจน",
         "en": "The recyclable + organic share fell from {diversion_pct_prev:pct} ({prev_label}) to {diversion_pct:pct} ({diversion_change_pts:pts}): sorting has clearly slipped."
       }
     },
@@ -533,7 +533,7 @@
         "th": [
           "แยกใส่ถุงแดงและภาชนะที่ปิดมิดชิด",
           "ส่งกำจัดผ่านผู้รับขยะติดเชื้อที่ได้รับอนุญาต",
-          "ห้ามปนกับขยะทั่วไปหรือขยะรีไซเคิล"
+          "ห้ามปนกับขยะทั่วไปหรือวัสดุรีไซเคิล"
         ],
         "en": [
           "Bag it in red bags inside sealed containers",
@@ -861,7 +861,7 @@
         "th": "ลดการใช้กระดาษในสำนักงาน",
         "en": "Cut paper use in the office"
       },
-      "when": "paper_rank <= 3 and paper_pct >= 5",
+      "when": "paper_rank <= 3 and paper_pct >= 5 and diversion_pct < 60",
       "priority": "45 + paper_pct",
       "bullets": {
         "th": [
@@ -891,7 +891,7 @@
         "th": "ลดสื่อสิ่งพิมพ์ในกิจกรรม",
         "en": "Cut printed material at events"
       },
-      "when": "paper_rank <= 3 and paper_pct >= 5",
+      "when": "paper_rank <= 3 and paper_pct >= 5 and diversion_pct < 60",
       "priority": "45 + paper_pct",
       "bullets": {
         "th": [
@@ -1257,12 +1257,12 @@
         "th": [
           "เปลี่ยนถังรวมเป็นถังแยก 2–3 ช่องตามโซนทำงาน",
           "กล่องและขวดที่ล้างแล้วรีไซเคิลได้ ไม่ต้องทิ้งเป็นขยะทั่วไป",
-          "ตั้งเป้าลดสัดส่วนขยะทั่วไปลง 5–10% ในไตรมาสถัดไป"
+          "ตั้งเป้าให้สัดส่วนขยะทั่วไปต่ำกว่า {general_pct:pct} ในไตรมาสถัดไป"
         ],
         "en": [
           "Swap single bins for 2–3 compartment bins in each work zone",
           "Rinsed boxes and bottles are recyclable, not general waste",
-          "Aim to cut the general-waste share by 5–10% next quarter"
+          "Aim to bring the general-waste share below {general_pct:pct} next quarter"
         ]
       },
       "reason": {
@@ -1477,7 +1477,7 @@
         ]
       },
       "reason": {
-        "th": "สัดส่วนขยะรีไซเคิลและขยะอินทรีย์เพิ่มจาก {diversion_pct_prev:pct} ในช่วง {prev_label} เป็น {diversion_pct:pct} ({diversion_change_pts:pts}) เป็นสัญญาณว่าการคัดแยกได้ผล",
+        "th": "สัดส่วนวัสดุรีไซเคิลและขยะอินทรีย์เพิ่มจาก {diversion_pct_prev:pct} ในช่วง {prev_label} เป็น {diversion_pct:pct} ({diversion_change_pts:pts}) เป็นสัญญาณว่าการคัดแยกได้ผล",
         "en": "The recyclable + organic share rose from {diversion_pct_prev:pct} ({prev_label}) to {diversion_pct:pct} ({diversion_change_pts:pts}), a sign sorting is working."
       }
     },
@@ -1646,7 +1646,7 @@
         "th": "การเพิ่มประสิทธิภาพตำแหน่งถังขยะ",
         "en": "Bin placement optimisation"
       },
-      "when": "total_kg >= 5 and general_pct >= 40 and general_kg > diversion_kg",
+      "when": "total_kg >= 5 and general_pct >= 40 and general_kg > diversion_kg and diversion_pct < 40",
       "priority": "46 + (general_pct - 40) * 0.4",
       "bullets": {
         "th": [
@@ -1676,7 +1676,7 @@
         "th": "วางถังรีไซเคิลคู่ถังขยะทั่วไปในสำนักงาน",
         "en": "Pair recycling and general bins in the office"
       },
-      "when": "total_kg >= 5 and general_pct >= 40 and general_kg > diversion_kg",
+      "when": "total_kg >= 5 and general_pct >= 40 and general_kg > diversion_kg and diversion_pct < 40",
       "priority": "46 + (general_pct - 40) * 0.4",
       "bullets": {
         "th": [
@@ -1706,7 +1706,7 @@
         "th": "เจ้าหน้าที่ประจำจุดทิ้งขยะช่วงคนเยอะ",
         "en": "Staff the bin stations at peak times"
       },
-      "when": "total_kg >= 5 and general_pct >= 40 and general_kg > diversion_kg",
+      "when": "total_kg >= 5 and general_pct >= 40 and general_kg > diversion_kg and diversion_pct < 40",
       "priority": "46 + (general_pct - 40) * 0.4",
       "bullets": {
         "th": [
