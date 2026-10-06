@@ -475,9 +475,9 @@ def handle_update_organization_setup(org_service: OrganizationService, user_id: 
                 setup_data['auto_approve_scale_transactions_editable'] = (
                     organization.owner_id == user_id
                 )
-                setup_data['transaction_evidence_mode'] = (
-                    org_service.get_organization_by_id(organization.id).transaction_evidence_mode or 'none'
-                )
+                setup_data['transaction_evidence_mode'] = getattr(
+                    org_service.get_organization_by_id(organization.id), 'transaction_evidence_mode', None
+                ) or 'none'
         else:
             # Prepare setup data including locations
             setup_data_dict = setup_request.to_dict()

@@ -34,7 +34,8 @@ VOTES = ('like', 'dislike')
 SECTIONS = ('risk', 'opportunity', 'quickwin')
 MAX_COMMENT = 2000
 FILTER_KEYS = ('location_ids', 'origin_ids', 'origin_combos', 'filter_tag_ids', 'filter_tenant_ids',
-               'location_tag_id', 'tenant_id', 'material_ids', 'destination_ids')
+               'location_tag_id', 'tenant_id', 'material_ids', 'destination_ids',
+               'time_from', 'time_to', 'time_tz')
 
 
 def _day(v) -> Optional[date]:

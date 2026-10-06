@@ -63,9 +63,9 @@ main_material_colorPalette = [
   "#047857", "#115E59",
   "#022C22", "#042F2E",
 ]
-# Pie charts in the PDF: the top 5 get clearly different colours, everything else is one grey.
-# The bar chart above the pie uses the same five so the two read together.
-TOP5_PALETTE = ["#1f6f54", "#2a78d6", "#eda100", "#e3734a", "#7c5cbf"]
+# Materials pages: bars, pie and legend use the dashboard's palettes by rank (main materials =
+# MaterialsTab, sub materials = SubMaterialsSection), so item N has the same colour as on
+# screen. The PDF pie shows the top 5 and folds the rest into one grey "others" slice.
 OTHERS_GREY = "#c8ced4"
 sub_material_colorPalette = [
     "#166534", "#4D7C0F", "#854D0E",
@@ -76,13 +76,17 @@ sub_material_colorPalette = [
 ]
 
 
-def _top5_pie(items_sorted: list, value_key: str = "total_waste") -> tuple:
-    """(values, colours, others_value): top 5 in TOP5_PALETTE, the rest folded into one grey slice."""
+def _rank_color(palette: list, i: int):
+    return colors.HexColor(palette[i % len(palette)])
+
+
+def _top5_pie(items_sorted: list, palette: list, value_key: str = "total_waste") -> tuple:
+    """(values, colours, others_value): top 5 in the page's palette, the rest one grey slice."""
     vals = [float(it.get(value_key, 0) or 0) for it in items_sorted]
     top = vals[:5]
     rest = sum(vals[5:])
     values = top + ([rest] if rest > 0 else [])
-    cols = [colors.HexColor(TOP5_PALETTE[i]) for i in range(len(top))] + ([colors.HexColor(OTHERS_GREY)] if rest > 0 else [])
+    cols = [_rank_color(palette, i) for i in range(len(top))] + ([colors.HexColor(OTHERS_GREY)] if rest > 0 else [])
     return (values or [1.0]), (cols or [colors.HexColor(OTHERS_GREY)]), rest
 
 
@@ -388,26 +392,6 @@ def _label_progress(pdf, x, y, w, label, value_text, ratio, bar_color, back_colo
     pdf.setFont("IBMPlexSansThai-Regular", 10)
     txt_w = stringWidth(value_text, "IBMPlexSansThai-Regular", 10)
     pdf.drawString(x + w - txt_w, y + 16, value_text)
-    _progress_bar(pdf, x, y, w, bar_h, ratio, bar_color, back_color)
-
-def _share_progress(pdf, x, y, w, label, value_text, share_text, ratio, bar_color, back_color, bar_h=8):
-    """Label on the left; value then its share of the total (green) on the right; bar under."""
-    share_w = stringWidth(share_text, MED, 9.5)
-    val_w = stringWidth(value_text, REG, 10)
-    # Long labels (e.g. "พลาสติกที่นำกลับมาใช้ประโยชน์ (กก.)") shrink to fit before the numbers.
-    label_room = w - share_w - 10 - val_w - 10
-    size = 10.0
-    while size > 8.0 and stringWidth(label, REG, size) > label_room:
-        size -= 0.25
-    pdf.setFillColor(TEXT)
-    pdf.setFont(REG, size)
-    pdf.drawString(x, y + 16, _fit_text_to_width(label, REG, size, label_room))
-    pdf.setFillColor(colors.HexColor("#2f8f6b"))
-    pdf.setFont(MED, 9.5)
-    pdf.drawString(x + w - share_w, y + 16, share_text)
-    pdf.setFillColor(TEXT)
-    pdf.setFont(REG, 10)
-    pdf.drawString(x + w - share_w - 10 - val_w, y + 16, value_text)
     _progress_bar(pdf, x, y, w, bar_h, ratio, bar_color, back_color)
 
 def _draw_bar_top_round_rect(pdf, x, y, w, h, r, color):
@@ -762,6 +746,8 @@ MUTED = colors.HexColor("#6f8a7e")
 INK = colors.HexColor("#2e5c4b")
 RECYCLED_COLOR = colors.HexColor("#2f8f6b")
 REST_COLOR = colors.HexColor("#d3e6dc")
+TREND_COLOR = colors.HexColor("#1f4a3a")   # same as the web trend line
+RECYCLABLE_CATEGORY_ID = "1"   # material_categories "วัสดุรีไซเคิล"
 INCREASE_COLOR = colors.HexColor("#c2562e")
 DECREASE_COLOR = colors.HexColor("#1f8a5e")
 SECTION_COLORS = {
@@ -1000,16 +986,21 @@ def _chart_series(data: dict) -> tuple:
     """(granularity, labels, series, rate_row) for the overview chart.
 
     series = [(name, colour, values)] bottom → top, following the user's breakdown:
-      recycled      recycled vs the rest (default), rate row = recycling rate per bucket
+      recycled      recyclables vs the rest, rate row = recycling rate per bucket
       category:<id> that category vs the rest, rate row = its share per bucket
-      all           every category stacked, no rate row
+      all           every category stacked (default), no rate row
     """
     gran, buckets = _chart_buckets(data)
     labels = [b["label"] for b in buckets]
     totals = [b["total"] for b in buckets]
-    mode = str(data.get("overview_breakdown") or "recycled")
+    mode = str(data.get("overview_breakdown") or "all")
     meta = _category_meta(data)
     other = _t('other_waste', data)
+    # Same rules as the web: the recyclable category IS the default view (no separate
+    # "category:1"), and without per-category amounts the category views fall back to it.
+    if mode == f"category:{RECYCLABLE_CATEGORY_ID}" or (
+            mode != "recycled" and not any(b["by_cat"] for b in buckets)):
+        mode = "recycled"
 
     def share_row(label, values):
         return (label, [f"{(v / t * 100.0) if t > 0 else 0:.1f}%" for v, t in zip(values, totals)])
@@ -1064,6 +1055,7 @@ def _stacked_month_chart(pdf, x, y, w, h, labels, series, rate_row, data):
         pdf.setFillColor(MUTED)
         pdf.setFont(REG, 7.5)
         pdf.drawString(x + 12, gy - 30, rate_row[0])
+    tops = []   # (centre x, top y) per bar: trend line + value labels go on top of all bars
     for i, label in enumerate(labels):
         cx = gx + slot * (i + 0.5)
         bx = cx - bar_w / 2.0
@@ -1080,12 +1072,7 @@ def _stacked_month_chart(pdf, x, y, w, h, labels, series, rate_row, data):
                 pdf.setFillColor(sv[1])
                 pdf.rect(bx, base, bar_w, hgt, stroke=0, fill=1)
             base += hgt
-        # Value on top of the bar: small and muted so a full year stays readable;
-        # dropped entirely once the bars get too narrow to carry a number.
-        if n <= 18:
-            pdf.setFillColor(MUTED)
-            pdf.setFont(REG, 6.5)
-            pdf.drawCentredString(cx, base + 3, _format_number(totals[i]))
+        tops.append((cx, base))
         pdf.setFillColor(TEXT)
         pdf.setFont(REG, 8.5)
         pdf.drawCentredString(cx, gy - 14, label)
@@ -1093,6 +1080,30 @@ def _stacked_month_chart(pdf, x, y, w, h, labels, series, rate_row, data):
             pdf.setFillColor(series[0][1] if series[0][1] != REST_COLOR else RECYCLED_COLOR)
             pdf.setFont(MED, 8)
             pdf.drawCentredString(cx, gy - 30, rate_row[1][i])
+    # Trend line through the bar totals (the user's "เส้นแนวโน้ม" switch on the web).
+    if data.get("overview_trend") and len(tops) >= 2:
+        pdf.setStrokeColor(TREND_COLOR)
+        pdf.setLineWidth(1.2)
+        path = pdf.beginPath()
+        path.moveTo(*tops[0])
+        for pt in tops[1:]:
+            path.lineTo(*pt)
+        pdf.drawPath(path, stroke=1, fill=0)
+        pdf.setFillColor(TREND_COLOR)
+        for (px, py) in tops:
+            pdf.circle(px, py, 2.2, stroke=0, fill=1)
+    # Value on top of the bar: small and muted so a full year stays readable;
+    # dropped entirely once the bars get too narrow to carry a number.
+    if n <= 18:
+        pdf.setFont(REG, 6.5)
+        for i, (px, py) in enumerate(tops):
+            txt = _format_number(totals[i])
+            if data.get("overview_trend"):   # keep the number readable where the line crosses it
+                tw = stringWidth(txt, REG, 6.5)
+                pdf.setFillColor(WHITE)
+                pdf.roundRect(px - tw / 2.0 - 2, py + 2.5, tw + 4, 8, 2, stroke=0, fill=1)
+            pdf.setFillColor(MUTED)
+            pdf.drawCentredString(px, py + 4, txt)
 
 
 def _stacked_area_chart(pdf, x, y, w, h, labels, series, data):
@@ -1150,28 +1161,54 @@ def _stacked_area_chart(pdf, x, y, w, h, labels, series, data):
         pdf.drawCentredString(xs[i], gy - 14, labels[i])
 
 
-def _fit_legend(pdf, right_x, y, entries, max_w):
-    """Legend swatches right-aligned in one line; shrinks / truncates names to fit max_w."""
+def _fit_legend(pdf, right_x, y, entries, max_w, full_w=None):
+    """Legend swatches, right-aligned, full names (never truncated).
+
+    One line beside the chart title when it fits in max_w at a readable size; otherwise the
+    legend wraps onto rows of up to full_w under the title. Returns the y of the lowest row,
+    so the caller can start the chart below it.
+    """
+    gap = 27   # swatch (9) + gaps around it
+
+    def item_w(nm, sz):
+        return stringWidth(nm, REG, sz) + gap
+
+    def draw_row(row, row_y, sz):
+        pdf.setFont(REG, sz)
+        cur = right_x
+        for (label, col) in reversed(row):
+            cur -= stringWidth(label, REG, sz)
+            pdf.setFillColor(TEXT)
+            pdf.drawString(cur, row_y, label)
+            cur -= 13
+            pdf.setFillColor(col)
+            pdf.roundRect(cur, row_y, 9, 9, 2, stroke=0, fill=1)
+            cur -= 14
+
     size = 8.5
-    def width(sz, names):
-        return sum(stringWidth(nm, REG, sz) + 27 for nm in names)
-    names = [e[0] for e in entries]
-    while size > 6.5 and width(size, names) > max_w:
+    while size > 7.5 and sum(item_w(e[0], size) for e in entries) > max_w:
         size -= 0.5
-    if width(size, names) > max_w and names:
-        per = max(20.0, max_w / len(names) - 27)
-        names = [_fit_text_to_width(nm, REG, size, per) for nm in names]
-    pdf.setFont(REG, size)
-    cur = right_x
-    for (label, col) in reversed(list(zip(names, [e[1] for e in entries]))):
-        lw = stringWidth(label, REG, size)
-        cur -= lw
-        pdf.setFillColor(TEXT)
-        pdf.drawString(cur, y, label)
-        cur -= 13
-        pdf.setFillColor(col)
-        pdf.roundRect(cur, y, 9, 9, 2, stroke=0, fill=1)
-        cur -= 14
+    if not entries or sum(item_w(e[0], size) for e in entries) <= max_w or not full_w:
+        draw_row(list(entries), y, size)
+        return y
+    # Wrap under the title: fill rows up to full_w, each row right-aligned.
+    size = 8
+    rows, row, row_w = [], [], 0.0
+    for nm, col in entries:
+        nm = _fit_text_to_width(nm, REG, size, full_w - gap)   # only a name wider than the card
+        w = item_w(nm, size)
+        if row and row_w + w > full_w:
+            rows.append(row)
+            row, row_w = [], 0.0
+        row.append((nm, col))
+        row_w += w
+    if row:
+        rows.append(row)
+    row_y = y
+    for r in rows:
+        row_y -= 14
+        draw_row(r, row_y, size)
+    return row_y
 
 
 def _rate_title_value(data: dict) -> tuple:
@@ -1214,8 +1251,9 @@ def draw_overview(pdf, page_width_points: float, page_height_points: float, data
     _stat_chip(pdf, margin + chip_w + chip_gap, chip_y, chip_w, chip_h, _t('total_approved', data), tx_approved_text)
 
     # Key indicators: every bar is a share of the total waste of the selected sources
-    # (total = 100%), with the % printed on the right of each row.
-    ki_h = 2.35 * inch   # room for the share note under the three rows
+    # (total = 100%). Like the dashboard card: the label on its own line, then the value on
+    # the left and the share on the right, then the bar.
+    ki_h = 184           # three stacked rows + the share note
     ki_y = chip_y - 8 - ki_h
     _rounded_card(pdf, margin, ki_y, left_col_w, ki_h, radius=8)
     pad = 28
@@ -1235,15 +1273,24 @@ def draw_overview(pdf, page_width_points: float, page_height_points: float, data
     ]
     for i, (key, val, color) in enumerate(ki_rows):
         share = (val / tw) if tw > 0 else 0.0
-        _share_progress(pdf, row_x, row_y - 24 - 34 * i, row_w, _t(key, data), _format_number(val),
-                        f"{share * 100:.2f}%", min(1.0, share), colors.HexColor(color), colors.HexColor("#e1e7ef"), bar_h=6)
+        top = row_y - 2 - 40 * i
+        pdf.setFillColor(MUTED)
+        pdf.setFont(REG, 9)
+        pdf.drawString(row_x, top, _fit_text_to_width(_t(key, data), REG, 9, row_w))
+        pdf.setFillColor(TEXT)
+        pdf.setFont(MED, 12)
+        pdf.drawString(row_x, top - 16, _format_number(val))
+        pdf.setFillColor(colors.HexColor("#2f8f6b"))
+        pdf.setFont(MED, 10)
+        pdf.drawRightString(row_x + row_w, top - 16, f"{share * 100:.2f}%")
+        _progress_bar(pdf, row_x, top - 27, row_w, 5, min(1.0, share), colors.HexColor(color), colors.HexColor("#e1e7ef"))
     pdf.setFillColor(MUTED)
     pdf.setFont(REG, 7.5)
     pdf.drawString(row_x, ki_y + 11, _fit_text_to_width(_t('key_indicators_share_note', data), REG, 7.5, row_w))
 
     # Top list: locations, tags ("activities") or tenants, following the report mode.
     mode = data.get("report_mode") or "location"
-    tr_h = 2.0 * inch
+    tr_h = 132           # three rows; shorter so the taller key-indicator card still fits the page
     tr_y = ki_y - 8 - tr_h
     _rounded_card(pdf, margin, tr_y, left_col_w, tr_h, radius=8)
     pdf.setFillColor(TEXT)
@@ -1253,12 +1300,12 @@ def draw_overview(pdf, page_width_points: float, page_height_points: float, data
     items = (ov.get("top_recyclables") or [])[:3]
     if items:
         max_val = max(float(it.get("total_waste", 0) or 0) for it in items) or 1.0
-        y_ptr = tr_y + tr_h - 72
+        y_ptr = tr_y + tr_h - 64
         for it in items:
             name = _fit_text_to_width(str(it.get("origin_name", "")), REG, 10, left_col_w - 2 * pad - 90)
             val = float(it.get("total_waste", 0) or 0)
             _label_progress(pdf, margin + pad, y_ptr, left_col_w - 2 * pad, name, _format_number(val), val / max_val, colors.HexColor("#c8ced4"), colors.HexColor("#e1e7ef"), bar_h=6)
-            y_ptr -= 32
+            y_ptr -= 29
     else:
         pdf.setFillColor(MUTED)
         pdf.setFont(REG, 9.5)
@@ -1304,10 +1351,10 @@ def draw_overview(pdf, page_width_points: float, page_height_points: float, data
     title = _t(f'chart_{gran}', data)
     pdf.drawString(overall_x + 16, legend_y, title)
     title_w = stringWidth(title, MED, 10)
-    _fit_legend(pdf, overall_x + right_col_w - 16, legend_y, [(nm, col) for nm, col, _v in series],
-                right_col_w - 32 - title_w - 20)
+    legend_bottom = _fit_legend(pdf, overall_x + right_col_w - 16, legend_y, [(nm, col) for nm, col, _v in series],
+                                right_col_w - 32 - title_w - 20, full_w=right_col_w - 32)
     cy = overall_y + 10
-    ch = legend_y - 10 - cy
+    ch = legend_bottom - 10 - cy
     if gran == "daily":
         _stacked_area_chart(pdf, overall_x + 8, cy, right_col_w - 16, ch, labels, series, data)
     else:
@@ -1578,8 +1625,9 @@ def draw_performance(pdf, page_width_points: float, page_height_points: float, d
         total_text_w = stringWidth(total_text, "IBMPlexSansThai-Regular", 10)
         pdf.drawString(1 * inch + 2.8 * inch - total_text_w, y_total + bar_h + 0.12 * inch, total_text)
         _progress_bar(pdf, 1 * inch, y_total, 2.8 * inch, bar_h, 1.0, colors.HexColor("#c5d2da"))
-        # Subsequent bars for individual waste types
-        for idx, (label, amount) in enumerate(performance_data["metrics"].items()):
+        # Subsequent bars for individual waste types, largest first (as on the dashboard)
+        _metrics = sorted((performance_data.get("metrics") or {}).items(), key=lambda kv: -float(kv[1] or 0))
+        for idx, (label, amount) in enumerate(_metrics):
             y = start_y - (idx + 1) * (bar_h + gap)
             pdf.setFillColor(TEXT)
             pdf.setFont("IBMPlexSansThai-Regular", 10)
@@ -1589,7 +1637,8 @@ def draw_performance(pdf, page_width_points: float, page_height_points: float, d
             value_text = f"{_format_number(amount)} {_t('kg', data)}"
             value_width = stringWidth(value_text, "IBMPlexSansThai-Regular", 10)
             pdf.drawString(1 * inch + 2.8 * inch - value_width, y + bar_h + 0.12 * inch, value_text)
-            _progress_bar(pdf, 1 * inch, y, 2.8 * inch, bar_h, amount / performance_data["totalWasteKg"], MATERIAL_COLORS.get(label, colors.HexColor("#cfe2f3")))
+            _progress_bar(pdf, 1 * inch, y, 2.8 * inch, bar_h, (float(amount or 0) / total_waste_val) if total_waste_val > 0 else 0.0,
+                          MATERIAL_COLORS.get(label, colors.HexColor("#cfe2f3")))
         gap = 1 * inch
         outer_x = gap + 3.22 * inch
         outer_y = left_card_y
@@ -2338,7 +2387,7 @@ def draw_main_materials(pdf, page_width_points: float, page_height_points: float
         y_bar = center_y - (row_h / 2.0)
         value = float(it.get("total_waste", 0) or 0)
         w = (value / top_val) * chart_w
-        bar_color = colors.HexColor(TOP5_PALETTE[i % len(TOP5_PALETTE)])
+        bar_color = _rank_color(main_material_colorPalette, i)
         _draw_right_round_rect(chart_left, y_bar, w, row_h, cap_r, bar_color)
         name = _t_name(it, "main_material_name", data)
         label_lines = wrap_label(name, "IBMPlexSansThai-Regular", 10, label_area)
@@ -2360,7 +2409,7 @@ def draw_main_materials(pdf, page_width_points: float, page_height_points: float
             pdf.setFillColor(TEXT)
             x_out = min(chart_right - 4 - sw, chart_left + w + 6)
             pdf.drawString(x_out, y_bar + row_h / 2.0 - 4, val_text)
-    pie_values, pie_colors, others_val = _top5_pie(items_sorted)
+    pie_values, pie_colors, others_val = _top5_pie(items_sorted, main_material_colorPalette)
     pie_size = max(60.0, min(pie_card, card_h2) * 0.55)
     pie_x = x_right + (pie_card - pie_size) / 2.0
     pie_y = card_y2 + (card_h2 - pie_size) - 36
@@ -2381,7 +2430,7 @@ def draw_main_materials(pdf, page_width_points: float, page_height_points: float
     legend_step = 17 if len(legend_rows) > 5 else row_h + 6   # 6 rows (top 5 + others) must fit the card
     for i, it in enumerate(legend_rows):
         y = start_y - i * legend_step
-        c = colors.HexColor(OTHERS_GREY) if it.get("_others") else colors.HexColor(TOP5_PALETTE[i % len(TOP5_PALETTE)])
+        c = colors.HexColor(OTHERS_GREY) if it.get("_others") else _rank_color(main_material_colorPalette, i)
         pdf.setFillColor(c)
         pdf.roundRect(left_x, y - box_size + 7, box_size, box_size, 2, stroke=0, fill=1)
         name = _t('others', data) if it.get("_others") else _t_name(it, "main_material_name", data)
@@ -2589,7 +2638,7 @@ def draw_sub_materials(pdf, page_width_points: float, page_height_points: float,
         y_bar = center_y - (row_h / 2.0)
         value = float(it.get("total_waste", 0) or 0)
         w = (value / top_val) * chart_w
-        bar_color = colors.HexColor(TOP5_PALETTE[i % len(TOP5_PALETTE)])
+        bar_color = _rank_color(sub_material_colorPalette, i)
         _draw_right_round_rect(chart_left, y_bar, w, row_h, cap_r, bar_color)
         name = _t_name(it, "material_name", data)
         label_lines = wrap_label(name, "IBMPlexSansThai-Regular", 10, label_area)
@@ -2611,7 +2660,7 @@ def draw_sub_materials(pdf, page_width_points: float, page_height_points: float,
             pdf.setFillColor(TEXT)
             x_out = min(chart_right - 4 - sw, chart_left + w + 6)
             pdf.drawString(x_out, y_bar + row_h / 2.0 - 4, val_text)
-    pie_values, pie_colors, others_val = _top5_pie(items_sorted)
+    pie_values, pie_colors, others_val = _top5_pie(items_sorted, sub_material_colorPalette)
     pie_size = max(60.0, min(pie_card, card_h2) * 0.55)
     pie_x = x_right + (pie_card - pie_size) / 2.0
     pie_y = card_y2 + (card_h2 - pie_size) - 36
@@ -2632,7 +2681,7 @@ def draw_sub_materials(pdf, page_width_points: float, page_height_points: float,
     legend_step = 17 if len(legend_rows) > 5 else row_h + 6   # 6 rows (top 5 + others) must fit the card
     for i, it in enumerate(legend_rows):
         y = start_y - i * legend_step
-        c = colors.HexColor(OTHERS_GREY) if it.get("_others") else colors.HexColor(TOP5_PALETTE[i % len(TOP5_PALETTE)])
+        c = colors.HexColor(OTHERS_GREY) if it.get("_others") else _rank_color(sub_material_colorPalette, i)
         pdf.setFillColor(c)
         pdf.roundRect(left_x, y - box_size + 7, box_size, box_size, 2, stroke=0, fill=1)
         name = _t('others', data) if it.get("_others") else _t_name(it, "material_name", data)

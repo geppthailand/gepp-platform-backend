@@ -247,6 +247,11 @@ def _build_filters_from_query_params(query_params: Dict[str, Any], timezone_name
         filters['compare_mode'] = query_params['compare_mode']
     if is_overview_breakdown(query_params.get('overview_breakdown')):
         filters['overview_breakdown'] = query_params['overview_breakdown']
+    if str(query_params.get('overview_trend', '')).lower() in ('1', 'true', '0', 'false'):
+        filters['overview_trend'] = str(query_params['overview_trend']).lower() in ('1', 'true')
+
+    # "เวลาเดิมทุกวัน": only records within these hours on every day of the range
+    filters.update(parse_time_window(query_params, timezone_name))
 
     return filters
 
@@ -286,6 +291,7 @@ _WASTE_TO_ENERGY_CAT_ID = 9  # Material category ID for Waste To Energy
 # area) or tenant. Rows from get_overview_data carry location_tag_id at 20, tenant_id at 21.
 REPORT_MODES = ('location', 'tag', 'tenant')
 from ..users.user_preferences_service import is_overview_breakdown  # noqa: E402
+from ....libs.timeWindow import parse_time_window, TIME_WINDOW_KEYS  # noqa: E402
 _GROUP_ROW_INDEX = {'tag': 20, 'tenant': 21}
 
 
@@ -626,6 +632,7 @@ def _handle_overview_report(
         'origin_ids', 'origin_combos', 'location_ids', 'destination_ids',
         'filter_tag_ids', 'filter_tenant_ids', 'location_tag_id', 'tenant_id',
         'material_ids',
+        'time_from',   # a daily time window narrows the data like any other filter
     )
     _has_scope_filter = bool(filters) and any(
         filters.get(k) is not None for k in _scope_filter_keys
@@ -2080,7 +2087,8 @@ def _handle_comparison_report(
         d_from, d_to = _utc_bounds(start, end)
         side_filters: Dict[str, Any] = {'date_from': d_from, 'date_to': d_to}
         # Same location/tag/tenant/material conventions as the other tabs.
-        for key in ('material_ids', 'location_ids', 'filter_tag_ids', 'filter_tenant_ids', 'destination_ids'):
+        for key in ('material_ids', 'location_ids', 'filter_tag_ids', 'filter_tenant_ids', 'destination_ids',
+                    *TIME_WINDOW_KEYS):
             if filters.get(key):
                 side_filters[key] = filters[key]
         if filters.get('origin_combos'):
@@ -2471,7 +2479,8 @@ def _handle_export_pdf_report(
     filters.setdefault('report_mode', _prefs.get('mode', 'location'))
     filters.setdefault('overview_chart', _prefs.get('overview_chart', 'monthly'))
     filters.setdefault('compare_mode', _prefs.get('compare_mode', 'yearly'))
-    filters.setdefault('overview_breakdown', _prefs.get('overview_breakdown', 'recycled'))
+    filters.setdefault('overview_breakdown', _prefs.get('overview_breakdown', 'all'))
+    filters.setdefault('overview_trend', bool(_prefs.get('overview_trend', False)))
     report_mode = _report_mode(filters)
 
     # 1) Pull data from the existing handlers/services
@@ -2591,6 +2600,10 @@ def _handle_export_pdf_report(
     )
     date_from_disp = _fmt_display_date_tz(filters.get('date_from'), client_tz_name, _show_time)
     date_to_disp = _fmt_display_date_tz(filters.get('date_to'), client_tz_name, _show_time)
+    if filters.get('time_from') and filters.get('time_to'):
+        # "เวลาเดิมทุกวัน": the same hours on every day — say so after the dates
+        _every = 'ทุกวัน' if language == 'th' else 'every day'
+        date_to_disp = f"{date_to_disp} ({filters['time_from']}–{filters['time_to']} {_every})"
 
     # 3) Resolve display user name from UserLocation (by current user id)
     def _display_user_name_from_db(user: Dict[str, Any]) -> str:
@@ -2840,7 +2853,8 @@ def _handle_export_pdf_report(
         # Presentation settings (report mode, chart granularity, comparison mode)
         'report_mode': report_mode,
         'overview_chart': filters.get('overview_chart', 'monthly'),
-        'overview_breakdown': filters.get('overview_breakdown', 'recycled'),
+        'overview_breakdown': filters.get('overview_breakdown', 'all'),
+        'overview_trend': bool(filters.get('overview_trend', False)),
         'compare_mode': filters.get('compare_mode', 'yearly'),
         'date_from': date_from_disp,
         'date_to': date_to_disp,

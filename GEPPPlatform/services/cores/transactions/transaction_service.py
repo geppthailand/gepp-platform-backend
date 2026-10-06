@@ -21,6 +21,7 @@ TRACEABILITY_DATE_TZ = "Asia/Bangkok"
 # auto_approve is a leaf module (logging + typing + sqlalchemy.text only), so this
 # import cannot cycle back into transactions.
 from ....libs.node_ids import to_node_id
+from ....libs.timeWindow import has_time_window, time_window_clause
 from ..iot_devices.auto_approve import SCALE_TRANSACTION_METHOD, scale_pile_source_transaction_id
 
 import boto3
@@ -2114,6 +2115,208 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
             send_email_fn=self._send_txn_rejected_emails,
         )
 
+    # ── Batches (Manual Audit "Approve / Reject All") ─────────────────────────────────────
+    # A bulk approve / reject is ONE event for the people told about it: one bell notification
+    # for the whole batch (resource.audit_batch → the bell opens the batch's list) and one
+    # digest email per recipient carrying what the per-transaction emails carried (id, link,
+    # materials and weights). Recipients are the same as per transaction: the roles configured
+    # for TXN_APPROVED / TXN_REJECTED, plus each transaction's creator (only their own rows
+    # in their digest) when that is not the auditor.
+    BATCH_EMAIL_MAX_ROWS = 200
+
+    def create_audit_batch(self, *, organization_id: int, action: str, transaction_ids: List[int],
+                           created_by_id: int, source: str = 'selected',
+                           filters: Optional[Dict[str, Any]] = None, notes: Optional[str] = None) -> Optional[int]:
+        if not transaction_ids:
+            return None
+        row = self.db.execute(
+            text("""
+                INSERT INTO transaction_audit_batches
+                    (organization_id, action, transaction_ids, total, source, filters, notes, created_by_id)
+                VALUES (:org, :action, :ids, :total, :source, CAST(:filters AS jsonb), :notes, :uid)
+                RETURNING id
+            """),
+            {'org': organization_id, 'action': action, 'ids': [int(t) for t in transaction_ids],
+             'total': len(transaction_ids), 'source': source,
+             'filters': json.dumps(filters or {}, ensure_ascii=False, default=str), 'notes': notes,
+             'uid': created_by_id},
+        ).fetchone()
+        return int(row[0]) if row else None
+
+    def _event_recipients(self, organization_id: int, event: str, actor_id: int, channel_bit: int) -> List[tuple]:
+        """[(user_location_id, email)] for the roles that get `event` on this channel (1 = email,
+        2 = bell) — the same rule as _create_txn_event_notifications."""
+        role_ids = [r[0] for r in self.db.execute(
+            text("""
+                SELECT role_id FROM organization_notification_settings
+                WHERE organization_id = :org_id AND event = :event
+                  AND is_active = TRUE AND deleted_date IS NULL
+                  AND (channels_mask & :bit) != 0
+            """),
+            {'org_id': organization_id, 'event': event, 'bit': channel_bit},
+        ).fetchall()]
+        if not role_ids:
+            return []
+        rows = self.db.execute(
+            text("""
+                SELECT DISTINCT ul.id, ul.email FROM user_locations ul
+                LEFT JOIN organization_roles orr ON orr.id = ul.organization_role_id
+                WHERE ul.organization_id = :org_id
+                  AND ul.is_user = TRUE AND ul.is_active = TRUE AND ul.deleted_date IS NULL
+                  AND (
+                    (ul.organization_role_id = ANY(:role_ids)
+                      AND (orr.key != 'data_input' OR ul.id = :created_by_id))
+                    OR (ul.organization_role_id IS NULL
+                      AND EXISTS (
+                        SELECT 1 FROM organization_roles ar
+                        WHERE ar.organization_id = :org_id AND ar.key = 'admin'
+                          AND ar.id = ANY(:role_ids)
+                      ))
+                  )
+            """),
+            {'org_id': organization_id, 'role_ids': role_ids, 'created_by_id': actor_id},
+        ).fetchall()
+        return [(int(r[0]), (r[1] or '').strip()) for r in rows]
+
+    def _materials_for_transactions(self, transaction_ids: List[int]) -> Dict[int, List[Dict[str, Any]]]:
+        out: Dict[int, List[Dict[str, Any]]] = {}
+        if not transaction_ids:
+            return out
+        rows = self.db.execute(
+            text("""
+                SELECT tr.created_transaction_id, m.name_th, tr.origin_weight_kg
+                FROM transaction_records tr
+                JOIN materials m ON m.id = tr.material_id
+                WHERE tr.created_transaction_id = ANY(:ids)
+                ORDER BY tr.created_transaction_id, tr.id
+            """),
+            {'ids': [int(t) for t in transaction_ids]},
+        ).fetchall()
+        for tid, name, kg in rows:
+            out.setdefault(int(tid), []).append({'name': name or '', 'weight_kg': float(kg or 0)})
+        return out
+
+    def create_txn_batch_notifications(self, *, event: str, organization_id: int, actor_id: int,
+                                       transaction_ids: List[int], batch_id: int) -> None:
+        """One bell notification + one digest email per recipient for a whole batch."""
+        if not transaction_ids or not batch_id:
+            return
+        action = 'approved' if event == 'TXN_APPROVED' else 'rejected'
+        try:
+            owners: Dict[int, List[int]] = {}
+            for tid, owner in self.db.execute(
+                text("SELECT id, created_by_id FROM transactions WHERE id = ANY(:ids)"),
+                {'ids': [int(t) for t in transaction_ids]},
+            ).fetchall():
+                if owner and int(owner) != int(actor_id):
+                    owners.setdefault(int(owner), []).append(int(tid))
+
+            # Bell: one notification for the batch — the auditor always gets it too (a receipt of
+            # what they just did, and the way into the batch's list)
+            bell_users = ({uid for uid, _ in self._event_recipients(organization_id, event, actor_id, 2)}
+                          | set(owners) | {int(actor_id)})
+            if bell_users:
+                notif_id = self.db.execute(
+                    text("""
+                        INSERT INTO notifications
+                            (created_by_id, resource, notification_type, is_active, created_date, updated_date)
+                        VALUES (:created_by_id, CAST(:resource AS jsonb), :ntype, TRUE, NOW(), NOW())
+                        RETURNING id
+                    """),
+                    {'created_by_id': actor_id, 'ntype': f'{event}_BATCH',
+                     'resource': json.dumps({'audit_batch': {'id': batch_id, 'action': action,
+                                                             'count': len(transaction_ids)}})},
+                ).scalar()
+                for uid in bell_users:
+                    self.db.execute(
+                        text("""
+                            INSERT INTO user_notifications
+                                (user_id, notification_id, is_read, is_active, created_date, updated_date)
+                            VALUES (:user_id, :notification_id, FALSE, TRUE, NOW(), NOW())
+                            ON CONFLICT (user_id, notification_id) DO NOTHING
+                        """),
+                        {'user_id': uid, 'notification_id': notif_id},
+                    )
+                self.db.flush()
+
+            # Email: the configured roles get the whole batch; creators get their own rows
+            digests: Dict[str, List[int]] = {}
+            for _uid, email in self._event_recipients(organization_id, event, actor_id, 1):
+                if email:
+                    digests[email] = list(transaction_ids)
+            if owners:
+                for oid, email in self.db.execute(
+                    text("""SELECT id, email FROM user_locations
+                            WHERE id = ANY(:ids) AND email IS NOT NULL AND TRIM(email) != ''"""),
+                    {'ids': list(owners)},
+                ).fetchall():
+                    email = (email or '').strip()
+                    if email and email not in digests:
+                        digests[email] = owners[int(oid)]
+            if digests:
+                materials = self._materials_for_transactions(list(transaction_ids))
+                for email, tids in digests.items():
+                    subject, html_content, text_content = self._build_batch_digest(action, batch_id, tids, materials)
+                    self._send_email_via_lambda(to_email=email, subject=subject,
+                                                html_content=html_content, text_content=text_content)
+        except Exception as e:
+            logger.error("Error creating %s batch notifications (batch=%s): %s", event, batch_id, e, exc_info=True)
+            raise   # the caller's savepoint rolls this back and falls back to per-transaction
+
+    def _build_batch_digest(self, action: str, batch_id: int, tids: List[int],
+                            materials: Dict[int, List[Dict[str, Any]]]) -> tuple:
+        import html as _html
+        n = len(tids)
+        verb = 'approved' if action == 'approved' else 'rejected'
+        accent = '#27ae60' if action == 'approved' else '#c0392b'
+        batch_url = f"https://geppdata.com/waste-transactions?audit_batch={batch_id}&audit_action={action}"
+        shown = sorted(tids)[: self.BATCH_EMAIL_MAX_ROWS]
+        more = n - len(shown)
+        reason = ('' if action == 'approved' else
+                  '<p style="margin: 0 0 16px 0; font-size: 14px; color: #6c757d;">A transaction is rejected when '
+                  'one or all of its records have been rejected. Please check the platform.</p>')
+        rows_html, rows_text = [], []
+        for tid in shown:
+            mats = materials.get(tid, [])
+            mat_html = '<br>'.join(f"{_html.escape(m['name'])} · {m['weight_kg']:g} กก." for m in mats) or '—'
+            rows_html.append(
+                f'<tr><td style="padding: 8px 0; border-bottom: 1px solid #e9ecef; vertical-align: top; white-space: nowrap;">'
+                f'<a href="https://geppdata.com/waste-transactions#{tid}" style="color: #2c3e50; font-weight: 600; text-decoration: none;">#{tid}</a></td>'
+                f'<td style="padding: 8px 0 8px 16px; border-bottom: 1px solid #e9ecef; font-size: 13px; color: #495057;">{mat_html}</td></tr>')
+            mat_text = ', '.join(f"{m['name']} {m['weight_kg']:g} kg" for m in mats) or '-'
+            rows_text.append(f"#{tid}: {mat_text} (https://geppdata.com/waste-transactions#{tid})")
+        more_html = (f'<p style="margin: 12px 0 0 0; font-size: 13px; color: #6c757d;">… and {more} more — '
+                     f'<a href="{batch_url}" style="color: {accent};">see the full list</a></p>') if more > 0 else ''
+        subject = f"{n} transaction{'s' if n != 1 else ''} {verb} – GEPP Platform"
+        html_content = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+<body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f4f6f8; line-height: 1.6; color: #333;">
+  <div style="max-width: 600px; margin: 0 auto; padding: 32px 24px;">
+    <div style="background: #ffffff; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); overflow: hidden;">
+      <div style="background: linear-gradient(135deg, #2c3e50 0%, {accent} 100%); padding: 28px 24px; text-align: center;">
+        <h1 style="margin: 0; color: #ffffff; font-size: 22px; font-weight: 600;">{n} Transaction{'s' if n != 1 else ''} {verb.capitalize()}</h1>
+        <p style="margin: 8px 0 0 0; color: rgba(255,255,255,0.9); font-size: 14px;">GEPP Platform</p>
+      </div>
+      <div style="padding: 28px 24px;">
+        <p style="margin: 0 0 16px 0; font-size: 15px;">Hello,</p>
+        <p style="margin: 0 0 16px 0; font-size: 15px;">The following {n} transaction{'s have' if n != 1 else ' has'} been {verb} in one batch.</p>
+        {reason}
+        <p style="margin: 0 0 20px 0;"><a href="{batch_url}" style="display: inline-block; padding: 10px 24px; background: {accent}; color: #ffffff; font-size: 14px; font-weight: 600; text-decoration: none; border-radius: 8px;">See all in the platform</a></p>
+        <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse: collapse; border-top: 1px solid #dee2e6;">{''.join(rows_html)}</table>
+        {more_html}
+      </div>
+      <hr style="border: none; border-top: 1px solid #eee; margin: 0;">
+      <div style="padding: 16px 24px;"><p style="margin: 0; font-size: 12px; color: #95a5a6;">This is an automated message from GEPP Platform. Please do not reply to this email.</p></div>
+    </div>
+  </div>
+</body></html>"""
+        text_content = (f"{n} transaction{'s' if n != 1 else ''} {verb} – GEPP Platform\n\nHello,\n\n"
+                        f"The following {n} transaction{'s have' if n != 1 else ' has'} been {verb} in one batch.\n"
+                        f"See all: {batch_url}\n\n" + '\n'.join(rows_text)
+                        + (f"\n… and {more} more: {batch_url}" if more > 0 else '')
+                        + "\n\n—\nThis is an automated message from GEPP Platform. Please do not reply to this email.")
+        return subject, html_content, text_content
+
     def create_txn_approved_notifications_for_record(
         self,
         transaction_id: int,
@@ -2590,7 +2793,11 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
         filter_tenant_ids: Optional[list] = None,
         material_ids: Optional[list] = None,
         source: Optional[str] = None,
-        approval_source: Optional[str] = None
+        approval_source: Optional[str] = None,
+        time_window: Optional[Dict[str, str]] = None,
+        audit_batch_id: Optional[int] = None,
+        ids_only: bool = False,
+        max_ids: int = 5000,
     ) -> Dict[str, Any]:
         """
         List transactions with filtering and pagination
@@ -2654,6 +2861,14 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
             query = query.filter(Transaction.is_internal_transfer.isnot(True))
 
             # Global filters (apply to own AND shared rows alike)
+            if audit_batch_id is not None:
+                # One approve / reject batch (bell notification): only its transactions, this org's.
+                batch_ids = self.db.execute(
+                    text("""SELECT transaction_ids FROM transaction_audit_batches
+                            WHERE id = :bid AND organization_id = :org"""),
+                    {'bid': int(audit_batch_id), 'org': organization_id},
+                ).scalar()
+                query = query.filter(Transaction.id.in_([int(i) for i in (batch_ids or [])] or [-1]))
             if status:
                 query = query.filter(Transaction.status == status)
             if origin_id:
@@ -2863,7 +3078,7 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
             # (e.g. waste collected today, billed yesterday). Per the product
             # requirement, the record-level date is what the user filters on,
             # not the parent transaction's created/transaction_date.
-            if date_from or date_to:
+            if date_from or date_to or has_time_window(time_window):
                 from datetime import datetime, timedelta
                 try:
                     from zoneinfo import ZoneInfo
@@ -2892,6 +3107,10 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                         # A datetime from the time filter ("… 17:59:59+07:00") covers that whole second.
                         date_to_obj = date_to_obj.replace(microsecond=999999)
                     date_conds.append(TransactionRecord.transaction_date <= date_to_obj)
+                # "เวลาเดิมทุกวัน": a record within these hours on one of the days
+                window = time_window_clause(TransactionRecord.transaction_date, time_window)
+                if window is not None:
+                    date_conds.append(window)
 
                 query = query.filter(exists().where(and_(*date_conds)))
 
@@ -2942,6 +3161,15 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                     else:
                         # No organization setup, just filter by district
                         query = query.filter(Transaction.origin_id == district)
+
+            if ids_only:
+                # "Approve / reject all matching the filter": every page, this org's rows only
+                # (shared rows from other orgs are read-only here). max_ids + 1 so the caller
+                # can tell a capped result from an exact one.
+                id_rows = query.with_entities(Transaction.id) \
+                    .filter(Transaction.organization_id == organization_id) \
+                    .order_by(Transaction.id).limit(max_ids + 1).all()
+                return {'success': True, 'ids': [int(r[0]) for r in id_rows]}
 
             # Get total count
             logger.info("Getting total count...")
