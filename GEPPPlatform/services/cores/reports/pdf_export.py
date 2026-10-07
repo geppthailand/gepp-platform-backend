@@ -745,9 +745,11 @@ BOLD = "IBMPlexSansThai-Bold"
 MUTED = colors.HexColor("#6f8a7e")
 INK = colors.HexColor("#2e5c4b")
 RECYCLED_COLOR = colors.HexColor("#2f8f6b")
-REST_COLOR = colors.HexColor("#d3e6dc")
+REST_COLOR = colors.HexColor("#d9dee3")   # "the rest" in X-vs-others views: neutral
 TREND_COLOR = colors.HexColor("#1f4a3a")   # same as the web trend line
 RECYCLABLE_CATEGORY_ID = "1"   # material_categories "วัสดุรีไซเคิล"
+ORGANIC_CATEGORY_ID = "3"      # material_categories "ขยะอินทรีย์"
+RATE_ROW_MAX_BARS = 12          # the overview chart's recycling-rate row only up to this many bars
 INCREASE_COLOR = colors.HexColor("#c2562e")
 DECREASE_COLOR = colors.HexColor("#1f8a5e")
 SECTION_COLORS = {
@@ -986,9 +988,15 @@ def _chart_series(data: dict) -> tuple:
     """(granularity, labels, series, rate_row) for the overview chart.
 
     series = [(name, colour, values)] bottom → top, following the user's breakdown:
-      recycled      recyclables vs the rest, rate row = recycling rate per bucket
-      category:<id> that category vs the rest, rate row = its share per bucket
-      all           every category stacked (default), no rate row
+      all           every category stacked (default)
+      recycled      the Recyclable category vs the rest
+      category:<id> that category vs the rest
+
+    rate_row = ("อัตรารีไซเคิล", ["xx.xx%", ...]) under the month / year labels, in every
+    breakdown, when the chart has at most RATE_ROW_MAX_BARS bars (beyond that the row would
+    crowd the axis and is left out). The rate is (Recyclable + Organic) ÷ the bucket's total —
+    the same basis as the web chart's tooltip; a payload without per-category amounts falls
+    back to the bucket's "counts as recycled" figure.
     """
     gran, buckets = _chart_buckets(data)
     labels = [b["label"] for b in buckets]
@@ -996,21 +1004,28 @@ def _chart_series(data: dict) -> tuple:
     mode = str(data.get("overview_breakdown") or "all")
     meta = _category_meta(data)
     other = _t('other_waste', data)
+    has_by_cat = any(b["by_cat"] for b in buckets)
     # Same rules as the web: the recyclable category IS the default view (no separate
     # "category:1"), and without per-category amounts the category views fall back to it.
-    if mode == f"category:{RECYCLABLE_CATEGORY_ID}" or (
-            mode != "recycled" and not any(b["by_cat"] for b in buckets)):
+    if mode == f"category:{RECYCLABLE_CATEGORY_ID}" or (mode != "recycled" and not has_by_cat):
         mode = "recycled"
 
-    def share_row(label, values):
-        return (label, [f"{(v / t * 100.0) if t > 0 else 0:.1f}%" for v, t in zip(values, totals)])
+    rate_row = None
+    if gran in ("monthly", "yearly") and 0 < len(buckets) <= RATE_ROW_MAX_BARS:
+        if has_by_cat:
+            recovered = [b["by_cat"].get(RECYCLABLE_CATEGORY_ID, 0.0) + b["by_cat"].get(ORGANIC_CATEGORY_ID, 0.0)
+                         for b in buckets]
+        else:
+            recovered = [b["recycled"] for b in buckets]
+        rate_row = (_t('recycling_rate_row', data),
+                    [f"{(min(v, t) / t * 100.0) if t > 0 else 0:.2f}%" for v, t in zip(recovered, totals)])
 
     if mode.startswith("category:") and mode.split(":", 1)[1] in meta:
         cid = mode.split(":", 1)[1]
         name, col, _tot = meta[cid]
         vals = [min(b["total"], b["by_cat"].get(cid, 0.0)) for b in buckets]
         series = [(name, col, vals), (other, REST_COLOR, [t - v for t, v in zip(totals, vals)])]
-        return gran, labels, series, share_row(_t('share_row', data), vals)
+        return gran, labels, series, rate_row
     if mode == "all" and meta:
         series = []
         for cid, (name, col, _tot) in sorted(meta.items(), key=lambda kv: -kv[1][2]):
@@ -1020,18 +1035,53 @@ def _chart_series(data: dict) -> tuple:
         rest = [max(0.0, t - sum(sv[2][i] for sv in series)) for i, t in enumerate(totals)]
         if any(v > 0.01 for v in rest):
             series.append((_t('uncategorized', data), colors.HexColor(OTHERS_GREY), rest))
-        return gran, labels, series, None
-    rec = [b["recycled"] for b in buckets]
-    series = [(_t('recycled', data), RECYCLED_COLOR, rec), (other, REST_COLOR, [t - r for t, r in zip(totals, rec)])]
-    return gran, labels, series, share_row(_t('recycling_rate_row', data), rec)
+        return gran, labels, series, rate_row
+    # "วัสดุรีไซเคิล เทียบอื่นๆ": the Recyclable category's own kg (organic waste NOT included),
+    # in its pie colour. Without per-category amounts (older payload) it falls back to the
+    # "counts as recycled" figure.
+    rec_meta = meta.get(RECYCLABLE_CATEGORY_ID)
+    rec_col = (rec_meta[1] if rec_meta else None) or MATERIAL_COLORS.get("Recyclable Waste") or RECYCLED_COLOR
+    if has_by_cat:
+        rec = [min(b["total"], b["by_cat"].get(RECYCLABLE_CATEGORY_ID, 0.0)) for b in buckets]
+        name = rec_meta[0] if rec_meta else _t('recycled', data)
+    else:
+        rec = [b["recycled"] for b in buckets]
+        name = _t('recycled', data)
+    series = [(name, rec_col, rec), (other, REST_COLOR, [t - r for t, r in zip(totals, rec)])]
+    return gran, labels, series, rate_row
 
 
 def _stacked_month_chart(pdf, x, y, w, h, labels, series, rate_row, data):
     """Stacked bars (monthly / yearly). Every series is a band; the total sits on top."""
-    left_pad, right_pad, top_pad, bottom_pad = 64, 18, 22, (46 if rate_row else 30)
-    gx, gy = x + left_pad, y + bottom_pad
-    gw, gh = w - left_pad - right_pad, h - bottom_pad - top_pad
+    left_pad, right_pad, top_pad = 64, 18, 22
+    gw = w - left_pad - right_pad
     n = len(labels)
+    # X labels: as many months as a long range brings must not overlap. Shrink the font
+    # first, then tilt (45°, 60° if still crowded) — decided from the widest label vs the
+    # space each bar has, so a normal year keeps straight 8.5pt labels.
+    slot_w = gw / n if n else gw
+    lab_size, lab_angle = 8.5, 0
+    widest = lambda sz: max((stringWidth(str(lb), REG, sz) for lb in labels), default=0.0)
+    while lab_size > 6.5 and widest(lab_size) > slot_w - 4:
+        lab_size -= 0.5
+    if widest(lab_size) > slot_w - 4:
+        lab_angle = 45 if slot_w >= lab_size * 1.5 else 60
+    lab_drop = (widest(lab_size) * math.sin(math.radians(lab_angle)) + lab_size * math.cos(math.radians(lab_angle))
+                if lab_angle else lab_size)
+    lab_band = 6 + lab_drop                       # space the labels take under the axis
+    # The rate row under the labels gets the same treatment (its "47.1%" values crowd too).
+    # same size / weight as the kg totals above the bars
+    rate_size, rate_angle, rate_band = 6.5, 0, 0.0
+    if rate_row:
+        rate_widest = lambda sz: max((stringWidth(str(v), REG, sz) for v in rate_row[1]), default=0.0)
+        while rate_size > 6.0 and rate_widest(rate_size) > slot_w - 3:
+            rate_size -= 0.5
+        if rate_widest(rate_size) > slot_w - 3:
+            rate_angle = 45
+        rate_band = 6 + (rate_widest(rate_size) * math.sin(math.radians(45)) + rate_size * 0.7 if rate_angle else rate_size)
+    bottom_pad = max(30.0, lab_band + 8) + (rate_band + 4 if rate_row else 0)
+    gx, gy = x + left_pad, y + bottom_pad
+    gh = h - bottom_pad - top_pad
     totals = [sum(sv[2][i] for sv in series) for i in range(n)]
     if not n or gw <= 0 or gh <= 0 or max(totals or [0]) <= 0:
         pdf.setFillColor(MUTED)
@@ -1051,10 +1101,11 @@ def _stacked_month_chart(pdf, x, y, w, h, labels, series, rate_row, data):
     pdf.drawRightString(gx - 6, gy + gh + 8, _t('kg', data))
     slot = gw / n
     bar_w = max(8.0, min(46.0, slot * 0.5))
+    rate_y = gy - lab_band - 6 - (0 if rate_angle else rate_size)   # under the (possibly tilted) labels
     if rate_row:
         pdf.setFillColor(MUTED)
         pdf.setFont(REG, 7.5)
-        pdf.drawString(x + 12, gy - 30, rate_row[0])
+        pdf.drawString(x + 12, rate_y, rate_row[0])
     tops = []   # (centre x, top y) per bar: trend line + value labels go on top of all bars
     for i, label in enumerate(labels):
         cx = gx + slot * (i + 0.5)
@@ -1074,12 +1125,26 @@ def _stacked_month_chart(pdf, x, y, w, h, labels, series, rate_row, data):
             base += hgt
         tops.append((cx, base))
         pdf.setFillColor(TEXT)
-        pdf.setFont(REG, 8.5)
-        pdf.drawCentredString(cx, gy - 14, label)
+        pdf.setFont(REG, lab_size)
+        if lab_angle:
+            pdf.saveState()
+            pdf.translate(cx + lab_size * 0.3, gy - 6)
+            pdf.rotate(lab_angle)
+            pdf.drawRightString(0, -lab_size * 0.75, str(label))   # ends at its tick, slopes down-left
+            pdf.restoreState()
+        else:
+            pdf.drawCentredString(cx, gy - 6 - lab_size, str(label))
         if rate_row:
-            pdf.setFillColor(series[0][1] if series[0][1] != REST_COLOR else RECYCLED_COLOR)
-            pdf.setFont(MED, 8)
-            pdf.drawCentredString(cx, gy - 30, rate_row[1][i])
+            pdf.setFillColor(MUTED)   # the same grey as the row's label
+            pdf.setFont(REG, rate_size)
+            if rate_angle:
+                pdf.saveState()
+                pdf.translate(cx + rate_size * 0.3, rate_y)
+                pdf.rotate(rate_angle)
+                pdf.drawRightString(0, -rate_size * 0.75, str(rate_row[1][i]))
+                pdf.restoreState()
+            else:
+                pdf.drawCentredString(cx, rate_y, str(rate_row[1][i]))
     # Trend line through the bar totals (the user's "เส้นแนวโน้ม" switch on the web).
     if data.get("overview_trend") and len(tops) >= 2:
         pdf.setStrokeColor(TREND_COLOR)
@@ -1191,19 +1256,17 @@ def _fit_legend(pdf, right_x, y, entries, max_w, full_w=None):
     if not entries or sum(item_w(e[0], size) for e in entries) <= max_w or not full_w:
         draw_row(list(entries), y, size)
         return y
-    # Wrap under the title: fill rows up to full_w, each row right-aligned.
+    # Wrap under the title in BALANCED rows (7 items → 4 + 3, not 6 + 1), each right-aligned:
+    # start from the fewest rows the total width needs and add rows until every row fits.
     size = 8
-    rows, row, row_w = [], [], 0.0
-    for nm, col in entries:
-        nm = _fit_text_to_width(nm, REG, size, full_w - gap)   # only a name wider than the card
-        w = item_w(nm, size)
-        if row and row_w + w > full_w:
-            rows.append(row)
-            row, row_w = [], 0.0
-        row.append((nm, col))
-        row_w += w
-    if row:
-        rows.append(row)
+    items = [(_fit_text_to_width(nm, REG, size, full_w - gap), col) for nm, col in entries]
+    n_rows = max(2, math.ceil(sum(item_w(nm, size) for nm, _c in items) / full_w))
+    while True:
+        per = math.ceil(len(items) / n_rows)
+        rows = [items[i:i + per] for i in range(0, len(items), per)]
+        if per == 1 or all(sum(item_w(nm, size) for nm, _c in r) <= full_w for r in rows):
+            break
+        n_rows += 1
     row_y = y
     for r in rows:
         row_y -= 14
@@ -1278,11 +1341,11 @@ def draw_overview(pdf, page_width_points: float, page_height_points: float, data
         pdf.setFont(REG, 9)
         pdf.drawString(row_x, top, _fit_text_to_width(_t(key, data), REG, 9, row_w))
         pdf.setFillColor(TEXT)
-        pdf.setFont(MED, 12)
-        pdf.drawString(row_x, top - 16, _format_number(val))
+        pdf.setFont(MED, 8)   # value and share the same size (was 12 / 10)
+        pdf.drawString(row_x, top - 14, _format_number(val))
         pdf.setFillColor(colors.HexColor("#2f8f6b"))
-        pdf.setFont(MED, 10)
-        pdf.drawRightString(row_x + row_w, top - 16, f"{share * 100:.2f}%")
+        pdf.setFont(MED, 8)
+        pdf.drawRightString(row_x + row_w, top - 14, f"{share * 100:.2f}%")
         _progress_bar(pdf, row_x, top - 27, row_w, 5, min(1.0, share), colors.HexColor(color), colors.HexColor("#e1e7ef"))
     pdf.setFillColor(MUTED)
     pdf.setFont(REG, 7.5)

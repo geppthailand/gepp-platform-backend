@@ -22,7 +22,7 @@ import os
 import re
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import boto3
 
@@ -177,6 +177,113 @@ def get_report_period_display(event: str, now_thai: datetime, email_time: Option
     return "", "Report period"
 
 
+_TH_MONTHS = ("", "มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน",
+              "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม")
+
+
+def _fmt_date_long_th(d) -> str:
+    """'12 กุมภาพันธ์ 2568' (Buddhist year)."""
+    return f"{d.day} {_TH_MONTHS[d.month]} {d.year + 543}"
+
+
+def get_report_period_display_th(event: str, now_thai: datetime, email_time: Optional[str] = None) -> str:
+    """Thai twin of get_report_period_display (same periods), for the Thai half of the email."""
+    if event == "RPT_TXN_DAILY":
+        end_hour = now_thai.hour
+        if email_time:
+            try:
+                end_hour = int(email_time.split(":")[0])
+            except (ValueError, IndexError):
+                pass
+        return f"รายวัน ({_fmt_date_long_th(now_thai.date())} 00:00 – {end_hour:02d}:00 น.)"
+    if event == "RPT_TXN_WEEKLY":
+        last_monday = now_thai.date() - timedelta(days=7)
+        return f"รายสัปดาห์ ({_fmt_date_long_th(last_monday)} – {_fmt_date_long_th(last_monday + timedelta(days=6))})"
+    if event == "RPT_TXN_BIWEEKLY":
+        period_end = now_thai.date() - timedelta(days=1)
+        period_start = period_end - timedelta(days=13)
+        return f"รายสองสัปดาห์ ({_fmt_date_long_th(period_start)} – {_fmt_date_long_th(period_end)})"
+    if event == "RPT_TXN_MONTHLY":
+        prev = (now_thai.replace(day=1) - timedelta(days=1)).date()
+        return f"รายเดือน ({_TH_MONTHS[prev.month]} {prev.year + 543})"
+    return ""
+
+
+# The report goes out in both languages: one email, Thai first then English, with a PDF per language.
+REPORT_LANGUAGES = ("th", "en")
+_LANG_LABEL = {"th": "ภาษาไทย", "en": "English"}
+
+
+def _lang_filename(filename: str, lang: str) -> str:
+    """report_2026-09-01_2026-09-30.pdf → report_2026-09-01_2026-09-30_TH.pdf"""
+    stem, dot, ext = filename.rpartition(".")
+    if not dot:
+        stem, ext = filename, "pdf"
+    return f"{stem}_{lang.upper()}.{ext}"
+
+
+def build_scheduled_report_email(period_th: str, period_en: str,
+                                 files: List[Tuple[str, str]]) -> Tuple[str, str, str]:
+    """(subject, html, text) — Thai block on top, English below. `files` = [(lang, filename)]."""
+    import html as _html
+    th_files = "<br>".join(f"<strong style=\"color: #333;\">{_html.escape(n)}</strong> ({_LANG_LABEL[l]})" for l, n in files)
+    en_files = "<br>".join(f"<strong style=\"color: #333;\">{_html.escape(n)}</strong> ({'Thai' if l == 'th' else 'English'})" for l, n in files)
+    n = len(files)
+    th_count = "ทั้งภาษาไทยและภาษาอังกฤษ" if n > 1 else _LANG_LABEL[files[0][0]]
+    en_count = "in Thai and in English" if n > 1 else ("in Thai" if files[0][0] == "th" else "in English")
+    box = ('<div style="background: #f8f9fa; border-radius: 8px; padding: 16px 20px; margin: 20px 0; border-left: 4px solid #27ae60;">'
+           '<p style="margin: 0; font-size: 16px; font-weight: 600; color: #2c3e50;">{}</p></div>')
+    subject = f"รายงานตามกำหนดเวลา / Scheduled Report – {period_en}"
+    html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f4f6f8; line-height: 1.6; color: #333;">
+    <div style="max-width: 560px; margin: 0 auto; padding: 32px 24px;">
+        <div style="background: #ffffff; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); overflow: hidden;">
+            <div style="background: linear-gradient(135deg, #2c3e50 0%, #27ae60 100%); padding: 28px 24px; text-align: center;">
+                <h1 style="margin: 0; color: #ffffff; font-size: 22px; font-weight: 600; letter-spacing: -0.02em;">รายงานตามกำหนดเวลา</h1>
+                <p style="margin: 6px 0 0 0; color: rgba(255,255,255,0.9); font-size: 14px;">Scheduled Report · GEPP Platform</p>
+            </div>
+            <div lang="th" style="padding: 28px 24px 20px 24px;">
+                <p style="margin: 0 0 16px 0; font-size: 15px;">เรียน ผู้ใช้งาน</p>
+                <p style="margin: 0; font-size: 15px;">รายงานตามกำหนดเวลาของคุณพร้อมแล้ว แนบไฟล์ PDF {th_count} มากับอีเมลนี้</p>
+                {box.format(_html.escape(period_th))}
+                <p style="margin: 0 0 8px 0; font-size: 14px; color: #6c757d;">ไฟล์แนบ:<br>{th_files}</p>
+                <p style="margin: 0; font-size: 14px; color: #6c757d;">หากมีข้อสงสัย กรุณาติดต่อผู้ดูแลระบบขององค์กรคุณ</p>
+            </div>
+            <hr style="border: none; border-top: 1px dashed #dee2e6; margin: 0 24px;">
+            <div lang="en" style="padding: 20px 24px 28px 24px;">
+                <p style="margin: 0 0 16px 0; font-size: 15px;">Hello,</p>
+                <p style="margin: 0; font-size: 15px;">Your scheduled report is ready. The PDF report is attached {en_count}.</p>
+                {box.format(_html.escape(period_en))}
+                <p style="margin: 0 0 8px 0; font-size: 14px; color: #6c757d;">Attachments:<br>{en_files}</p>
+                <p style="margin: 0; font-size: 14px; color: #6c757d;">If you have any questions, please contact your administrator.</p>
+            </div>
+            <hr style="border: none; border-top: 1px solid #eee; margin: 0;">
+            <div style="padding: 16px 24px;">
+                <p style="margin: 0; font-size: 12px; color: #95a5a6;">อีเมลนี้ส่งอัตโนมัติจาก GEPP Platform กรุณาอย่าตอบกลับ<br>This is an automated message from GEPP Platform. Please do not reply to this email.</p>
+            </div>
+        </div>
+    </div>
+</body>
+</html>"""
+    th_lines = "\n".join(f"  - {name} ({_LANG_LABEL[l]})" for l, name in files)
+    en_lines = "\n".join(f"  - {name} ({'Thai' if l == 'th' else 'English'})" for l, name in files)
+    text_content = (f"รายงานตามกำหนดเวลา – GEPP Platform\n\nเรียน ผู้ใช้งาน\n\n"
+                    f"รายงานตามกำหนดเวลาของคุณพร้อมแล้ว แนบไฟล์ PDF {th_count} มากับอีเมลนี้\n\n"
+                    f"{period_th}\nไฟล์แนบ:\n{th_lines}\n\nหากมีข้อสงสัย กรุณาติดต่อผู้ดูแลระบบขององค์กรคุณ\n\n"
+                    f"----------------------------------------\n\n"
+                    f"Scheduled Report – GEPP Platform\n\nHello,\n\n"
+                    f"Your scheduled report is ready. The PDF report is attached {en_count}.\n\n"
+                    f"{period_en}\nAttachments:\n{en_lines}\n\nIf you have any questions, please contact your administrator.\n\n"
+                    f"—\nอีเมลนี้ส่งอัตโนมัติจาก GEPP Platform กรุณาอย่าตอบกลับ\n"
+                    f"This is an automated message from GEPP Platform. Please do not reply to this email.")
+    return subject, html_content, text_content
+
+
 def get_scheduled_settings_for_current_hour(db: Session) -> List[Dict[str, Any]]:
     """
     Query organization_notification_settings for rows that:
@@ -295,12 +402,17 @@ def _send_email_via_lambda(
     text_content: Optional[str] = None,
     pdf_attachment_base64: Optional[str] = None,
     pdf_filename: Optional[str] = None,
+    attachments: Optional[List[Dict[str, str]]] = None,
+    lambda_client: Any = None,
 ) -> bool:
     """
-    Send email via Lambda (same as auth_handlers). Optional PDF attachment.
+    Send email via Lambda (same as auth_handlers). Optional PDF attachment(s): either one
+    (pdf_attachment_base64 + pdf_filename) or `attachments` = [{"name", "content"}].
+    Pass `lambda_client` when sending from several threads (one client, shared).
     """
     try:
-        lambda_function_name = os.environ.get("EMAIL_LAMBDA_FUNCTION", "PROD-GEPPEmailNotification")
+        from ...settings.email_gate import email_lambda_function
+        lambda_function_name = email_lambda_function()
         message = {
             "from_email": os.environ.get("EMAIL_FROM", "noreply@gepp.me"),
             "from_name": os.environ.get("EMAIL_FROM_NAME", "GEPP Platform"),
@@ -310,15 +422,18 @@ def _send_email_via_lambda(
         }
         if text_content:
             message["text"] = text_content
+        files = list(attachments or [])
         if pdf_attachment_base64 and pdf_filename:
+            files.append({"name": pdf_filename, "content": pdf_attachment_base64})
+        if files:
             message["attachments"] = [
-                {
-                    "type": "application/pdf",
-                    "name": pdf_filename,
-                    "content": pdf_attachment_base64,
-                }
+                {"type": "application/pdf", "name": f["name"], "content": f["content"]} for f in files
             ]
-        lambda_client = boto3.client("lambda")
+        from ...settings.email_gate import gate_email_message   # global "Send emails" switch
+        message = gate_email_message(message)
+        if message is None:
+            return False
+        lambda_client = lambda_client or boto3.client("lambda")
         response = lambda_client.invoke(
             FunctionName=lambda_function_name,
             InvocationType="RequestResponse",
@@ -340,7 +455,52 @@ def _send_email_via_lambda(
         return False
 
 
-def run_scheduled_report_job(db: Session) -> Dict[str, Any]:
+# Don't start another org's report with less than this left (2 exports + sends ≈ 10–15 s).
+_RESERVE_MS = int(os.environ.get("SCHEDULE_REPORT_RESERVE_MS", "15000"))
+_SEND_WORKERS = 8
+
+
+def _export_pdf(export_fn, reports_service, org_id: int, filters: Dict[str, Any], user_context: Dict[str, Any],
+                lang: str, date_from_iso: str, date_to_iso: str) -> Tuple[Optional[str], str]:
+    """One language's PDF: (base64 or None, filename with a _TH / _EN suffix)."""
+    result = export_fn(reports_service, org_id, dict(filters), user_context, language=lang)
+    ok = (result.get("statusCode") == 200 and bool(result.get("body"))) or result.get("success", False)
+    filename = result.get("filename")
+    if not filename and isinstance(result.get("headers"), dict):
+        content_disp = (result.get("headers") or {}).get("Content-Disposition") or ""
+        m = re.search(r'filename=["\']?([^"\']+)["\']?', content_disp)
+        if m:
+            filename = m.group(1).strip()
+    filename = _lang_filename(filename or f"report_{date_from_iso[:10]}_{date_to_iso[:10]}.pdf", lang)
+    pdf_base64 = (result.get("body") or result.get("pdf_base64")) if ok else None
+    return pdf_base64, filename
+
+
+def _send_report_to_recipients(emails: List[str], subject: str, html_content: str, text_content: str,
+                               attachments: List[Dict[str, str]]) -> Dict[str, bool]:
+    """Send the same email to every recipient in parallel. Sequential sync sends (~1 s each with
+    the PDFs) were what pushed busy Mondays past the Lambda timeout."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    client = boto3.client("lambda")   # one client, shared: boto3 clients are thread-safe, creating them is not
+    results: Dict[str, bool] = {}
+    with ThreadPoolExecutor(max_workers=max(1, min(_SEND_WORKERS, len(emails)))) as pool:
+        futures = {
+            pool.submit(_send_email_via_lambda, email, subject, html_content, text_content,
+                        attachments=attachments, lambda_client=client): email
+            for email in emails
+        }
+        for future in as_completed(futures):
+            email = futures[future]
+            try:
+                results[email] = bool(future.result())
+            except Exception as e:  # _send_email_via_lambda already catches; belt and braces
+                logger.warning("[ScheduleReport] send to %s failed: %s", email, e)
+                results[email] = False
+            print(f"[ScheduleReport]   Email to {email}: sent={results[email]}")
+    return results
+
+
+def run_scheduled_report_job(db: Session, time_left_ms: Optional[Callable[[], int]] = None) -> Dict[str, Any]:
     """
     Main job: find settings that match the current hour and day/date.
     For each matching setting, compute date_from/date_to for the report period,
@@ -381,7 +541,14 @@ def run_scheduled_report_job(db: Session) -> Dict[str, Any]:
         processed = 0
         skipped = 0
 
+        not_run: List[str] = []
         for s in settings:
+            # Stop before the Lambda timeout: a timed-out run is retried by Lambda (async
+            # invoke), and every retry re-sent the reports already delivered (2026-10-05:
+            # 27 recipients got the weekly report 3×). A clean return is not retried.
+            if time_left_ms is not None and time_left_ms() < _RESERVE_MS:
+                not_run.append(f"{s['organization_id']}/{s['event']}/role {s['role_id']}")
+                continue
             org_id = s["organization_id"]
             role_id = s["role_id"]
             event = s["event"]
@@ -429,91 +596,36 @@ def run_scheduled_report_job(db: Session) -> Dict[str, Any]:
                 skipped += 1
                 continue
 
-            print(f"[ScheduleReport]   Running PDF export for org_id={org_id} event={event}...")
+            print(f"[ScheduleReport]   Running PDF exports ({'/'.join(REPORT_LANGUAGES)}) for org_id={org_id} event={event}...")
             filters: Dict[str, Any] = {"date_from": date_from_iso, "date_to": date_to_iso}
             reports_service = ReportsService(db)
+            export_result: Dict[str, Any] = {}
             try:
-                print(f"Starting export for org_id={org_id} event={event}...")
-                export_result = _handle_export_pdf_report(
-                    reports_service, int(org_id), filters, user_context
-                )
-                # Success: API Gateway shape (statusCode 200 + body) or legacy {success, pdf_base64}
-                ok = (
-                    export_result.get("statusCode") == 200 and bool(export_result.get("body"))
-                ) or export_result.get("success", False)
-                print(f"[ScheduleReport]   Export finished: success={ok}")
-                if ok and emails:
-                    pdf_base64 = export_result.get("body") or export_result.get("pdf_base64")
-                    filename = export_result.get("filename")
-                    if not filename and isinstance(export_result.get("headers"), dict):
-                        content_disp = (export_result.get("headers") or {}).get("Content-Disposition") or ""
-                        if "filename=" in content_disp:
-                            m = re.search(r'filename=["\']?([^"\']+)["\']?', content_disp)
-                            if m:
-                                filename = m.group(1).strip()
-                    if not filename:
-                        filename = f"report_{date_from_iso[:10]}_{date_to_iso[:10]}.pdf"
-                    period_display, _ = get_report_period_display(event, now_thai, email_time=s.get("email_time"))
-                    subject = f"Scheduled Report – {period_display}"
-                    html_content = f"""<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-</head>
-<body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f4f6f8; line-height: 1.6; color: #333;">
-    <div style="max-width: 560px; margin: 0 auto; padding: 32px 24px;">
-        <div style="background: #ffffff; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); overflow: hidden;">
-            <div style="background: linear-gradient(135deg, #2c3e50 0%, #27ae60 100%); padding: 28px 24px; text-align: center;">
-                <h1 style="margin: 0; color: #ffffff; font-size: 22px; font-weight: 600; letter-spacing: -0.02em;">Scheduled Report</h1>
-                <p style="margin: 8px 0 0 0; color: rgba(255,255,255,0.9); font-size: 14px;">GEPP Platform</p>
-            </div>
-            <div style="padding: 28px 24px;">
-                <p style="margin: 0 0 16px 0; font-size: 15px;">Hello,</p>
-                <p style="margin: 0 0 20px 0; font-size: 15px;">Your scheduled report is ready. Please find the PDF attached to this email.</p>
-                <div style="background: #f8f9fa; border-radius: 8px; padding: 16px 20px; margin: 24px 0; border-left: 4px solid #27ae60;">
-                    <p style="margin: 0; font-size: 16px; font-weight: 600; color: #2c3e50;">{period_display}</p>
-                </div>
-                <p style="margin: 0 0 8px 0; font-size: 14px; color: #6c757d;">The attachment <strong style="color: #333;">{filename}</strong> contains your full report.</p>
-                <p style="margin: 0; font-size: 14px; color: #6c757d;">If you have any questions, please contact your administrator.</p>
-            </div>
-            <hr style="border: none; border-top: 1px solid #eee; margin: 0;">
-            <div style="padding: 16px 24px;">
-                <p style="margin: 0; font-size: 12px; color: #95a5a6;">This is an automated message from GEPP Platform. Please do not reply to this email.</p>
-            </div>
-        </div>
-    </div>
-</body>
-</html>"""
-                    text_content = f"""Scheduled Report – GEPP Platform
-
-Hello,
-
-Your scheduled report is ready. Please find the PDF attached to this email.
-
-{period_display}
-Attachment: {filename}
-
-If you have any questions, please contact your administrator.
-
-—
-This is an automated message from GEPP Platform. Please do not reply to this email."""
-                    for email in emails:
-                        email_sent = _send_email_via_lambda(
-                            to_email=email,
-                            subject=subject,
-                            html_content=html_content,
-                            text_content=text_content,
-                            pdf_attachment_base64=pdf_base64,
-                            pdf_filename=filename,
-                        )
-                        print(f"[ScheduleReport]   Email to {email}: sent={email_sent}")
+                files: List[Tuple[str, str]] = []
+                attachments: List[Dict[str, str]] = []
+                for lang in REPORT_LANGUAGES:
+                    pdf_base64, filename = _export_pdf(
+                        _handle_export_pdf_report, reports_service, int(org_id), filters, user_context, lang,
+                        date_from_iso, date_to_iso,
+                    )
+                    export_result[lang] = bool(pdf_base64)
+                    print(f"[ScheduleReport]   Export {lang}: success={bool(pdf_base64)}")
+                    if pdf_base64:
+                        files.append((lang, filename))
+                        attachments.append({"name": filename, "content": pdf_base64})
+                if attachments and emails:
+                    period_en, _ = get_report_period_display(event, now_thai, email_time=s.get("email_time"))
+                    period_th = get_report_period_display_th(event, now_thai, email_time=s.get("email_time"))
+                    subject, html_content, text_content = build_scheduled_report_email(period_th, period_en, files)
+                    sent = _send_report_to_recipients(emails, subject, html_content, text_content, attachments)
+                    export_result["sent"] = sum(1 for ok in sent.values() if ok)
+                    print(f"[ScheduleReport]   Emails sent: {export_result['sent']}/{len(emails)}")
             except Exception as export_err:
                 print(f"[ScheduleReport]   Export failed: {export_err}")
                 logger.exception(
                     "Export failed for org_id=%s event=%s: %s", org_id, event, export_err
                 )
-                export_result = {"success": False, "error": str(export_err)}
+                export_result["error"] = str(export_err)
             processed += 1
             recipients.append({
                 "organization_id": org_id,
@@ -532,10 +644,13 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                 "setting_id": s["id"],
                 "date_from": date_from_iso,
                 "date_to": date_to_iso,
-                "export_success": export_result,
+                "export_success": export_result,   # {"th": bool, "en": bool, "sent": n} — no PDF bodies
                 "recipient_count": len(emails),
             })
 
+        if not_run:
+            logger.warning("[ScheduleReport] Out of time — %d setting(s) not sent this run "
+                           "(raise the Lambda timeout): %s", len(not_run), ", ".join(not_run))
         print(f"[ScheduleReport] Done. Processed {len(exports)} export(s), skipped {skipped} setting(s).")
         return {
             "success": True,
@@ -561,7 +676,7 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
         }
 
 
-def main() -> Dict[str, Any]:
+def main(context: Any = None) -> Dict[str, Any]:
     """
     Entry point for cron/Lambda: get a DB session, run the job, close session.
     """
@@ -570,7 +685,7 @@ def main() -> Dict[str, Any]:
     print("[ScheduleReport] main() entry — getting DB session...")
     db = get_db_session()
     try:
-        result = run_scheduled_report_job(db)
+        result = run_scheduled_report_job(db, time_left_ms=getattr(context, "get_remaining_time_in_millis", None))
         print(f"[ScheduleReport] main() done. success={result.get('success')}, exports={len(result.get('exports', []))}")
         logger.info("Scheduled report job result: %s", result)
         return result
@@ -583,7 +698,7 @@ def lambda_handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]
     """
     AWS Lambda handler. Invoke this on an hourly schedule (e.g. rate(1 hour)).
     """
-    return main()
+    return main(context)
 
 
 if __name__ == "__main__":

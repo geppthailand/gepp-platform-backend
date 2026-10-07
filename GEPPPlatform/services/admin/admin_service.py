@@ -1181,10 +1181,13 @@ class AdminService:
         radius on the same screen as the switch rather than being asked to
         trust that someone ran a query once.
         """
-        from ..settings import describe
+        from ..settings import describe, running_in_production
 
         payload = describe(self.db_session)
         payload['impact'] = {'subscription': self._subscription_gate_impact()}
+        # Which server this is: the email switch defaults differently per environment,
+        # and the page warns before mail is switched on outside production.
+        payload['environment'] = 'production' if running_in_production() else 'development'
         return payload
 
     def _subscription_gate_impact(self) -> Dict[str, Any]:

@@ -29,6 +29,7 @@ Aliases:
   iot, iot-health-cron         -> <ENV>-GEPPPlatform-IOTHEALTHCRON
   audit, audit-cron            -> <ENV>-GEPPPlatform-AUDITCRON
   bma, bma-gsheet-cron         -> <ENV>-GEPPV3BMAGsheetCron
+  schedule, schedule-report    -> <ENV>-GEPPScheduleNotiReport (scheduled report emails)
 EOF
 }
 
@@ -79,6 +80,10 @@ case "$lower_name" in
   bma|bma-gsheet|bma-gsheet-cron|geppv3bmagsheetcron)
     FUNCTION_NAME="${ENV_NAME}-GEPPV3BMAGsheetCron"
     HANDLER="GEPPPlatform.entry_points.GEPPV3BMAGsheetCron.lambda_handler"
+    ;;
+  schedule|schedule-report|*geppschedulenotireport)
+    FUNCTION_NAME="${ENV_NAME}-GEPPScheduleNotiReport"
+    HANDLER="GEPPPlatform.entry_points.GEPPScheduleNotiReport.lambda_handler"
     ;;
   *)
     if [[ "$FUNCTION_INPUT" == "${ENV_NAME}-"* ]]; then

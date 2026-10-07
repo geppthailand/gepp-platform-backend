@@ -44,6 +44,27 @@ from ....models.shared_user_location import SharedUserLocation
 
 logger = logging.getLogger(__name__)
 
+# One Lambda client per container (creating one per email cost ~0.1 s each). boto3 clients
+# are thread-safe, so the parallel flush shares it too.
+_email_lambda_client = None
+
+
+def _get_email_lambda_client():
+    global _email_lambda_client
+    if _email_lambda_client is None:
+        _email_lambda_client = boto3.client("lambda")
+    return _email_lambda_client
+
+
+# Async Lambda invokes take at most 256 KB of payload; anything bigger is sent synchronously.
+_EMAIL_ASYNC_MAX_PAYLOAD = 240_000
+
+
+def _web_base_url() -> str:
+    """Frontend origin for links in emails: WEB_BASE_URL (DEV-GEPPPlatform → https://dev.geppdata.com),
+    else production — so a DEV email never links to the production site."""
+    return (os.environ.get("WEB_BASE_URL") or "https://geppdata.com").rstrip("/")
+
 # Shared locations are NOT persisted as nodes in root_nodes and are NOT user_locations rows.
 # Placement lives on shared_user_locations.placed_parent_node_id. The FRONTEND renders each
 # placed share as an in-memory overlay node whose id is a large NEGATIVE sentinel (kept here
@@ -966,9 +987,16 @@ class TransactionService:
         html_content: str,
         text_content: Optional[str] = None,
     ) -> bool:
-        """Actually send email via Lambda invocation."""
+        """Actually send email via Lambda invocation.
+
+        Fire-and-forget (`InvocationType="Event"`): the email Lambda answers in ~0.6–0.9 s
+        per message, and awaiting it made create/approve wait ~N × 0.7 s for N recipients.
+        True therefore means "queued" (the Mailchimp result is in the email Lambda's own
+        log). A payload over the async limit falls back to a synchronous call.
+        """
         try:
-            lambda_function_name = os.environ.get("EMAIL_LAMBDA_FUNCTION", "PROD-GEPPEmailNotification")
+            from ...settings.email_gate import email_lambda_function
+            lambda_function_name = email_lambda_function()
             message = {
                 "from_email": os.environ.get("EMAIL_FROM", "noreply@gepp.me"),
                 "from_name": os.environ.get("EMAIL_FROM_NAME", "GEPP Platform"),
@@ -978,11 +1006,23 @@ class TransactionService:
             }
             if text_content:
                 message["text"] = text_content
-            lambda_client = boto3.client("lambda")
+            from ...settings.email_gate import gate_email_message   # global "Send emails" switch
+            message = gate_email_message(message)
+            if message is None:
+                return False
+            payload = json.dumps({"data": {"message": message}}).encode("utf-8")
+            lambda_client = _get_email_lambda_client()
+            if len(payload) <= _EMAIL_ASYNC_MAX_PAYLOAD:
+                response = lambda_client.invoke(
+                    FunctionName=lambda_function_name,
+                    InvocationType="Event",
+                    Payload=payload,
+                )
+                return response.get("StatusCode") == 202
             response = lambda_client.invoke(
                 FunctionName=lambda_function_name,
                 InvocationType="RequestResponse",
-                Payload=json.dumps({"data": {"message": message}}).encode("utf-8"),
+                Payload=payload,
             )
             response_payload = response.get("Payload").read()
             response_data = json.loads(response_payload)
@@ -1096,7 +1136,7 @@ class TransactionService:
                 <div style="background: #f8f9fa; border-radius: 8px; padding: 16px 20px; margin: 24px 0; border-left: 4px solid #27ae60;">
                     <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse: collapse;"><tr>
                         <td style="vertical-align: middle; padding-right: 16px;"><p style="margin: 0; font-size: 13px; color: #6c757d; text-transform: uppercase; letter-spacing: 0.05em;">Transaction ID &nbsp;<strong style="font-size: 18px; color: #2c3e50; text-transform: none; letter-spacing: normal;">#{transaction_id}</strong></p></td>
-                        <td style="vertical-align: middle; text-align: right; white-space: nowrap;"><a href="https://geppdata.com/waste-transactions#{transaction_id}" style="display: inline-block; padding: 10px 24px; background: linear-gradient(135deg, #8fc9a3 0%, #27ae60 100%); color: #ffffff; font-size: 14px; font-weight: 600; text-decoration: none; border-radius: 8px; white-space: nowrap;">See details</a></td></tr></table>{materials_html}
+                        <td style="vertical-align: middle; text-align: right; white-space: nowrap;"><a href="{_web_base_url()}/waste-transactions#{transaction_id}" style="display: inline-block; padding: 10px 24px; background: linear-gradient(135deg, #8fc9a3 0%, #27ae60 100%); color: #ffffff; font-size: 14px; font-weight: 600; text-decoration: none; border-radius: 8px; white-space: nowrap;">See details</a></td></tr></table>{materials_html}
                 </div>
                 <p style="margin: 0; font-size: 14px; color: #6c757d;">Log in to the platform to view details and take action if needed.</p>
             </div>
@@ -1116,7 +1156,7 @@ A new transaction has been created in your organization.
 
 Transaction ID: #{transaction_id}{materials_text}
 
-See details: https://geppdata.com/waste-transactions#{transaction_id}
+See details: {_web_base_url()}/waste-transactions#{transaction_id}
 
 Log in to the platform to view details and take action if needed.
 
@@ -1179,7 +1219,7 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                 <div style="background: #f8f9fa; border-radius: 8px; padding: 16px 20px; margin: 24px 0; border-left: 4px solid #3498db;">
                     <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse: collapse;"><tr>
                         <td style="vertical-align: middle; padding-right: 16px;"><p style="margin: 0; font-size: 13px; color: #6c757d; text-transform: uppercase; letter-spacing: 0.05em;">Transaction ID &nbsp;<strong style="font-size: 18px; color: #2c3e50; text-transform: none; letter-spacing: normal;">#{transaction_id}</strong></p></td>
-                        <td style="vertical-align: middle; text-align: right; white-space: nowrap;"><a href="https://geppdata.com/waste-transactions#{transaction_id}" style="display: inline-block; padding: 10px 24px; background: linear-gradient(135deg, #7ec4e8 0%, #3498db 100%); color: #ffffff; font-size: 14px; font-weight: 600; text-decoration: none; border-radius: 8px; white-space: nowrap;">See details</a></td></tr></table>{materials_html}
+                        <td style="vertical-align: middle; text-align: right; white-space: nowrap;"><a href="{_web_base_url()}/waste-transactions#{transaction_id}" style="display: inline-block; padding: 10px 24px; background: linear-gradient(135deg, #7ec4e8 0%, #3498db 100%); color: #ffffff; font-size: 14px; font-weight: 600; text-decoration: none; border-radius: 8px; white-space: nowrap;">See details</a></td></tr></table>{materials_html}
                 </div>
                 <p style="margin: 0; font-size: 14px; color: #6c757d;">Log in to the platform to view the latest details.</p>
             </div>
@@ -1199,7 +1239,7 @@ A transaction in your organization has been updated.
 
 Transaction ID: #{transaction_id}{materials_text}
 
-See details: https://geppdata.com/waste-transactions#{transaction_id}
+See details: {_web_base_url()}/waste-transactions#{transaction_id}
 
 Log in to the platform to view the latest details.
 
@@ -1796,7 +1836,7 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                 <div style="background: #f8f9fa; border-radius: 8px; padding: 16px 20px; margin: 24px 0; border-left: 4px solid #27ae60;">
                     <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse: collapse;"><tr>
                         <td style="vertical-align: middle; padding-right: 16px;"><p style="margin: 0; font-size: 13px; color: #6c757d; text-transform: uppercase; letter-spacing: 0.05em;">Transaction ID &nbsp;<strong style="font-size: 18px; color: #2c3e50; text-transform: none; letter-spacing: normal;">{txn_ref}</strong></p></td>
-                        <td style="vertical-align: middle; text-align: right; white-space: nowrap;"><a href="https://geppdata.com/waste-transactions#{transaction_id}" style="display: inline-block; padding: 10px 24px; background: linear-gradient(135deg, #8fc9a3 0%, #27ae60 100%); color: #ffffff; font-size: 14px; font-weight: 600; text-decoration: none; border-radius: 8px; white-space: nowrap;">See details</a></td></tr></table>{materials_html}
+                        <td style="vertical-align: middle; text-align: right; white-space: nowrap;"><a href="{_web_base_url()}/waste-transactions#{transaction_id}" style="display: inline-block; padding: 10px 24px; background: linear-gradient(135deg, #8fc9a3 0%, #27ae60 100%); color: #ffffff; font-size: 14px; font-weight: 600; text-decoration: none; border-radius: 8px; white-space: nowrap;">See details</a></td></tr></table>{materials_html}
                 </div>
                 <p style="margin: 0; font-size: 14px; color: #6c757d;">Log in to the platform to view details.</p>
             </div>
@@ -1816,7 +1856,7 @@ Transaction {txn_ref} has been approved.
 
 Transaction ID: {txn_ref}{materials_text}
 
-See details: https://geppdata.com/waste-transactions#{transaction_id}
+See details: {_web_base_url()}/waste-transactions#{transaction_id}
 
 Log in to the platform to view details.
 
@@ -1878,7 +1918,7 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
                 <div style="background: #f8f9fa; border-radius: 8px; padding: 16px 20px; margin: 24px 0; border-left: 4px solid #e74c3c;">
                     <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse: collapse;"><tr>
                         <td style="vertical-align: middle; padding-right: 16px;"><p style="margin: 0; font-size: 13px; color: #6c757d; text-transform: uppercase; letter-spacing: 0.05em;">Transaction ID &nbsp;<strong style="font-size: 18px; color: #2c3e50; text-transform: none; letter-spacing: normal;">{txn_ref}</strong></p></td>
-                        <td style="vertical-align: middle; text-align: right; white-space: nowrap;"><a href="https://geppdata.com/waste-transactions#{transaction_id}" style="display: inline-block; padding: 10px 24px; background: linear-gradient(135deg, #f1a9a0 0%, #e74c3c 100%); color: #ffffff; font-size: 14px; font-weight: 600; text-decoration: none; border-radius: 8px; white-space: nowrap;">See details</a></td></tr></table>{materials_html}
+                        <td style="vertical-align: middle; text-align: right; white-space: nowrap;"><a href="{_web_base_url()}/waste-transactions#{transaction_id}" style="display: inline-block; padding: 10px 24px; background: linear-gradient(135deg, #f1a9a0 0%, #e74c3c 100%); color: #ffffff; font-size: 14px; font-weight: 600; text-decoration: none; border-radius: 8px; white-space: nowrap;">See details</a></td></tr></table>{materials_html}
                 </div>
                 <p style="margin: 0; font-size: 14px; color: #6c757d;">Log in to the platform to view details and take action if needed.</p>
             </div>
@@ -1898,7 +1938,7 @@ Transaction {txn_ref} has been rejected because one or all of its records have b
 
 Transaction ID: {txn_ref}{materials_text}
 
-See details: https://geppdata.com/waste-transactions#{transaction_id}
+See details: {_web_base_url()}/waste-transactions#{transaction_id}
 
 Log in to the platform to view details and take action if needed.
 
@@ -2263,30 +2303,63 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
             logger.error("Error creating %s batch notifications (batch=%s): %s", event, batch_id, e, exc_info=True)
             raise   # the caller's savepoint rolls this back and falls back to per-transaction
 
+    @staticmethod
+    def _fmt_kg(value: float) -> str:
+        """1234.5 → '1,234.5' (at most 2 decimals, no trailing zeros)."""
+        txt = f"{value:,.2f}"
+        return txt.rstrip("0").rstrip(".")
+
     def _build_batch_digest(self, action: str, batch_id: int, tids: List[int],
                             materials: Dict[int, List[Dict[str, Any]]]) -> tuple:
+        """Digest for one Approve / Reject All batch: the weight per waste type summed over the
+        batch (one row per type, not per transaction), the transaction numbers under it, and a
+        button that opens the batch's list on /waste-transactions (?audit_batch=…)."""
         import html as _html
         n = len(tids)
         verb = 'approved' if action == 'approved' else 'rejected'
         accent = '#27ae60' if action == 'approved' else '#c0392b'
-        batch_url = f"https://geppdata.com/waste-transactions?audit_batch={batch_id}&audit_action={action}"
-        shown = sorted(tids)[: self.BATCH_EMAIL_MAX_ROWS]
+        batch_url = f"{_web_base_url()}/waste-transactions?audit_batch={batch_id}&audit_action={action}"
+
+        totals: Dict[str, Dict[str, Any]] = {}
+        for tid in tids:
+            for m in materials.get(tid, []):
+                row = totals.setdefault(m['name'] or '—', {'kg': 0.0, 'tids': set()})
+                row['kg'] += float(m['weight_kg'] or 0)
+                row['tids'].add(tid)
+        rows = sorted(totals.items(), key=lambda kv: (-kv[1]['kg'], kv[0]))
+        total_kg = sum(r['kg'] for _, r in rows)
+
+        ids = sorted(tids)
+        shown = ids[: self.BATCH_EMAIL_MAX_ROWS]
         more = n - len(shown)
+        ids_line = ', '.join(f"#{t}" for t in shown) + (f" … and {more:,} more" if more > 0 else '')
+
         reason = ('' if action == 'approved' else
                   '<p style="margin: 0 0 16px 0; font-size: 14px; color: #6c757d;">A transaction is rejected when '
                   'one or all of its records have been rejected. Please check the platform.</p>')
-        rows_html, rows_text = [], []
-        for tid in shown:
-            mats = materials.get(tid, [])
-            mat_html = '<br>'.join(f"{_html.escape(m['name'])} · {m['weight_kg']:g} กก." for m in mats) or '—'
-            rows_html.append(
-                f'<tr><td style="padding: 8px 0; border-bottom: 1px solid #e9ecef; vertical-align: top; white-space: nowrap;">'
-                f'<a href="https://geppdata.com/waste-transactions#{tid}" style="color: #2c3e50; font-weight: 600; text-decoration: none;">#{tid}</a></td>'
-                f'<td style="padding: 8px 0 8px 16px; border-bottom: 1px solid #e9ecef; font-size: 13px; color: #495057;">{mat_html}</td></tr>')
-            mat_text = ', '.join(f"{m['name']} {m['weight_kg']:g} kg" for m in mats) or '-'
-            rows_text.append(f"#{tid}: {mat_text} (https://geppdata.com/waste-transactions#{tid})")
-        more_html = (f'<p style="margin: 12px 0 0 0; font-size: 13px; color: #6c757d;">… and {more} more — '
-                     f'<a href="{batch_url}" style="color: {accent};">see the full list</a></p>') if more > 0 else ''
+        cell = 'padding: 8px 0; border-bottom: 1px solid #e9ecef; font-size: 14px; color: #495057;'
+        num = 'text-align: right; white-space: nowrap; padding-left: 16px;'
+        head = 'padding: 8px 0; border-bottom: 1px solid #dee2e6; font-size: 12px; color: #6c757d; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em;'
+        body_rows = ''.join(
+            f'<tr><td style="{cell}">{_html.escape(name)}</td>'
+            f'<td style="{cell} {num}">{len(r["tids"]):,}</td>'
+            f'<td style="{cell} {num}">{self._fmt_kg(r["kg"])}</td></tr>'
+            for name, r in rows
+        ) or f'<tr><td colspan="3" style="{cell}">—</td></tr>'
+        table_html = (
+            '<table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse: collapse;">'
+            f'<tr><td style="{head}">Waste type</td><td style="{head} {num}">Transactions</td>'
+            f'<td style="{head} {num}">Weight (kg)</td></tr>'
+            f'{body_rows}'
+            f'<tr><td style="padding: 10px 0; font-size: 14px; font-weight: 700; color: #2c3e50;">Total</td>'
+            f'<td style="padding: 10px 0; font-size: 14px; font-weight: 700; color: #2c3e50; {num}">{n:,}</td>'
+            f'<td style="padding: 10px 0; font-size: 14px; font-weight: 700; color: #2c3e50; {num}">{self._fmt_kg(total_kg)}</td></tr>'
+            '</table>'
+        )
+        ids_html = (
+            f'<p style="margin: 16px 0 0 0; font-size: 12px; color: #6c757d; font-weight: 600;">Transactions ({n:,})</p>'
+            f'<p style="margin: 4px 0 0 0; font-size: 12px; line-height: 1.7; color: #6c757d; word-break: break-word;">{ids_line}</p>'
+        )
         subject = f"{n} transaction{'s' if n != 1 else ''} {verb} – GEPP Platform"
         html_content = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
@@ -2299,21 +2372,25 @@ This is an automated message from GEPP Platform. Please do not reply to this ema
       </div>
       <div style="padding: 28px 24px;">
         <p style="margin: 0 0 16px 0; font-size: 15px;">Hello,</p>
-        <p style="margin: 0 0 16px 0; font-size: 15px;">The following {n} transaction{'s have' if n != 1 else ' has'} been {verb} in one batch.</p>
+        <p style="margin: 0 0 20px 0; font-size: 15px;">{n:,} transaction{'s have' if n != 1 else ' has'} been {verb} in one batch. Total weight by waste type:</p>
         {reason}
-        <p style="margin: 0 0 20px 0;"><a href="{batch_url}" style="display: inline-block; padding: 10px 24px; background: {accent}; color: #ffffff; font-size: 14px; font-weight: 600; text-decoration: none; border-radius: 8px;">See all in the platform</a></p>
-        <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse: collapse; border-top: 1px solid #dee2e6;">{''.join(rows_html)}</table>
-        {more_html}
+        {table_html}
+        {ids_html}
+        <p style="margin: 24px 0 0 0;"><a href="{batch_url}" style="display: inline-block; padding: 10px 24px; background: {accent}; color: #ffffff; font-size: 14px; font-weight: 600; text-decoration: none; border-radius: 8px;">See all in the platform</a></p>
       </div>
       <hr style="border: none; border-top: 1px solid #eee; margin: 0;">
       <div style="padding: 16px 24px;"><p style="margin: 0; font-size: 12px; color: #95a5a6;">This is an automated message from GEPP Platform. Please do not reply to this email.</p></div>
     </div>
   </div>
 </body></html>"""
+        lines_text = [f"- {name}: {len(r['tids']):,} transaction{'s' if len(r['tids']) != 1 else ''}, {self._fmt_kg(r['kg'])} kg"
+                      for name, r in rows]
         text_content = (f"{n} transaction{'s' if n != 1 else ''} {verb} – GEPP Platform\n\nHello,\n\n"
-                        f"The following {n} transaction{'s have' if n != 1 else ' has'} been {verb} in one batch.\n"
-                        f"See all: {batch_url}\n\n" + '\n'.join(rows_text)
-                        + (f"\n… and {more} more: {batch_url}" if more > 0 else '')
+                        f"{n:,} transaction{'s have' if n != 1 else ' has'} been {verb} in one batch. Total weight by waste type:\n"
+                        + '\n'.join(lines_text)
+                        + f"\nTotal: {n:,} transactions, {self._fmt_kg(total_kg)} kg\n\n"
+                        f"Transactions ({n:,}): {ids_line}\n\n"
+                        f"See all in the platform: {batch_url}"
                         + "\n\n—\nThis is an automated message from GEPP Platform. Please do not reply to this email.")
         return subject, html_content, text_content
 
