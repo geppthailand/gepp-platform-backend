@@ -318,6 +318,10 @@ def _send_email_via_lambda(
                     "content": pdf_attachment_base64,
                 }
             ]
+        from ...settings.email_gate import gate_email_message   # global "Send emails" switch
+        message = gate_email_message(message)
+        if message is None:
+            return False
         lambda_client = boto3.client("lambda")
         response = lambda_client.invoke(
             FunctionName=lambda_function_name,

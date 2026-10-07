@@ -93,7 +93,9 @@ class TestDefaults:
 class TestNeverRaises:
     def test_a_broken_table_resolves_to_defaults(self):
         # The gate calls this on every request; raising here would be an outage.
-        assert gs.get_all(FakeDB(explode=True)) == {KEY: False}
+        # every registered key falls back to its own default (KEY included)
+        assert gs.get_all(FakeDB(explode=True)) == {k: spec.default for k, spec in gs.REGISTRY.items()}
+        assert gs.get_all(FakeDB(explode=True))[KEY] is False
 
     def test_a_broken_table_does_not_enable_the_gate(self):
         # Direction matters: failing "on" would lock out every customer.

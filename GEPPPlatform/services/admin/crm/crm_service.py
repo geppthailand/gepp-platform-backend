@@ -149,6 +149,13 @@ def send_via_email_lambda(
     if tags:
         message["tags"] = tags
 
+    # Global "Send emails" switch (backoffice → Global Settings → Notification)
+    from ...settings.email_gate import gate_email_message
+    message = gate_email_message(message)
+    if message is None:
+        return {"success": False, "suppressed": True, "mandrill_message_id": None,
+                "raw_response": None, "error": "Email sending is switched off (notification.email_enabled)"}
+
     try:
         lambda_client = boto3.client('lambda')
         response = lambda_client.invoke(

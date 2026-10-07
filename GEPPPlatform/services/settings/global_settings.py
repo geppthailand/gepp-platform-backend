@@ -29,9 +29,11 @@ consistent immediately.
 
 import json
 import logging
+import os
+import re
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +58,48 @@ def _as_bool(value: Any) -> bool:
     return False
 
 
+_RECIPIENT = re.compile(r'^(?:[^@\s,;]+@)?@?[a-z0-9.-]+\.[a-z]{2,}$')
+
+
+def _as_recipient_list(value: Any) -> List[str]:
+    """A list of email addresses and/or domains ("@gepp.me"), lower-cased.
+
+    Accepts a JSON list or free text separated by commas / spaces / new lines (what
+    a textarea submits). Entries that are neither an address nor a domain are
+    dropped rather than kept: an allowlist entry that can never match is a typo
+    the operator should see disappear, not a silent no-op.
+    """
+    if isinstance(value, str):
+        items = re.split(r'[\s,;]+', value)
+    elif isinstance(value, (list, tuple)):
+        items = [str(v) for v in value]
+    else:
+        return []
+    out: List[str] = []
+    for item in items:
+        item = item.strip().lower()
+        if item and _RECIPIENT.match(item) and item not in out:
+            out.append(item)
+    return out
+
+
+def running_in_production() -> bool:
+    """True on the PROD Lambdas (PROD-GEPPPlatform, its crons). DEV Lambdas and a
+    local server (no AWS_LAMBDA_FUNCTION_NAME) are not production."""
+    return os.environ.get('AWS_LAMBDA_FUNCTION_NAME', '').upper().startswith('PROD-')
+
+
+def _email_default() -> bool:
+    """Default for "Send emails" when no row is stored: EMAIL_SENDING_DEFAULT=on|off on the
+    function wins; otherwise ON on production Lambdas, OFF everywhere else."""
+    override = os.environ.get('EMAIL_SENDING_DEFAULT', '').strip().lower()
+    if override in ('on', 'true', '1', 'yes'):
+        return True
+    if override in ('off', 'false', '0', 'no'):
+        return False
+    return running_in_production()
+
+
 @dataclass(frozen=True)
 class SettingSpec:
     """One declared global setting."""
@@ -70,7 +114,7 @@ class SettingSpec:
     #: Shown next to the control. Says what happens when it is ON.
     label: str
     help_text: str = ''
-    #: 'boolean' today; the UI switches on this.
+    #: 'boolean' or 'string_list'; the UI switches on this.
     value_type: str = 'boolean'
 
 
@@ -78,6 +122,12 @@ class SettingSpec:
 #: covering today, no access at all). OFF = access continues, with the LAST
 #: period's commercial terms still applied — see `limits.resolve_org_limits`.
 SUBSCRIPTION_DISABLE_WHEN_NOT_IN_PERIOD = 'subscription.disable_when_not_in_period'
+
+#: Outgoing email (every send path goes through `email_gate`). OFF = nothing is sent
+#: except to the test recipients below — so testing on DEV cannot mail real users.
+NOTIFICATION_EMAIL_ENABLED = 'notification.email_enabled'
+#: Addresses / @domains that still receive email while sending is OFF.
+NOTIFICATION_EMAIL_TEST_RECIPIENTS = 'notification.email_test_recipients'
 
 REGISTRY: Dict[str, SettingSpec] = {
     SUBSCRIPTION_DISABLE_WHEN_NOT_IN_PERIOD: SettingSpec(
@@ -96,6 +146,37 @@ REGISTRY: Dict[str, SettingSpec] = {
             'its most recent period rather than falling back to the more '
             'permissive system defaults.'
         ),
+    ),
+    NOTIFICATION_EMAIL_ENABLED: SettingSpec(
+        key=NOTIFICATION_EMAIL_ENABLED,
+        # Per environment: ON on production (deploying this must not silence real
+        # mail), OFF on DEV / local (their data holds real users' addresses).
+        default=_email_default(),
+        coerce=_as_bool,
+        section='notification',
+        label='Send emails',
+        help_text=(
+            'ON — the platform sends every email (transaction notifications and '
+            'approval digests, scheduled reports, password and invitation emails, '
+            'location sharing, CRM). '
+            'OFF — no email leaves the platform, except to the test recipients below; '
+            'skipped emails are logged. Default: ON on production, OFF on DEV and '
+            'local servers, so testing there cannot mail real users.'
+        ),
+    ),
+    NOTIFICATION_EMAIL_TEST_RECIPIENTS: SettingSpec(
+        key=NOTIFICATION_EMAIL_TEST_RECIPIENTS,
+        default=[],
+        coerce=_as_recipient_list,
+        section='notification',
+        label='Test recipients while sending is off',
+        help_text=(
+            'Email addresses or whole domains (e.g. tester@gepp.me, @gepp.me), one per '
+            'line or comma-separated. While "Send emails" is OFF, only these receive '
+            'mail, so emails can be tested without reaching customers. Ignored while '
+            'sending is ON.'
+        ),
+        value_type='string_list',
     ),
 }
 

@@ -98,7 +98,13 @@ class AuthHandlers:
             
             if text_content:
                 message["text"] = text_content
-            
+
+            # Global "Send emails" switch (backoffice → Global Settings → Notification)
+            from ..settings.email_gate import gate_email_message
+            message = gate_email_message(message)
+            if message is None:
+                return False
+
             # Invoke Lambda function
             lambda_client = boto3.client('lambda')
             response = lambda_client.invoke(
