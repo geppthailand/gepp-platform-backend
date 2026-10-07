@@ -5,7 +5,7 @@ This is a SKELETON. Sprint-1 devs fill in method bodies per their briefs.
 
 Key non-negotiables:
   - emit_event() is the ONLY entry point for writing to crm_events
-  - send_via_email_lambda() is the ONLY email path; it wraps lambda.invoke('PROD-GEPPEmailNotification')
+  - send_via_email_lambda() is the ONLY email path; it wraps lambda.invoke(email_lambda_function()): DEV-/PROD-GEPPEmailNotification by stage
   - All SQL uses parameterized queries (no string interpolation)
 """
 
@@ -127,7 +127,8 @@ def send_via_email_lambda(
         "error": str | None,
       }
     """
-    lambda_function_name = os.environ.get('EMAIL_LAMBDA_FUNCTION', 'PROD-GEPPEmailNotification')
+    from ...settings.email_gate import email_lambda_function
+    lambda_function_name = email_lambda_function()
 
     message: Dict[str, Any] = {
         "from_email": from_email or os.environ.get('EMAIL_FROM', 'noreply@gepp.me'),

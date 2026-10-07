@@ -72,3 +72,25 @@ def test_unreadable_settings_fall_back_to_the_code_default(monkeypatch):
     monkeypatch.setattr(gs, '_cache_valid', lambda: True)
     enabled, allow = email_gate._settings()
     assert enabled is bool(gs.REGISTRY[gs.NOTIFICATION_EMAIL_ENABLED].default) and allow == []
+
+
+def test_email_lambda_follows_the_caller_stage(monkeypatch):
+    monkeypatch.delenv('EMAIL_LAMBDA_FUNCTION', raising=False)
+    monkeypatch.setenv('AWS_LAMBDA_FUNCTION_NAME', 'DEV-GEPPPlatform')
+    assert email_gate.email_lambda_function() == 'DEV-GEPPEmailNotification'
+    monkeypatch.setenv('AWS_LAMBDA_FUNCTION_NAME', 'PROD-GEPPPlatform')
+    assert email_gate.email_lambda_function() == 'PROD-GEPPEmailNotification'
+    monkeypatch.delenv('AWS_LAMBDA_FUNCTION_NAME')            # local server: unchanged default
+    assert email_gate.email_lambda_function() == 'PROD-GEPPEmailNotification'
+    monkeypatch.setenv('AWS_LAMBDA_FUNCTION_NAME', 'DEV-GEPPPlatform')
+    monkeypatch.setenv('EMAIL_LAMBDA_FUNCTION', 'Some-Other-Fn')   # explicit env still wins
+    assert email_gate.email_lambda_function() == 'Some-Other-Fn'
+
+
+def test_skips_are_logged_at_warning_without_full_addresses(monkeypatch, caplog):
+    monkeypatch.setattr(email_gate, '_settings', lambda db=None: (False, ['@gepp.me']))
+    with caplog.at_level('WARNING', logger=email_gate.logger.name):
+        assert email_gate.gate_email_message(_msg('customer@example.com')) is None
+    warn = [r.getMessage() for r in caplog.records if r.levelname == 'WARNING']
+    assert len(warn) == 1 and 'example.com' in warn[0] and 'nothing sent' in warn[0]
+    assert 'customer@' not in warn[0]

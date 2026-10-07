@@ -44,7 +44,8 @@ def _send_share_notification_email(to_email: str, subject: str, html_content: st
     handler (which pulls in JWT/bcrypt setup). Best-effort: never raises.
     """
     try:
-        lambda_function_name = os.environ.get('EMAIL_LAMBDA_FUNCTION', 'PROD-GEPPEmailNotification')
+        from ...settings.email_gate import email_lambda_function
+        lambda_function_name = email_lambda_function()
         message = {
             "from_email": os.environ.get('EMAIL_FROM', 'noreply@gepp.me'),
             "from_name": os.environ.get('EMAIL_FROM_NAME', 'GEPP Platform'),

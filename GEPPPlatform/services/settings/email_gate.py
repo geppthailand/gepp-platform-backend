@@ -9,11 +9,27 @@ Read failures fall back to the code default (ON in production, OFF elsewhere) �
 never to "send everything", and a broken settings table never raises into a send.
 """
 import logging
+import os
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import global_settings as gs
 
 logger = logging.getLogger(__name__)
+
+
+def email_lambda_function() -> str:
+    """Name of the Mailchimp-wrapper Lambda to invoke.
+
+    `EMAIL_LAMBDA_FUNCTION` wins when set. Otherwise follow the caller's own stage:
+    a `DEV-…` Lambda uses DEV-GEPPEmailNotification (the DEV role may invoke only that
+    one — invoking PROD-… was AccessDenied on every DEV send), everything else (PROD,
+    local) keeps the old PROD-GEPPEmailNotification default.
+    """
+    explicit = (os.environ.get('EMAIL_LAMBDA_FUNCTION') or '').strip()
+    if explicit:
+        return explicit
+    caller = os.environ.get('AWS_LAMBDA_FUNCTION_NAME', '')
+    return 'DEV-GEPPEmailNotification' if caller.upper().startswith('DEV-') else 'PROD-GEPPEmailNotification'
 
 
 def _settings(db=None) -> Tuple[bool, List[str]]:
@@ -51,8 +67,15 @@ def gate_email_message(message: Dict[str, Any], db=None) -> Optional[Dict[str, A
     kept = [r for r in to if recipient_allowed((r or {}).get('email', ''), allowlist)]
     skipped = [(r or {}).get('email', '') for r in to if r not in kept]
     if skipped:
-        logger.info('Email not sent (notification.email_enabled is OFF): to=%s subject=%r',
-                    ', '.join(skipped), str(message.get('subject', ''))[:120])
+        # WARNING, not INFO: Lambda only shows WARNING+, and "why did nobody get the email"
+        # must be answerable from CloudWatch. Domains only (no full addresses) at this level.
+        domains = sorted({e.split('@', 1)[-1].lower() for e in skipped if '@' in e})
+        logger.warning('Email gate: sending is OFF, %d of %d recipient(s) not on the test list '
+                       'were skipped (domains: %s); %s; subject=%r',
+                       len(skipped), len(to), ', '.join(domains) or '-',
+                       f'still sent to {len(kept)}' if kept else 'nothing sent',
+                       str(message.get('subject', ''))[:120])
+        logger.info('Email gate skipped: %s', ', '.join(skipped))
     if not kept:
         return None
     return {**message, 'to': kept}

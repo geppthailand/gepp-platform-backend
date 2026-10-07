@@ -85,7 +85,8 @@ class AuthHandlers:
     def _send_email_via_lambda(self, to_email: str, subject: str, html_content: str, text_content: str = None) -> bool:
         """Send email via Lambda function PROD-GEPPEmailNotification"""
         try:
-            lambda_function_name = os.environ.get('EMAIL_LAMBDA_FUNCTION', 'PROD-GEPPEmailNotification')
+            from ..settings.email_gate import email_lambda_function
+            lambda_function_name = email_lambda_function()
             
             # Format Mailchimp message object
             message = {
