@@ -280,6 +280,11 @@ Return ONLY this JSON (no commentary, no markdown fences):
       "value": "<the number exactly as printed, e.g. \\"29,540.00\\">"}}
   ],
   "image_content": "<one short phrase for what this image IS, e.g. \\"printed tax invoice\\", \\"digital scale display\\", \\"pile of PET bottles\\">",
+  "image_content_th": "<the same phrase in Thai, e.g. \\"ใบกำกับภาษีแบบพิมพ์\\", \\"หน้าจอเครื่องชั่งดิจิทัล\\", \\"กองขวด PET\\">",
+  "identifying_elements": "<up to 4 things VISIBLE that make it that, comma separated, e.g. \\"company letterhead, tax id, itemised table, VAT line\\" or \\"digital display, weight in kg, platform scale\\">",
+  "identifying_elements_th": "<the same list in Thai>",
+  "is_paper_document": true | false,   // Would someone READ this page for its text and figures? true for an invoice, receipt, voucher, report, certificate or ID card — INCLUDING one that embeds a product photo alongside its data. false for a photo of goods, a weighing scale, a vehicle or a waste pile, and false for a page that is essentially just a printed or scanned photograph with little or no data on it. A label, tag or stray document somewhere in the frame does not make a photo into a document.
+  "shows_material": true | false,      // Is the waste/product/cargo itself VISIBLE anywhere in this image, as a photograph? true for a photo of a waste pile, bales, scrap, bags, or a loaded truck — and ALSO true for a printed page that carries such photos, e.g. a delivery sheet with truck and bale photos pasted on it. false for a page of text, tables and signatures with no product photograph on it.
   "matches_stated_type": true | false | null
 }}
 
@@ -326,7 +331,9 @@ def read_image_sightings(
     """Ask the vision LLM what it can SEE on one image. No verification.
 
     Returns {"dates_seen": [{label, value}], "numbers_seen": [{label, value}],
-             "image_content": str, "matches_stated_type": True|False|None}.
+             "image_content": str, "image_content_th": str,
+             "is_paper_document": bool, "shows_material": bool,
+             "matches_stated_type": True|False|None}.
     Raises on HTTP error or unparseable JSON (caller decides whether to swallow).
     """
     api_key = os.environ.get("OPENROUTER_API_KEY")

@@ -159,6 +159,19 @@ SLOT_KEYS: Dict[str, List[str]] = {
 }
 
 
+# A slot may accept evidence of a related type under its own name. Measured on
+# Green Shelter 2026: 36 of 38 files labelled `product_weighing_sheet` by a
+# person are scale PHOTOS — one weight reading, no ticket number, no gross or
+# tare, no plate. Against the sheet's six keys that is 1/6 and the slot came
+# back empty, even though the OCR had read the weight correctly (94.7%).
+#
+# So a slot named for the document also accepts the photo. The reverse is not
+# listed: a weighbridge ticket already satisfies the photo's keys.
+_ALSO_ACCEPTS = {
+    "product_weighing_sheet": ("product_weighing_image",),
+}
+
+
 def keysets(slot_name: str, explicit: List[str] = None) -> List[List[str]]:
     """Key sets a file may match to claim this slot — one list per alternative.
 
@@ -170,7 +183,9 @@ def keysets(slot_name: str, explicit: List[str] = None) -> List[List[str]]:
         return [list(explicit)]
     out = []
     for part in slot_name.split("/"):
-        found = SLOT_KEYS.get(part.strip())
-        if found:
-            out.append(found)
+        part = part.strip()
+        for name in (part,) + _ALSO_ACCEPTS.get(part, ()):
+            found = SLOT_KEYS.get(name)
+            if found and found not in out:
+                out.append(found)
     return out
