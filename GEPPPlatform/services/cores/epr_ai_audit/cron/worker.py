@@ -1074,12 +1074,15 @@ def _use_python_judge() -> bool:
     """True when the integrity verdict is decided in Python from LLM sightings
     instead of asking the LLM to compare.
 
-    ponytail: env flag, not a settings table — this is a migration switch, so
-    delete the branch (and the LLM-compare path with it) once the Python judge
-    is proven on production traffic. Read per-call so it can be flipped on a
-    warm Lambda.
+    This is the default everywhere. EPR_INTEGRITY_JUDGE=llm falls back to the
+    old path, where the LLM is handed the payload and asked to compare, and
+    Python string-matches its prose.
+
+    ponytail: env flag, not a settings table — it is only a rollback lever, so
+    delete it (and the LLM-compare path with it) once nothing has needed to
+    pull it. Read per-call so it can be flipped on a warm Lambda.
     """
-    return os.environ.get("EPR_INTEGRITY_JUDGE", "").lower() == "python"
+    return os.environ.get("EPR_INTEGRITY_JUDGE", "").lower() != "llm"
 
 
 # Label keywords that mark a number as the document's grand total / the weight,

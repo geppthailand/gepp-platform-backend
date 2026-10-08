@@ -214,11 +214,12 @@ def test_malformed_sightings_do_not_crash():
 
 # ── the flag ───────────────────────────────────────────────────────────────
 
-def test_judge_is_off_by_default(monkeypatch):
+def test_judge_is_on_by_default(monkeypatch):
     monkeypatch.delenv("EPR_INTEGRITY_JUDGE", raising=False)
-    assert worker._use_python_judge() is False
+    assert worker._use_python_judge() is True
     monkeypatch.setenv("EPR_INTEGRITY_JUDGE", "python")
     assert worker._use_python_judge() is True
+    # The only way back to the old LLM-compare path.
     monkeypatch.setenv("EPR_INTEGRITY_JUDGE", "llm")
     assert worker._use_python_judge() is False
 
