@@ -20,6 +20,9 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_PAGE_SIZE = 20
 _MAX_PAGE_SIZE = 100
+# Each audit carries full raw_data plus every image extraction, so a response
+# is large. Bounded for the same reason page_size is.
+_MAX_AUDIT_IDS = 50
 
 
 class EprAiAuditService:
@@ -47,6 +50,30 @@ class EprAiAuditService:
                     f"project_id must be an integer, got {project_id_raw!r}"
                 )
             where_clauses.append("t.epr_project_id = :project_id")
+
+        # Filter by the LEGACY transaction id — the numeric id the transaction
+        # has in the legacy database. Imported rows carry it at
+        # raw_data->>'_legacy_id'; rows posted live through the API carry the
+        # caller's own id at raw_data->>'id'. Match either, so one filter works
+        # whichever way a transaction arrived.
+        #
+        # `epr_transactions_embeded.id` is this table's own key and means
+        # nothing to a caller — that one is for /{id}/audit.
+        transaction_id_raw = qp.get("transaction_id")
+        if transaction_id_raw is not None and transaction_id_raw != "":
+            ids = [v.strip() for v in str(transaction_id_raw).split(",") if v.strip()]
+            if not ids:
+                raise BadRequestException("transaction_id must not be blank")
+            bad = [v for v in ids if not v.lstrip("-").isdigit()]
+            if bad:
+                raise BadRequestException(
+                    f"transaction_id must be numeric, got {', '.join(bad)}"
+                )
+            params["transaction_ids"] = ids
+            where_clauses.append(
+                "(t.raw_data->>'_legacy_id' = ANY(:transaction_ids) "
+                "OR t.raw_data->>'id' = ANY(:transaction_ids))"
+            )
 
         status_raw = qp.get("status")
         if status_raw is not None and status_raw != "":
@@ -156,6 +183,10 @@ class EprAiAuditService:
         transactions = [
             {
                 "id": r[0],
+                # The id a caller knows this transaction by: the legacy one if
+                # it was imported, otherwise whatever the POST carried. Same
+                # precedence the dedup flags use.
+                "transaction_id": _source_id(r[2]),
                 "is_active": r[1],
                 "raw_data": r[2],
                 "epr_project_id": r[3],
@@ -178,6 +209,177 @@ class EprAiAuditService:
             },
             "transactions": transactions,
         }
+
+    # ── GET /api/epr/ai_audit/transactions/{id}/audit ────────────────────────
+
+    def get_transaction_audit(self, transaction_id: Any) -> Dict[str, Any]:
+        """One or more transactions with every field, and why each check
+        passed, failed or could not be verified.
+
+        Keyed by `epr_transactions_embeded.id` — the `id` the list endpoint
+        returns. Several ids comma-separated:
+
+            /transactions/553/audit
+            /transactions/553,552,551/audit
+
+        Always returns a list, so a caller does not have to branch on how many
+        it asked for. Ids that do not exist come back under `not_found` rather
+        than failing the whole request — one bad id in a batch should not cost
+        the other nine.
+
+        Every query here is set-based. Looping per id would turn a page of ten
+        into forty round trips.
+        """
+        raw = [v.strip() for v in str(transaction_id).split(",") if v.strip()]
+        if not raw:
+            raise BadRequestException("transaction id must not be blank")
+        bad = [v for v in raw if not v.lstrip("-").isdigit()]
+        if bad:
+            raise BadRequestException(
+                f"transaction id must be an integer, got {', '.join(bad)}"
+            )
+        if len(raw) > _MAX_AUDIT_IDS:
+            raise BadRequestException(
+                f"at most {_MAX_AUDIT_IDS} ids per request, got {len(raw)}"
+            )
+        # De-duplicated, original order preserved so the response lines up with
+        # what was asked for.
+        ids, seen = [], set()
+        for v in (int(x) for x in raw):
+            if v not in seen:
+                seen.add(v); ids.append(v)
+
+        rows = self.db.execute(
+            text("""
+                SELECT id, is_active, raw_data, epr_project_id, ai_score,
+                       status, flags, created_date, updated_date, deleted_date
+                FROM epr_transactions_embeded WHERE id = ANY(:ids)
+            """),
+            {"ids": ids},
+        ).fetchall()
+        by_id = {r[0]: r for r in rows}
+
+        # Duplicates across every requested transaction, resolved in one go.
+        dup_ids = [
+            d.get("embeded_id")
+            for r in rows
+            for d in ((r[6] or {}).get("duplicates") or [])
+            if d.get("embeded_id") is not None
+        ]
+        dup_source_ids = {}
+        if dup_ids:
+            dup_source_ids = dict(
+                self.db.execute(
+                    text("SELECT id, raw_data FROM epr_transactions_embeded "
+                         "WHERE id = ANY(:ids)"),
+                    {"ids": list(set(dup_ids))},
+                ).fetchall()
+            )
+            dup_source_ids = {k: _source_id(v) for k, v in dup_source_ids.items()}
+
+        records_by_tx: Dict[int, List[Dict[str, Any]]] = {}
+        for r in self.db.execute(
+            text("""
+                SELECT id, transaction_id, is_active, raw_data, ai_score,
+                       status, flags, created_date, updated_date, deleted_date
+                FROM epr_transaction_records_embeded
+                WHERE transaction_id = ANY(:ids) AND deleted_date IS NULL
+                ORDER BY id ASC
+            """),
+            {"ids": ids},
+        ).fetchall():
+            records_by_tx.setdefault(r[1], []).append({
+                "id": r[0],
+                "is_active": r[2],
+                "raw_data": r[3],
+                "ai_score": _num(r[4]),
+                "status": r[5],
+                "flags": r[6],
+                "audit": _audit_view(r[6] or {}, r[3]),
+                "timestamps": _timestamps_obj(r[7], r[8], r[9]),
+                "images": [],
+            })
+
+        # The images and what the vision model read off each one. For rows
+        # deduped before `confirmations` existed, a pass carries only the field
+        # name — but THIS is what it was judged against, and it was never
+        # thrown away. A reviewer can see for themselves rather than being
+        # told to trust an unexplained pass.
+        images_by_tx: Dict[int, List[Dict[str, Any]]] = {}
+        for i in self.db.execute(
+            text("""
+                SELECT transaction_id, id, name, image_url, type,
+                       NULL::bigint AS record_id, extracted_data
+                FROM epr_transaction_image
+                WHERE transaction_id = ANY(:ids) AND deleted_date IS NULL
+                UNION ALL
+                SELECT r.transaction_id, ri.id, ri.name, ri.image_url, ri.type,
+                       ri.epr_transaction_record_id, ri.extracted_data
+                FROM epr_transaction_record_image ri
+                JOIN epr_transaction_records_embeded r
+                  ON r.id = ri.epr_transaction_record_id
+                WHERE r.transaction_id = ANY(:ids) AND ri.deleted_date IS NULL
+                ORDER BY 1, 6 NULLS FIRST, 2
+            """),
+            {"ids": ids},
+        ).fetchall():
+            images_by_tx.setdefault(i[0], []).append({
+                "id": i[1],
+                "name": i[2],
+                "image_url": i[3],
+                "type": i[4],
+                "record_id": i[5],
+                "extracted_data": i[6],
+                "extracted": i[6] is not None,
+            })
+
+        results = []
+        for tx_id in ids:
+            row = by_id.get(tx_id)
+            if row is None:
+                continue
+            flags = row[6] or {}
+            dups = flags.get("duplicates") or []
+            records = records_by_tx.get(tx_id, [])
+            images = images_by_tx.get(tx_id, [])
+            for rec in records:
+                rec["images"] = [im for im in images if im["record_id"] == rec["id"]]
+
+            results.append({
+                "transaction": {
+                    "id": row[0],
+                    "transaction_id": _source_id(row[2]),
+                    "source_id": _source_id(row[2]),      # kept: same value
+                    "is_active": row[1],
+                    "raw_data": row[2],
+                    "epr_project_id": row[3],
+                    "ai_score": _num(row[4]),
+                    "status": row[5],
+                    "flags": _with_dup_transaction_ids(flags, dup_source_ids),
+                    "timestamps": _timestamps_obj(row[7], row[8], row[9]),
+                },
+                "records": records,
+                "records_count": len(records),
+                "images": [im for im in images if im["record_id"] is None],
+                "audit": {
+                    **_audit_view(flags, row[2]),
+                    "duplicates": [
+                        {**d, "transaction_id": dup_source_ids.get(d.get("embeded_id"))}
+                        for d in dups
+                    ],
+                    "reason": flags.get("reason"),
+                    "dedup_at": flags.get("dedup_at"),
+                },
+            })
+
+        return {
+            "results": results,
+            "count": len(results),
+            # Asked for but not in the database. Not an error — a batch should
+            # not fail because one id is stale.
+            "not_found": [i for i in ids if i not in by_id],
+        }
+
 
     # ── POST /api/epr/ai_audit/embed-transaction ─────────────────────────────
 
@@ -484,6 +686,203 @@ def _with_dup_transaction_ids(flags, source_ids) -> Optional[Dict[str, Any]]:
             for d in dups
         ],
     }
+
+
+def _source_id(raw_data) -> Optional[Any]:
+    """The id a caller knows this transaction by.
+
+    Imported rows carry the legacy database's numeric id at `_legacy_id`; rows
+    posted live through the API carry the caller's own `id`. The dedup flags
+    already prefer the legacy one, so this matches.
+    """
+    raw = raw_data or {}
+    legacy = raw.get("_legacy_id")
+    return legacy if legacy is not None else raw.get("id")
+
+
+# Payload keys the integrity judge actually examines, mapped to the name it
+# reports them under. Everything else a caller submits is never compared
+# against a document — see _NOT_CHECKED_REASONS.
+_JUDGED_FIELDS = {
+    "transactionDate": "transactionDate",
+    "totalQuantity": "totalQuantity",
+    "totalPrice": "totalPrice",
+    # Records store the per-unit price as `price` and the quantity under
+    # several legacy names; worker._payload_for_integrity coalesces them.
+    "price": "pricePerUnit",
+    "pricePerUnit": "pricePerUnit",
+    "quantity": "totalQuantity",
+    "weight": "totalQuantity",
+    "materialWeight": "totalQuantity",
+    "kgQuantity": "totalQuantity",
+    "unitPrice": "pricePerUnit",
+}
+
+# Why a submitted field is not compared against the documents. A field with no
+# entry here falls back to the generic line.
+_NOT_CHECKED_REASONS = {
+    "invoiceNo": {
+        "en": "Not verified: this is freeform text on the transaction and "
+              "rarely matches the reference numbers printed on record-level "
+              "documents, so checking it produces more noise than signal.",
+        "th": "ไม่ได้ตรวจสอบ: เป็นข้อความที่ผู้ใช้กรอกเอง และมักไม่ตรงกับ "
+              "เลขที่เอกสารที่พิมพ์บนไฟล์แนบ",
+    },
+}
+_NOT_CHECKED_DEFAULT = {
+    "en": "Not verified against any document — no check is defined for this field.",
+    "th": "ไม่ได้ตรวจสอบกับเอกสาร — ยังไม่มีการตรวจสอบสำหรับข้อมูลนี้",
+}
+
+# Structural keys in raw_data that are not user-entered values.
+_NOT_A_FIELD = {
+    "id", "_legacy_id", "_source", "_extraction_complete", "isActive",
+    "status", "images", "materials", "auditHistory", "timestamps",
+    "timestamp", "organization", "originBusinessUnit", "destinationBusinessUnit",
+    "conditions", "material", "actionBy", "deviceLog", "coordinate", "journey",
+}
+
+
+# The judge reports four canonical names; a caller submitted something else.
+# worker._payload_for_integrity coalesces in this order, so the first key
+# present in raw_data is the one that supplied the value. Mirrored here rather
+# than threaded through the worker: resolving at read time means rows deduped
+# before this existed get their original names too, with no re-run.
+_CANONICAL_SOURCES = {
+    "totalQuantity": ("totalQuantity", "quantity", "weight", "materialWeight",
+                      "kgQuantity"),
+    "pricePerUnit": ("price", "pricePerUnit", "unitPrice"),
+    "totalPrice": ("totalPrice",),
+    "transactionDate": ("transactionDate",),
+}
+
+
+def _payload_field(canonical: str, raw_data: Any) -> Optional[str]:
+    """The key the CALLER actually submitted for this canonical field.
+
+    A record sends `price`; the verdict comes back as `pricePerUnit`. Showing
+    only the canonical name leaves a reviewer matching up two vocabularies by
+    eye. None when the field is not one of the remapped four (imageType is the
+    judge's own, not a payload key).
+    """
+    raw = raw_data or {}
+    for key in _CANONICAL_SOURCES.get(canonical, ()):
+        v = raw.get(key)
+        if v is not None and v != "":
+            return key
+    return None
+
+
+def _label(entry: Dict[str, Any], raw_data: Any) -> Dict[str, Any]:
+    """Add the submitted key alongside the canonical one."""
+    submitted = _payload_field(entry.get("field"), raw_data)
+    return {**entry, "payload_field": submitted or entry.get("field")}
+
+
+def _not_checked(raw_data: Any, judged: set) -> List[Dict[str, Any]]:
+    """Every submitted field that no check looks at.
+
+    Without this a reviewer sees four verdicts and cannot tell whether the
+    other fifteen fields passed silently or were never examined. They were
+    never examined — say so per field rather than leaving a gap.
+    """
+    out = []
+    for k, v in (raw_data or {}).items():
+        if k in _NOT_A_FIELD or isinstance(v, (dict, list)):
+            continue
+        if _JUDGED_FIELDS.get(k) in judged:
+            continue
+        out.append({
+            "field": k,
+            "payload_field": k,          # not remapped: never judged
+            "payload_value": v,
+            "image_indicates": None,
+            "explanation": _NOT_CHECKED_REASONS.get(k, _NOT_CHECKED_DEFAULT),
+        })
+    return sorted(out, key=lambda f: f["field"])
+
+
+def _audit_view(flags: Dict[str, Any], raw_data: Any = None) -> Dict[str, Any]:
+    """Unpack flags.integrity into the two questions a reviewer asks.
+
+    `matched_fields` is a bare list of field names — the evidence confirmed
+    these. `issues` are objects carrying the payload value, what the image
+    showed instead, and a bilingual explanation. Both were already written;
+    neither was ever served.
+    """
+    integrity = flags.get("integrity") or {}
+    issues = integrity.get("issues") or []
+    matched = integrity.get("matched_fields") or []
+
+    # `confirmations` carries the same detail for a pass that `issues` does for
+    # a failure. Rows deduped before it existed have only the field names, so
+    # those fall back to the name alone rather than inventing a reason.
+    by_field = {c.get("field"): c for c in (integrity.get("confirmations") or [])}
+    passed = []
+    for f in matched:
+        c = by_field.get(f)
+        passed.append({
+            "field": f,
+            "payload_field": _payload_field(f, raw_data) or f,
+            "payload_value": c.get("payload_value") if c else None,
+            "image_indicates": c.get("image_indicates") if c else None,
+            "explanation": (c.get("explanation") or {}) if c else {},
+            # False for anything checked before confirmations were recorded —
+            # the pass is real, the reasoning was simply never kept.
+            "explained": bool(c),
+        })
+
+    judged = ({f for f in matched}
+              | {i.get("field") for i in issues}
+              | {u.get("field") for u in (integrity.get("unverified") or [])})
+    not_checked = _not_checked(raw_data, judged)
+
+    return {
+        "checked_at": integrity.get("checked_at"),
+        "checked_image_count": integrity.get("checked_image_count", 0),
+        "skipped": bool(integrity.get("skipped")),
+        # Why it passed: what was submitted, what the image showed, in en/th.
+        "passed": passed,
+        # Why it failed: each carries both sides and an explanation in en/th.
+        "failed": [
+            {
+                "field": i.get("field"),
+                "payload_field": _payload_field(i.get("field"), raw_data) or i.get("field"),
+                "payload_value": i.get("payload_value"),
+                "image_indicates": i.get("image_indicates"),
+                "explanation": i.get("explanation") or {},
+                # Which file produced this verdict, so the UI can link it.
+                "image_id": i.get("image_id"),
+                "image_type": i.get("image_type"),
+                "image_name": i.get("image_name"),
+                "source_image_url": i.get("source_image_url"),
+                "record_id": i.get("record_id"),
+            }
+            for i in issues
+        ],
+        # Submitted and examined, but the image had nothing to check it
+        # against. Not a pass and not a failure — an unanswered question.
+        "unverified": [_label(u, raw_data)
+                       for u in (integrity.get("unverified") or [])],
+        # Submitted but never examined — no check exists for these.
+        "not_checked": not_checked,
+        # Extraction or model errors — not a verdict on the data.
+        "errors": integrity.get("errors") or [],
+        "passed_count": len(matched),
+        "failed_count": len(issues),
+        "unverified_count": len(integrity.get("unverified") or []),
+        "not_checked_count": len(not_checked),
+    }
+
+
+def _num(v) -> Optional[float]:
+    """DECIMAL comes back as Decimal, which json.dumps refuses."""
+    return float(v) if v is not None else None
+
+
+def _enum_value(v) -> Optional[str]:
+    """Status columns are Enums on some rows and plain strings on others."""
+    return getattr(v, "value", v) if v is not None else None
 
 
 def _timestamps_obj(created, updated, deleted) -> Dict[str, Any]:
