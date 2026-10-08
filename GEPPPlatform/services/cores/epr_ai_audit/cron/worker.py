@@ -1392,7 +1392,13 @@ def _judge_sightings(payload, sightings, expected_type=None):
         # of paperwork filed here is wrong and that IS answerable. A photo of
         # goods with a label or a stray document in frame stays fine; only a
         # page read for its text counts as a document.
+        #
+        # A document that CARRIES product photos (a delivery sheet with the
+        # truck and the bales pasted on it) still shows the material, which is
+        # what the slot is for. Paper wrapping does not make it the wrong file.
         is_doc = sightings.get("is_paper_document")
+        if sightings.get("shows_material") is True:
+            is_doc = False
         if is_doc is True:
             flag("imageType", stated, content,
                  f"'{stated}' should be a photo of the material, but the image "
@@ -1401,9 +1407,8 @@ def _judge_sightings(payload, sightings, expected_type=None):
                  f"{content_th}{because_th}")
         elif is_doc is False:
             confirm("imageType", stated, content,
-                    f"The image is a photo of the material, not paperwork: "
-                    f"{content}.{because}",
-                    f"รูปเป็นรูปถ่ายของวัสดุ ไม่ใช่เอกสาร: {content_th}{because_th}")
+                    f"The image shows the material: {content}.{because}",
+                    f"รูปแสดงตัววัสดุ: {content_th}{because_th}")
         else:
             cant_verify(
                 "imageType", stated,

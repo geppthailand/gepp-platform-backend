@@ -616,13 +616,14 @@ def test_a_type_mismatch_also_says_what_it_saw():
     assert "ขนนก" in i["explanation"]["th"]
 
 
-def _judge_material_slot(stated, content, is_doc):
+def _judge_material_slot(stated, content, is_doc, shows_material=None):
     from GEPPPlatform.services.cores.epr_ai_audit.cron.worker import _judge_sightings
     return _judge_sightings(
         {}, {"dates_seen": [], "numbers_seen": [],
              "image_content": content, "image_content_th": content,
              "identifying_elements": "", "identifying_elements_th": "",
-             "is_paper_document": is_doc},
+             "is_paper_document": is_doc,
+             "shows_material": shows_material},
         expected_type=stated)
 
 
@@ -632,7 +633,7 @@ def test_a_material_slot_holding_the_material_passes():
     r = _judge_material_slot("product_image", "a pile of PET bottles", False)
     assert not r["issues"]
     c = next(c for c in r["confirmations"] if c["field"] == "imageType")
-    assert "not paperwork" in c["explanation"]["en"]
+    assert "shows the material" in c["explanation"]["en"]
 
 
 def test_a_material_slot_holding_a_document_is_flagged():
@@ -660,11 +661,21 @@ def test_the_elements_are_optional():
     assert "Identified by" not in c["explanation"]["en"]
 
 
-def test_paperwork_that_embeds_a_product_photo_is_still_paperwork():
-    """A QC report with a photo of the material alongside its data is a QC
-    report — it belongs in qc_file, not in a material slot."""
+def test_paperwork_that_carries_product_photos_is_the_product_image():
+    """A delivery sheet with the truck and the bales pasted on it still shows
+    the material, which is what the slot is for. Paper wrapping is not a
+    wrong file."""
     r = _judge_material_slot(
-        "product_image", "a QC inspection report with an embedded product photo", True)
+        "product_image", "a sheet with truck and baled-waste photos", True,
+        shows_material=True)
+    assert not r["issues"]
+    c = next(c for c in r["confirmations"] if c["field"] == "imageType")
+    assert "shows the material" in c["explanation"]["en"]
+
+
+def test_a_document_with_no_product_photo_is_still_flagged():
+    r = _judge_material_slot(
+        "product_image", "a printed tax invoice", True, shows_material=False)
     assert {i["field"] for i in r["issues"]} == {"imageType"}
 
 
@@ -675,7 +686,7 @@ def test_a_page_that_is_essentially_just_a_photo_is_not_paperwork():
         "product_image", "a printed photograph of baled PET bottles", False)
     assert not r["issues"]
     c = next(c for c in r["confirmations"] if c["field"] == "imageType")
-    assert "not paperwork" in c["explanation"]["en"]
+    assert "shows the material" in c["explanation"]["en"]
 
 
 # ── the slot type reads in Thai too ────────────────────────────────────────
