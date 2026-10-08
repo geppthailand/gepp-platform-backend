@@ -470,6 +470,51 @@ def _is_empty_payload_value(v):
     return s in _EMPTY_PAYLOAD_TOKENS
 
 
+# Thai names for the document slot types, for the Thai half of an
+# explanation. transaction_image_types carries only an English `desctiption`
+# and nothing in either database translates these — I scanned 1,426 text
+# columns across both. ai_audit_document_types has name_th but for a
+# different, five-entry vocabulary ("Weight Ticket", not
+# product_weighing_sheet), so it cannot be joined to.
+#
+# If the frontend already renders these names in Thai, that map is the real
+# source and this should be replaced by it rather than competing with it.
+# Until then an untranslated key renders as the raw slug, which is what the
+# Thai sentence used to show for every one of them.
+_IMAGE_TYPE_TH = {
+    "uncategorized": "ไม่ระบุประเภท",
+    "invoice": "ใบแจ้งหนี้",
+    "bill_of_lading": "ใบตราส่งสินค้า",
+    "qc_file": "เอกสารตรวจสอบคุณภาพ",
+    "receipt": "ใบเสร็จรับเงิน",
+    "cash_bill": "บิลเงินสด",
+    "payment_voucher": "ใบสำคัญจ่าย",
+    "tax_invoice": "ใบกำกับภาษี",
+    "id_card": "บัตรประชาชน",
+    "invoice/receipt/cash_bill/payment_voucher":
+        "ใบแจ้งหนี้ / ใบเสร็จรับเงิน / บิลเงินสด / ใบสำคัญจ่าย",
+    "invoice/tax_invoice/cash_bill/payment_voucher/id_card":
+        "ใบแจ้งหนี้ / ใบกำกับภาษี / บิลเงินสด / ใบสำคัญจ่าย / บัตรประชาชน",
+    "money_transfer_document": "เอกสารการโอนเงิน",
+    "production_report": "รายงานการผลิต",
+    "monthly_progress_report": "รายงานความคืบหน้ารายเดือน",
+    "production_other_report": "รายงานการผลิตอื่น ๆ",
+    "product_weighing_sheet": "ใบชั่งน้ำหนักสินค้า",
+    "product_weighing_sheet/product_weighing_image":
+        "ใบชั่งน้ำหนักสินค้า / รูปถ่ายการชั่งน้ำหนัก",
+    "product_image": "รูปถ่ายสินค้า",
+    "epr_payment_attachment": "เอกสารแนบการชำระเงิน EPR",
+    "epr_payment_confirm_file": "เอกสารยืนยันการชำระเงิน EPR",
+    "gepp_business_ocr_input": "ไฟล์นำเข้า OCR",
+    "gepp_business_ocr_output": "ไฟล์ผลลัพธ์ OCR",
+}
+
+
+def _type_th(name):
+    """The Thai name for a slot type, or the raw key when none is known."""
+    return _IMAGE_TYPE_TH.get(str(name or "").strip().lower(), name)
+
+
 _GENERIC_IMAGE_TYPES = frozenset({
     "",
     "other",
@@ -1352,7 +1397,7 @@ def _judge_sightings(payload, sightings, expected_type=None):
             flag("imageType", stated, content,
                  f"'{stated}' should be a photo of the material, but the image "
                  f"is a paper document: {content}.{because}",
-                 f"'{stated}' ควรเป็นรูปถ่ายของวัสดุ แต่รูปนี้เป็นเอกสาร: "
+                 f"'{_type_th(stated)}' ควรเป็นรูปถ่ายของวัสดุ แต่รูปนี้เป็นเอกสาร: "
                  f"{content_th}{because_th}")
         elif is_doc is False:
             confirm("imageType", stated, content,
@@ -1364,7 +1409,7 @@ def _judge_sightings(payload, sightings, expected_type=None):
                 "imageType", stated,
                 f"Could not tell whether '{stated}' holds a photo of the "
                 f"material or paperwork. The image appears to be {content}.{because}",
-                f"ไม่สามารถระบุได้ว่า '{stated}' เป็นรูปวัสดุหรือเอกสาร "
+                f"ไม่สามารถระบุได้ว่า '{_type_th(stated)}' เป็นรูปวัสดุหรือเอกสาร "
                 f"รูปเป็น {content_th}{because_th}",
             )
     elif stated:
@@ -1373,12 +1418,12 @@ def _judge_sightings(payload, sightings, expected_type=None):
             confirm("imageType", stated, content,
                     f"The image appears to be {content}, matching the stated "
                     f"type '{stated}'.{because}",
-                    f"รูปเป็น {content_th} ตรงกับประเภทที่ระบุ '{stated}'{because_th}")
+                    f"รูปเป็น {content_th} ตรงกับประเภทที่ระบุ '{_type_th(stated)}'{because_th}")
         elif verdict is False:
             flag("imageType", stated, content,
                  f"Stated type '{stated}' but the image appears to be "
                  f"{content}.{because}",
-                 f"ระบุประเภทเป็น '{stated}' แต่ในรูปเป็น {content_th}{because_th}")
+                 f"ระบุประเภทเป็น '{_type_th(stated)}' แต่ในรูปเป็น {content_th}{because_th}")
 
     return {
         "verdict": "flagged" if issues else "passed",

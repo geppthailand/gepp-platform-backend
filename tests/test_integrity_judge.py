@@ -676,3 +676,37 @@ def test_a_page_that_is_essentially_just_a_photo_is_not_paperwork():
     assert not r["issues"]
     c = next(c for c in r["confirmations"] if c["field"] == "imageType")
     assert "not paperwork" in c["explanation"]["en"]
+
+
+# ── the slot type reads in Thai too ────────────────────────────────────────
+
+def test_the_thai_sentence_names_the_type_in_thai():
+    """It used to print the raw slug: "ระบุประเภทเป็น 'money_transfer_document'"."""
+    r = _judge_type("money_transfer_document", "a photo of a rabbit", "รูปถ่ายกระต่าย",
+                    "", "", ok=False)
+    i = next(i for i in r["issues"] if i["field"] == "imageType")
+    assert "เอกสารการโอนเงิน" in i["explanation"]["th"]
+    assert "money_transfer_document" not in i["explanation"]["th"]
+    # the English half keeps the key, which is what a developer greps for
+    assert "money_transfer_document" in i["explanation"]["en"]
+
+
+def test_every_slot_type_in_use_has_a_thai_name():
+    """The 22 rows of transaction_image_types. A new one renders as its slug,
+    which is the old behaviour, not a crash."""
+    from GEPPPlatform.services.cores.epr_ai_audit.cron.worker import _IMAGE_TYPE_TH
+    for t in ("invoice", "bill_of_lading", "qc_file", "receipt", "cash_bill",
+              "payment_voucher", "tax_invoice", "id_card",
+              "invoice/receipt/cash_bill/payment_voucher",
+              "invoice/tax_invoice/cash_bill/payment_voucher/id_card",
+              "money_transfer_document", "production_report",
+              "monthly_progress_report", "production_other_report",
+              "product_weighing_sheet",
+              "product_weighing_sheet/product_weighing_image", "product_image"):
+        assert t in _IMAGE_TYPE_TH, t
+
+
+def test_an_unknown_type_falls_back_to_its_key():
+    from GEPPPlatform.services.cores.epr_ai_audit.cron.worker import _type_th
+    assert _type_th("brand_new_type") == "brand_new_type"
+    assert _type_th(None) is None
