@@ -470,6 +470,51 @@ def _is_empty_payload_value(v):
     return s in _EMPTY_PAYLOAD_TOKENS
 
 
+# Thai names for the document slot types, for the Thai half of an
+# explanation. transaction_image_types carries only an English `desctiption`
+# and nothing in either database translates these — I scanned 1,426 text
+# columns across both. ai_audit_document_types has name_th but for a
+# different, five-entry vocabulary ("Weight Ticket", not
+# product_weighing_sheet), so it cannot be joined to.
+#
+# If the frontend already renders these names in Thai, that map is the real
+# source and this should be replaced by it rather than competing with it.
+# Until then an untranslated key renders as the raw slug, which is what the
+# Thai sentence used to show for every one of them.
+_IMAGE_TYPE_TH = {
+    "uncategorized": "ไม่ระบุประเภท",
+    "invoice": "ใบแจ้งหนี้",
+    "bill_of_lading": "ใบตราส่งสินค้า",
+    "qc_file": "เอกสารตรวจสอบคุณภาพ",
+    "receipt": "ใบเสร็จรับเงิน",
+    "cash_bill": "บิลเงินสด",
+    "payment_voucher": "ใบสำคัญจ่าย",
+    "tax_invoice": "ใบกำกับภาษี",
+    "id_card": "บัตรประชาชน",
+    "invoice/receipt/cash_bill/payment_voucher":
+        "ใบแจ้งหนี้ / ใบเสร็จรับเงิน / บิลเงินสด / ใบสำคัญจ่าย",
+    "invoice/tax_invoice/cash_bill/payment_voucher/id_card":
+        "ใบแจ้งหนี้ / ใบกำกับภาษี / บิลเงินสด / ใบสำคัญจ่าย / บัตรประชาชน",
+    "money_transfer_document": "เอกสารการโอนเงิน",
+    "production_report": "รายงานการผลิต",
+    "monthly_progress_report": "รายงานความคืบหน้ารายเดือน",
+    "production_other_report": "รายงานการผลิตอื่น ๆ",
+    "product_weighing_sheet": "ใบชั่งน้ำหนักสินค้า",
+    "product_weighing_sheet/product_weighing_image":
+        "ใบชั่งน้ำหนักสินค้า / รูปถ่ายการชั่งน้ำหนัก",
+    "product_image": "รูปถ่ายสินค้า",
+    "epr_payment_attachment": "เอกสารแนบการชำระเงิน EPR",
+    "epr_payment_confirm_file": "เอกสารยืนยันการชำระเงิน EPR",
+    "gepp_business_ocr_input": "ไฟล์นำเข้า OCR",
+    "gepp_business_ocr_output": "ไฟล์ผลลัพธ์ OCR",
+}
+
+
+def _type_th(name):
+    """The Thai name for a slot type, or the raw key when none is known."""
+    return _IMAGE_TYPE_TH.get(str(name or "").strip().lower(), name)
+
+
 _GENERIC_IMAGE_TYPES = frozenset({
     "",
     "other",
@@ -568,6 +613,122 @@ def _safe_date(year, month, day):
         return date(year, month, day)
     except (ValueError, TypeError):
         return None
+
+
+# How far the recorded transaction date may sit from the NEAREST date on a
+# document. Measured over 538 real transactions on dev, comparing candidate
+# rules against their stored document_date extractions:
+#
+#     window      nearest-date rule     anchored on earliest
+#     +/-1              96.5%                  48.3%
+#     +/-3              98.3%                  52.2%
+#     +/-5              99.4%                  55.2%
+#
+# Anchoring on the earliest document rejected nearly half of real traffic: the
+# single largest bucket is the transaction dated ONE DAY BEFORE any document
+# (195 of 538), because the paperwork is written up the day after the material
+# moves. Nearest-date has no such directional assumption and needs no choice of
+# a "main" date.
+#
+# +/-3 rather than +/-1 because document dates come from the vision model and
+# it does misread Buddhist years (67 for 69 has been seen), so a tight window
+# fails honest transactions on an OCR slip. Past +/-3 the curve flattens — +/-5
+# buys 1.1% and starts admitting genuinely mismatched evidence.
+_DATE_WINDOW_DAYS = 3
+
+
+# A date-shaped substring is not necessarily a date. Tax ids, serial numbers
+# and phone numbers match DD/MM/YYYY, and one produced "1983-10-08" on a 2026
+# transaction — flagged as 15,655 days out. Anything this far from the
+# submitted date is extraction noise, not evidence of a discrepancy, so it is
+# dropped before the comparison rather than counted against the transaction.
+_DATE_PLAUSIBLE_DAYS = 730          # ~2 years either side
+
+
+def _plausible_dates(seen, want):
+    """Drop date-shaped noise. Returns (kept, dropped)."""
+    kept, dropped = [], []
+    for d in seen:
+        (kept if abs((d - want).days) <= _DATE_PLAUSIBLE_DAYS else dropped).append(d)
+    return kept, dropped
+
+
+def _same_day_and_month(a, b, window):
+    """Is `a` within `window` days of `b`, ignoring the YEAR?
+
+    The year is the unreliable digit. A Thai two-digit Buddhist year (69 for
+    2026) comes back from the vision model as 67, 2069 or 2019 on different
+    calls over the SAME document, while the day and month are read correctly
+    almost every time. Measured on project 50: every date "mismatch" had a
+    correct day and month and a mangled year.
+
+    So the comparison projects both dates onto one year. A document genuinely
+    a year old with the same day and month would pass, which is far rarer than
+    the misread it prevents.
+    """
+    for year_shift in (0, -1, 1):
+        try:
+            projected = a.replace(year=b.year + year_shift)
+        except ValueError:          # 29 Feb onto a non-leap year
+            continue
+        if abs((projected - b).days) <= window:
+            return True
+    return False
+
+
+def _date_supported_by_documents(payload_date, date_blob):
+    """Is the recorded transaction date close to ANY date on this document?
+
+    Returns (ok, nearest, reason_fragment).
+
+    Documents for one delivery carry different dates by design — weighed one
+    day, QC-signed the next, invoiced after that — and the recorded date can
+    fall either side of them. So the test is distance to the CLOSEST date on
+    the document, in either direction, rather than a rule about which one
+    comes first.
+    """
+    want = _parse_date_flexible(payload_date)
+    seen = sorted(_extract_all_dates(date_blob))
+    if want is None or not seen:
+        return (None, None, None)
+    # Year-blind FIRST, against every parsed candidate — before the noise
+    # filter. A misread year can land a real date decades away (2069 for
+    # 2026), and dropping it as implausible would discard the very reading
+    # that matches. A matching day and month is itself evidence the string is
+    # a date rather than a serial number.
+    for d in seen:
+        if _same_day_and_month(d, want, _DATE_WINDOW_DAYS):
+            exact = abs((want - d).days)
+            if exact <= _DATE_WINDOW_DAYS:
+                if exact == 0:
+                    return (True, d, f"the same day as {d} on the document")
+                side = "after" if (want - d).days > 0 else "before"
+                return (True, d,
+                        f"{exact} day(s) {side} {d} on the document, within the "
+                        f"{_DATE_WINDOW_DAYS}-day allowance")
+            return (True, d,
+                    f"the same day and month as {d} on the document — the year "
+                    f"differs, which is the digit the model misreads on Thai "
+                    f"two-digit Buddhist dates")
+
+    # No day/month match anywhere. Now drop date-shaped noise before deciding
+    # whether what is left actually contradicts the submitted date.
+    seen, _noise = _plausible_dates(seen, want)
+    if not seen:
+        return (None, None, None)
+    nearest = min(seen, key=lambda x: abs((want - x).days))
+    gap = (want - nearest).days
+    if abs(gap) <= _DATE_WINDOW_DAYS:
+        if gap == 0:
+            return (True, nearest, f"the same day as {nearest} on the document")
+        side = "after" if gap > 0 else "before"
+        return (True, nearest,
+                f"{abs(gap)} day(s) {side} {nearest} on the document, within the "
+                f"{_DATE_WINDOW_DAYS}-day allowance")
+    side = "after" if gap > 0 else "before"
+    return (False, nearest,
+            f"{abs(gap)} days {side} the closest document date {nearest}, "
+            f"beyond the {_DATE_WINDOW_DAYS}-day allowance")
 
 
 def _dates_within_one_day(a, b, tolerance_days=1):
@@ -913,12 +1074,15 @@ def _use_python_judge() -> bool:
     """True when the integrity verdict is decided in Python from LLM sightings
     instead of asking the LLM to compare.
 
-    ponytail: env flag, not a settings table — this is a migration switch, so
-    delete the branch (and the LLM-compare path with it) once the Python judge
-    is proven on production traffic. Read per-call so it can be flipped on a
-    warm Lambda.
+    This is the default everywhere. EPR_INTEGRITY_JUDGE=llm falls back to the
+    old path, where the LLM is handed the payload and asked to compare, and
+    Python string-matches its prose.
+
+    ponytail: env flag, not a settings table — it is only a rollback lever, so
+    delete it (and the LLM-compare path with it) once nothing has needed to
+    pull it. Read per-call so it can be flipped on a warm Lambda.
     """
-    return os.environ.get("EPR_INTEGRITY_JUDGE", "").lower() == "python"
+    return os.environ.get("EPR_INTEGRITY_JUDGE", "").lower() != "llm"
 
 
 # Label keywords that mark a number as the document's grand total / the weight,
@@ -1022,7 +1186,10 @@ def _judge_field_numeric(payload_value, numbers_seen, label_hints=None,
                          allow_net=False):
     """Decide MATCH / MISMATCH / CANT_VERIFY for one numeric field.
 
-    Returns ("match", None) | ("mismatch", seen_repr) | ("cant_verify", None).
+    Returns (outcome, what_the_image_showed). The second element is populated
+    on a MATCH as well as a mismatch — a confirmation that cannot name the
+    figure it matched reads as "matches the image. Seen: None", which looks
+    like a bug rather than a pass.
 
     Labelled numbers are authoritative: when the image has a number whose
     label looks like this field, only those decide the outcome. Otherwise fall
@@ -1043,8 +1210,9 @@ def _judge_field_numeric(payload_value, numbers_seen, label_hints=None,
         # Sighting-only field (pricePerUnit). Unit rates get scribbled in
         # margins, so an appearance anywhere counts. Absence proves nothing —
         # never a mismatch, only unverifiable.
-        return ("match", None) if _value_sighted(payload_value, values) \
-            else ("cant_verify", None)
+        if _value_sighted(payload_value, values):
+            return ("match", ", ".join(str(v) for v in values))
+        return ("cant_verify", None)
 
     labelled = [e.get("value") for e in entries
                 if _label_matches(e.get("label"), label_hints)
@@ -1061,10 +1229,15 @@ def _judge_field_numeric(payload_value, numbers_seen, label_hints=None,
         # happens to differ says nothing, so CANT VERIFY rather than mismatch.
         return ("cant_verify", None)
 
+    seen_repr = ", ".join(str(v) for v in labelled)
     if _value_sighted(payload_value, labelled):
-        return ("match", None)
+        return ("match", seen_repr)
     if allow_net and _net_of_two(payload_value, labelled):
-        return ("match", None)
+        # Derived, not printed: a weighbridge ticket shows gross and tare and
+        # the net is the difference. Saying "matches the image. Seen: 17,730,
+        # 11,830" for a submitted 5,900 reads as a false pass — neither number
+        # is the value. A separate outcome so the caller can say what it did.
+        return ("match_net", seen_repr)
     return ("mismatch", ", ".join(str(v) for v in labelled))
 
 
@@ -1085,9 +1258,44 @@ def _judge_sightings(payload, sightings, expected_type=None):
 
     issues = []
     matched = []
+    confirmed = []
+    unverified = []
 
     def flag(field, payload_value, seen, en, th):
         issues.append({
+            "field": field,
+            "payload_value": payload_value,
+            "image_indicates": seen or "not shown",
+            "explanation": {"en": en, "th": th},
+        })
+
+    def cant_verify(field, payload_value, en, th):
+        """Examined, but the image gave nothing to compare against.
+
+        _judge_field_numeric has always been able to say "cant_verify" and the
+        caller only handled match and mismatch, so the field fell out of both
+        lists — indistinguishable from one that was never checked at all. That
+        is not a pass and it is not a failure; it is an unanswered question,
+        and a reviewer has to be able to see which fields are in it.
+        """
+        unverified.append({
+            "field": field,
+            "payload_value": payload_value,
+            "image_indicates": "not shown",
+            "explanation": {"en": en, "th": th},
+        })
+
+    def confirm(field, payload_value, seen, en, th):
+        """A match, recorded with the same detail as a mismatch.
+
+        `matched_fields` has only ever held field NAMES, so a reviewer could
+        see that something passed but not what it was checked against — while
+        the mismatch beside it carried both values and an explanation. The
+        data was in hand at this point either way; only the failure path kept
+        it. Names still go to `matched` so existing consumers are untouched.
+        """
+        matched.append(field)
+        confirmed.append({
             "field": field,
             "payload_value": payload_value,
             "image_indicates": seen or "not shown",
@@ -1109,17 +1317,32 @@ def _judge_sightings(payload, sightings, expected_type=None):
         # model reports dates verbatim, so an unrecognised format (or a script
         # we have no pattern for) must not manufacture a false flag — that is
         # the whole failure mode this design exists to remove.
-        if not date_blob.strip() or not any(_extract_all_dates(date_blob)):
-            pass  # CANT VERIFY — nothing readable to compare against
-        elif any(_dates_within_one_day(c, date_blob) for c in candidates if c):
-            matched.append("transactionDate")
-        else:
-            seen = ", ".join(
-                f"{e.get('label') or 'date'}: {e.get('value')}" for e in dates_seen
-            )
+        # Three outcomes, not two: an unreadable or noise-only date is CANT
+        # VERIFY, never a mismatch. Collapsing it into the else branch flagged
+        # transactions whose only date-shaped text was a serial number.
+        results = [_date_supported_by_documents(c, date_blob)
+                   for c in candidates if c]
+        supported = next((r for r in results if r[0] is True), None)
+        contradicted = next((r for r in results if r[0] is False), None)
+        seen = ", ".join(
+            f"{e.get('label') or 'date'}: {e.get('value')}" for e in dates_seen
+        )
+
+        if supported:
+            _ok, nearest, why = supported
+            confirm("transactionDate", tx_date, seen,
+                    f"{normalized} is {why}. Seen: {seen}.",
+                    f"{normalized} ห่างจากวันที่ใกล้ที่สุดในเอกสาร ({nearest}) "
+                    f"ไม่เกิน {_DATE_WINDOW_DAYS} วัน พบ: {seen}")
+        elif contradicted:
             flag("transactionDate", tx_date, seen,
-                 f"No date on the image is within 1 day of {normalized}. Seen: {seen}.",
-                 f"ไม่พบวันที่ในรูปที่ตรงกับ {normalized} (ยอมรับคลาดเคลื่อน 1 วัน) พบ: {seen}")
+                 f"{normalized} is not supported by the document dates: "
+                 f"{contradicted[2]}. Seen: {seen}.",
+                 f"{normalized} ไม่สอดคล้องกับวันที่ในเอกสาร พบ: {seen}")
+        else:
+            cant_verify("transactionDate", tx_date,
+                        "No readable date on the image to compare against.",
+                        "ไม่พบวันที่ที่อ่านได้ในรูปเพื่อเปรียบเทียบ")
 
     # ── numeric fields ─────────────────────────────────────────────────────
     for field, hints, en_label, th_label, allow_net in (
@@ -1133,30 +1356,91 @@ def _judge_sightings(payload, sightings, expected_type=None):
         outcome, seen = _judge_field_numeric(value, numbers_seen, hints,
                                             allow_net=allow_net)
         if outcome == "match":
-            matched.append(field)
+            confirm(field, value, seen,
+                    f"Submitted {en_label} {value} matches the image. Seen: {seen}.",
+                    f"{th_label}ที่กรอก {value} ตรงกับในรูป พบ: {seen}")
+        elif outcome == "match_net":
+            confirm(field, value, seen,
+                    f"Submitted {en_label} {value} is the difference between the "
+                    f"figures on the image ({seen}) — gross minus tare.",
+                    f"{th_label}ที่กรอก {value} เท่ากับผลต่างของตัวเลขในรูป "
+                    f"({seen}) คือ น้ำหนักรวมลบน้ำหนักภาชนะ")
         elif outcome == "mismatch":
             flag(field, value, seen,
                  f"Submitted {en_label} {value} does not match the image. Seen: {seen}.",
                  f"{th_label}ที่กรอก {value} ไม่ตรงกับในรูป พบ: {seen}")
+        elif not _is_empty_payload_value(value):
+            # Submitted, examined, and the image had nothing to check it
+            # against. Silence here would read as a pass.
+            cant_verify(field, value,
+                        f"No readable {en_label} on the image to compare against.",
+                        f"ไม่พบ{th_label}ที่อ่านได้ในรูปเพื่อเปรียบเทียบ")
 
     # ── imageType ──────────────────────────────────────────────────────────
     # The one genuinely semantic judgement, so it stays with the LLM — but as
     # a tri-state boolean, not prose that has to be string-matched afterwards.
     stated = expected_type
-    if stated and str(stated).lower() not in _GENERIC_IMAGE_TYPES:
+    content = sightings.get("image_content") or "unclear"
+    # The model's own description, in Thai, so the Thai sentence is not half
+    # English. Falls back to the English phrase on an older row.
+    content_th = sightings.get("image_content_th") or content
+    elements = sightings.get("identifying_elements") or ""
+    elements_th = sightings.get("identifying_elements_th") or elements
+    because = f" Identified by: {elements}." if elements else ""
+    because_th = f" สังเกตจาก: {elements_th}" if elements_th else ""
+
+    if stated and str(stated).lower() in _GENERIC_IMAGE_TYPES:
+        # "Is this specifically a product image" has no wrong answer — a photo
+        # of bottles IS one. But these slots are for the MATERIAL, so a sheet
+        # of paperwork filed here is wrong and that IS answerable. A photo of
+        # goods with a label or a stray document in frame stays fine; only a
+        # page read for its text counts as a document.
+        #
+        # A document that CARRIES product photos (a delivery sheet with the
+        # truck and the bales pasted on it) still shows the material, which is
+        # what the slot is for. Paper wrapping does not make it the wrong file.
+        is_doc = sightings.get("is_paper_document")
+        if sightings.get("shows_material") is True:
+            is_doc = False
+        if is_doc is True:
+            flag("imageType", stated, content,
+                 f"'{stated}' should be a photo of the material, but the image "
+                 f"is a paper document: {content}.{because}",
+                 f"'{_type_th(stated)}' ควรเป็นรูปถ่ายของวัสดุ แต่รูปนี้เป็นเอกสาร: "
+                 f"{content_th}{because_th}")
+        elif is_doc is False:
+            confirm("imageType", stated, content,
+                    f"The image shows the material: {content}.{because}",
+                    f"รูปแสดงตัววัสดุ: {content_th}{because_th}")
+        else:
+            cant_verify(
+                "imageType", stated,
+                f"Could not tell whether '{stated}' holds a photo of the "
+                f"material or paperwork. The image appears to be {content}.{because}",
+                f"ไม่สามารถระบุได้ว่า '{_type_th(stated)}' เป็นรูปวัสดุหรือเอกสาร "
+                f"รูปเป็น {content_th}{because_th}",
+            )
+    elif stated:
         verdict = sightings.get("matches_stated_type")
-        content = sightings.get("image_content") or "unclear"
         if verdict is True:
-            matched.append("imageType")
+            confirm("imageType", stated, content,
+                    f"The image appears to be {content}, matching the stated "
+                    f"type '{stated}'.{because}",
+                    f"รูปเป็น {content_th} ตรงกับประเภทที่ระบุ '{_type_th(stated)}'{because_th}")
         elif verdict is False:
             flag("imageType", stated, content,
-                 f"Stated type '{stated}' but the image appears to be {content}.",
-                 f"ระบุประเภทเป็น '{stated}' แต่ในรูปเป็น {content}")
+                 f"Stated type '{stated}' but the image appears to be "
+                 f"{content}.{because}",
+                 f"ระบุประเภทเป็น '{_type_th(stated)}' แต่ในรูปเป็น {content_th}{because_th}")
 
     return {
         "verdict": "flagged" if issues else "passed",
         "issues": issues,
         "matched_fields": matched,
+        # Same shape as `issues`, for the fields that passed.
+        "confirmations": confirmed,
+        # And for the ones that could be neither confirmed nor contradicted.
+        "unverified": unverified,
     }
 
 
@@ -1229,8 +1513,8 @@ def _check_integrity_for_images(payload, images, extra_ctx=None):
     extra_ctx = extra_ctx or {}
     image_list = list(images or [])
     if not image_list:
-        return {"issues": [], "matched_fields": set(),
-                "checked_image_count": 0, "errors": []}
+        return {"issues": [], "matched_fields": set(), "confirmations": [],
+                "unverified": [], "checked_image_count": 0, "errors": []}
 
     workers = min(_INTEGRITY_PARALLELISM, len(image_list))
     with ThreadPoolExecutor(max_workers=workers) as ex:
@@ -1242,6 +1526,8 @@ def _check_integrity_for_images(payload, images, extra_ctx=None):
 
     issues = []
     matched_set: set[str] = set()
+    confirmations = []
+    unverified = []
     errors = []
     checked = 0
     for r in results:
@@ -1266,10 +1552,18 @@ def _check_integrity_for_images(payload, images, extra_ctx=None):
             issues.append(issue)
         for f in (llm_result.get("matched_fields") or []):
             matched_set.add(str(f))
+        for c in (llm_result.get("confirmations") or []):
+            c.update(img_ctx)
+            confirmations.append(c)
+        for u in (llm_result.get("unverified") or []):
+            u.update(img_ctx)
+            unverified.append(u)
 
     return {
         "issues": issues,
         "matched_fields": matched_set,
+        "confirmations": confirmations,
+        "unverified": unverified,
         "checked_image_count": checked,
         "errors": errors,
     }
@@ -1306,8 +1600,8 @@ def _check_integrity(raw_data, parent_images, record_inputs=None):
     # Parent
     parent_payload = _payload_for_integrity(raw_data)
     if parent_payload is None:
-        parent_result = {"issues": [], "matched_fields": set(),
-                         "checked_image_count": 0, "errors": []}
+        parent_result = {"issues": [], "matched_fields": set(), "confirmations": [],
+                         "unverified": [], "checked_image_count": 0, "errors": []}
     else:
         parent_result = _check_integrity_for_images(parent_payload, parent_images)
 
@@ -1326,6 +1620,8 @@ def _check_integrity(raw_data, parent_images, record_inputs=None):
             "record_id": record_id,
             "issues": r["issues"],
             "matched_fields": sorted(r["matched_fields"]),
+            "confirmations": r.get("confirmations") or [],
+            "unverified": r.get("unverified") or [],
             "checked_image_count": r["checked_image_count"],
             "errors": r["errors"],
         })
@@ -1333,10 +1629,17 @@ def _check_integrity(raw_data, parent_images, record_inputs=None):
     return {
         "issues": parent_result["issues"],
         "matched_fields": sorted(parent_result["matched_fields"]),
+        "confirmations": parent_result.get("confirmations") or [],
+        "unverified": parent_result.get("unverified") or [],
         "checked_image_count": parent_result["checked_image_count"],
         "errors": parent_result["errors"],
         "records": records_out,
     }
+
+
+# Statuses only a person sets. The worker never produces these, so seeing one
+# means the row has been reviewed.
+_HUMAN_DECIDED_STATUSES = frozenset({"approved", "rejected"})
 
 
 def _write_dedup_outcome(conn, tx_id: int, candidates, integrity=None, reason=None):
@@ -1346,13 +1649,17 @@ def _write_dedup_outcome(conn, tx_id: int, candidates, integrity=None, reason=No
     skipped (no images / no verifiable payload) get `passed` with
     `flags.integrity.skipped = true` so they're not stuck on `pending`.
     All updates committed in one small transaction."""
-    integrity = integrity or {"issues": [], "matched_fields": [], "records": []}
+    integrity = integrity or {"issues": [], "matched_fields": [],
+                              "confirmations": [], "unverified": [], "records": []}
     legacy_id_map = _fetch_legacy_ids(conn, [c.get("id") for c in candidates])
     flags_obj = {
         "duplicates": _summarize_candidates_for_flags(candidates, legacy_id_map),
         "integrity": {
             "issues": integrity.get("issues") or [],
             "matched_fields": integrity.get("matched_fields") or [],
+            # Why each matched field passed, same shape as `issues`.
+            "confirmations": integrity.get("confirmations") or [],
+            "unverified": integrity.get("unverified") or [],
             "checked_image_count": integrity.get("checked_image_count", 0),
             "errors": integrity.get("errors") or [],
             "records": integrity.get("records") or [],
@@ -1362,7 +1669,22 @@ def _write_dedup_outcome(conn, tx_id: int, candidates, integrity=None, reason=No
     }
     if reason:
         flags_obj["reason"] = reason
+    # A person's decision outranks a re-run. status goes
+    # pending -> passed|flagged|skipped from here, then approved|rejected once
+    # a human reviews; re-processing a reviewed row used to overwrite that
+    # silently, so a requeue or a replay threw away the review. The fresh
+    # verdict still lands in `flags` — only `status` is held.
     new_status = _determine_status(candidates, integrity)
+    with conn.cursor() as cur:
+        cur.execute("SELECT status FROM epr_transactions_embeded WHERE id = %s",
+                    (tx_id,))
+        row = cur.fetchone()
+    prior = row[0] if row else None
+    if prior in _HUMAN_DECIDED_STATUSES:
+        logger.info("tx=%s keeping human status %r (ai said %r)",
+                    tx_id, prior, new_status)
+        flags_obj["ai_status"] = new_status
+        new_status = prior
     integrity_checked_at = flags_obj["integrity"]["checked_at"]
     record_summaries = {
         r["record_id"]: r for r in (integrity.get("records") or [])
@@ -1393,6 +1715,8 @@ def _write_dedup_outcome(conn, tx_id: int, candidates, integrity=None, reason=No
                     "integrity": {
                         "issues": summary["issues"],
                         "matched_fields": summary["matched_fields"],
+                        "confirmations": summary.get("confirmations") or [],
+                        "unverified": summary.get("unverified") or [],
                         "checked_image_count": summary["checked_image_count"],
                         "errors": summary["errors"],
                         "checked_at": integrity_checked_at,
@@ -1404,6 +1728,8 @@ def _write_dedup_outcome(conn, tx_id: int, candidates, integrity=None, reason=No
                     "integrity": {
                         "issues": [],
                         "matched_fields": [],
+                        "confirmations": [],
+                        "unverified": [],
                         "checked_image_count": 0,
                         "errors": [],
                         "checked_at": integrity_checked_at,

@@ -20,6 +20,9 @@ _EDIT_PATH_RE = re.compile(r"/epr/ai_audit/embed-transaction/([^/]+)$")
 # PATCH /api/epr/ai_audit/transactions/{source_id}/status
 _STATUS_PATH_RE = re.compile(r"/epr/ai_audit/transactions/([^/]+)/status$")
 
+# GET /api/epr/ai_audit/transactions/{transaction_id}/audit
+_TX_AUDIT_PATH_RE = re.compile(r"/epr/ai_audit/transactions/([^/]+)/audit$")
+
 # GET /api/epr/ai_audit/{ocr|recycler-audit-ocr}/jobs/{job_id}
 #
 # Two job paths, mirroring the two synchronous OCR endpoints, so a caller polls
@@ -63,6 +66,14 @@ def handle_epr_ai_audit_routes(event: Dict[str, Any], data: Dict[str, Any], **pa
                 "data": ocr_jobs.create_job(db_session, files, fields, kind)}
 
     if method == "GET":
+        # Before the /transactions collection route below, which would not
+        # match this anyway, but keep the specific path first so it stays that
+        # way if the collection route is ever loosened.
+        m = _TX_AUDIT_PATH_RE.search(path)
+        if m:
+            return {"success": True,
+                    "data": service.get_transaction_audit(m.group(1))}
+
         m = _OCR_JOB_PATH_RE.search(path)
         if m:
             from . import ocr_jobs

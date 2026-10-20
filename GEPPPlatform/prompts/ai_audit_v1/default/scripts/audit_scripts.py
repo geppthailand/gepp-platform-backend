@@ -1236,25 +1236,34 @@ def _deterministic_pass(
         if col not in integrity.DETERMINISTIC_COLUMNS or col not in checklist:
             continue
 
-        outcomes = []
+        results = []
         for rec in all_records_data:
             if col not in rec:
-                outcomes = []
+                results = []
                 break
-            outcomes.append(integrity.check(col, rec.get(col), evidence)['outcome'])
-        if not outcomes:
+            results.append(integrity.check(col, rec.get(col), evidence))
+        if not results:
             continue
+        outcomes = [r['outcome'] for r in results]
 
         if all(o == integrity.MATCH for o in outcomes):
-            checklist[col].update(match=True, found=True, error=None,
-                                  outcome=integrity.MATCH, source='deterministic')
+            # Say WHY it passed. An approved column used to carry nothing, so
+            # the decision could not be re-checked without re-running the audit.
+            checklist[col].update(
+                match=True, found=True, error=None,
+                outcome=integrity.MATCH, source='deterministic',
+                passed_because=[r['reason'] for r in results],
+                evidence=[r['evidence'] for r in results],
+            )
             settled.add(col)
         elif integrity.MISMATCH in outcomes:
             # A number that is on the document but different is a real finding,
             # and the LLM cannot talk us out of it.
+            first = next(r for r in results if r['outcome'] == integrity.MISMATCH)
             checklist[col].update(
                 match=False, found=True, outcome=integrity.MISMATCH, source='deterministic',
                 error=checklist[col].get('error') or _mismatch_error(col),
+                failed_because=first['reason'],
             )
             settled.add(col)
         elif all(o == integrity.NOT_EXPECTED for o in outcomes):
@@ -1605,6 +1614,12 @@ def _determine_final_status(
             'found': final_found,
             'error': final_error,
             'outcome': tx.get('outcome') or rec.get('outcome'),
+            # Why the column landed where it did. Present for passes too, not
+            # just failures — "approved" with no reason cannot be audited.
+            'passed_because': tx.get('passed_because') or rec.get('passed_because'),
+            'failed_because': tx.get('failed_because') or rec.get('failed_because'),
+            'evidence': tx.get('evidence') or rec.get('evidence'),
+            'source': tx.get('source') or rec.get('source') or 'llm',
         }
 
     # Step 3: Collect rejection errors
@@ -1734,16 +1749,46 @@ def _compose_audit_note(
     if status == 'approved':
         summary_th = f'ตรวจสอบเอกสาร {n_evidence} ไฟล์เรียบร้อย ข้อมูลตรงกับเอกสารทั้งหมด'
         summary_en = f'Verified {n_evidence} evidence files. All data matches.'
+    elif status == 'no_action':
+        n_review = sum(1 for r in final_checklist.values()
+                       if r.get('outcome') == integrity.UNREADABLE)
+        summary_th = (f'ตรวจสอบเอกสาร {n_evidence} ไฟล์ '
+                      f'อ่านค่าไม่ได้ {n_review} รายการ ต้องให้เจ้าหน้าที่ตรวจสอบ')
+        summary_en = (f'Verified {n_evidence} evidence files. {n_review} field(s) '
+                      f'could not be read — needs human review.')
     else:
         n_issues = len(issues)
         summary_th = f'ตรวจสอบเอกสาร {n_evidence} ไฟล์ พบปัญหา {n_issues} รายการ'
         summary_en = f'Verified {n_evidence} evidence files. Found {n_issues} issue(s).'
+
+    # Per-column record of WHAT was checked and why it landed where it did,
+    # passes included. Without this an approved audit says only "all data
+    # matches" and cannot be re-checked without re-running it — and a column
+    # the machine settled is indistinguishable from one the model waved
+    # through. `source` says which, `evidence` points at the file.
+    checks = []
+    for col, result in final_checklist.items():
+        checks.append({
+            'field': col,
+            'field_th': _get_column_description(col),
+            'outcome': result.get('outcome') or ('match' if result.get('match')
+                                                 else 'mismatch' if result.get('found')
+                                                 else 'missing'),
+            'match': bool(result.get('match')),
+            'found': bool(result.get('found')),
+            'source': result.get('source') or 'llm',
+            'reason': (result.get('passed_because')
+                       or result.get('failed_because')
+                       or result.get('error')),
+            'evidence': result.get('evidence'),
+        })
 
     return {
         'status': status,
         'summary_th': summary_th,
         'summary_en': summary_en,
         'issues': issues,
+        'checks': checks,
     }
 
 

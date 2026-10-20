@@ -3,14 +3,18 @@
 import sys
 import types
 
-# ocr.py pulls in the whole GEPPPlatform package (db, boto, openrouter) at
-# import time; none of it is needed to exercise _classify.
-for name, attrs in [
-    ("GEPPPlatform.libs.exceptions", {"BadRequestException": type("BadRequestException", (Exception,), {})}),
-    ("GEPPPlatform.libs.image_processing", {"safe_process_image": lambda url: url}),
-    ("GEPPPlatform.libs.openrouter", {"OCR_MODEL": "x", "call_llm": lambda *a, **k: None}),
-]:
-    sys.modules.setdefault(name, types.SimpleNamespace(**attrs))
+# ocr.py imports openrouter at module scope, which wants an API key. Stub only
+# that one.
+#
+# NOT libs.exceptions: stubbing it here replaced the real BadRequestException
+# for every test collected afterwards, so `pytest.raises(BadRequestException)`
+# in other files caught nothing — six tests that passed alone failed in a full
+# run. A fake exception class is never worth that; the real module imports
+# fine on its own.
+sys.modules.setdefault(
+    "GEPPPlatform.libs.openrouter",
+    types.SimpleNamespace(OCR_MODEL="x", call_llm=lambda *a, **k: None),
+)
 
 from GEPPPlatform.services.cores.epr_ai_audit.api.ocr import _classify, _declared_keys
 
