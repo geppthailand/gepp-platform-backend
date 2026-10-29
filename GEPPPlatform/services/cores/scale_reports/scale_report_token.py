@@ -5,6 +5,7 @@ Token format
     urlsafe_b64encode(payload_bytes + sig_bytes).rstrip('=')
 
     payload = "<origin_id>|<org_id>|<YYYY-MM-DD>|<exp_epoch>"
+              [+ "|u<user_id>" when the link is tag/tenant-scoped]
     sig     = HMAC-SHA256(SECRET, payload_bytes).digest()   # always 32 bytes
 
 Stateless on purpose: no migration, no table, no DB round-trip to verify, and
@@ -77,8 +78,14 @@ def make_report_token(
     org_id: int,
     day: date,
     ttl_hours: int = TTL_HOURS_DEFAULT,
+    scope_user_id: Any = None,
 ) -> Tuple[str, datetime]:
     """Issue a token for (*origin_id*, *org_id*, *day*).
+
+    `scope_user_id` — set when the summary on the tablet was tag/tenant-scoped.
+    The public page then re-resolves that user's grants on every open instead of
+    showing the whole station, so a QR from a tenant never leaks the other
+    tenants' weights, and revoking the grant also stops the link.
 
     Returns:
         (token, expires_at) — `expires_at` is naive UTC, matching how every
@@ -89,7 +96,10 @@ def make_report_token(
 
     payload = '{0}|{1}|{2}|{3}'.format(
         int(origin_id), int(org_id), day.strftime(DAY_FORMAT), exp_epoch
-    ).encode('utf-8')
+    )
+    if scope_user_id is not None:
+        payload += '|u{0}'.format(int(scope_user_id))
+    payload = payload.encode('utf-8')
 
     token = urlsafe_b64encode(payload + _sign(payload)).decode('ascii').rstrip('=')
     return token, expires_at
@@ -99,7 +109,8 @@ def verify_report_token(token: str) -> Dict[str, Any]:
     """Verify and decode a token issued by :func:`make_report_token`.
 
     Returns:
-        `{'origin_id': int, 'org_id': int, 'day': date, 'exp': datetime}`
+        `{'origin_id': int, 'org_id': int, 'day': date, 'exp': datetime,
+          'scope_user_id': int | None}`
 
     Raises:
         UnauthorizedException: 401 — malformed, or the signature does not match.
@@ -132,12 +143,21 @@ def verify_report_token(token: str) -> Dict[str, Any]:
     # Signature is good, so the payload is ours; a parse failure here means a
     # format change, not tampering. Still refuse rather than guess.
     try:
-        origin_s, org_s, day_s, exp_s = payload.decode('utf-8').split('|')
+        fields = payload.decode('utf-8').split('|')
+        if len(fields) == 4:
+            origin_s, org_s, day_s, exp_s = fields
+            scope_user_id = None
+        elif len(fields) == 5 and fields[4].startswith('u'):
+            origin_s, org_s, day_s, exp_s, scope_s = fields
+            scope_user_id = int(scope_s[1:])
+        else:
+            raise ValueError('unexpected field count')
         claims = {
             'origin_id': int(origin_s),
             'org_id': int(org_s),
             'day': datetime.strptime(day_s, DAY_FORMAT).date(),
             'exp': datetime.fromtimestamp(int(exp_s), tz=timezone.utc).replace(tzinfo=None),
+            'scope_user_id': scope_user_id,
         }
     except (ValueError, UnicodeDecodeError):
         logger.warning('verify_report_token: signed payload did not parse')

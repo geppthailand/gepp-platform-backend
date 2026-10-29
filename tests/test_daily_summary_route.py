@@ -82,10 +82,58 @@ def test_requires_the_user_to_have_an_organization():
 
 def test_rejects_a_location_the_user_is_not_a_member_of(monkeypatch):
     """A borrowed tablet must not be able to read another site's intake,
-    even inside the same organisation."""
+    even inside the same organisation — unless a tag/tenant grant covers it,
+    and here none does."""
+    monkeypatch.setattr(handlers, "resolve_scoped_summary", lambda *a, **k: None)
     with pytest.raises(APIException) as exc:
         _call(monkeypatch, data={"origin_id": 999}, members={1, 2, 3})
     assert exc.value.status_code == 401
+
+
+# ── tag / tenant members ─────────────────────────────────────────────────────
+
+def _capture(monkeypatch, scoped):
+    seen = {}
+
+    def fake_summary(*args, **kwargs):
+        seen["visibility"] = kwargs.get("visibility")
+        return {"date": "2026-07-26", "totals": {"weight_kg": 3.0, "entries": 1}, "materials": []}
+
+    def fake_token(*args, **kwargs):
+        seen["scope_user_id"] = kwargs.get("scope_user_id")
+        return "tok", __import__("datetime").datetime(2026, 7, 28, 9, 0)
+
+    monkeypatch.setattr(handlers, "member_origin_ids", lambda *a, **k: {1})
+    monkeypatch.setattr(handlers, "resolve_scoped_summary", lambda *a, **k: scoped)
+    monkeypatch.setattr(handlers, "get_daily_summary", fake_summary)
+    monkeypatch.setattr(handlers, "make_report_token", fake_token)
+    monkeypatch.setattr(handlers, "build_report_url", lambda t: "https://geppdata.com/scale-report/" + t)
+    return seen
+
+
+def test_tag_or_tenant_member_gets_a_narrowed_summary_not_a_401(monkeypatch):
+    """A tenant's PIN user is not a member of the location but is a member of a
+    tenant attached to it. They must see their tenant's figures — filtered, so
+    the other tenants' weights at the same site stay hidden."""
+    clause = object()
+    grants = [{"kind": "tenant", "id": 7, "name": "Andaz"}]
+    seen = _capture(monkeypatch, {"clause": clause, "grants": grants})
+
+    result = _call(data={"origin_id": 999})
+
+    assert seen["visibility"] is clause            # summary computed through the filter
+    assert seen["scope_user_id"] == 5              # QR re-applies the same narrowing
+    assert result["scope"] == {"restricted": True, "grants": grants}
+
+
+def test_location_member_path_is_unchanged(monkeypatch):
+    seen = _capture(monkeypatch, None)
+
+    result = _call(data={"origin_id": 1})
+
+    assert seen["visibility"] is None
+    assert seen["scope_user_id"] is None
+    assert "scope" not in result
 
 
 # ── input validation ─────────────────────────────────────────────────────────

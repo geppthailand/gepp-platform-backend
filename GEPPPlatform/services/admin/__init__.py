@@ -53,6 +53,9 @@ def handle_admin_routes(path: str, data: dict, **commonParams):
     if method == "POST":
         if internal_path == "/login":
             return admin_handler.admin_login(data)
+        if internal_path == "/sso":
+            # GEPP Team sign-in (public route — the assertion IS the credential)
+            return admin_handler.admin_sso(data)
 
         # Import Organization Setup (back-office):
         #   POST /admin/organizations/{id}/setup-import                    (upload)
