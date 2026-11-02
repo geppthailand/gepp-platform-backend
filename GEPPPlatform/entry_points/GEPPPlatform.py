@@ -213,8 +213,8 @@ def main(event, context):
             }
 
             # Route based on path and method
-            if "/api/admin/login" in path and http_method == "POST":
-                # Admin login endpoint (no authorization required)
+            if ("/api/admin/login" in path or "/api/admin/sso" in path) and http_method == "POST":
+                # Admin login endpoints (no authorization required). /sso = GEPP Team assertion exchange.
                 from GEPPPlatform.services.admin import handle_admin_routes
                 admin_result = handle_admin_routes(path, data=body, **commonParams)
                 results = {"data": admin_result}
@@ -585,6 +585,23 @@ def main(event, context):
                 report_day = resolve_requested_day(          # raises 422 / 403
                     claims, query_params.get('date')
                 )
+                # A QR issued from a tag/tenant-scoped summary re-resolves that
+                # user's grants on every open: same narrowing as the tablet, and
+                # a revoked grant stops the link instead of exposing the station.
+                visibility = None
+                if claims.get('scope_user_id') is not None:
+                    from GEPPPlatform.services.cores.scale_reports.summary_scope import (
+                        resolve_scoped_summary,
+                    )
+                    scoped = resolve_scoped_summary(
+                        session, claims['scope_user_id'], claims['org_id'],
+                        claims['origin_id'], report_day,
+                    )
+                    if scoped is None:
+                        raise UnauthorizedException(
+                            'This report is no longer available', 'REPORT_SCOPE_REVOKED'
+                        )
+                    visibility = scoped['clause']
                 results = {
                     "success": True,
                     "data": to_public_payload(
@@ -593,6 +610,7 @@ def main(event, context):
                             claims['origin_id'],
                             claims['org_id'],
                             report_day,
+                            visibility=visibility,
                         )
                     ),
                 }

@@ -15,6 +15,7 @@ from GEPPPlatform.services.cores.users.user_service import UserService
 from GEPPPlatform.services.cores.users.user_handlers import handle_get_location_allowed_materials
 from GEPPPlatform.services.cores.scale_reports.bkk_time import parse_day, bkk_today
 from GEPPPlatform.services.cores.scale_reports.scale_report_service import get_daily_summary
+from GEPPPlatform.services.cores.scale_reports.summary_scope import resolve_scoped_summary
 from GEPPPlatform.services.cores.scale_reports.scale_report_token import (
     build_report_url,
     make_report_token,
@@ -365,10 +366,11 @@ def can_input_at_location(db_session, user_id: Any, organization_id: Any, locati
     falls back to the global material list — which is how "the location's materials are not
     sent" showed up.
 
-    The daily-summary route keeps the narrower `member_origin_ids()` gate on purpose: it
-    returns the whole location's intake, unfiltered by tag/tenant, so a tenant member passing
-    that gate would read every other tenant's weights at the same site. Two gates that look
-    interchangeable but answer different questions — do not merge them.
+    The daily-summary route does NOT use this check: location members get the whole
+    location's intake via `member_origin_ids()`, while tag/tenant members get a summary
+    narrowed to their own tag/tenant records (`summary_scope.resolve_scoped_summary`).
+    Letting this wider check through to the unfiltered summary would show a tenant every
+    other tenant's weights at the same site — do not merge the two.
     """
     loc = int(location_id)
 
@@ -540,6 +542,13 @@ def handle_get_locations_by_membership(user_service: UserService, query_params: 
             raise UnauthorizedException('Unauthorized')
 
         role = (query_params.get('role') or 'dataInput').strip()
+        # `?compact=1` (iotdash EcoScale on the ESP32 indicator): the places only. No global
+        # `materials` (that build never reads it: the picker loads /locations/{id}/allowed-materials
+        # per location) and no `members` on tags/tenants (every label sent here is already one the
+        # operator may pick, see pick_selectable_entities). The full answer was ~174 KB for org 35,
+        # which a 4G link to the indicator took 19 s to carry; other clients send no flag and get
+        # the same answer as before.
+        compact = str(query_params.get('compact') or '').strip().lower() in ('1', 'true', 'yes')
         # Normalize common role variants used by clients/DB
         # DB memberships commonly store camelCase role (e.g. "dataInput")
         if role in ('data_input', 'data-input', 'datainput'):
@@ -614,6 +623,8 @@ def handle_get_locations_by_membership(user_service: UserService, query_params: 
                         current_user['user_id'], organization_id, sorted(_allowed),
                     )
                     _materials = _get_cached_materials(db_session)
+                if compact:
+                    return {'success': True, 'data': {'locations': _compact_locations(destinations)}}
                 return {
                     'success': True,
                     'data': {
@@ -766,7 +777,7 @@ def handle_get_locations_by_membership(user_service: UserService, query_params: 
         # tablets) skip both the DB query AND the JSON serialisation.
         # The cache rebuild itself is also faster than before — column-
         # only SELECT instead of ORM hydration with joinedload.
-        materials_list = _get_cached_materials(db_session)
+        materials_list = [] if compact else _get_cached_materials(db_session)
         
         # Which tags/tenants sit on each returned location.
         origin_ids = ordered_ids
@@ -852,6 +863,8 @@ def handle_get_locations_by_membership(user_service: UserService, query_params: 
                 'access': 'scoped' if scoped_here is not None else 'assigned',
             })
         
+        if compact:
+            return {'success': True, 'data': {'locations': _compact_locations(locations_list)}}
         return {
             'success': True,
             'data': {
@@ -862,6 +875,19 @@ def handle_get_locations_by_membership(user_service: UserService, query_params: 
 
     except Exception as e:
         raise APIException(f'Error fetching member locations: {str(e)}')
+
+
+def _compact_locations(locations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The /my-memberships `compact` shape: each location as it is, its tags and tenants without
+    `members` (new dicts: the full payload's rows are left untouched)."""
+    out: List[Dict[str, Any]] = []
+    for loc in locations or []:
+        row = dict(loc)
+        for k in ('tags', 'tenants'):
+            if isinstance(row.get(k), list):
+                row[k] = [{kk: vv for kk, vv in e.items() if kk != 'members'} if isinstance(e, dict) else e for e in row[k]]
+        out.append(row)
+    return out
 
 # ========== /sync + /commands/{id}/ack HANDLERS ==========
 
@@ -1897,6 +1923,7 @@ def handle_iot_devices_routes(event: Dict[str, Any], data: Dict[str, Any], **com
             sorter_location_id = get_sorter_location_id(
                 db_session, current_user['user_id'], organization_id
             )
+            scoped = None
             if sorter_location_id:
                 origin_id = sorter_location_id
             # Scoped to the logged-in operator's memberships, not merely the
@@ -1905,12 +1932,30 @@ def handle_iot_devices_routes(event: Dict[str, Any], data: Dict[str, Any], **com
             elif origin_id not in member_origin_ids(
                 db_session, current_user['user_id'], organization_id
             ):
-                raise UnauthorizedException('User is not a member of this location')
+                # Not a member of the location, but possibly of a tag/tenant
+                # attached to it (a tenant's own PIN user). They get the summary
+                # narrowed to their tag/tenant's records — never the whole
+                # location, which would show the other tenants' weights.
+                scoped = resolve_scoped_summary(
+                    db_session, current_user['user_id'], organization_id, origin_id, day
+                )
+                if scoped is None:
+                    raise UnauthorizedException('User is not a member of this location')
 
-            summary = get_daily_summary(db_session, origin_id, organization_id, day)
-            token, expires_at = make_report_token(origin_id, organization_id, day)
+            summary = get_daily_summary(
+                db_session, origin_id, organization_id, day,
+                visibility=scoped['clause'] if scoped else None,
+            )
+            # A scoped QR carries the user so the public page applies the same
+            # narrowing (see make_report_token).
+            token, expires_at = make_report_token(
+                origin_id, organization_id, day,
+                scope_user_id=current_user['user_id'] if scoped else None,
+            )
             summary['report_url'] = build_report_url(token)
             summary['report_expires_at'] = expires_at.isoformat()
+            if scoped:
+                summary['scope'] = {'restricted': True, 'grants': scoped['grants']}
             # คืน payload ตรง ๆ ห้ามห่อ {'success':..., 'data':...} เอง —
             # entry point ห่อให้แล้วที่ GEPPPlatform.py (`results = {"success":
             # True, "data": iot_devices_result}`) ถ้าห่อซ้ำ client จะได้

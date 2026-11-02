@@ -39,9 +39,23 @@ def handle_admin_routes(path: str, data: dict, **commonParams):
             db_session, commonParams.get('current_user', {}) or {},
         )
 
+    # PDF Editor (Documents tab): every method under /admin/pdf-editor/*.
+    # Same reason as above — sub-paths like `projects/3/state` must not hit the
+    # generic `{resource}/{id}` handling.
+    if path_parts and path_parts[0] == 'pdf-editor':
+        from .pdf_editor import handle_pdf_editor_route
+        return handle_pdf_editor_route(
+            method, path_parts, data,
+            commonParams.get('query_params', {}) or {},
+            db_session, commonParams.get('current_user', {}) or {},
+        )
+
     if method == "POST":
         if internal_path == "/login":
             return admin_handler.admin_login(data)
+        if internal_path == "/sso":
+            # GEPP Team sign-in (public route — the assertion IS the credential)
+            return admin_handler.admin_sso(data)
 
         # Import Organization Setup (back-office):
         #   POST /admin/organizations/{id}/setup-import                    (upload)

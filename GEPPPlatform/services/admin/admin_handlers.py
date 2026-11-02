@@ -91,7 +91,54 @@ class AdminHandlers:
         if user.platform_role not in ('super-admin', 'gepp-admin'):
             raise UnauthorizedException('Invalid credentials or not an admin user')
 
-        # Generate JWT tokens with admin_role claim
+        return self._issue_admin_tokens(user)
+
+    def admin_sso(self, data: dict) -> Dict[str, Any]:
+        """GEPP Team sign-in: exchange a 60-second ISO assertion (aud=v3) for the usual admin token.
+
+        The person is matched by email. An existing admin row is used as-is (its role is not
+        changed). A matching NON-admin row (a customer account) is refused — never elevated.
+        With no row at all, a staff admin row is created (password NULL, so it can only enter
+        through GEPP Team) when GEPP_TEAM_SSO_AUTO_PROVISION is on (default) and the email is
+        a company domain. ISO admins become super-admin, everyone else gepp-admin.
+        """
+        from sqlalchemy import func
+        from GEPPPlatform.libs import gepp_team_sso
+        claims = gepp_team_sso.verify((data or {}).get('assertion', ''), 'v3')
+        email = claims['email']
+        rows = (
+            self.db_session.query(UserLocation)
+            .filter(func.lower(UserLocation.email) == email,
+                    UserLocation.is_user == True,  # noqa: E712
+                    UserLocation.is_active == True)  # noqa: E712
+            .order_by(UserLocation.id)
+            .all()
+        )
+        user = next((u for u in rows if u.platform_role in ('super-admin', 'gepp-admin')), None)
+        if user is None:
+            if rows:
+                raise UnauthorizedException(
+                    'This email belongs to a non-admin Business (v3) account — ask an administrator')
+            auto = (os.environ.get('GEPP_TEAM_SSO_AUTO_PROVISION', '1') or '').strip() not in ('0', 'false', 'off')
+            domain = email.rsplit('@', 1)[-1]
+            if not auto or domain not in gepp_team_sso.allowed_domains():
+                raise UnauthorizedException('No Business (v3) back-office account for this email — ask an administrator')
+            name = (claims.get('name') or email.split('@')[0]).strip()
+            first, _, last = name.partition(' ')
+            user = UserLocation(
+                is_user=True, is_location=False, display_name=name, first_name=first or name, last_name=last or None,
+                email=email, is_email_active=True, password=None,
+                platform_role='super-admin' if claims.get('isAdmin') else 'gepp-admin',
+                country_id=212, currency_id=12, locale='TH', is_active=True,
+            )
+            self.db_session.add(user)
+            self.db_session.flush()
+        result = self._issue_admin_tokens(user)
+        result['sso'] = {'provider': 'gepp-team', 'isoUid': claims.get('sub'), 'jti': claims.get('jti')}
+        return result
+
+    def _issue_admin_tokens(self, user) -> Dict[str, Any]:
+        """Admin JWT pair with the admin_role claim (shared by password login and GEPP Team SSO)."""
         now = datetime.now(timezone.utc)
         expiry = now + timedelta(days=1)
 

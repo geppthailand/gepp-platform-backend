@@ -153,8 +153,14 @@ def get_daily_summary(
     origin_id: int,
     organization_id: int,
     day: date,
+    visibility=None,
 ) -> Dict[str, Any]:
     """Aggregate one Thai calendar day of weighing at one station.
+
+    `visibility` — optional extra row predicate (from
+    `summary_scope.resolve_scoped_summary`) for a caller who reaches the station
+    only through a tag/tenant grant: every total, material and per-location row
+    is then computed from their records alone. None = the whole station.
 
     Returns the full payload — see `to_public_payload` before exposing it to
     anyone outside the organisation.
@@ -212,6 +218,7 @@ def get_daily_summary(
             # back-dated inside the record window gets cut here.
             Transaction.transaction_date >= start_utc - timedelta(days=1),
             Transaction.transaction_date < end_utc + timedelta(days=1),
+            *([visibility] if visibility is not None else []),
         )
         .group_by(
             TransactionRecord.material_id,
